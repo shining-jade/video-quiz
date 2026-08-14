@@ -1,5 +1,7 @@
 # 영상 퀴즈 — 실시간 진행 도구
 
+### 👉 https://shining-jade.github.io/video-quiz/
+
 교사가 교실 화면에서 유튜브 영상을 재생하면 미리 지정한 타임코드에 퀴즈가 자동으로 뜨고,
 학생들은 각자 폰으로 반 코드만 입력해 **그 순간의 문항만** 푸는 웹 도구입니다.
 
@@ -46,18 +48,21 @@
 
 ## 배포 — GitHub Pages
 
-1. GitHub에서 새 저장소를 만듭니다 (예: `video-quiz`). Public 이어야 Pages가 무료입니다.
-2. `index.html` 을 저장소 최상위에 올립니다. (웹에서 **Add file → Upload files** 로 끌어다 놓으면 됩니다.)
-3. 저장소 **Settings → Pages** → Source 를 `Deploy from a branch`, 브랜치 `main` / 폴더 `/ (root)` 로 지정하고 저장합니다.
-4. 1~2분 뒤 주소가 생깁니다.
+**✅ 배포 완료:** https://shining-jade.github.io/video-quiz/
 
-   ```
-   https://<GitHub계정>.github.io/video-quiz/
-   ```
+저장소는 [shining-jade/video-quiz](https://github.com/shining-jade/video-quiz) (Public), `main` 브랜치 루트를 Pages가 서비스합니다.
 
-이 주소가 모든 링크의 기준이 됩니다. 파일을 수정하면 같은 방법으로 다시 올리기만 하면 됩니다.
+### 수정한 내용을 반영하려면
 
-> 로컬에서 `index.html` 을 더블클릭해 열어도 동작합니다. 다만 그때 만들어지는 공유 링크는 그 PC에서만 열리는 주소이므로, 실제 수업에는 Pages 주소를 쓰세요.
+바탕화면 `영상퀴즈` 폴더에서 파일을 고친 뒤:
+
+```bash
+git add -A && git commit -m "수정 내용" && git push
+```
+
+1~2분 뒤 사이트에 반영됩니다. (Git이 익숙하지 않다면 GitHub 저장소 페이지에서 `index.html` 을 열고 연필 아이콘으로 직접 고쳐도 됩니다.)
+
+> 로컬에서 `index.html` 을 더블클릭해 열어도 동작합니다. 다만 그때 만들어지는 공유 링크는 그 PC에서만 열리는 주소이므로, 실제 수업에는 위 Pages 주소를 쓰세요.
 
 ---
 
