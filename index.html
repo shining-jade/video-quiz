@@ -573,7 +573,11 @@ function whenYT(cb) { ytReady ? cb() : ytWaiters.push(cb); }
 /* ── 유튜브 자막(CC) 제어 ──────────────────────────────────────────────
    자동 생성 자막이 화면 아래쪽을 가려 수업에 방해가 되는 경우가 많아 기본은 끕니다.
    유튜브는 플레이어가 준비될 때와 재생이 시작될 때 자막 모듈을 다시 얹으므로,
-   그 두 시점에 다시 적용해 주어야 확실히 꺼집니다. */
+   그 두 시점에 다시 적용해 주어야 확실히 꺼집니다.
+
+   끄는 것은 확실히 동작하지만, API로 특정 자막을 "켜는" 것은 영상에 따라 되지 않습니다.
+   그래서 켜기는 '차단 해제'까지만 하고, 어떤 자막을 볼지는 플레이어 ⚙ 메뉴에 맡깁니다.
+   광고 재생 중에는 자막 API가 먹지 않으며, 본 영상이 시작되면 정상 적용됩니다. */
 let captionsOn = lsGet('vq_captions') === '1';
 
 function applyCaptions(player) {
@@ -582,17 +586,10 @@ function applyCaptions(player) {
   ['captions', 'cc'].forEach(m => {
     try {
       if (captionsOn) {
-        // 모듈만 올려서는 자막이 나오지 않는다. 트랙 목록이 잡힌 뒤 하나를 골라줘야 한다.
+        // 자막 차단만 해제한다. 어떤 자막을 켤지는 유튜브(와 교사)가 정한다.
+        // setOption('track', ...) 으로 트랙을 강제하는 방법은 영상에 따라 먹지 않아
+        // (자동 번역 트랙은 is_servable:false 라 지정해도 무시됨) 시도하지 않는다.
         player.loadModule(m);
-        setTimeout(() => {
-          try {
-            const list = player.getOption(m, 'tracklist');
-            if (!captionsOn || !list || !list.length) return;
-            // 한국어 트랙이 있으면 그것을, 없으면 첫 번째 트랙을 쓴다
-            const ko = list.filter(t => t && t.languageCode === 'ko')[0];
-            player.setOption(m, 'track', ko || list[0]);
-          } catch (e) {}
-        }, 500);
       } else {
         player.unloadModule(m);
         player.setOption(m, 'track', {});
@@ -613,9 +610,11 @@ function toggleCaptions(getPlayer) {
   lsSet('vq_captions', captionsOn ? '1' : '0');
   applyCaptions(getPlayer());
   $$('.cc-btn').forEach(b => { b.textContent = ccLabel(); });
-  toast(captionsOn ? '자막을 켰습니다' : '자막을 껐습니다');
+  toast(captionsOn
+    ? '자막 차단을 풀었습니다. 자막이 안 보이면 플레이어 ⚙ → 자막에서 고르세요'
+    : '자막을 껐습니다');
 }
-function ccLabel() { return captionsOn ? '💬 자막 끄기' : '💬 자막 켜기'; }
+function ccLabel() { return captionsOn ? '💬 자막 끄기' : '💬 자막 허용'; }
 function ccButton(handler) { return '<button class="btn sm cc-btn" onclick="' + handler + '">' + ccLabel() + '</button>'; }
 
 function mkToggleCC() { toggleCaptions(() => mkPlayer); }
