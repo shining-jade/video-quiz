@@ -52,7 +52,7 @@
 
 **현재 기존 사이트 주소:** https://shining-jade.github.io/video-quiz/
 
-Firebase 콘솔 규칙 게시, 기존 세트 이전과 로컬 다중 창 브라우저 검증은 완료했습니다. Firestore 이전 버전은 아직 GitHub Pages 운영 배포와 배포본 재검증이 남아 있습니다.
+Firebase 콘솔 규칙 게시, 기존 세트 이전과 원본 객관식 세트의 로컬 다중 창 핵심 흐름 검증은 완료했습니다. 다른 문항 유형·이미지·관리자 흐름은 자동 테스트로만 확인했으며, Firestore 이전 버전은 아직 GitHub Pages 운영 배포와 배포본 재검증이 남아 있습니다.
 
 저장소는 [shining-jade/video-quiz](https://github.com/shining-jade/video-quiz) (Public), `main` 브랜치 루트를 Pages가 서비스합니다.
 
