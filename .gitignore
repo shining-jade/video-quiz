@@ -7,3 +7,6 @@
 # 두 파일은 이 폴더(로컬)에 그대로 보관되어 있다.
 database.rules.json
 database.rules.BACKUP.json
+
+# 로컬 이전 백업과 일회성 검증 도구
+.migration-backup/
