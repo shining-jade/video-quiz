@@ -14,22 +14,23 @@
 
 ## Firebase 설정 (한 번만)
 
-이 도구는 기존 **감염병 TTX 도구와 같은 Firebase 프로젝트**(`idst-84e4f`)를 씁니다.
-데이터는 전부 `vq/` 경로 아래에 두어 TTX의 `settings/`, `rooms/` 와 겹치지 않습니다.
+이 도구는 **영상 퀴즈 전용 Firebase 프로젝트** `video-quiz-65798` 을 씁니다.
+(처음에는 감염병 TTX 도구와 같은 프로젝트를 썼지만, 무료 요금제의 동시 접속 100명을 두 도구가 나눠 쓰게 되어 분리했습니다.)
 
-원래 이 프로젝트의 규칙에는 최상위에 `"$other": { ".read": false, ".write": false }` 가 있어 `vq/` 가 통째로 막혀 있었습니다. 아래 두 가지를 설정해야 동작합니다.
+- 데이터베이스 위치: **싱가포르(asia-southeast1)** — 한국에서 지연이 가장 짧습니다
+- Google 애널리틱스, Gemini 학습 데이터 수집은 **끔**
+- 데이터는 `vq/` 경로 아래에 둡니다
+
+아래 두 가지가 이미 설정되어 있습니다. 프로젝트를 새로 만들 때만 다시 하면 됩니다.
 
 ### 1) 데이터베이스 규칙
 
 **✅ 이미 게시 완료된 상태입니다.** 아래는 나중에 다시 손볼 때를 위한 기록입니다.
 
-[Firebase 콘솔](https://console.firebase.google.com/project/idst-84e4f/database/idst-84e4f-default-rtdb/rules) → **Realtime Database → 규칙** 탭에 `database.rules.json` 내용을 붙여넣고 **게시**합니다.
+[Firebase 콘솔](https://console.firebase.google.com/project/video-quiz-65798/database/video-quiz-65798-default-rtdb/rules) → **Realtime Database → 규칙** 탭에 `database.rules.json` 내용을 붙여넣고 **게시**합니다.
 
-이 파일에는 **기존 TTX 규칙(`rooms`, `settings`)이 원본 그대로 포함**되어 있고 `vq` 블록만 추가된 상태입니다. 그대로 붙여넣어도 감염병 모의훈련 도구는 영향받지 않습니다.
+> 📁 `database.rules.json` 은 **이 저장소에 올라가 있지 않습니다**(`.gitignore` 처리). 저장소가 공개라 규칙 구조까지 노출할 이유가 없어서입니다. 파일은 원본 작업 폴더(`바탕화면\영상퀴즈`)에 있습니다.
 
-> 📁 `database.rules.json` 과 `database.rules.BACKUP.json` 은 **이 저장소에 올라가 있지 않습니다**(`.gitignore` 처리). 저장소가 공개라 규칙 구조까지 노출할 이유가 없어서입니다. 두 파일은 원본 작업 폴더(`바탕화면\영상퀴즈`)에 그대로 있습니다.
-
-- 변경 전 원본은 `database.rules.BACKUP.json` 에 보관되어 있습니다. 문제가 생기면 그 내용을 그대로 붙여넣어 되돌리세요.
 - `vq` 는 **익명 인증을 거친 접속만**(`auth != null`) 허용합니다. 주소만 알아낸 외부인이 학생 이름을 조회하는 것을 막습니다.
 - 글자 수·타입 제한이 들어 있어 데이터베이스가 엉뚱한 용도로 쓰이는 것을 막습니다.
 - `quiz_sets` 는 **삭제가 차단**되어 다른 선생님이 공유받아 쓰는 세트가 실수로 사라지지 않습니다.
@@ -202,8 +203,25 @@ Firebase 무료(Spark) 요금제는 **동시 접속 100명**이 한도입니다.
 
 1. **시간을 나눠 진행** — 한 번에 3개 반(약 90명) 이하로. 요금제를 그대로 두는 방법입니다.
 2. **Blaze 요금제로 전환** — 동시 접속 20만 개로 늘어납니다. 저장 1GB·다운로드 월 10GB까지는 **여전히 무료**라, 이 도구의 사용량(학생 200명 한 번 진행 ≈ 60MB)이면 실제 요금은 거의 0원입니다. 다만 **결제 수단 등록이 필요**하므로 학교 회계 절차를 확인하세요. 전환하면 이미지 저장(Firebase Storage)도 함께 열립니다.
+3. **학년별로 프로젝트를 나누기** — 무료로도 가능합니다. 아래 절차를 참고하세요.
 
-> 사용량은 [Firebase 콘솔 → 사용량 및 결제](https://console.firebase.google.com/project/idst-84e4f/usage)에서 확인할 수 있습니다.
+> 사용량은 [Firebase 콘솔 → 사용량 및 결제](https://console.firebase.google.com/project/video-quiz-65798/usage)에서 확인할 수 있습니다.
+
+### 학년별로 프로젝트를 나누려면
+
+프로젝트마다 각자 100명을 받으므로, 3개로 나누면 300명이 됩니다. **단, 같은 학년 여러 반이 한꺼번에 들어오면 그 학년 프로젝트가 다시 100명에서 막힙니다.** 서로 다른 학년이 동시에 돌 때만 효과가 있습니다.
+
+1. Firebase 콘솔에서 새 프로젝트를 만듭니다 (예: `video-quiz-1`).
+2. Realtime Database 만들기 → 위치 **싱가포르** → 잠금 모드
+3. 규칙 탭에 `database.rules.json` 붙여넣고 게시
+4. Authentication → 시작하기 → **익명** 사용 설정
+5. 프로젝트 설정 → 웹 앱 추가 → `firebaseConfig` 복사
+6. `index.html` 의 `firebaseConfig` 만 바꾼 사본을 만들어 별도 주소로 배포
+   (예: GitHub 저장소에 `g1/index.html`, `g2/index.html` … 로 두면 주소가 `/video-quiz/g1/` 이 됩니다)
+
+**세트 옮기기는 도구 안에서 됩니다.** 세트 목록에서 **[📤 파일]** 로 내려받아, 옮길 곳의 세트 목록에서 **[📥 세트 가져오기]** 로 넣으면 문항·설정·이미지가 그대로 따라갑니다.
+
+다만 프로젝트가 갈리면 **관리자 통합 조회도 갈립니다** — 학년별로 따로 로그인해서 봐야 합니다.
 
 ### 알아 두어야 할 보안 한계
 
