@@ -572,6 +572,21 @@ test('편집 변경은 로컬 초안을 남기고 정식 저장 성공 뒤 삭�
   assert.deepEqual(calls, [['draft', 'set1'], ['clear', 'set1']]);
 });
 
+test('문항 추가처럼 입력 이벤트가 없는 편집도 로컬 초안을 갱신한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let dirty = 0;
+  const context = {
+    mk: { questions: [{ t: 10 }] },
+    blankQuestion(t) { return { t }; },
+    mkRenderQuestions() {}, mkFocusQuestion() {}, mkMarkDirty() { dirty += 1; }
+  };
+  vm.runInNewContext(extractFunction(html, 'mkAddQuestion'), context);
+
+  context.mkAddQuestion();
+
+  assert.equal(dirty, 1);
+});
+
 test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면을 덮어쓰지 않는다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let finishList;

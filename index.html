@@ -1913,12 +1913,14 @@ function mkStamp(i) {
   const t = mkCurrentTime();
   if (!mkPlayer) { toast('먼저 유튜브 주소를 입력하세요'); return; }
   mk.questions[i].t = Math.floor(t);
+  mkMarkDirty();
   mkRenderQuestions();
   toast(fmtTime(t) + ' 지점으로 설정했습니다');
 }
 function mkStampNew() {
   const t = Math.floor(mkCurrentTime());
   mk.questions.push(blankQuestion(t));
+  mkMarkDirty();
   mkRenderQuestions();
   toast(fmtTime(t) + ' 지점에 문항을 추가했습니다 — 바로 질문을 입력하세요');
   mkFocusQuestion(mk.questions.length - 1);
@@ -1944,12 +1946,14 @@ function mkSeek(i) {
 function mkAddQuestion() {
   const last = mk.questions[mk.questions.length - 1];
   mk.questions.push(blankQuestion(last ? last.t + 30 : 0));
+  mkMarkDirty();
   mkRenderQuestions();
   mkFocusQuestion(mk.questions.length - 1);
 }
 function mkDelQuestion(i) {
   if (!confirm((i + 1) + '번 문항을 삭제할까요?')) return;
   mk.questions.splice(i, 1);
+  mkMarkDirty();
   mkRenderQuestions();
 }
 function mkMove(i, d) {
@@ -1958,16 +1962,19 @@ function mkMove(i, d) {
   const tmp = mk.questions[i];
   mk.questions[i] = mk.questions[j];
   mk.questions[j] = tmp;
+  mkMarkDirty();
   mkRenderQuestions();
 }
 function mkSortQuestions() {
   mk.questions.sort((a, b) => a.t - b.t);
+  mkMarkDirty();
   mkRenderQuestions();
   toast('시각 순으로 정렬했습니다');
 }
 function mkAddChoice(i) {
   if (mk.questions[i].choices.length >= 6) return;
   mk.questions[i].choices.push('');
+  mkMarkDirty();
   mkRenderQuestions();
 }
 function mkDelChoice(i, j) {
@@ -1978,6 +1985,7 @@ function mkDelChoice(i, j) {
   else if (q.answer > j) q.answer--;
   // 복수 정답 목록도 지운 보기에 맞춰 당긴다
   q.answers = (q.answers || []).filter(x => x !== j).map(x => (x > j ? x - 1 : x));
+  mkMarkDirty();
   mkRenderQuestions();
 }
 
