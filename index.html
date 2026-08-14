@@ -245,10 +245,21 @@ textarea { resize: vertical; min-height: 62px; }
 .stu-mystat .box.ok .v { color: var(--ok); }
 .stu-mystat .box.rank .v { color: var(--accent); }
 
-/* 문항 목차 버블 — 문항이 많아지면 스크롤로 오가기 번거로워 옆에 띄운다 */
+/* 제작 화면 — 영상은 왼쪽에 고정해 두고 문항은 오른쪽에서 편집한다.
+   영상을 보며 문항을 만드는 흐름이라 스크롤해도 영상이 따라와야 한다. */
+.mk-layout {
+  display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr);
+  gap: 16px; align-items: start;
+}
+.mk-left { position: sticky; top: 68px; }
+@media (max-width: 1080px) {
+  .mk-layout { grid-template-columns: 1fr; }
+  .mk-left { position: static; }
+}
+
+/* 문항 목차 — 문항이 많아지면 스크롤로 오가기 번거로워 영상 아래에 붙인다 */
 #mk-nav {
-  position: fixed; right: 14px; top: 50%; transform: translateY(-50%);
-  width: 218px; max-height: 74vh; z-index: 60;
+  margin-top: 14px; max-height: 44vh;
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
   box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
 }
@@ -281,8 +292,6 @@ textarea { resize: vertical; min-height: 62px; }
 #mk-nav .it .mv button:disabled { opacity: .3; cursor: not-allowed; }
 @keyframes qflash { 0%,100% { box-shadow: 0 0 0 0 rgba(67,56,202,0); } 30% { box-shadow: 0 0 0 4px rgba(67,56,202,.35); } }
 .q-card.flash { animation: qflash 1s ease; }
-/* 목차를 놓을 자리가 없는 좁은 화면에서는 숨긴다 */
-@media (max-width: 1240px) { #mk-nav { display: none; } }
 
 .player-box { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 10px; overflow: hidden; }
 .player-box > div, .player-box iframe { width: 100%; height: 100%; border: 0; }
@@ -1217,13 +1226,15 @@ function renderMake() {
       '<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>' +
       (isEdit ? '<a class="btn sm" href="#/play/' + esc(mk.id) + '">▶ 진행 화면 열기</a>' : '')
     ) +
-    '<div class="wrap">' +
+    '<div class="wrap wide">' +
       '<h1 style="font-size:22px;margin-bottom:4px">' + (isEdit ? '퀴즈 세트 편집' : '새 퀴즈 세트 만들기') + '</h1>' +
-      '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">영상을 재생하면서 <b>[현재 시각 찍기]</b>를 누르면 그 지점이 문항 시각으로 들어갑니다.</p>' +
+      '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
+        '왼쪽에서 영상을 보다가 <b>[현재 시각으로 문항 추가]</b>를 누르면 그 지점 문항이 오른쪽에 만들어집니다. ' +
+        '영상은 스크롤해도 따라옵니다.</p>' +
 
       '<div class="card">' +
         '<h2>1. 영상과 제목</h2>' +
-        '<div class="sub">유튜브 주소를 붙여넣으면 아래에 미리보기가 뜹니다.</div>' +
+        '<div class="sub">유튜브 주소를 붙여넣으면 왼쪽에 미리보기가 뜹니다.</div>' +
         '<div class="field"><label class="f">세트 제목</label>' +
           '<input type="text" id="mk-title" placeholder="예) 2학년 보건 — 감염병 예방 영상 퀴즈" value="' + esc(mk.title) + '"></div>' +
         '<div class="grid2">' +
@@ -1233,8 +1244,16 @@ function renderMake() {
           '<div class="field"><label class="f">만든 사람 (선택)</label>' +
             '<input type="text" id="mk-author" placeholder="예) 보건교사 이○○" value="' + esc(mk.author) + '"></div>' +
         '</div>' +
-        '<div id="mk-player-wrap" style="margin-top:6px"></div>' +
       '</div>' +
+
+      '<div class="mk-layout">' +
+      '<div class="mk-left">' +
+        '<div class="card" style="padding:14px">' +
+          '<div id="mk-player-wrap"></div>' +
+        '</div>' +
+        '<div id="mk-nav"></div>' +
+      '</div>' +
+      '<div class="mk-right">' +
 
       '<div class="card">' +
         '<h2>2. 진행 설정</h2>' +
@@ -1270,7 +1289,6 @@ function renderMake() {
         '<button class="btn" onclick="mkAddQuestion()">＋ 문항 추가</button> ' +
         '<button class="btn ghost sm" onclick="mkSortQuestions()">시각 순으로 정렬</button>' +
       '</div>' +
-      '<div id="mk-nav"></div>' +
 
       '<div class="card" id="mk-save-card">' +
         '<div class="row" style="align-items:center">' +
@@ -1280,6 +1298,9 @@ function renderMake() {
         '</div>' +
         '<div id="mk-share"></div>' +
       '</div>' +
+
+      '</div>' +   // .mk-right
+      '</div>' +   // .mk-layout
     '</div>';
 
   // 입력 → 상태 반영
@@ -1322,7 +1343,11 @@ function mkSyncVideo() {
   }
   const wrap = $('#mk-player-wrap');
   if (!wrap) return;
-  if (!vid) { wrap.innerHTML = ''; mkPlayer = null; mkPlayerVid = ''; return; }
+  if (!vid) {
+    wrap.innerHTML = '<div class="empty" style="padding:44px 12px">위에 유튜브 주소를 넣으면<br>여기에 영상이 뜹니다.</div>';
+    mkPlayer = null; mkPlayerVid = '';
+    return;
+  }
   if (vid === mkPlayerVid && mkPlayer) return;
 
   mkPlayerVid = vid;
