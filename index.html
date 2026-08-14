@@ -1246,15 +1246,6 @@ function renderMake() {
         '</div>' +
       '</div>' +
 
-      '<div class="mk-layout">' +
-      '<div class="mk-left">' +
-        '<div class="card" style="padding:14px">' +
-          '<div id="mk-player-wrap"></div>' +
-        '</div>' +
-        '<div id="mk-nav"></div>' +
-      '</div>' +
-      '<div class="mk-right">' +
-
       '<div class="card">' +
         '<h2>2. 진행 설정</h2>' +
         '<div class="sub">이 세트로 진행하는 모든 반에 동일하게 적용됩니다.</div>' +
@@ -1281,6 +1272,15 @@ function renderMake() {
             '<div class="hint">보통은 일시정지가 편합니다.</div></div>' +
         '</div>' +
       '</div>' +
+
+      '<div class="mk-layout">' +
+      '<div class="mk-left">' +
+        '<div class="card" style="padding:14px">' +
+          '<div id="mk-player-wrap"></div>' +
+        '</div>' +
+        '<div id="mk-nav"></div>' +
+      '</div>' +
+      '<div class="mk-right">' +
 
       '<div class="card">' +
         '<h2>3. 문항</h2>' +
@@ -1602,9 +1602,21 @@ function mkStampNew() {
   const t = Math.floor(mkCurrentTime());
   mk.questions.push(blankQuestion(t));
   mkRenderQuestions();
-  toast(fmtTime(t) + ' 지점에 문항을 추가했습니다');
-  const cards = $$('#mk-questions .q-card');
-  if (cards.length) cards[cards.length - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  toast(fmtTime(t) + ' 지점에 문항을 추가했습니다 — 바로 질문을 입력하세요');
+  mkFocusQuestion(mk.questions.length - 1);
+}
+
+/** 새로 만든 문항으로 옮겨 가면서 질문 칸에 커서까지 넣어 준다.
+    영상은 왼쪽에 고정되어 있으므로 다시 위로 올라갈 필요가 없다. */
+function mkFocusQuestion(i) {
+  const card = document.getElementById('mk-q-' + i);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('flash');
+  void card.offsetWidth;
+  card.classList.add('flash');
+  const ta = card.querySelector('textarea');
+  if (ta) setTimeout(() => { try { ta.focus({ preventScroll: true }); } catch (e) { ta.focus(); } }, 320);
 }
 function mkSeek(i) {
   if (!mkPlayer || !mkPlayer.seekTo) { toast('미리보기 플레이어가 없습니다'); return; }
@@ -1615,6 +1627,7 @@ function mkAddQuestion() {
   const last = mk.questions[mk.questions.length - 1];
   mk.questions.push(blankQuestion(last ? last.t + 30 : 0));
   mkRenderQuestions();
+  mkFocusQuestion(mk.questions.length - 1);
 }
 function mkDelQuestion(i) {
   if (!confirm((i + 1) + '번 문항을 삭제할까요?')) return;
