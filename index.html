@@ -248,13 +248,32 @@ textarea { resize: vertical; min-height: 62px; }
 /* 제작 화면 — 영상은 왼쪽에 고정해 두고 문항은 오른쪽에서 편집한다.
    영상을 보며 문항을 만드는 흐름이라 스크롤해도 영상이 따라와야 한다. */
 .mk-layout {
-  display: grid; grid-template-columns: minmax(0, 480px) minmax(0, 1fr);
-  gap: 16px; align-items: start;
+  display: grid;
+  grid-template-columns: var(--mk-left-w, 480px) 14px minmax(0, 1fr);
+  gap: 0; align-items: start;
 }
 .mk-left { position: sticky; top: 68px; }
+
+/* 가운데 경계 — 끌어서 영상/문항 폭을 조절한다 */
+.mk-resizer { align-self: stretch; min-height: 240px; cursor: col-resize; position: relative; }
+.mk-resizer::before {
+  content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 3px;
+  transform: translateX(-50%); background: var(--line); border-radius: 3px;
+  transition: background .12s, width .12s;
+}
+.mk-resizer::after {
+  content: '⋮'; position: absolute; left: 50%; top: 90px; transform: translateX(-50%);
+  color: var(--ink-3); font-size: 15px; line-height: 1; letter-spacing: -1px;
+  background: var(--bg); padding: 5px 1px; border-radius: 4px;
+}
+.mk-resizer:hover::before, .mk-resizer.dragging::before { background: var(--accent); width: 5px; }
+/* 드래그 중에는 유튜브 iframe 이 마우스를 먹어 버리므로 덮개를 깐다 */
+#mk-dragshield { position: fixed; inset: 0; z-index: 999; cursor: col-resize; }
+
 @media (max-width: 1080px) {
   .mk-layout { grid-template-columns: 1fr; }
   .mk-left { position: static; }
+  .mk-resizer { display: none; }
 }
 
 /* 문항 목차 — 문항이 많아지면 스크롤로 오가기 번거로워 영상 아래에 붙인다 */
@@ -1256,6 +1275,7 @@ function renderMake() {
         '</div>' +
         '<div id="mk-nav"></div>' +
       '</div>' +
+      '<div class="mk-resizer" id="mk-resizer" title="끌어서 영상 폭 조절 · 두 번 클릭하면 기본값"></div>' +
       '<div class="mk-right">' +
 
       '<div class="card">' +
@@ -1285,9 +1305,61 @@ function renderMake() {
   $('#mk-url').oninput = e => { mk.videoUrl = e.target.value; mkSyncVideo(); };
 
   mkRenderSettings();
+  mkInitResizer();
   mkSyncVideo();
   mkRenderQuestions();
   if (mk.id) mkShowShare();
+}
+
+/* ── 영상 / 문항 폭 조절 ───────────────────────────────────────────────
+   선생님마다 영상을 크게 보고 싶은지, 문항을 넓게 쓰고 싶은지가 달라서
+   가운데 경계를 끌어 조절하게 하고 그 폭을 브라우저에 기억시킨다. */
+const MK_SPLIT_DEFAULT = 480;
+
+function mkInitResizer() {
+  const layout = $('.mk-layout'), rz = $('#mk-resizer');
+  if (!layout || !rz) return;
+
+  const clamp = w => {
+    const total = layout.getBoundingClientRect().width;
+    const max = Math.max(320, total - 420);   // 문항 칸이 너무 좁아지지 않게
+    return Math.round(Math.max(300, Math.min(w, max)));
+  };
+  const apply = (w, save) => {
+    layout.style.setProperty('--mk-left-w', w + 'px');
+    if (save) lsSet('vq_mk_split', String(w));
+  };
+
+  const saved = parseInt(lsGet('vq_mk_split', ''), 10);
+  if (saved) apply(clamp(saved), false);
+
+  let shield = null;
+  const onMove = e => {
+    if (!shield) return;
+    apply(clamp(e.clientX - layout.getBoundingClientRect().left), true);
+    e.preventDefault();
+  };
+  const stop = () => {
+    if (!shield) return;
+    shield.remove(); shield = null;
+    rz.classList.remove('dragging');
+  };
+  rz.onmousedown = e => {
+    rz.classList.add('dragging');
+    shield = document.createElement('div');
+    shield.id = 'mk-dragshield';
+    document.body.appendChild(shield);
+    e.preventDefault();
+  };
+  rz.ondblclick = () => { apply(MK_SPLIT_DEFAULT, true); toast('기본 너비로 되돌렸습니다'); };
+
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', stop);
+  onCleanup(() => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', stop);
+    stop();
+  });
 }
 
 /* ── 진행 설정 ─────────────────────────────────────────────────────────
