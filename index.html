@@ -533,17 +533,24 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 "use strict";
 
 /* ══════════════════════════════════════════════════════════════════════
-   0. Firebase — 기존 감염병 TTX 도구와 같은 프로젝트를 사용합니다.
-      데이터는 전부 vq/ 아래에 두어 TTX의 settings/, rooms/ 와 겹치지 않습니다.
+   0. Firebase — 영상 퀴즈 전용 프로젝트 (video-quiz-65798)
+
+   원래는 감염병 TTX 도구와 프로젝트를 같이 썼는데, 무료 요금제의 동시 접속
+   100명을 두 도구가 나눠 쓰게 되어 분리했습니다. 데이터는 여전히 vq/ 아래에
+   둡니다(경로 구조를 그대로 유지해 코드가 갈리지 않게).
+
+   ▸ 학년별로 프로젝트를 더 나누려면: 새 프로젝트를 만들고 규칙 게시 + 익명
+     로그인을 켠 뒤, 아래 config 만 바꾼 사본을 따로 배포하면 됩니다.
+     세트는 세트 목록 화면의 [📤 파일] / [📥 세트 가져오기] 로 옮깁니다.
    ══════════════════════════════════════════════════════════════════════ */
 const firebaseConfig = {
-  apiKey: "AIzaSyC8KDLecYY5kNGsXxflRgP8-PP_S-DIU54",
-  authDomain: "idst-84e4f.firebaseapp.com",
-  databaseURL: "https://idst-84e4f-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "idst-84e4f",
-  storageBucket: "idst-84e4f.firebasestorage.app",
-  messagingSenderId: "1019780815428",
-  appId: "1:1019780815428:web:3730e229889a21eaa33a11"
+  apiKey: "AIzaSyBEWWFzjfPGHrLGlqHAHBDWPnnToV13l90",
+  authDomain: "video-quiz-65798.firebaseapp.com",
+  databaseURL: "https://video-quiz-65798-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "video-quiz-65798",
+  storageBucket: "video-quiz-65798.firebasestorage.app",
+  messagingSenderId: "931590286071",
+  appId: "1:931590286071:web:ec229442ee844b78d981f2"
 };
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
