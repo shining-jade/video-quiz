@@ -169,6 +169,45 @@ textarea { resize: vertical; min-height: 62px; }
 .choice-row .btn { flex: none; }
 .time-input { width: 110px !important; }
 
+/* 문항 목차 버블 — 문항이 많아지면 스크롤로 오가기 번거로워 옆에 띄운다 */
+#mk-nav {
+  position: fixed; right: 14px; top: 50%; transform: translateY(-50%);
+  width: 218px; max-height: 74vh; z-index: 60;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); display: flex; flex-direction: column; overflow: hidden;
+}
+#mk-nav .hd {
+  padding: 9px 12px; font-size: 12px; font-weight: 700; color: var(--ink-2);
+  border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 6px;
+}
+#mk-nav .hd .spacer { flex: 1; }
+#mk-nav .bd { overflow-y: auto; padding: 6px; }
+#mk-nav .ft { padding: 7px; border-top: 1px solid var(--line); }
+#mk-nav .it {
+  display: flex; align-items: center; gap: 6px; padding: 6px 7px;
+  border-radius: 7px; cursor: pointer; font-size: 12px;
+}
+#mk-nav .it:hover { background: #f2f3f8; }
+#mk-nav .it .n {
+  width: 19px; height: 19px; border-radius: 5px; background: var(--accent); color: #fff;
+  display: grid; place-items: center; font-size: 10px; font-weight: 700; flex: none;
+}
+#mk-nav .it .t { font-family: ui-monospace, Consolas, monospace; color: var(--accent); font-weight: 700; flex: none; font-size: 11px; }
+#mk-nav .it .x { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+#mk-nav .it .x.empty-q { color: var(--ink-3); font-style: italic; }
+#mk-nav .it .mv { display: flex; flex-direction: column; gap: 1px; opacity: 0; transition: opacity .1s; flex: none; }
+#mk-nav .it:hover .mv { opacity: 1; }
+#mk-nav .it .mv button {
+  width: 17px; height: 13px; padding: 0; line-height: 1; font-size: 9px;
+  border: 1px solid var(--line-2); background: #fff; border-radius: 3px; cursor: pointer; color: var(--ink-2);
+}
+#mk-nav .it .mv button:hover { background: var(--accent-2); border-color: var(--accent); color: var(--accent); }
+#mk-nav .it .mv button:disabled { opacity: .3; cursor: not-allowed; }
+@keyframes qflash { 0%,100% { box-shadow: 0 0 0 0 rgba(67,56,202,0); } 30% { box-shadow: 0 0 0 4px rgba(67,56,202,.35); } }
+.q-card.flash { animation: qflash 1s ease; }
+/* 목차를 놓을 자리가 없는 좁은 화면에서는 숨긴다 */
+@media (max-width: 1240px) { #mk-nav { display: none; } }
+
 .player-box { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 10px; overflow: hidden; }
 .player-box > div, .player-box iframe { width: 100%; height: 100%; border: 0; }
 
@@ -700,6 +739,7 @@ function router() {
 
   switch (name) {
     case 'home':  screenHome(); break;
+    case 'sets':  screenSetList(); break;
     case 'make':  screenMake(arg); break;
     case 'play':  screenPlay(arg); break;
     case 'join':  screenStudent(arg); break;
@@ -723,6 +763,9 @@ function screenHome() {
       '<a class="home-card" href="#/make">' +
         '<div class="ico">✏️</div><h3>퀴즈 세트 만들기</h3>' +
         '<p>유튜브 영상에 타임코드별 문항을 붙여 세트를 만들고, 링크로 다른 선생님께 공유합니다.</p></a>' +
+      '<a class="home-card" href="#/sets">' +
+        '<div class="ico">📚</div><h3>만들어진 세트 목록</h3>' +
+        '<p>이미 만들어 둔 세트를 불러와 수업에 쓰거나, 복제해서 우리 반에 맞게 고쳐 씁니다.</p></a>' +
       '<a class="home-card" href="#/join">' +
         '<div class="ico">🙋</div><h3>학생 참여하기</h3>' +
         '<p>선생님이 알려준 6자리 반 코드를 입력해 들어갑니다.</p></a>' +
@@ -740,6 +783,100 @@ function screenHome() {
       '</ol>' +
     '</div>' +
   '</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   4-2. 세트 목록 — 불러오기 / 복제
+   ══════════════════════════════════════════════════════════════════════ */
+let setList = null;
+
+function screenSetList() {
+  setList = { all: [], q: '' };
+  onCleanup(() => { setList = null; });
+  APP().innerHTML = topbar('<a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
+    '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
+
+  R('quiz_sets').once('value').then(snap => {
+    const all = snap.val() || {};
+    setList.all = Object.keys(all).map(id => {
+      const s = normSet(all[id]);
+      s.id = id;
+      return s;
+    }).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+    renderSetList();
+  }).catch(e => {
+    console.error(e);
+    APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>';
+  });
+}
+
+function renderSetList() {
+  if (!setList) return;
+  const kw = setList.q.trim().toLowerCase();
+  const rows = setList.all.filter(s =>
+    !kw || (s.title + ' ' + (s.author || '')).toLowerCase().indexOf(kw) >= 0);
+
+  APP().innerHTML = topbar('<a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
+    '<div class="wrap">' +
+      '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
+      '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
+        '학교 안에서 만들어진 세트가 모두 보입니다. <b>복제</b>하면 원본은 그대로 두고 우리 반용으로 고쳐 쓸 수 있습니다.</p>' +
+      '<div class="card" style="padding:14px">' +
+        '<input type="text" id="sl-q" placeholder="제목이나 만든 사람으로 찾기" value="' + esc(setList.q) + '">' +
+      '</div>' +
+      (rows.length ? rows.map(setListRow).join('')
+        : '<div class="card"><div class="empty">' +
+            (setList.all.length ? '검색 결과가 없습니다.' : '아직 만들어진 세트가 없습니다.') +
+            '<br><br><a class="btn primary" href="#/make">첫 세트 만들기</a></div></div>') +
+    '</div>';
+
+  const inp = $('#sl-q');
+  inp.oninput = e => {
+    setList.q = e.target.value;
+    const pos = e.target.selectionStart;
+    renderSetList();
+    const n = $('#sl-q');
+    n.focus();
+    try { n.setSelectionRange(pos, pos); } catch (err) {}
+  };
+}
+
+function setListRow(s) {
+  return '<div class="card" style="padding:15px;margin-bottom:10px">' +
+    '<div class="row" style="align-items:center">' +
+      '<div style="flex:1 1 260px;min-width:0">' +
+        '<div style="font-size:15px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(s.title) + '</div>' +
+        '<div style="font-size:12.5px;color:var(--ink-2);margin-top:3px">' +
+          '문항 ' + s.questions.length + '개' +
+          (s.author ? ' · ' + esc(s.author) : '') +
+          ' · ' + REVEAL_LABEL[s.settings.revealMode] +
+          (s.updatedAt ? ' · ' + fmtDate(s.updatedAt) : '') +
+        '</div>' +
+      '</div>' +
+      '<a class="btn sm primary" href="#/play/' + esc(s.id) + '">▶ 진행</a>' +
+      '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
+      '<button class="btn sm" onclick="setDuplicate(\'' + esc(s.id) + '\')">⧉ 복제</button>' +
+      '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>' +
+    '</div>' +
+  '</div>';
+}
+
+/** 원본은 그대로 두고 새 ID로 사본을 만든다 (규칙상 세트 삭제는 막혀 있으므로 원본이 안전) */
+function setDuplicate(id) {
+  R('quiz_sets/' + id).once('value').then(snap => {
+    const src = snap.val();
+    if (!src) { toast('세트를 찾을 수 없습니다'); return; }
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.title = ((src.title || '제목 없음') + ' (사본)').slice(0, 200);
+    copy.author = lsGet('vq_teacher') || src.author || '';
+    copy.createdAt = SV_TS;
+    copy.updatedAt = SV_TS;
+    const newId = rid(8);
+    return R('quiz_sets/' + newId).set(copy).then(() => {
+      toast('사본을 만들었습니다');
+      go('make/' + newId);
+    });
+  }).catch(e => { console.error(e); alert('복제 실패: ' + e.message); });
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -804,6 +941,7 @@ function renderMake() {
   mkPlayer = null;
   mkPlayerVid = '';
   APP().innerHTML = topbar(
+      '<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>' +
       (isEdit ? '<a class="btn sm" href="#/play/' + esc(mk.id) + '">▶ 진행 화면 열기</a>' : '')
     ) +
     '<div class="wrap">' +
@@ -859,6 +997,7 @@ function renderMake() {
         '<button class="btn" onclick="mkAddQuestion()">＋ 문항 추가</button> ' +
         '<button class="btn ghost sm" onclick="mkSortQuestions()">시각 순으로 정렬</button>' +
       '</div>' +
+      '<div id="mk-nav"></div>' +
 
       '<div class="card" id="mk-save-card">' +
         '<div class="row" style="align-items:center">' +
@@ -943,11 +1082,12 @@ function mkRenderQuestions() {
   if (!box) return;
   if (!mk.questions.length) {
     box.innerHTML = '<div class="empty">문항이 없습니다. 아래에서 추가하세요.</div>';
+    mkRenderNav();
     return;
   }
   box.innerHTML = mk.questions.map((q, i) => {
     const choices = q.choices.length ? q.choices : ['', ''];
-    return '<div class="q-card">' +
+    return '<div class="q-card" id="mk-q-' + i + '">' +
       '<div class="q-head">' +
         '<div class="q-no">' + (i + 1) + '</div>' +
         '<input type="text" class="time-input mono" value="' + esc(fmtTime(q.t)) + '" ' +
@@ -960,7 +1100,7 @@ function mkRenderQuestions() {
         '<button class="btn sm danger" onclick="mkDelQuestion(' + i + ')">삭제</button>' +
       '</div>' +
       '<div class="field"><label class="f">질문</label>' +
-        '<textarea oninput="mk.questions[' + i + '].text=this.value" placeholder="예) 감염병 전파를 막는 가장 기본적인 방법은?">' + esc(q.text) + '</textarea></div>' +
+        '<textarea oninput="mk.questions[' + i + '].text=this.value; mkNavText(' + i + ')" placeholder="예) 감염병 전파를 막는 가장 기본적인 방법은?">' + esc(q.text) + '</textarea></div>' +
       '<div class="field"><label class="f">보기 — 왼쪽 동그라미로 정답을 지정하세요</label>' +
         choices.map((c, j) =>
           '<div class="choice-row">' +
@@ -981,6 +1121,54 @@ function mkRenderQuestions() {
       '</div>' +
     '</div>';
   }).join('');
+  mkRenderNav();
+}
+
+/** 문항 목차 버블 — 클릭하면 해당 문항으로, ↑↓ 로 순서 바꾸기 */
+function mkRenderNav() {
+  const nav = $('#mk-nav');
+  if (!nav) return;
+  if (mk.questions.length < 2) { nav.style.display = 'none'; return; }
+  nav.style.display = '';
+  nav.innerHTML =
+    '<div class="hd"><span>📑 문항 ' + mk.questions.length + '개</span><span class="spacer"></span>' +
+      '<button class="btn sm ghost" style="padding:2px 6px;font-size:11px" onclick="mkSortQuestions()" title="시각 순으로 정렬">↕ 정렬</button>' +
+    '</div>' +
+    '<div class="bd">' +
+      mk.questions.map((q, i) => {
+        const t = (q.text || '').trim();
+        return '<div class="it">' +
+          '<span class="n" onclick="mkJumpTo(' + i + ')">' + (i + 1) + '</span>' +
+          '<span class="t" onclick="mkJumpTo(' + i + ')">' + fmtTime(q.t) + '</span>' +
+          '<span class="x' + (t ? '' : ' empty-q') + '" data-navtext="' + i + '" onclick="mkJumpTo(' + i + ')" title="' + esc(t) + '">' +
+            esc(t || '(질문 비어 있음)') + '</span>' +
+          '<span class="mv">' +
+            '<button onclick="mkMove(' + i + ',-1)" ' + (i === 0 ? 'disabled' : '') + ' title="위로">▲</button>' +
+            '<button onclick="mkMove(' + i + ',1)" ' + (i === mk.questions.length - 1 ? 'disabled' : '') + ' title="아래로">▼</button>' +
+          '</span>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+    '<div class="ft"><button class="btn sm block" onclick="mkAddQuestion()">＋ 문항 추가</button></div>';
+}
+
+/** 질문을 타이핑하는 중에는 목차 전체를 다시 그리면 입력 포커스를 잃으므로 그 줄만 고친다 */
+function mkNavText(i) {
+  const el = $('#mk-nav [data-navtext="' + i + '"]');
+  if (!el) return;
+  const t = (mk.questions[i].text || '').trim();
+  el.textContent = t || '(질문 비어 있음)';
+  el.title = t;
+  el.classList.toggle('empty-q', !t);
+}
+
+function mkJumpTo(i) {
+  const card = document.getElementById('mk-q-' + i);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('flash');
+  void card.offsetWidth;          // 애니메이션을 다시 태우기 위한 리플로우
+  card.classList.add('flash');
 }
 
 function mkSetTime(i, v, el) {
@@ -988,6 +1176,7 @@ function mkSetTime(i, v, el) {
   if (isNaN(t)) { toast('시각 형식이 올바르지 않습니다 (예: 1:23)'); el.value = fmtTime(mk.questions[i].t); return; }
   mk.questions[i].t = t;
   el.value = fmtTime(t);
+  mkRenderNav();
 }
 function mkStamp(i) {
   const t = mkCurrentTime();
@@ -1464,7 +1653,20 @@ function plRenderOverlay() {
   plRenderQList();
 }
 
-/** 교사 화면은 항상 정답 위치를 표시한다 (교실 앞이므로 학생에게는 안 보임) */
+/** 교사 화면은 교실 앞에 투사되므로 학생 화면과 같은 시점에만 정답을 드러낸다.
+    (instant 모드는 학생마다 공개 시점이 달라, 교사가 직접 누를 때까지 기다린다) */
+function plRevealed() {
+  if (!pl) return false;
+  const mode = pl.set.settings.revealMode;
+  if (mode === 'never') return false;
+  if (pl.live.revealed) return true;
+  if (mode === 'timer') {
+    if (!pl.live.openedAt) return false;
+    return (serverNow() - pl.live.openedAt) / 1000 >= pl.set.settings.revealDelaySec;
+  }
+  return false;
+}
+
 function plRenderOverlayCounts() {
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
@@ -1481,24 +1683,34 @@ function plRenderOverlayCounts() {
   const cntEl = ov.querySelector('#ov-count');
   if (cntEl) cntEl.textContent = total + ' / ' + nStu + ' 제출';
 
-  const revealed = !!pl.live.revealed;
+  // 공개 전에는 정답 표시도, 보기별 응답 분포도 감춘다.
+  // 이 화면은 교실 앞에 띄워 두는 것이라 둘 다 답을 알려주는 단서가 된다.
+  const revealed = plRevealed();
+  pl.uiRevealed = revealed;
   $$('.ov-choice', ov).forEach(el => {
     const j = Number(el.dataset.c);
-    const pct = total ? Math.round(counts[j] / total * 100) : 0;
+    const pct = (revealed && total) ? Math.round(counts[j] / total * 100) : 0;
     el.querySelector('.bar').style.width = pct + '%';
-    el.querySelector('[data-cnt]').textContent = total ? counts[j] + '명 (' + pct + '%)' : '';
-    el.classList.toggle('correct', j === q.answer);
+    el.querySelector('[data-cnt]').textContent = (revealed && total) ? counts[j] + '명 (' + pct + '%)' : '';
+    el.classList.toggle('correct', revealed && j === q.answer);
   });
   const ex = ov.querySelector('#ov-explain');
   if (ex) ex.style.display = revealed ? '' : 'none';
   const rv = ov.querySelector('#ov-reveal');
-  if (rv) { rv.disabled = revealed; rv.textContent = revealed ? '공개됨' : rv.textContent; }
+  if (rv) {
+    rv.disabled = revealed;
+    rv.textContent = revealed ? '공개됨' : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
+  }
 }
 
 /** 남은 시간 표시 — 서버 시각 기준이라 학생 화면과 어긋나지 않는다 */
 function plTimerTick() {
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
+
+  // timer 모드는 시간이 차면 자동 공개되므로, 그 순간 화면을 갱신해 준다
+  if (plRevealed() !== pl.uiRevealed) plRenderOverlayCounts();
+
   const el = ov.querySelector('#ov-timer'), num = ov.querySelector('#ov-timer-n');
   const limit = Number(pl.live.limitSec) || 0;
   if (!limit || !pl.live.openedAt) { if (el) el.style.display = 'none'; return; }
