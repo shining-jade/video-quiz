@@ -1,6 +1,53 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const core = require('../firestore-core.js');
+const draft = require('../editor-draft.js');
+
+function memoryStorage(initial = {}) {
+  const values = { ...initial };
+  return {
+    getItem(key) { return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null; },
+    setItem(key, value) { values[key] = String(value); },
+    removeItem(key) { delete values[key]; }
+  };
+}
+
+test('편집 초안은 새 세트와 기존 세트를 서로 다른 키에 보관한다', () => {
+  const storage = memoryStorage();
+  draft.write(storage, '', { title: '새 세트', questions: [] }, 1000);
+  draft.write(storage, 'set-a', { title: '기존 세트', questions: [] }, 2000);
+
+  assert.equal(draft.read(storage, '').model.title, '새 세트');
+  assert.equal(draft.read(storage, 'set-a').model.title, '기존 세트');
+  assert.equal(draft.read(storage, 'set-b'), null);
+});
+
+test('편집 초안은 저장용 필드만 복제하고 저장 시각으로 복구 여부를 정한다', () => {
+  const storage = memoryStorage();
+  const model = {
+    title: '수정', videoUrl: 'https://youtu.be/x', videoId: 'x', author: '교사',
+    settings: { limitSec: 15 }, questions: [{ text: '문항' }], createdAt: 10,
+    archived: false, saved: false, settingsOpen: true
+  };
+
+  draft.write(storage, 'set-a', model, 2000);
+  model.questions[0].text = '나중 변경';
+  const restored = draft.read(storage, 'set-a');
+
+  assert.equal(restored.model.questions[0].text, '문항');
+  assert.equal(restored.model.saved, undefined);
+  assert.equal(restored.model.settingsOpen, undefined);
+  assert.equal(draft.isNewer(restored, 1999), true);
+  assert.equal(draft.isNewer(restored, 2000), false);
+});
+
+test('깨진 편집 초안은 무시하고 정식 저장 뒤 지울 수 있다', () => {
+  const storage = memoryStorage({ vq_draft_set_a: '{broken' });
+  assert.equal(draft.read(storage, 'set-a'), null);
+  draft.write(storage, 'set-a', { title: '복구', questions: [] }, 1000);
+  draft.clear(storage, 'set-a');
+  assert.equal(draft.read(storage, 'set-a'), null);
+});
 
 test('충돌한 반 코드를 건너뛰고 다음 코드를 사용한다', async () => {
   const attempts = [];
