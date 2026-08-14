@@ -133,6 +133,12 @@ textarea { resize: vertical; min-height: 62px; }
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+#conn-banner {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 9998;
+  background: #b3261e; color: #fff; padding: 10px 16px;
+  font-size: 13.5px; line-height: 1.5; text-align: center;
+}
+
 /* ══════════════════════════════════════════════════════════
    홈
    ══════════════════════════════════════════════════════════ */
@@ -168,6 +174,11 @@ textarea { resize: vertical; min-height: 62px; }
 .choice-row .cno { width: 20px; text-align: center; color: var(--ink-3); font-size: 13px; font-weight: 700; flex: none; }
 .choice-row .btn { flex: none; }
 .time-input { width: 110px !important; }
+
+/* 숫자 칸 옆에 단위를 붙여 초/분 헷갈리지 않게 */
+.unit-wrap { display: flex; align-items: center; gap: 7px; }
+.unit-wrap input { flex: 1; min-width: 0; }
+.unit-wrap .unit { flex: none; font-size: 14px; font-weight: 700; color: var(--ink-2); }
 
 /* 문항 이미지 */
 .img-box { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -545,6 +556,29 @@ function R(path) { return db.ref(path ? 'vq/' + path : 'vq'); }
 let serverOffset = 0;
 db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
 function serverNow() { return Date.now() + serverOffset; }
+
+/* ── 연결 감시 ─────────────────────────────────────────────────────────
+   무선망이 끊기거나, 무료 요금제의 동시 접속 한도(100명)를 넘겨 연결이
+   거부되면 화면이 그냥 멈춘 것처럼 보인다. 무슨 일인지 알려 준다. */
+let connLostSince = Date.now();
+db.ref('.info/connected').on('value', s => {
+  if (s.val()) { connLostSince = 0; setConnBanner(false); }
+  else if (!connLostSince) connLostSince = Date.now();
+});
+setInterval(() => {
+  if (connLostSince && Date.now() - connLostSince > 9000) setConnBanner(true);
+}, 2500);
+
+function setConnBanner(show) {
+  let el = document.getElementById('conn-banner');
+  if (!show) { if (el) el.remove(); return; }
+  if (el) return;
+  el = document.createElement('div');
+  el.id = 'conn-banner';
+  el.innerHTML = '⚠ <b>서버에 연결되어 있지 않습니다.</b> 답이 저장되지 않을 수 있어요. ' +
+    '와이파이를 확인하고 새로고침해 보세요. 한 번에 접속한 사람이 너무 많아도 이 안내가 뜹니다.';
+  document.body.appendChild(el);
+}
 
 /* ══════════════════════════════════════════════════════════════════════
    1. 공용 유틸
@@ -1406,13 +1440,13 @@ function mkRenderSettings() {
             '<option value="' + k + '"' + (mk.settings.revealMode === k ? ' selected' : '') + '>' + REVEAL_LABEL[k] + '</option>').join('') +
         '</select>' +
         '<div class="hint" id="mk-reveal-hint"></div></div>' +
-      '<div class="field"><label class="f">문항당 응답 제한 시간 (초)</label>' +
-        '<input type="number" id="mk-limit" min="0" max="600" value="' + mk.settings.limitSec + '">' +
+      '<div class="field"><label class="f">문항당 응답 제한 시간</label>' +
+        '<div class="unit-wrap"><input type="number" id="mk-limit" min="0" max="600" value="' + mk.settings.limitSec + '"><span class="unit">초</span></div>' +
         '<div class="hint">0을 넣으면 시간 제한 없이, 교사가 [계속 재생]을 누를 때까지 열려 있습니다.</div></div>' +
     '</div>' +
     '<div class="grid2">' +
-      '<div class="field" id="mk-delay-field"><label class="f">정답 자동 공개까지 (초)</label>' +
-        '<input type="number" id="mk-delay" min="0" max="600" value="' + mk.settings.revealDelaySec + '">' +
+      '<div class="field" id="mk-delay-field"><label class="f">정답 자동 공개까지</label>' +
+        '<div class="unit-wrap"><input type="number" id="mk-delay" min="0" max="600" value="' + mk.settings.revealDelaySec + '"><span class="unit">초</span></div>' +
         '<div class="hint">퀴즈가 뜬 뒤 이만큼 지나면 학생 화면에 정답·해설이 뜹니다.</div></div>' +
       '<div class="field"><label class="f">퀴즈가 뜰 때 영상</label>' +
         '<select id="mk-pause">' +
@@ -1520,9 +1554,11 @@ function mkRenderQuestions() {
         '<div class="field"><label class="f">해설 (선택)</label>' +
           '<input type="text" value="' + esc(q.explain) + '" oninput="mk.questions[' + i + '].explain=this.value" placeholder="정답 공개 때 함께 보여줄 설명"></div>' +
         '<div class="field"><label class="f">이 문항만 제한 시간 다르게 (선택)</label>' +
-          '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
-            'oninput="mk.questions[' + i + '].limitSec = this.value===\'\' ? null : Math.max(0,Number(this.value)||0)" ' +
-            'placeholder="비우면 세트 기본값(' + mk.settings.limitSec + '초)"></div>' +
+          '<div class="unit-wrap">' +
+            '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
+              'oninput="mk.questions[' + i + '].limitSec = this.value===\'\' ? null : Math.max(0,Number(this.value)||0)" ' +
+              'placeholder="비우면 세트 기본값 ' + mk.settings.limitSec + '초">' +
+            '<span class="unit">초</span></div></div>' +
       '</div>' +
     '</div>';
   }).join('');
