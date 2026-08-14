@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    match /quiz_sets/{setId} {
+      allow read, create, update: if signedIn();
+      allow delete: if false;
+    }
+
+    match /images/{setId}/q/{questionIndex} {
+      allow read, write: if signedIn();
+    }
+
+    match /codes/{code} {
+      allow read, write: if signedIn();
+    }
+
+    match /sessions/{sessionId} {
+      allow read, write: if signedIn();
+
+      match /{document=**} {
+        allow read, write: if signedIn();
+      }
+    }
+
+    match /config/{document} {
+      allow read, write: if signedIn();
+    }
+
+    match /clock/{sampleId} {
+      allow read, write: if signedIn();
+    }
+  }
+}

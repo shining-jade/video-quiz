@@ -537,18 +537,12 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 /* ══════════════════════════════════════════════════════════════════════
    0. Firebase — 영상 퀴즈 전용 프로젝트 (video-quiz-65798)
 
-   원래는 감염병 TTX 도구와 프로젝트를 같이 썼는데, 무료 요금제의 동시 접속
-   100명을 두 도구가 나눠 쓰게 되어 분리했습니다. 데이터는 여전히 vq/ 아래에
-   둡니다(경로 구조를 그대로 유지해 코드가 갈리지 않게).
-
-   ▸ 학년별로 프로젝트를 더 나누려면: 새 프로젝트를 만들고 규칙 게시 + 익명
-     로그인을 켠 뒤, 아래 config 만 바꾼 사본을 따로 배포하면 됩니다.
-     세트는 세트 목록 화면의 [📤 파일] / [📥 세트 가져오기] 로 옮깁니다.
+   Cloud Firestore(asia-southeast1)와 익명 인증을 사용합니다. 보안 규칙은
+   저장소의 firestore.rules를 기준으로 게시합니다.
    ══════════════════════════════════════════════════════════════════════ */
 const firebaseConfig = {
   apiKey: "AIzaSyBEWWFzjfPGHrLGlqHAHBDWPnnToV13l90",
   authDomain: "video-quiz-65798.firebaseapp.com",
-  databaseURL: "https://video-quiz-65798-default-rtdb.asia-southeast1.firebasedatabase.app",
   projectId: "video-quiz-65798",
   storageBucket: "video-quiz-65798.firebasestorage.app",
   messagingSenderId: "931590286071",
@@ -558,9 +552,6 @@ if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const store = FirestoreStore.createFirestoreStore(db, firebase.firestore.FieldValue, () => Date.now());
 const SV_TS = firebase.firestore.FieldValue.serverTimestamp();
-
-/** vq/ 네임스페이스 아래의 ref를 반환 (path가 비면 vq 루트) */
-function R(path) { return db.ref(path ? 'vq/' + path : 'vq'); }
 
 /* 서버 시각 보정 — 인증 뒤 고유 clock 문서로 동기화한다. */
 function serverNow() { return store.serverNow(); }
@@ -887,7 +878,7 @@ function gradeResponse(q, resp) {
   if (t === 'multi') return multiCorrect(q, parseMulti(resp.cs));
   return Number(resp.c) === Number(q.answer);
 }
-/** 복수 정답은 "0,2" 문자열로 저장한다 (RTDB에서 배열이 다루기 번거로워서) */
+/** 복수 정답은 "0,2" 문자열로 정규화해 저장한다. */
 function parseMulti(cs) {
   return String(cs || '').split(',').filter(x => x !== '').map(Number).filter(n => !isNaN(n));
 }
@@ -903,7 +894,7 @@ function answerLabel(q, r) {
   return (t === 'ox' ? ['O', 'X'][c] : LETTERS[c]) || '';
 }
 
-/** Firebase는 빈 배열을 지우므로 questions가 없을 수 있다 */
+/** 이전 JSON이나 불완전한 문서에서는 questions가 없을 수 있다. */
 function normQuestions(qs) {
   return (qs || []).filter(Boolean).map(q => {
     const type = QTYPES[q.type] ? q.type : 'choice';
@@ -920,7 +911,7 @@ function normQuestions(qs) {
       accept: (q.accept ? Object.keys(q.accept).map(k => String(q.accept[k])) : []).filter(s => s.trim() !== ''),
       imgUrl: q.imgUrl || '',
       imgUp: !!q.imgUp,
-      _img: '',                 // 업로드 이미지 원본 (vq/images 에서 따로 불러온다)
+      _img: '',                 // 업로드 이미지 원본 (images 하위 컬렉션에서 따로 불러온다)
       explain: q.explain || '',
       limitSec: (q.limitSec === undefined || q.limitSec === null || q.limitSec === '') ? null : Number(q.limitSec)
     };
@@ -942,10 +933,10 @@ function normSet(raw) {
 }
 /* ── 문항 이미지 ────────────────────────────────────────────────────────
    Firebase Storage 는 유료 요금제라야 쓸 수 있어서, 브라우저에서 크기를 줄여
-   데이터베이스에 넣습니다. 대신 이미지는 퀴즈 세트가 아니라 vq/images/{세트}/{문항}
+   데이터베이스에 넣습니다. 대신 이미지는 퀴즈 세트가 아니라 images/{세트}/q/{문항}
    에 따로 두고, 그 문항이 열릴 때만 내려받습니다. 학생 30명이 세트를 열 때마다
    모든 이미지를 받아가면 무료 전송량이 금방 동나기 때문입니다. */
-const IMG_MAX_CHARS = 380000;   // 규칙의 400,000자 상한 아래로 (대략 280KB 사진)
+const IMG_MAX_CHARS = 380000;   // 문항별 Firestore 문서 크기에 여유를 둔다 (대략 280KB 사진)
 
 function compressImage(file, maxPx, quality) {
   return new Promise((resolve, reject) => {
@@ -1192,9 +1183,7 @@ function setArchive(id, on) {
 }
 
 /* ── 세트 내보내기 / 가져오기 ─────────────────────────────────────────
-   Firebase 프로젝트를 학년별로 나누면 프로젝트끼리는 데이터가 통하지 않는다.
-   그때 세트를 옮기려고 매번 사람을 거치지 않도록, 파일 한 개로 주고받게 한다.
-   백업 용도로도 그대로 쓸 수 있다. */
+   세트와 이미지를 JSON 파일 한 개로 주고받는다. 백업과 데이터 이전에도 쓴다. */
 const EXPORT_VERSION = 1;
 
 function setExport(id) {
@@ -1996,7 +1985,7 @@ function mkPayload() {
     return o;
   });
 
-  // 업로드 이미지는 세트가 아니라 vq/images 에 따로 넣는다 (학생이 통째로 받지 않도록)
+  // 업로드 이미지는 세트가 아니라 images 하위 컬렉션에 둔다 (학생이 통째로 받지 않도록)
   const images = {};
   ordered.forEach((q, i) => { if (q.imgUp && q._img) images[i] = q._img; });
 
@@ -3390,7 +3379,7 @@ function dashExportCSV() {
 /* ══════════════════════════════════════════════════════════════════════
    9. ⑤ 관리자 통합 조회 화면
    ══════════════════════════════════════════════════════════════════════ */
-/* 기본 비밀번호 admin1234 의 SHA-256. 관리자 화면에서 바꾸면 vq/config/adminHash 에 저장된다.
+/* 기본 비밀번호 admin1234 의 SHA-256. 관리자 화면에서 바꾸면 config/app에 저장된다.
    ※ 클라이언트 검증이므로 화면 접근을 막아줄 뿐, DB 자체를 잠그지는 못한다 (README 참고). */
 const DEFAULT_ADMIN_HASH = 'ac9689e2272427085e35b9d3e3e8bed88cb3434828b43b86fc0596cad4c6e270';
 
@@ -3773,7 +3762,7 @@ function admManage(d) {
       '<div style="font-size:13.5px;color:var(--ink-2);line-height:1.9">' +
         '· 이 화면은 학생 개인정보(학년·반·번호·이름)를 다룹니다. 공용 PC에서는 반드시 로그아웃하세요.<br>' +
         '· 비밀번호는 브라우저에서 확인하는 방식이라 화면 접근을 막아줄 뿐입니다. 데이터베이스 자체를 잠그려면 Firebase 인증 도입이 필요합니다.<br>' +
-        '· 세션·응답은 Firebase Realtime Database의 <span class="mono">vq/</span> 경로에 저장됩니다.' +
+        '· 세션·응답은 Cloud Firestore의 <span class="mono">sessions/</span> 컬렉션에 저장됩니다.' +
       '</div>' +
     '</div>';
 }
