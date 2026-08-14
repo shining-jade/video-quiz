@@ -260,8 +260,9 @@ function loadStoreModule() {
 }
 
 function extractFunction(source, name) {
-  const start = source.indexOf('function ' + name + '(');
+  let start = source.indexOf('function ' + name + '(');
   assert.ok(start >= 0, name + ' 함수를 찾을 수 있어야 한다');
+  if (source.slice(Math.max(0, start - 6), start) === 'async ') start -= 6;
   const brace = source.indexOf('{', start);
   let depth = 0;
   let quote = '';
@@ -654,6 +655,353 @@ test('빈 반 코드는 한 트랜잭션에서 코드·세션·live·board를 �
   });
   assert.deepEqual(fake.value('sessions/new/meta/board'), { scores: {} });
   assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 1);
+});
+
+test('세션 시작은 충돌한 후보를 건너뛰고 열 개 안에서 선점한 코드를 반환한다', async () => {
+  const fake = makeFirestoreFake({ 'codes/OLD234': { sessionId: 'old' } });
+  const store = createStore(fake);
+  const candidates = ['OLD234', 'NEW234'];
+  const session = { setId: 'set1', status: 'live' };
+
+  const code = await store.startSession('new', session, () => candidates.shift());
+
+  assert.equal(code, 'NEW234');
+  assert.deepEqual(fake.value('sessions/new'), { ...session, code: 'NEW234' });
+  assert.equal(fake.value('codes/NEW234').sessionId, 'new');
+});
+
+test('세션 시작은 열 후보가 모두 충돌하면 더 만들지 않고 실패한다', async () => {
+  const initial = Object.fromEntries(
+    Array.from({ length: 10 }, (_, index) => ['codes/CODE' + index, { sessionId: 'old-' + index }])
+  );
+  const fake = makeFirestoreFake(initial);
+  const store = createStore(fake);
+  let generated = 0;
+
+  await assert.rejects(
+    store.startSession('new', { setId: 'set1' }, () => 'CODE' + generated++),
+    /사용 가능한 반 코드/
+  );
+
+  assert.equal(generated, 10);
+  assert.equal(fake.has('sessions/new'), false);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 10);
+});
+
+test('학생·응답·live 구독은 세션의 각 Firestore 경로 데이터만 반환한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/students/s1': { name: '가' },
+    'sessions/a/responses/s1': { answers: { '0': { c: 1, ok: true } } },
+    'sessions/a/meta/live': { q: 0, openedAt: 123, revealed: false, limitSec: 20 }
+  });
+  const store = createStore(fake);
+  let students;
+  let responses;
+  let live;
+
+  const stops = [
+    store.subscribeStudents('a', value => { students = value; }),
+    store.subscribeResponses('a', value => { responses = value; }),
+    store.subscribeLive('a', value => { live = value; })
+  ];
+  await fake.flush();
+
+  assert.deepEqual(students, { s1: { name: '가' } });
+  assert.deepEqual(responses, { s1: { answers: { '0': { c: 1, ok: true } } } });
+  assert.deepEqual(live, { id: 'live', q: 0, openedAt: 123, revealed: false, limitSec: 20 });
+  assert.deepEqual(fake.subscribedPaths(), [
+    'sessions/a/students',
+    'sessions/a/responses',
+    'sessions/a/meta/live'
+  ]);
+  stops.forEach(stop => stop());
+});
+
+test('live 갱신은 meta/live 문서를 통째로 교체한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/meta/live': { q: 2, openedAt: 10, revealed: true, limitSec: 30, stale: true }
+  });
+  const store = createStore(fake);
+  const waiting = { q: -1, openedAt: 0, revealed: false, limitSec: 0 };
+
+  await store.setLive('a', waiting);
+
+  assert.deepEqual(fake.value('sessions/a/meta/live'), waiting);
+});
+
+test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a/meta/live': { q: 2, openedAt: 10, revealed: true, limitSec: 30 }
+  }, { committedServerMillis: 20_000 });
+  const store = createStore(fake);
+
+  await store.endSession('a');
+
+  const session = fake.value('sessions/a');
+  assert.deepEqual({ setId: session.setId, status: session.status }, { setId: 'set1', status: 'ended' });
+  assert.equal(session.endedAt.toMillis(), 20_000);
+  assert.deepEqual(fake.value('sessions/a/meta/live'), {
+    q: -1, openedAt: 0, revealed: false, limitSec: 0
+  });
+});
+
+test('점수판은 meta/board 문서에 scores 필드로 쓴다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  await store.writeBoard('a', { s1: 2, s2: 1 });
+
+  assert.deepEqual(fake.value('sessions/a/meta/board'), { scores: { s1: 2, s2: 1 } });
+});
+
+test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기고 응답 문서를 화면 형태로 바꾼다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const subscriptions = {};
+  let boardWrites = 0;
+  const app = { innerHTML: '' };
+  const context = {
+    pl: {
+      sessionId: 'session-a', code: 'ABC234', students: {}, responses: {},
+      live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+      set: {
+        title: '첫 세트', videoId: 'abcdefghijk', questions: [],
+        settings: { revealMode: 'manual', limitSec: 0 }
+      }
+    },
+    store: {
+      subscribeStudents(id, next) { assert.equal(id, 'session-a'); subscriptions.students = next; return () => {}; },
+      subscribeResponses(id, next) { assert.equal(id, 'session-a'); subscriptions.responses = next; return () => {}; },
+      subscribeLive(id, next) { assert.equal(id, 'session-a'); subscriptions.live = next; return () => {}; }
+    },
+    FirestoreCore: require('../firestore-core.js'),
+    onCleanup() {},
+    APP() { return app; },
+    topbar() { return '<nav></nav>'; },
+    linkTo() { return 'https://example.test/join/ABC234'; },
+    esc(value) { return String(value); },
+    ccButton() { return ''; },
+    REVEAL_LABEL: { manual: '교사 공개' },
+    window: {},
+    document: { getElementById() { return {}; } },
+    $(selector) { return selector === '#pl-qr' ? { style: {} } : null; },
+    plRenderQList() {},
+    plRenderStudents() {},
+    plRenderBoardOverlay() {},
+    plRenderOverlay() {},
+    plRenderOverlayCounts() {},
+    plPushBoard() { boardWrites += 1; },
+    whenYT() {},
+    every() {},
+    plTick() {},
+    plTimerTick() {},
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'renderPlayRun'), context);
+
+  context.renderPlayRun();
+  subscriptions.students({ s1: { name: '가' } });
+  subscriptions.responses({ s1: { answers: { '0': { c: 1, ok: true } } } });
+  subscriptions.live({ q: 0, openedAt: 123, revealed: false, limitSec: 20 });
+
+  assert.deepEqual(context.pl.students, { s1: { name: '가' } });
+  assert.deepEqual(context.pl.responses, { '0': { s1: { c: 1, ok: true } } });
+  assert.equal(context.pl.live.q, 0);
+  assert.equal(boardWrites, 0);
+});
+
+test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 전달한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const serverTimestamp = Symbol('server timestamp');
+  let received;
+  let rendered = 0;
+  const generated = ['SESSION12345', 'OLD234', 'NEW234'];
+  const context = {
+    pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
+    $(selector) { return selector === '#pl-label' ? { value: '  2학년 3반  ' } : null; },
+    lsSet() {},
+    rid() { return generated.shift(); },
+    SV_TS: serverTimestamp,
+    store: {
+      async startSession(sessionId, session, createCode) {
+        received = { sessionId, session, codes: [createCode(), createCode()] };
+        return 'NEW234';
+      }
+    },
+    renderPlayRun() { rendered += 1; },
+    alert() {},
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'plStartSession'), context);
+
+  await context.plStartSession();
+
+  assert.deepEqual(clone(received), {
+    sessionId: 'SESSION12345',
+    session: {
+      setId: 'set1', setTitle: '첫 세트', label: '2학년 3반',
+      teacher: '교사', createdAt: serverTimestamp, status: 'live'
+    },
+    codes: ['OLD234', 'NEW234']
+  });
+  assert.equal(context.pl.code, 'NEW234');
+  assert.equal(context.pl.sessionId, 'SESSION12345');
+  assert.equal(rendered, 1);
+});
+
+test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let message = '';
+  const context = {
+    pl: { setId: 'set1', set: { title: '첫 세트', author: '' } },
+    $() { return { value: '' }; },
+    lsSet() {},
+    rid() { return 'SESSION12345'; },
+    SV_TS: Symbol('server timestamp'),
+    store: {
+      async startSession() {
+        throw new Error('사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.');
+      }
+    },
+    renderPlayRun() {},
+    alert(value) { message = value; },
+    console: { error() {} }
+  };
+  vm.runInNewContext(extractFunction(html, 'plStartSession'), context);
+
+  await context.plStartSession();
+
+  assert.equal(message, '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.');
+});
+
+test('문항 열기와 정답 공개는 meta/live 전체 상태를 저장소로 쓴다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const serverTimestamp = Symbol('server timestamp');
+  const writes = [];
+  const context = {
+    pl: {
+      sessionId: 'session-a',
+      live: { q: 2, openedAt: 123, revealed: false, limitSec: 20 },
+      player: { pauseVideo() {} },
+      set: { settings: { autoPause: true, revealMode: 'manual' } }
+    },
+    SV_TS: serverTimestamp,
+    limitFor() { return 20; },
+    store: {
+      setLive(id, value) { writes.push([id, value]); return Promise.resolve(); }
+    }
+  };
+  vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
+  vm.runInNewContext(extractFunction(html, 'plReveal'), context);
+
+  await context.plOpenQuestion(3);
+  await context.plReveal();
+
+  assert.deepEqual(clone(writes), [
+    ['session-a', { q: 3, openedAt: serverTimestamp, revealed: false, limitSec: 20 }],
+    ['session-a', { q: 2, openedAt: 123, revealed: true, limitSec: 20 }]
+  ]);
+});
+
+test('교사 수업 종료는 저장소 종료가 끝난 뒤 안내 화면으로 이동한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const events = [];
+  const context = {
+    pl: { sessionId: 'session-a' },
+    confirm() { return true; },
+    store: { async endSession(id) { events.push(['end', id]); } },
+    toast(message) { events.push(['toast', message]); },
+    go(route) { events.push(['go', route]); }
+  };
+  vm.runInNewContext(extractFunction(html, 'plEndSession'), context);
+
+  await context.plEndSession();
+
+  assert.deepEqual(events, [
+    ['end', 'session-a'],
+    ['toast', '진행을 종료했습니다'],
+    ['go', 'live/session-a']
+  ]);
+});
+
+test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    pl: { sessionId: 'session-a', player: { playVideo() { calls.push('play'); } } },
+    plPushBoard() { calls.push('board'); return Promise.resolve(); },
+    store: {
+      setLive(id, value) {
+        calls.push(['live', id, value]);
+        return Promise.resolve();
+      }
+    }
+  };
+  vm.runInNewContext(extractFunction(html, 'plCloseQuestion'), context);
+
+  await context.plCloseQuestion();
+
+  assert.equal(calls.filter(call => call === 'board').length, 1);
+  assert.deepEqual(clone(calls[1]), ['live', 'session-a', {
+    q: -1, openedAt: 0, revealed: false, limitSec: 0
+  }]);
+  assert.equal(calls[2], 'play');
+});
+
+test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답과 보기별 수를 숨긴다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const count = { textContent: '' };
+  const explain = { style: {} };
+  const reveal = { disabled: false, textContent: '' };
+  const choices = [0, 1].map(index => {
+    const bar = { style: {} };
+    const number = { textContent: '' };
+    const classes = new Set();
+    return {
+      dataset: { c: String(index) }, bar, number, classes,
+      querySelector(selector) { return selector === '.bar' ? bar : number; },
+      classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); } }
+    };
+  });
+  const overlay = {
+    querySelector(selector) {
+      if (selector === '#ov-count') return count;
+      if (selector === '#ov-explain-top') return explain;
+      if (selector === '#ov-reveal') return reveal;
+      return null;
+    }
+  };
+  const context = {
+    pl: {
+      live: { q: 0, revealed: false },
+      students: { s1: {}, s2: {} },
+      responses: { '0': { s1: { c: 1 }, s2: { c: 0 } } },
+      set: {
+        settings: { revealMode: 'manual' },
+        questions: [{ type: 'choice', choices: ['오답', '정답'], answer: 1 }]
+      }
+    },
+    document: { getElementById() { return overlay; } },
+    qType() { return 'choice'; },
+    isTextType() { return false; },
+    parseMulti() { return []; },
+    plRevealed() { return false; },
+    $$(selector) { return selector === '.ov-choice' ? choices : []; }
+  };
+  vm.runInNewContext(extractFunction(html, 'plRenderOverlayCounts'), context);
+
+  context.plRenderOverlayCounts();
+
+  const rendered = JSON.stringify({
+    count: count.textContent,
+    choices: choices.map(choice => ({
+      width: choice.bar.style.width,
+      number: choice.number.textContent,
+      correct: choice.classes.has('correct')
+    }))
+  });
+  assert.match(rendered, /2 \/ 2 제출/);
+  assert.doesNotMatch(rendered, /1명|50%|"correct":true/);
 });
 
 test('Firestore 초기화 구간은 ref 없는 Firestore 인스턴스에서도 중단되지 않는다', () => {

@@ -2,6 +2,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const core = require('../firestore-core.js');
 
+test('충돌한 반 코드를 건너뛰고 다음 코드를 사용한다', async () => {
+  const attempts = [];
+  const claim = async code => { attempts.push(code); return code === 'NEW234'; };
+  const result = await core.claimFirstAvailableCode(['OLD234', 'NEW234'], claim);
+  assert.equal(result, 'NEW234');
+  assert.deepEqual(attempts, ['OLD234', 'NEW234']);
+});
+
 test('Timestamp와 왕복 중간값으로 서버 시각 오프셋을 계산한다', () => {
   const ts = { toMillis: () => 10_250 };
   assert.equal(core.timestampMillis(ts), 10_250);

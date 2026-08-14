@@ -6,7 +6,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
-  const { timestampMillis, offsetFromRoundTrip } = core;
+  const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode } = core;
 
   function createFirestoreStore(db, fieldValue, nowFn) {
     let serverOffset = 0;
@@ -93,6 +93,67 @@
       return copy;
     }
 
+    function claimSessionCode(code, sessionId, session) {
+      return db.runTransaction(async transaction => {
+        const codeReference = db.doc('codes/' + code);
+        const codeSnapshot = await transaction.get(codeReference);
+        if (codeSnapshot.exists) return false;
+
+        transaction.set(codeReference, {
+          sessionId,
+          createdAt: fieldValue.serverTimestamp()
+        });
+        transaction.set(db.doc('sessions/' + sessionId), session);
+        transaction.set(db.doc('sessions/' + sessionId + '/meta/live'), {
+          q: -1,
+          openedAt: 0,
+          revealed: false,
+          limitSec: 0
+        });
+        transaction.set(db.doc('sessions/' + sessionId + '/meta/board'), { scores: {} });
+        return true;
+      });
+    }
+
+    function startSession(sessionId, session, createCode) {
+      const candidates = Array.from({ length: 10 }, () => createCode());
+      return claimFirstAvailableCode(
+        candidates,
+        code => claimSessionCode(code, sessionId, { ...session, code })
+      );
+    }
+
+    function subscribeStudents(sessionId, next, error) {
+      return db.collection('sessions/' + sessionId + '/students')
+        .onSnapshot(snapshot => next(collectionValue(snapshot)), error);
+    }
+
+    function subscribeResponses(sessionId, next, error) {
+      return db.collection('sessions/' + sessionId + '/responses')
+        .onSnapshot(snapshot => next(collectionValue(snapshot)), error);
+    }
+
+    function subscribeLive(sessionId, next, error) {
+      return db.doc('sessions/' + sessionId + '/meta/live')
+        .onSnapshot(snapshot => next(snapshotValue(snapshot)), error);
+    }
+
+    function setLive(sessionId, live) {
+      return db.doc('sessions/' + sessionId + '/meta/live').set(live);
+    }
+
+    async function endSession(sessionId) {
+      await db.doc('sessions/' + sessionId).set({
+        status: 'ended',
+        endedAt: fieldValue.serverTimestamp()
+      }, { merge: true });
+      await setLive(sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+    }
+
+    function writeBoard(sessionId, board) {
+      return db.doc('sessions/' + sessionId + '/meta/board').set({ scores: board });
+    }
+
     return {
       listQuizSets,
       getQuizSet,
@@ -102,6 +163,13 @@
       getImages,
       replaceImages,
       copyQuizSet,
+      startSession,
+      subscribeStudents,
+      subscribeResponses,
+      subscribeLive,
+      setLive,
+      endSession,
+      writeBoard,
 
       getDoc(path) {
         return db.doc(path).get().then(snapshotValue);
@@ -152,27 +220,7 @@
         return nowFn() + serverOffset;
       },
 
-      claimSessionCode(code, sessionId, session) {
-        return db.runTransaction(async transaction => {
-          const codeReference = db.doc('codes/' + code);
-          const codeSnapshot = await transaction.get(codeReference);
-          if (codeSnapshot.exists) return false;
-
-          transaction.set(codeReference, {
-            sessionId,
-            createdAt: fieldValue.serverTimestamp()
-          });
-          transaction.set(db.doc('sessions/' + sessionId), session);
-          transaction.set(db.doc('sessions/' + sessionId + '/meta/live'), {
-            q: -1,
-            openedAt: 0,
-            revealed: false,
-            limitSec: 0
-          });
-          transaction.set(db.doc('sessions/' + sessionId + '/meta/board'), { scores: {} });
-          return true;
-        });
-      }
+      claimSessionCode
     };
   }
 

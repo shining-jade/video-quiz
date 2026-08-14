@@ -2078,7 +2078,7 @@ function screenPlay(setId) {
     sessionId: null, code: null,
     player: null, lastT: 0, fired: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
-    students: {}, answers: {},
+    students: {}, responses: {},
     liveRef: null
   };
   onCleanup(() => {
@@ -2087,8 +2087,6 @@ function screenPlay(setId) {
     if (ov) ov.remove();
     const bo = document.getElementById('board-overlay');
     if (bo) bo.remove();
-    clearTimeout(boardPushTimer);
-    lastBoardJson = '';
     document.body.classList.remove('quiz-open');
     pl = null;
   });
@@ -2151,30 +2149,23 @@ function plStartSession() {
   const sessionId = rid(12);
   const teacher = pl.set.author || '';
 
-  (function claim(tries) {
-    if (tries > 8) { alert('반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.'); return; }
-    const code = rid(6);
-    // transaction 으로 코드 선점 — 동시에 시작해도 중복되지 않는다
-    R('codes/' + code).transaction(cur => (cur === null ? { sessionId: sessionId, createdAt: Date.now() } : undefined))
-      .then(res => {
-        if (!res.committed) return claim(tries + 1);
-        return R('sessions/' + sessionId).set({
-          setId: pl.setId,
-          setTitle: pl.set.title,
-          label: label,
-          code: code,
-          teacher: teacher,
-          createdAt: SV_TS,
-          status: 'live',
-          live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
-        }).then(() => {
-          pl.sessionId = sessionId;
-          pl.code = code;
-          renderPlayRun();
-        });
-      })
-      .catch(e => { console.error(e); alert('반 시작 실패: ' + e.message); });
-  })(0);
+  return store.startSession(sessionId, {
+    setId: pl.setId,
+    setTitle: pl.set.title,
+    label: label,
+    teacher: teacher,
+    createdAt: SV_TS,
+    status: 'live'
+  }, () => rid(6)).then(code => {
+    pl.sessionId = sessionId;
+    pl.code = code;
+    renderPlayRun();
+  }).catch(e => {
+    console.error(e);
+    alert(e.message === '사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.'
+      ? '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.'
+      : '반 시작 실패: ' + e.message);
+  });
 }
 
 function renderPlayRun() {
@@ -2243,24 +2234,22 @@ function renderPlayRun() {
   plRenderQList();
 
   // 실시간 구독 — 참여자, 응답, live 상태
-  watch(R('sessions/' + pl.sessionId + '/students'), 'value', snap => {
-    pl.students = snap.val() || {};
+  onCleanup(store.subscribeStudents(pl.sessionId, students => {
+    pl.students = students || {};
     plRenderStudents();
     plRenderBoardOverlay();
-    plPushBoard();
-  });
-  watch(R('responses/' + pl.sessionId), 'value', snap => {
-    pl.answers = snap.val() || {};
+  }, e => console.error(e)));
+  onCleanup(store.subscribeResponses(pl.sessionId, responseDocs => {
+    pl.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
     plRenderQList();
     plRenderOverlayCounts();
     plRenderStudents();
     plRenderBoardOverlay();
-    plPushBoard();
-  });
-  watch(R('sessions/' + pl.sessionId + '/live'), 'value', snap => {
-    pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, snap.val() || {});
+  }, e => console.error(e)));
+  onCleanup(store.subscribeLive(pl.sessionId, live => {
+    pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     plRenderOverlay();
-  });
+  }, e => console.error(e)));
 
   // 플레이어
   whenYT(() => {
@@ -2312,7 +2301,7 @@ function plTick() {
 function plOpenQuestion(i) {
   if (!pl || !pl.sessionId) return;
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
-  R('sessions/' + pl.sessionId + '/live').set({
+  return store.setLive(pl.sessionId, {
     q: i,
     openedAt: SV_TS,
     revealed: pl.set.settings.revealMode === 'instant',
@@ -2321,11 +2310,17 @@ function plOpenQuestion(i) {
 }
 function plReveal() {
   if (!pl || pl.live.q < 0) return;
-  R('sessions/' + pl.sessionId + '/live/revealed').set(true);
+  return store.setLive(pl.sessionId, {
+    q: pl.live.q,
+    openedAt: pl.live.openedAt,
+    revealed: true,
+    limitSec: pl.live.limitSec
+  });
 }
-function plCloseQuestion() {
+async function plCloseQuestion() {
   if (!pl) return;
-  R('sessions/' + pl.sessionId + '/live').set({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  await plPushBoard();
+  await store.setLive(pl.sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
   try { pl.player.playVideo(); } catch (e) {}
 }
 function plJumpTo(i) {
@@ -2336,10 +2331,9 @@ function plJumpTo(i) {
   pl.player.seekTo(t, true);
   pl.player.playVideo();
 }
-function plEndSession() {
+async function plEndSession() {
   if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
-  R('sessions/' + pl.sessionId).update({ status: 'ended', endedAt: SV_TS });
-  R('sessions/' + pl.sessionId + '/live').set({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  await store.endSession(pl.sessionId);
   toast('진행을 종료했습니다');
   go('live/' + pl.sessionId);
 }
@@ -2348,7 +2342,7 @@ function plRenderQList() {
   const box = $('#pl-qlist');
   if (!box || !pl) return;
   box.innerHTML = pl.set.questions.map((q, i) => {
-    const resp = pl.answers[i] || {};
+    const resp = pl.responses[i] || {};
     const n = Object.keys(resp).length;
     const cls = pl.live.q === i ? ' active' : (n > 0 ? ' done' : '');
     return '<div class="qlist-item' + cls + '">' +
@@ -2369,7 +2363,7 @@ function plScoreboard() {
     const s = pl.students[sid];
     let correct = 0, answered = 0, graded = 0;
     pl.set.questions.forEach((q, i) => {
-      const r = (pl.answers[i] || {})[sid];
+      const r = (pl.responses[i] || {})[sid];
       if (!r) return;
       answered++;
       if (r.ok === true) { graded++; correct++; }
@@ -2390,20 +2384,12 @@ function plScoreboard() {
   return rows;
 }
 
-let boardPushTimer = null, lastBoardJson = '';
-/** 응답이 들어올 때마다 쓰면 너무 잦으므로 잠깐 모아서 한 번에 올린다 */
+/** 문항을 닫을 때 현재 점수판을 한 번 저장한다. */
 function plPushBoard() {
   if (!pl || !pl.sessionId) return;
-  clearTimeout(boardPushTimer);
-  boardPushTimer = setTimeout(() => {
-    if (!pl || !pl.sessionId) return;
-    const board = {};
-    plScoreboard().forEach(r => { board[r.sid] = r.correct; });
-    const json = JSON.stringify(board);
-    if (json === lastBoardJson) return;
-    lastBoardJson = json;
-    R('sessions/' + pl.sessionId + '/board').set(board).catch(e => console.warn('board', e));
-  }, 900);
+  const board = {};
+  plScoreboard().forEach(r => { board[r.sid] = r.correct; });
+  return store.writeBoard(pl.sessionId, board).catch(e => console.warn('board', e));
 }
 
 function plRenderStudents() {
@@ -2572,7 +2558,7 @@ function plRenderOverlayCounts() {
   if (!ov || !pl || pl.live.q < 0) return;
   const i = pl.live.q, q = pl.set.questions[i];
   if (!q) return;
-  const resp = pl.answers[i] || {};
+  const resp = pl.responses[i] || {};
   const keys = Object.keys(resp);
   const total = keys.length;
   const nStu = Math.max(Object.keys(pl.students).length, total);

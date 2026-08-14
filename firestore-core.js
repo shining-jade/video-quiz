@@ -33,6 +33,11 @@
     return board;
   }
 
+  async function claimFirstAvailableCode(codes, claim) {
+    for (const code of codes) if (await claim(code)) return code;
+    throw new Error('사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.');
+  }
+
   function chunk(items, size) {
     if (!Number.isInteger(size) || size < 1) throw new Error('분할 크기는 양수여야 합니다');
     const groups = [];
@@ -45,6 +50,7 @@
     offsetFromRoundTrip,
     responseDocsToQuestionMaps,
     buildBoard,
+    claimFirstAvailableCode,
     chunk
   };
 });
