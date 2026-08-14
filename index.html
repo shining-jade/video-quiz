@@ -528,6 +528,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="firestore-core.js"></script>
 <script src="firestore-store.js"></script>
+<script src="editor-draft.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
 
@@ -1315,6 +1316,54 @@ function setDuplicate(id) {
 let mk = null;          // 편집 중인 세트 상태
 let mkPlayer = null;    // 미리보기 플레이어
 let mkPlayerVid = '';   // 현재 플레이어에 로드된 영상 ID
+let mkDraftTimer = null;
+
+function mkSetSaveStatus(state, detail) {
+  const el = $('#mk-save-status');
+  if (!el) return;
+  const label = {
+    dirty: '저장하지 않은 변경', saving: '저장 중…',
+    saved: '저장됨', failed: '저장 실패 · 다시 시도'
+  }[state] || '';
+  el.textContent = label + (detail ? ' · ' + detail : '');
+  el.dataset.state = state || '';
+}
+
+function mkPersistDraft() {
+  if (!mk || typeof EditorDraft === 'undefined') return;
+  EditorDraft.write(localStorage, mk.id, mk, Date.now());
+}
+
+function mkClearDraft(setId) {
+  if (typeof EditorDraft === 'undefined') return;
+  EditorDraft.clear(localStorage, setId === undefined ? (mk && mk.id) : setId);
+}
+
+function mkMarkDirty() {
+  if (!mk) return;
+  mk.saved = false;
+  mkSetSaveStatus('dirty');
+  clearTimeout(mkDraftTimer);
+  mkDraftTimer = setTimeout(mkPersistDraft, 350);
+}
+
+function mkHandleSaveShortcut(event) {
+  if (!mk || !event || String(event.key).toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) return;
+  event.preventDefault();
+  mkSave(false);
+}
+
+function mkRestoreDraft(savedAt) {
+  if (!mk || typeof EditorDraft === 'undefined') return false;
+  const value = EditorDraft.read(localStorage, mk.id);
+  if (!EditorDraft.isNewer(value, savedAt)) return false;
+  if (!confirm('이 컴퓨터에 정식 저장보다 새로운 편집 내용이 있습니다. 복구할까요?')) {
+    mkClearDraft(mk.id);
+    return false;
+  }
+  Object.assign(mk, value.model, { id: mk.id, saved: false });
+  return true;
+}
 
 function blankQuestion(t) {
   return {
@@ -1341,7 +1390,13 @@ function screenMake(setId) {
   };
   mkPlayer = null;
   mkPlayerVid = '';
-  onCleanup(() => { try { mkPlayer && mkPlayer.destroy(); } catch (e) {} mkPlayer = null; });
+  document.addEventListener('keydown', mkHandleSaveShortcut);
+  onCleanup(() => {
+    document.removeEventListener('keydown', mkHandleSaveShortcut);
+    clearTimeout(mkDraftTimer);
+    try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
+    mkPlayer = null;
+  });
 
   // 재생 위치 표시 — 화면당 한 번만 등록한다 (URL을 고칠 때마다 쌓이지 않도록)
   every(500, () => {
@@ -1365,6 +1420,7 @@ function screenMake(setId) {
       mk.createdAt = set.createdAt;
       mk.archived = set.archived;
       mk.saved = true;
+      mkRestoreDraft(set.updatedAt || set.createdAt || 0);
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
         mk.questions.forEach((q, i) => { if (q.imgUp) q._img = imgs[i] || ''; });
@@ -1372,6 +1428,7 @@ function screenMake(setId) {
       });
     }).catch(e => { console.error(e); toast('불러오기 실패: ' + e.message); });
   } else {
+    mkRestoreDraft(0);
     renderMake();
   }
 }
@@ -1431,6 +1488,7 @@ function renderMake() {
           '<button class="btn primary lg" onclick="mkSave()">' + (mk.id ? '변경 사항 저장' : '세트 저장하고 링크 만들기') + '</button>' +
           (mk.id ? '<button class="btn" onclick="mkSaveAsNew()">다른 세트로 복제 저장</button>' : '') +
           '<div class="spacer" style="flex:1"></div>' +
+          '<span class="hint" id="mk-save-status">' + (mk.saved ? '저장됨' : '저장하지 않은 변경') + '</span>' +
         '</div>' +
         '<div id="mk-share"></div>' +
       '</div>' +
@@ -1440,14 +1498,19 @@ function renderMake() {
     '</div>';
 
   // 입력 → 상태 반영
-  $('#mk-title').oninput = e => { mk.title = e.target.value; };
-  $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); };
-  $('#mk-url').oninput = e => { mk.videoUrl = e.target.value; mkSyncVideo(); };
+  $('#mk-title').oninput = e => { mk.title = e.target.value; mkMarkDirty(); };
+  $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); mkMarkDirty(); };
+  $('#mk-url').oninput = e => { mk.videoUrl = e.target.value; mkSyncVideo(); mkMarkDirty(); };
 
   mkRenderSettings();
   mkInitResizer();
   mkSyncVideo();
   mkRenderQuestions();
+  const questionBox = $('#mk-questions');
+  if (questionBox) {
+    questionBox.addEventListener('input', mkMarkDirty);
+    questionBox.addEventListener('change', mkMarkDirty);
+  }
   if (mk.id) mkShowShare();
 }
 
@@ -1562,10 +1625,10 @@ function mkRenderSettings() {
         '<div class="hint">보통은 일시정지가 편합니다.</div></div>' +
     '</div>';
 
-  $('#mk-reveal').onchange = e => { mk.settings.revealMode = e.target.value; mkRevealHint(); };
-  $('#mk-limit').oninput = e => { mk.settings.limitSec = Math.max(0, Number(e.target.value) || 0); };
-  $('#mk-delay').oninput = e => { mk.settings.revealDelaySec = Math.max(0, Number(e.target.value) || 0); };
-  $('#mk-pause').onchange = e => { mk.settings.autoPause = e.target.value === '1'; };
+  $('#mk-reveal').onchange = e => { mk.settings.revealMode = e.target.value; mkRevealHint(); mkMarkDirty(); };
+  $('#mk-limit').oninput = e => { mk.settings.limitSec = Math.max(0, Number(e.target.value) || 0); mkMarkDirty(); };
+  $('#mk-delay').oninput = e => { mk.settings.revealDelaySec = Math.max(0, Number(e.target.value) || 0); mkMarkDirty(); };
+  $('#mk-pause').onchange = e => { mk.settings.autoPause = e.target.value === '1'; mkMarkDirty(); };
   mkRevealHint();
 }
 
@@ -2007,6 +2070,7 @@ function mkSave(forceNew) {
   const err = mkValidate();
   if (err) { toast(err); return; }
   const id = (forceNew || !mk.id) ? rid(8) : mk.id;
+  const draftId = mk.id;
   const isNew = (id !== mk.id);
   const built = mkPayload();
   const data = built.set;
@@ -2014,12 +2078,15 @@ function mkSave(forceNew) {
 
   const nImg = Object.keys(built.images).length;
   if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
+  mkSetSaveStatus('saving');
 
   return store.saveQuizSet(id, data)
     .then(() => store.replaceImages(id, built.images))
     .then(() => {
       mk.id = id;
       mk.saved = true;
+      mkClearDraft(draftId);
+      if (draftId !== id) mkClearDraft(id);
       // 저장 결과를 그대로 다시 읽어들여, 정렬·인덱스 재계산이 화면에도 반영되게 한다
       mk.questions = normQuestions(data.questions);
       mk.questions.forEach((q, i) => { if (q.imgUp) q._img = built.images[i] || ''; });
@@ -2029,10 +2096,16 @@ function mkSave(forceNew) {
       }
       toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
       renderMake();
+      mkSetSaveStatus('saved', new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
       const card = $('#mk-save-card');
       if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     })
-    .catch(e => { console.error(e); alert('저장 실패: ' + e.message); });
+    .catch(e => {
+      console.error(e);
+      mkSetSaveStatus('failed');
+      mkPersistDraft();
+      alert('저장 실패: ' + e.message);
+    });
 }
 function mkSaveAsNew() {
   if (!confirm('현재 내용을 새 세트로 복제 저장합니다. 원본은 그대로 남습니다. 계속할까요?')) return;

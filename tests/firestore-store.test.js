@@ -506,6 +506,10 @@ test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한�
     location: { hash: '#/make/set1' },
     history: { replaceState() {} },
     renderMake() {},
+    mkSetSaveStatus() {},
+    mkClearDraft() {},
+    mkPersistDraft() {},
+    Date,
     $() { return null; },
     alert(message) { throw new Error(message); },
     console
@@ -518,6 +522,53 @@ test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한�
     ['save', 'set1', { title: '수정', questions: [{ text: '문항' }] }],
     ['images', 'set1', {}]
   ]);
+});
+
+test('Ctrl+S는 브라우저 저장을 막고 편집 화면의 정식 저장을 한 번 실행한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let saves = 0;
+  const context = { mk: {}, mkSave() { saves += 1; } };
+  vm.runInNewContext(extractFunction(html, 'mkHandleSaveShortcut'), context);
+  const event = {
+    key: 's', ctrlKey: true, metaKey: false, prevented: false,
+    preventDefault() { this.prevented = true; }
+  };
+
+  context.mkHandleSaveShortcut(event);
+
+  assert.equal(event.prevented, true);
+  assert.equal(saves, 1);
+});
+
+test('편집 변경은 로컬 초안을 남기고 정식 저장 성공 뒤 삭제한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    mk: { id: 'set1', saved: false, questions: [] },
+    localStorage: {},
+    EditorDraft: {
+      write(storage, id) { calls.push(['draft', id]); },
+      clear(storage, id) { calls.push(['clear', id]); }
+    },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: '수정', questions: [] }, images: {} }; },
+    rid() { return 'new-id'; }, SV_TS: {},
+    store: { async saveQuizSet() {}, async replaceImages() {} },
+    toast() {}, normQuestions(value) { return value; }, imgCache: {},
+    location: { hash: '#/make/set1' }, history: { replaceState() {} },
+    renderMake() {}, $() { return null; }, console, alert() {},
+    clearTimeout() {}, setTimeout(fn) { fn(); return 1; }, Date,
+    mkDraftTimer: null, mkSetSaveStatus() {}
+  };
+  vm.runInNewContext(extractFunction(html, 'mkPersistDraft'), context);
+  vm.runInNewContext(extractFunction(html, 'mkClearDraft'), context);
+  vm.runInNewContext(extractFunction(html, 'mkMarkDirty'), context);
+  vm.runInNewContext(extractFunction(html, 'mkSave'), context);
+
+  context.mkMarkDirty();
+  await context.mkSave(false);
+
+  assert.deepEqual(calls, [['draft', 'set1'], ['clear', 'set1']]);
 });
 
 test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면을 덮어쓰지 않는다', async () => {
