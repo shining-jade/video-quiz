@@ -3112,15 +3112,19 @@ function screenDashboard(sessionId) {
 
   APP().innerHTML = topbar() + '<div class="wrap wide"><div class="empty">불러오는 중…</div></div>';
 
-  R('sessions/' + sessionId).once('value').then(snap => {
-    const sess = snap.val();
+  return store.getSession(sessionId).then(sess => {
     if (!sess) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">반 정보를 찾을 수 없습니다.</div></div></div>'; return; }
     dash.session = sess;
-    return R('quiz_sets/' + sess.setId).once('value').then(s2 => {
-      dash.set = normSet(s2.val()) || { title: sess.setTitle || '', questions: [], settings: normSettings(null) };
-      watch(R('sessions/' + sessionId + '/students'), 'value', s => { dash.students = s.val() || {}; renderDash(); });
-      watch(R('responses/' + sessionId), 'value', s => { dash.answers = s.val() || {}; renderDash(); });
-      watch(R('sessions/' + sessionId + '/status'), 'value', s => { if (dash.session) dash.session.status = s.val(); renderDash(); });
+    return store.getQuizSet(sess.setId).then(savedSet => {
+      dash.set = normSet(savedSet) || { title: sess.setTitle || '', questions: [], settings: normSettings(null) };
+      onCleanup(store.subscribeStudents(sessionId, students => {
+        dash.students = students || {};
+        renderDash();
+      }));
+      onCleanup(store.subscribeResponses(sessionId, responseDocs => {
+        dash.answers = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
+        renderDash();
+      }));
     });
   }).catch(e => { console.error(e); APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>'; });
 }
@@ -3340,7 +3344,7 @@ function dashTextAnswers(q, i, rows, resp) {
 /** 서술형 채점 — 교사가 O/X 를 누르면 그 응답의 ok 만 고쳐 쓴다 */
 function dashGrade(qIdx, sid, ok) {
   if (!dash) return;
-  R('responses/' + dash.sessionId + '/' + qIdx + '/' + sid + '/ok').set(ok)
+  return store.gradeAnswer(dash.sessionId, sid, qIdx, ok)
     .catch(e => { console.error(e); alert('채점 저장 실패: ' + e.message); });
 }
 
@@ -3422,8 +3426,8 @@ function admRenderLogin(err) {
 function admLogin() {
   const pw = $('#adm-pw').value;
   if (!pw) return;
-  Promise.all([sha256(pw), R('config/adminHash').once('value')]).then(([h, snap]) => {
-    const want = snap.val() || DEFAULT_ADMIN_HASH;
+  return Promise.all([sha256(pw), store.getDoc('config/app')]).then(([h, config]) => {
+    const want = (config && config.adminHash) || DEFAULT_ADMIN_HASH;
     if (h !== want) { admRenderLogin('비밀번호가 올바르지 않습니다.'); return; }
     ssSet('vq_admin', '1');
     admRenderShell();
@@ -3484,11 +3488,11 @@ function admLoad() {
   const fromTs = adm.from ? new Date(adm.from + 'T00:00:00').getTime() : 0;
   const toTs = adm.to ? new Date(adm.to + 'T23:59:59').getTime() : Infinity;
 
-  R('sessions').once('value').then(snap => {
-    const all = snap.val() || {};
+  return store.listSessions().then(sessions => {
+    const all = sessions || [];
     const picked = {};
-    Object.keys(all).forEach(id => {
-      const s = all[id];
+    all.forEach(s => {
+      const id = s.id;
       const ts = s.createdAt || 0;
       if (ts >= fromTs && ts <= toTs) picked[id] = s;
     });
@@ -3501,10 +3505,20 @@ function admLoad() {
       adm.loading = false;
       return;
     }
-    return Promise.all(ids.map(id => R('responses/' + id).once('value').then(s => [id, s.val() || {}])))
+    return Promise.all(ids.map(id => Promise.all([
+      store.getCollection('sessions/' + id + '/students'),
+      store.getCollection('sessions/' + id + '/responses')
+    ]).then(([students, responseDocs]) => [
+      id,
+      students || {},
+      FirestoreCore.responseDocsToQuestionMaps(responseDocs || {})
+    ])))
       .then(pairs => {
         adm.resp = {};
-        pairs.forEach(([id, v]) => { adm.resp[id] = v; });
+        pairs.forEach(([id, students, responses]) => {
+          adm.sessions[id].students = students;
+          adm.resp[id] = responses;
+        });
         adm.loading = false;
         admFillSetOptions();
         admRenderBody();
@@ -3768,7 +3782,7 @@ function admChangePw() {
   const a = $('#adm-newpw').value, b = $('#adm-newpw2').value;
   if (!a || a.length < 4) { alert('비밀번호는 4자 이상이어야 합니다.'); return; }
   if (a !== b) { alert('두 입력이 다릅니다.'); return; }
-  sha256(a).then(h => R('config/adminHash').set(h)).then(() => {
+  return sha256(a).then(h => store.mergeDoc('config/app', { adminHash: h })).then(() => {
     toast('비밀번호를 변경했습니다');
     $('#adm-newpw').value = ''; $('#adm-newpw2').value = '';
   }).catch(e => alert('변경 실패: ' + e.message));
@@ -3782,13 +3796,7 @@ function admPurge() {
   if (typed === null) return;
   if (typed.trim() !== '삭제') { alert('취소되었습니다.'); return; }
 
-  const updates = {};
-  d.sessions.forEach(s => {
-    updates['sessions/' + s.id] = null;
-    updates['responses/' + s.id] = null;
-    if (s.code) updates['codes/' + s.code] = null;
-  });
-  R('').update(updates).then(() => {
+  return store.purgeSessions(d.sessions.map(s => s.id)).then(() => {
     toast(d.sessions.length + '건을 삭제했습니다');
     admLoad();
   }).catch(e => alert('삭제 실패: ' + e.message));

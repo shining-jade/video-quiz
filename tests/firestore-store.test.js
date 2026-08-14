@@ -81,8 +81,10 @@ function makeFirestoreFake(initial = {}, options = {}) {
       .map(key => docSnapshot(key, source));
   }
 
-  function querySnapshot(path, source = documents) {
-    const docs = collectionDocs(path, source);
+  function querySnapshot(path, source = documents, filters = []) {
+    const docs = collectionDocs(path, source).filter(document =>
+      filters.every(filter => filter.operator === '==' && document.get(filter.field) === filter.value)
+    );
     return {
       docs,
       empty: docs.length === 0,
@@ -163,13 +165,17 @@ function makeFirestoreFake(initial = {}, options = {}) {
     };
   }
 
-  function collectionRef(path) {
+  function collectionRef(path, filters = []) {
     return {
       id: path.split('/').at(-1),
       path,
       async get() {
-        calls.push({ operation: 'getCollection', path });
-        return querySnapshot(path);
+        calls.push({ operation: 'getCollection', path, filters: clone(filters) });
+        return querySnapshot(path, documents, filters);
+      },
+      where(field, operator, value) {
+        calls.push({ operation: 'where', path, field, operator, value: clone(value) });
+        return collectionRef(path, filters.concat({ field, operator, value }));
       },
       onSnapshot(next, error) {
         return addListener(collectionListeners, path, next, error, querySnapshot);
@@ -1367,4 +1373,293 @@ test('서버 시각 보정 실패는 한국어 오류를 표시하고 수업 라
 
   assert.equal(routed, 0);
   assert.match(app.innerHTML, /서버 시각을 확인하지 못했습니다\. 새로고침해 주세요\./);
+});
+
+test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/responses/s1': { answers: { '3': { txt: '학생 글', at: 10, ms: 20 } } }
+  });
+  const store = createStore(fake);
+
+  await store.gradeAnswer('a', 's1', 3, true);
+  assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
+    txt: '학생 글', at: 10, ms: 20, ok: true
+  });
+
+  await store.gradeAnswer('a', 's1', 3, null);
+  assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
+    txt: '학생 글', at: 10, ms: 20, ok: null
+  });
+});
+
+test('세션 목록은 문서 ID와 화면용 밀리초 시각을 반환한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a': { setId: 'set1', createdAt: { toMillis: () => 12_345 } },
+    'sessions/b': { setId: 'set2', createdAt: 67_890 }
+  });
+
+  assert.deepEqual(await createStore(fake).listSessions(), [
+    { id: 'a', setId: 'set1', createdAt: 12_345 },
+    { id: 'b', setId: 'set2', createdAt: 67_890 }
+  ]);
+});
+
+test('기간 삭제는 세션 하위 문서와 연결 코드만 지운다', async () => {
+  const fake = makeFirestoreFake({
+    'codes/CODE23': { sessionId: 's1' },
+    'codes/KEEP23': { sessionId: 's2' },
+    'sessions/s1': { setId: 'set1' },
+    'sessions/s1/meta/live': { q: -1 },
+    'sessions/s1/meta/board': { scores: {} },
+    'sessions/s1/students/a': { name: '가' },
+    'sessions/s1/responses/a': { answers: {} },
+    'sessions/s2': { setId: 'set1' },
+    'quiz_sets/set1': { title: '보존' }
+  });
+
+  await createStore(fake).purgeSessions(['s1']);
+
+  assert.equal(fake.value('sessions/s1'), undefined);
+  assert.equal(fake.value('sessions/s1/meta/live'), undefined);
+  assert.equal(fake.value('sessions/s1/meta/board'), undefined);
+  assert.equal(fake.value('sessions/s1/students/a'), undefined);
+  assert.equal(fake.value('sessions/s1/responses/a'), undefined);
+  assert.equal(fake.value('codes/CODE23'), undefined);
+  assert.deepEqual(fake.value('codes/KEEP23'), { sessionId: 's2' });
+  assert.deepEqual(fake.value('sessions/s2'), { setId: 'set1' });
+  assert.deepEqual(fake.value('quiz_sets/set1'), { title: '보존' });
+  assert.deepEqual(
+    fake.calls().filter(call => call.operation === 'where').map(call => [call.path, call.field, call.value]),
+    [['codes', 'sessionId', 's1']]
+  );
+});
+
+test('기간 삭제 batch는 450개를 넘지 않고 모든 대상을 나누어 지운다', async () => {
+  const initial = { 'sessions/s1': { setId: 'set1' } };
+  for (let index = 0; index < 451; index += 1) {
+    initial['sessions/s1/responses/student-' + index] = { answers: {} };
+  }
+  const fake = makeFirestoreFake(initial);
+
+  await createStore(fake).purgeSessions(['s1']);
+
+  const commits = fake.calls().filter(call => call.operation === 'batchCommit');
+  assert.deepEqual(commits.map(call => call.size), [450, 2]);
+  assert.equal(fake.value('sessions/s1/responses/student-450'), undefined);
+  assert.equal(fake.value('sessions/s1'), undefined);
+});
+
+test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답만 구독한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const subscriptions = {};
+  const calls = [];
+  const app = { innerHTML: '' };
+  const context = {
+    dash: null,
+    store: {
+      async getSession(id) {
+        calls.push(['getSession', id]);
+        return { id, setId: 'set1', code: 'ABC234', status: 'live' };
+      },
+      async getQuizSet(id) {
+        calls.push(['getQuizSet', id]);
+        return { id, title: '첫 세트', questions: [] };
+      },
+      subscribeStudents(id, next) {
+        calls.push(['subscribeStudents', id]); subscriptions.students = next; return () => {};
+      },
+      subscribeResponses(id, next) {
+        calls.push(['subscribeResponses', id]); subscriptions.responses = next; return () => {};
+      }
+    },
+    FirestoreCore: require('../firestore-core.js'),
+    APP() { return app; },
+    topbar() { return '<nav></nav>'; },
+    normSet(value) { return value; },
+    normSettings() { return {}; },
+    renderDash() {},
+    onCleanup() {},
+    go() {},
+    esc(value) { return String(value); },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'screenDashboard'), context);
+
+  context.screenDashboard('session-a');
+  await new Promise(resolve => setImmediate(resolve));
+  subscriptions.students({ s1: { name: '가' } });
+  subscriptions.responses({ s1: { answers: { '2': { txt: '학생 글', ok: null } } } });
+
+  assert.deepEqual(calls, [
+    ['getSession', 'session-a'],
+    ['getQuizSet', 'set1'],
+    ['subscribeStudents', 'session-a'],
+    ['subscribeResponses', 'session-a']
+  ]);
+  assert.deepEqual(context.dash.students, { s1: { name: '가' } });
+  assert.deepEqual(context.dash.answers, { '2': { s1: { txt: '학생 글', ok: null } } });
+});
+
+test('대시보드 서술형 채점은 저장소에 ok만 전달한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    dash: { sessionId: 'session-a' },
+    store: {
+      async gradeAnswer(...args) { calls.push(args); }
+    },
+    alert() {},
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'dashGrade'), context);
+
+  await context.dashGrade(3, 'student-a', null);
+
+  assert.deepEqual(calls, [['session-a', 'student-a', 3, null]]);
+});
+
+test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 한 번만 읽는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const body = { innerHTML: '' };
+  const context = {
+    adm: {
+      sessions: {}, resp: {}, from: '2024-01-01', to: '2024-01-31',
+      loading: false, detail: null
+    },
+    store: {
+      async listSessions() {
+        calls.push(['listSessions']);
+        return [
+          { id: 'in', createdAt: new Date('2024-01-15T00:00:00').getTime(), setId: 'set1' },
+          { id: 'out', createdAt: new Date('2024-02-15T00:00:00').getTime(), setId: 'set2' }
+        ];
+      },
+      async getCollection(collectionPath) {
+        calls.push(['getCollection', collectionPath]);
+        if (collectionPath.endsWith('/students')) return { s1: { name: '가' } };
+        return { s1: { answers: { '0': { c: 1, ok: true } } } };
+      }
+    },
+    FirestoreCore: require('../firestore-core.js'),
+    $(selector) { return selector === '#adm-body' ? body : null; },
+    admFillSetOptions() {},
+    admRenderBody() {},
+    esc(value) { return String(value); },
+    Date,
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'admLoad'), context);
+
+  await context.admLoad();
+
+  assert.deepEqual(calls, [
+    ['listSessions'],
+    ['getCollection', 'sessions/in/students'],
+    ['getCollection', 'sessions/in/responses']
+  ]);
+  assert.deepEqual(context.adm.sessions.in.students, { s1: { name: '가' } });
+  assert.deepEqual(context.adm.resp.in, { '0': { s1: { c: 1, ok: true } } });
+  assert.equal(context.adm.loading, false);
+});
+
+test('관리자 로그인과 비밀번호 변경은 config/app의 adminHash를 사용한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const fields = {
+    '#adm-pw': { value: 'old-password' },
+    '#adm-newpw': { value: 'new-password' },
+    '#adm-newpw2': { value: 'new-password' }
+  };
+  const context = {
+    store: {
+      async getDoc(documentPath) {
+        calls.push(['getDoc', documentPath]);
+        return { adminHash: 'hash:old-password' };
+      },
+      async mergeDoc(documentPath, value) {
+        calls.push(['mergeDoc', documentPath, value]);
+      }
+    },
+    $(selector) { return fields[selector]; },
+    async sha256(value) { return 'hash:' + value; },
+    DEFAULT_ADMIN_HASH: 'default',
+    ssSet(key, value) { calls.push(['ssSet', key, value]); },
+    admRenderShell() { calls.push(['render']); },
+    admRenderLogin(message) { throw new Error(message); },
+    toast(message) { calls.push(['toast', message]); },
+    alert(message) { throw new Error(message); },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'admLogin'), context);
+  vm.runInNewContext(extractFunction(html, 'admChangePw'), context);
+
+  await context.admLogin();
+  await context.admChangePw();
+
+  assert.deepEqual(clone(calls), [
+    ['getDoc', 'config/app'],
+    ['ssSet', 'vq_admin', '1'],
+    ['render'],
+    ['mergeDoc', 'config/app', { adminHash: 'hash:new-password' }],
+    ['toast', '비밀번호를 변경했습니다']
+  ]);
+});
+
+test('관리자 기간 삭제는 화면에서 경로를 만들지 않고 저장소 API에 세션 ID를 맡긴다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    adm: { from: '2024-01-01', to: '2024-01-31' },
+    admCompute() { return { sessions: [{ id: 'a' }, { id: 'b' }] }; },
+    prompt() { return '삭제'; },
+    store: {
+      async purgeSessions(ids) { calls.push(['purgeSessions', ids]); }
+    },
+    toast(message) { calls.push(['toast', message]); },
+    admLoad() { calls.push(['load']); },
+    alert(message) { throw new Error(message); }
+  };
+  vm.runInNewContext(extractFunction(html, 'admPurge'), context);
+
+  await context.admPurge();
+
+  assert.deepEqual(calls, [
+    ['purgeSessions', ['a', 'b']],
+    ['toast', '2건을 삭제했습니다'],
+    ['load']
+  ]);
+});
+
+test('대시보드 CSV는 서술형 텍스트와 미채점 표시를 유지한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let downloaded;
+  const context = {
+    dash: {
+      session: { code: 'ABC234', createdAt: 1, setTitle: '세트' },
+      set: { title: '세트', questions: [{ type: 'long', text: '설명' }] },
+      sort: { key: 'no', dir: 1 }
+    },
+    dashBuildRows() {
+      return [{
+        grade: 1, klass: 2, num: 3, name: '가',
+        cells: [{ txt: '학생 글', ok: null, ms: 1200 }],
+        correct: 0, graded: 0, ungraded: 1, answered: 1, rate: 0, avgMs: 1200
+      }];
+    },
+    dashSortRows(rows) { return rows; },
+    qType() { return 'long'; },
+    QTYPES: { long: '서술형 — 직접 채점' },
+    answerLabel(question, answer) { return answer.txt; },
+    fmtDate() { return '날짜'; },
+    fmtDay() { return '날짜'; },
+    downloadCSV(name, rows) { downloaded = { name, rows }; },
+    toast() {}
+  };
+  vm.runInNewContext(extractFunction(html, 'dashExportCSV'), context);
+
+  context.dashExportCSV();
+
+  assert.equal(downloaded.rows[6][4], '학생 글');
+  assert.equal(downloaded.rows[6][5], '미채점');
 });

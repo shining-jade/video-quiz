@@ -6,7 +6,7 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
-  const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode } = core;
+  const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
 
   function createFirestoreStore(db, fieldValue, nowFn) {
     let serverOffset = 0;
@@ -31,6 +31,15 @@
       if (!value) return null;
       const millis = timestampMillis(value.openedAt);
       if (millis !== null) value.openedAt = millis;
+      return value;
+    };
+    const sessionValue = snapshot => {
+      const value = snapshotValue(snapshot);
+      if (!value) return null;
+      ['createdAt', 'endedAt'].forEach(field => {
+        const millis = timestampMillis(value[field]);
+        if (millis !== null) value[field] = millis;
+      });
       return value;
     };
     const withoutDocumentId = value => {
@@ -150,7 +159,7 @@
     }
 
     function getSession(sessionId) {
-      return db.doc('sessions/' + sessionId).get().then(snapshotValue);
+      return db.doc('sessions/' + sessionId).get().then(sessionValue);
     }
 
     function getStudent(sessionId, studentId) {
@@ -171,6 +180,41 @@
       return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
         answers: { [String(questionIndex)]: answer }
       }, { merge: true });
+    }
+
+    function gradeAnswer(sessionId, studentId, questionIndex, ok) {
+      return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
+        answers: { [String(questionIndex)]: { ok } }
+      }, { merge: true });
+    }
+
+    async function listSessions() {
+      const snapshot = await db.collection('sessions').get();
+      return snapshot.docs.map(sessionValue);
+    }
+
+    async function purgeSessions(sessionIds) {
+      const references = [];
+      for (const sessionId of [...new Set(sessionIds || [])]) {
+        for (const collectionName of ['meta', 'students', 'responses']) {
+          const snapshot = await db.collection(
+            'sessions/' + sessionId + '/' + collectionName
+          ).get();
+          snapshot.docs.forEach(document => references.push(document.ref));
+        }
+        references.push(db.doc('sessions/' + sessionId));
+
+        const codes = await db.collection('codes')
+          .where('sessionId', '==', sessionId)
+          .get();
+        codes.docs.forEach(document => references.push(document.ref));
+      }
+
+      for (const group of chunk(references, 450)) {
+        const batch = db.batch();
+        group.forEach(reference => batch.delete(reference));
+        await batch.commit();
+      }
     }
 
     async function getBoard(sessionId) {
@@ -225,6 +269,9 @@
       saveStudent,
       getOwnResponses,
       mergeAnswer,
+      gradeAnswer,
+      listSessions,
+      purgeSessions,
       getBoard,
       setLive,
       revealLive,
