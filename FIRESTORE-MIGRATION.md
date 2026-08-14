@@ -1,6 +1,6 @@
 # Cloud Firestore 이전 및 운영 절차
 
-이 문서는 영상 퀴즈의 Realtime Database 데이터를 Cloud Firestore로 옮기고 배포를 검증하는 운영 기준입니다. 애플리케이션 코드는 Firestore 구조로 이전되어 있으며, 새 운영 환경은 Firestore만 사용합니다.
+이 문서는 영상 퀴즈의 Realtime Database 데이터를 Cloud Firestore로 옮기고 배포를 검증하는 운영 기준입니다. 저장소의 애플리케이션 코드는 Firestore 구조로 이전되었지만, Firebase 콘솔 설정·데이터 이전·실제 운영 배포 검증은 아직 완료되지 않았습니다.
 
 ## 현재 구성
 
@@ -8,7 +8,8 @@
 - Firestore 위치: `asia-southeast1`
 - 인증: Firebase Authentication 익명 로그인
 - 보안 규칙 원본: `firestore.rules`
-- 웹 배포: GitHub Pages의 `main` 브랜치 루트
+- 기존 사이트: GitHub Pages의 `main` 브랜치 루트
+- Firestore 이전 배포: 미완료(Task 8에서 규칙 게시·데이터 이전·브라우저 검증 예정)
 
 Firestore의 운영 데이터 구조는 다음과 같습니다.
 
