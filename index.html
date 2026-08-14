@@ -1,0 +1,2437 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>영상 퀴즈 — 실시간 진행 도구</title>
+<style>
+/* ══════════════════════════════════════════════════════════
+   기본 / 토큰
+   ══════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --bg:        #f4f5f8;
+  --panel:     #ffffff;
+  --line:      #e2e5ec;
+  --line-2:    #cfd4de;
+  --ink:       #1c2030;
+  --ink-2:     #5a6276;
+  --ink-3:     #8b93a5;
+  --accent:    #4338ca;
+  --accent-2:  #eef0ff;
+  --ok:        #0f8a4d;
+  --ok-bg:     #e6f6ed;
+  --bad:       #c62828;
+  --bad-bg:    #fdeaea;
+  --warn:      #b26a00;
+  --warn-bg:   #fff4e0;
+  --radius:    12px;
+  --shadow:    0 1px 2px rgba(20,25,45,.06), 0 6px 20px rgba(20,25,45,.07);
+}
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Pretendard", -apple-system, BlinkMacSystemFont, "Segoe UI",
+               "Malgun Gothic", "맑은 고딕", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -.02em; }
+p { margin: 0 0 .6em; }
+a { color: var(--accent); }
+
+/* ══════════════════════════════════════════════════════════
+   레이아웃
+   ══════════════════════════════════════════════════════════ */
+.wrap { max-width: 980px; margin: 0 auto; padding: 20px 16px 80px; }
+.wrap.wide { max-width: 1400px; }
+.topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 50;
+}
+.topbar .brand {
+  font-weight: 800; font-size: 15px; letter-spacing: -.03em;
+  color: var(--ink); text-decoration: none; white-space: nowrap;
+}
+.topbar .brand span { color: var(--accent); }
+.topbar .spacer { flex: 1; }
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+  box-shadow: var(--shadow);
+}
+.card > h2 { font-size: 17px; margin-bottom: 4px; }
+.card > .sub { color: var(--ink-2); font-size: 13px; margin-bottom: 16px; }
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row > * { min-width: 0; }
+.col { flex: 1 1 220px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* ══════════════════════════════════════════════════════════
+   폼
+   ══════════════════════════════════════════════════════════ */
+label.f { display: block; font-size: 13px; font-weight: 600; color: var(--ink-2); margin-bottom: 5px; }
+input[type=text], input[type=number], input[type=password], input[type=date], select, textarea {
+  width: 100%; padding: 10px 12px; font: inherit; font-size: 15px;
+  border: 1px solid var(--line-2); border-radius: 9px;
+  background: #fff; color: var(--ink); outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-2); }
+textarea { resize: vertical; min-height: 62px; }
+.field { margin-bottom: 14px; }
+.hint { font-size: 12px; color: var(--ink-3); margin-top: 5px; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 16px; font: inherit; font-size: 14px; font-weight: 600;
+  border: 1px solid var(--line-2); border-radius: 9px;
+  background: #fff; color: var(--ink); cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.btn:hover { background: #f7f8fb; }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: #372cb0; }
+.btn.danger { color: var(--bad); border-color: #f0c5c5; }
+.btn.danger:hover { background: var(--bad-bg); }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--ink-2); }
+.btn.ghost:hover { background: #eceef4; }
+.btn.sm { padding: 6px 11px; font-size: 13px; }
+.btn.lg { padding: 15px 28px; font-size: 17px; border-radius: 11px; }
+.btn.block { width: 100%; }
+
+/* ══════════════════════════════════════════════════════════
+   공용 조각
+   ══════════════════════════════════════════════════════════ */
+.tag {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; background: var(--accent-2); color: var(--accent);
+}
+.tag.ok   { background: var(--ok-bg);   color: var(--ok); }
+.tag.bad  { background: var(--bad-bg);  color: var(--bad); }
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.tag.mute { background: #eceef4; color: var(--ink-2); }
+.empty { text-align: center; color: var(--ink-3); padding: 36px 16px; font-size: 14px; }
+.notice {
+  background: var(--warn-bg); border: 1px solid #f0dcb4; color: #7a4a00;
+  border-radius: 10px; padding: 12px 14px; font-size: 13px; margin-bottom: 16px;
+}
+.notice.info { background: var(--accent-2); border-color: #d4d8ff; color: #2f2a86; }
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+
+#toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+  background: #1c2030; color: #fff; padding: 11px 20px; border-radius: 999px;
+  font-size: 14px; font-weight: 600; opacity: 0; pointer-events: none;
+  transition: opacity .18s, transform .18s; z-index: 9999; max-width: 90vw;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ══════════════════════════════════════════════════════════
+   홈
+   ══════════════════════════════════════════════════════════ */
+.home-hero { text-align: center; padding: 44px 0 30px; }
+.home-hero h1 { font-size: 30px; margin-bottom: 8px; }
+.home-hero p { color: var(--ink-2); font-size: 15px; }
+.home-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.home-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 22px; text-decoration: none; color: inherit; display: block;
+  box-shadow: var(--shadow); transition: transform .12s, border-color .12s;
+}
+.home-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.home-card .ico { font-size: 26px; margin-bottom: 10px; }
+.home-card h3 { font-size: 16px; margin-bottom: 5px; }
+.home-card p { font-size: 13px; color: var(--ink-2); margin: 0; }
+
+/* ══════════════════════════════════════════════════════════
+   세트 제작
+   ══════════════════════════════════════════════════════════ */
+.q-card {
+  border: 1px solid var(--line); border-radius: 11px; padding: 15px;
+  margin-bottom: 12px; background: #fbfbfd;
+}
+.q-card .q-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.q-card .q-no {
+  width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: #fff;
+  display: grid; place-items: center; font-size: 13px; font-weight: 700; flex: none;
+}
+.q-card .q-head .spacer { flex: 1; }
+.choice-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.choice-row input[type=radio] { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
+.choice-row .cno { width: 20px; text-align: center; color: var(--ink-3); font-size: 13px; font-weight: 700; flex: none; }
+.choice-row .btn { flex: none; }
+.time-input { width: 110px !important; }
+
+.player-box { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 10px; overflow: hidden; }
+.player-box > div, .player-box iframe { width: 100%; height: 100%; border: 0; }
+
+/* ══════════════════════════════════════════════════════════
+   교사 재생
+   ══════════════════════════════════════════════════════════ */
+.play-layout { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 16px; align-items: start; }
+@media (max-width: 900px) { .play-layout { grid-template-columns: 1fr; } }
+
+.code-panel { background: var(--accent); color: #fff; border-radius: var(--radius); padding: 18px; text-align: center; }
+.code-panel .lbl { font-size: 12px; opacity: .8; font-weight: 600; letter-spacing: .06em; }
+.code-panel .code {
+  font-size: 44px; font-weight: 800; letter-spacing: .12em; line-height: 1.15;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace; margin: 4px 0 8px;
+}
+.code-panel .url { font-size: 12px; opacity: .9; word-break: break-all; }
+.code-panel .qr { background: #fff; padding: 8px; border-radius: 8px; display: inline-block; margin-top: 10px; line-height: 0; }
+
+.qlist-item {
+  display: flex; align-items: center; gap: 9px; padding: 9px 10px;
+  border-radius: 9px; cursor: pointer; font-size: 13px; border: 1px solid transparent;
+}
+.qlist-item:hover { background: #f2f3f8; }
+.qlist-item.done { color: var(--ink-3); }
+.qlist-item.active { background: var(--accent-2); border-color: var(--accent); }
+.qlist-item .t { font-family: ui-monospace, Consolas, monospace; font-weight: 700; color: var(--accent); flex: none; }
+.qlist-item .x { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 교사 퀴즈 오버레이 */
+#overlay {
+  position: fixed; inset: 0; background: rgba(14,17,30,.93); z-index: 200;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  overflow-y: auto;
+}
+#overlay .ov-inner { width: 100%; max-width: 960px; color: #fff; }
+#overlay .ov-top { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+#overlay .ov-q { font-size: clamp(22px, 3.4vw, 38px); font-weight: 800; line-height: 1.35; margin-bottom: 22px; }
+#overlay .ov-choices { display: grid; gap: 10px; }
+#overlay .ov-choice {
+  display: flex; align-items: center; gap: 14px; padding: 14px 18px;
+  border: 2px solid rgba(255,255,255,.22); border-radius: 12px;
+  font-size: clamp(16px, 2vw, 22px); font-weight: 600; position: relative; overflow: hidden;
+}
+#overlay .ov-choice .bar {
+  position: absolute; inset: 0 auto 0 0; background: rgba(255,255,255,.13);
+  width: 0; transition: width .4s ease;
+}
+#overlay .ov-choice > * { position: relative; }
+#overlay .ov-choice .lt {
+  width: 34px; height: 34px; border-radius: 8px; background: rgba(255,255,255,.16);
+  display: grid; place-items: center; font-weight: 800; flex: none; font-size: 17px;
+}
+#overlay .ov-choice .cnt { margin-left: auto; font-size: 16px; font-weight: 700; opacity: .85; }
+#overlay .ov-choice.correct { border-color: #34d17f; background: rgba(52,209,127,.16); }
+#overlay .ov-choice.correct .lt { background: #34d17f; color: #04331d; }
+#overlay .ov-explain {
+  margin-top: 18px; padding: 14px 18px; border-radius: 11px;
+  background: rgba(255,255,255,.1); font-size: 16px; line-height: 1.6;
+}
+#overlay .ov-actions { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
+#overlay .ov-actions .btn { padding: 13px 24px; font-size: 16px; }
+.ov-timer {
+  display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700;
+  background: rgba(255,255,255,.14); padding: 7px 15px; border-radius: 999px;
+}
+.ov-timer.urgent { background: rgba(255,90,90,.3); }
+.ov-count { font-size: 15px; font-weight: 700; background: rgba(255,255,255,.14); padding: 7px 15px; border-radius: 999px; }
+
+/* ══════════════════════════════════════════════════════════
+   학생
+   ══════════════════════════════════════════════════════════ */
+.stu-wrap { max-width: 560px; margin: 0 auto; padding: 18px 14px 60px; }
+.stu-status {
+  display: flex; align-items: center; gap: 10px; font-size: 13px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 9px 13px; margin-bottom: 14px;
+}
+.stu-status .spacer { flex: 1; }
+.stu-wait { text-align: center; padding: 60px 18px; }
+.stu-wait .big { font-size: 46px; margin-bottom: 14px; }
+.stu-wait h2 { font-size: 19px; margin-bottom: 6px; }
+.stu-wait p { color: var(--ink-2); font-size: 14px; }
+.stu-q { font-size: 20px; font-weight: 700; line-height: 1.45; margin-bottom: 18px; }
+.stu-choice {
+  display: flex; align-items: center; gap: 13px; width: 100%; text-align: left;
+  padding: 15px 16px; margin-bottom: 10px; font: inherit; font-size: 16px; font-weight: 600;
+  background: #fff; border: 2px solid var(--line-2); border-radius: 12px;
+  color: var(--ink); cursor: pointer; transition: border-color .12s, background .12s;
+}
+.stu-choice:hover:not(:disabled) { border-color: var(--accent); }
+.stu-choice .lt {
+  width: 32px; height: 32px; border-radius: 8px; background: #eceef4; color: var(--ink-2);
+  display: grid; place-items: center; font-weight: 800; flex: none;
+}
+.stu-choice.sel { border-color: var(--accent); background: var(--accent-2); }
+.stu-choice.sel .lt { background: var(--accent); color: #fff; }
+.stu-choice.correct { border-color: var(--ok); background: var(--ok-bg); }
+.stu-choice.correct .lt { background: var(--ok); color: #fff; }
+.stu-choice.wrong { border-color: var(--bad); background: var(--bad-bg); }
+.stu-choice.wrong .lt { background: var(--bad); color: #fff; }
+.stu-choice:disabled { cursor: default; opacity: 1; }
+.stu-timer {
+  height: 7px; background: #e2e5ec; border-radius: 999px; overflow: hidden; margin-bottom: 16px;
+}
+.stu-timer > i { display: block; height: 100%; background: var(--accent); transition: width .25s linear; }
+.stu-timer.urgent > i { background: #e04545; }
+.result-banner {
+  border-radius: 12px; padding: 16px; text-align: center; font-size: 18px;
+  font-weight: 800; margin-bottom: 14px;
+}
+.result-banner.ok  { background: var(--ok-bg);  color: var(--ok); }
+.result-banner.bad { background: var(--bad-bg); color: var(--bad); }
+.result-banner.mute{ background: #eceef4; color: var(--ink-2); }
+.privacy-note {
+  font-size: 11.5px; color: var(--ink-3); line-height: 1.5;
+  border-top: 1px solid var(--line); padding-top: 12px; margin-top: 26px;
+}
+
+/* ══════════════════════════════════════════════════════════
+   대시보드 / 관리자 표
+   ══════════════════════════════════════════════════════════ */
+.tbl-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; white-space: nowrap; }
+table.tbl th, table.tbl td { padding: 9px 11px; border-bottom: 1px solid var(--line); text-align: left; }
+table.tbl th {
+  background: #f7f8fb; font-size: 12px; font-weight: 700; color: var(--ink-2);
+  position: sticky; top: 0; cursor: pointer; user-select: none;
+}
+table.tbl th.nosort { cursor: default; }
+table.tbl tbody tr:hover { background: #f9fafc; }
+table.tbl td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
+.ox-o { color: var(--ok); font-weight: 800; }
+.ox-x { color: var(--bad); font-weight: 800; }
+.ox-none { color: var(--ink-3); }
+
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.stat {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 13px 15px;
+}
+.stat .k { font-size: 12px; color: var(--ink-2); font-weight: 600; }
+.stat .v { font-size: 25px; font-weight: 800; letter-spacing: -.02em; line-height: 1.2; }
+
+.dist-row { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; font-size: 13px; }
+.dist-row .lt {
+  width: 24px; height: 24px; border-radius: 6px; background: #eceef4; color: var(--ink-2);
+  display: grid; place-items: center; font-weight: 700; flex: none; font-size: 12px;
+}
+.dist-row.is-ans .lt { background: var(--ok); color: #fff; }
+.dist-row .txt { flex: 0 1 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dist-row .track { flex: 1; height: 20px; background: #eceef4; border-radius: 5px; overflow: hidden; min-width: 60px; }
+.dist-row .track > i { display: block; height: 100%; background: var(--ink-3); transition: width .3s; }
+.dist-row.is-ans .track > i { background: var(--ok); }
+.dist-row .n { flex: none; width: 74px; text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+.acc-item { border: 1px solid var(--line); border-radius: 11px; margin-bottom: 10px; overflow: hidden; }
+.acc-item > .hd {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  background: #fbfbfd; cursor: pointer; font-size: 14px; font-weight: 600;
+}
+.acc-item > .hd .spacer { flex: 1; }
+.acc-item > .bd { padding: 14px; border-top: 1px solid var(--line); }
+.filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 16px; }
+.filters .fc { flex: 0 1 150px; }
+.filters .fc label.f { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+<div id="toast"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
+
+<script>
+"use strict";
+
+/* ══════════════════════════════════════════════════════════════════════
+   0. Firebase — 기존 감염병 TTX 도구와 같은 프로젝트를 사용합니다.
+      데이터는 전부 vq/ 아래에 두어 TTX의 settings/, rooms/ 와 겹치지 않습니다.
+   ══════════════════════════════════════════════════════════════════════ */
+const firebaseConfig = {
+  apiKey: "AIzaSyC8KDLecYY5kNGsXxflRgP8-PP_S-DIU54",
+  authDomain: "idst-84e4f.firebaseapp.com",
+  databaseURL: "https://idst-84e4f-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "idst-84e4f",
+  storageBucket: "idst-84e4f.firebasestorage.app",
+  messagingSenderId: "1019780815428",
+  appId: "1:1019780815428:web:3730e229889a21eaa33a11"
+};
+if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+const SV_TS = firebase.database.ServerValue.TIMESTAMP;
+
+/** vq/ 네임스페이스 아래의 ref를 반환 (path가 비면 vq 루트) */
+function R(path) { return db.ref(path ? 'vq/' + path : 'vq'); }
+
+/* 서버 시각 보정 — 기기마다 시계가 달라도 카운트다운이 어긋나지 않게 한다. */
+let serverOffset = 0;
+db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
+function serverNow() { return Date.now() + serverOffset; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   1. 공용 유틸
+   ══════════════════════════════════════════════════════════════════════ */
+const $  = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const APP = () => document.getElementById('app');
+
+/** 혼동하기 쉬운 0/O/1/I 를 뺀 문자셋 — 학생이 코드를 손으로 입력하기 때문 */
+const IDCHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function rid(n) {
+  const a = new Uint32Array(n);
+  crypto.getRandomValues(a);
+  let s = '';
+  for (let i = 0; i < n; i++) s += IDCHARS[a[i] % IDCHARS.length];
+  return s;
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* 사생활 보호 모드나 학교 정책으로 저장소가 막혀도 화면이 죽지 않게 감싼다 */
+function lsGet(k, dflt) { try { const v = localStorage.getItem(k); return v === null ? (dflt || '') : v; } catch (e) { return dflt || ''; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function ssGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+function ssSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
+function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
+
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+const LETTERS = ['①', '②', '③', '④', '⑤', '⑥'];
+
+/** "1:23" / "1:02:03" / "83" / "83.5" 를 모두 초 단위로 */
+function parseTime(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return NaN;
+  if (/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+  if (!/^\d{1,2}(:\d{1,2}){1,2}$/.test(s)) return NaN;
+  return s.split(':').map(Number).reduce((a, b) => a * 60 + b, 0);
+}
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  return (h ? h + ':' : '') + mm + ':' + String(s).padStart(2, '0');
+}
+function fmtDate(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+         ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function fmtDay(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+/** watch?v= / youtu.be / embed / shorts / live 형태를 모두 받아 11자리 ID 추출 */
+function parseYouTube(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  if (/^[\w-]{11}$/.test(s)) return s;
+  const m = s.match(/(?:youtu\.be\/|[?&]v=|\/embed\/|\/shorts\/|\/live\/|\/v\/)([\w-]{11})/);
+  return m ? m[1] : '';
+}
+
+/* crypto.subtle 은 https(또는 file://)에서만 제공된다.
+   학교 내부망의 http 주소로 열었을 때 관리자 로그인이 통째로 실패하지 않도록 대체 구현을 둔다. */
+function sha256Fallback(str) {
+  const K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const bytes = Array.from(new TextEncoder().encode(str));
+  const bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  bytes.push(0, 0, 0, 0, (bitLen >>> 24) & 255, (bitLen >>> 16) & 255, (bitLen >>> 8) & 255, bitLen & 255);
+
+  const w = new Array(64);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let i = 0; i < bytes.length; i += 64) {
+    for (let t = 0; t < 16; t++)
+      w[t] = (bytes[i + t * 4] << 24) | (bytes[i + t * 4 + 1] << 16) | (bytes[i + t * 4 + 2] << 8) | bytes[i + t * 4 + 3];
+    for (let t = 16; t < 64; t++) {
+      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
+    }
+    let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (let t = 0; t < 64; t++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const t1 = (h + S1 + ((e & f) ^ (~e & g)) + K[t] + w[t]) | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    H = [(H[0] + a) | 0, (H[1] + b) | 0, (H[2] + c) | 0, (H[3] + d) | 0,
+         (H[4] + e) | 0, (H[5] + f) | 0, (H[6] + g) | 0, (H[7] + h) | 0];
+  }
+  return H.map(x => (x >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+async function sha256(str) {
+  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+    try {
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) { /* 아래 대체 구현으로 */ }
+  }
+  return sha256Fallback(str);
+}
+
+/** 현재 페이지 주소 기준으로 링크를 만든다 → 어디에 올려도 그대로 동작.
+    location.origin 은 file:// 에서 "null" 이 되므로 href 에서 해시만 떼어 쓴다. */
+function linkTo(hash) {
+  return location.href.split('#')[0] + '#/' + hash;
+}
+function copyText(text) {
+  const done = () => toast('링크를 복사했습니다');
+  if (navigator.clipboard && location.protocol !== 'file:') {
+    navigator.clipboard.writeText(text).then(done, () => fallback());
+  } else fallback();
+  function fallback() {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { prompt('아래 링크를 복사하세요', text); }
+    ta.remove();
+  }
+}
+
+/** UTF-8 BOM 포함 — 엑셀에서 한글이 깨지지 않게 */
+function downloadCSV(filename, rows) {
+  const csv = rows.map(r => r.map(c => {
+    const v = c == null ? '' : String(c);
+    return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  }).join(',')).join('\r\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+
+/* ── 화면 전환 시 리스너/타이머 정리 ───────────────────────────────── */
+let cleanups = [];
+function onCleanup(fn) { cleanups.push(fn); }
+function runCleanups() {
+  cleanups.forEach(fn => { try { fn(); } catch (e) { console.warn(e); } });
+  cleanups = [];
+}
+/** ref.on() 을 걸면서 화면을 떠날 때 자동으로 off 되도록 등록 */
+function watch(ref, event, cb) {
+  ref.on(event, cb);
+  onCleanup(() => ref.off(event, cb));
+  return cb;
+}
+function every(ms, fn) {
+  const id = setInterval(fn, ms);
+  onCleanup(() => clearInterval(id));
+  return id;
+}
+
+/* ── YouTube IFrame API 준비 대기 ──────────────────────────────────── */
+let ytReady = false;
+const ytWaiters = [];
+window.onYouTubeIframeAPIReady = function () {
+  ytReady = true;
+  while (ytWaiters.length) ytWaiters.shift()();
+};
+function whenYT(cb) { ytReady ? cb() : ytWaiters.push(cb); }
+
+/* ══════════════════════════════════════════════════════════════════════
+   2. 기본값 / 스키마 헬퍼
+   ══════════════════════════════════════════════════════════════════════ */
+const DEFAULT_SETTINGS = {
+  revealMode: 'timer',    // instant | timer | manual | never
+  limitSec: 20,           // 문항당 응답 제한 시간 (0 = 무제한, 교사가 닫을 때까지)
+  revealDelaySec: 5,      // revealMode='timer' 일 때 오픈 후 정답 공개까지
+  autoPause: true         // 퀴즈가 뜰 때 영상 자동 일시정지
+};
+const REVEAL_LABEL = {
+  instant: '제출 즉시 공개',
+  timer:   '타이머 종료 후 자동 공개',
+  manual:  '교사가 버튼을 누를 때 공개',
+  never:   '학생에게 공개 안 함'
+};
+
+function normSettings(s) {
+  const o = Object.assign({}, DEFAULT_SETTINGS, s || {});
+  if (!REVEAL_LABEL[o.revealMode]) o.revealMode = DEFAULT_SETTINGS.revealMode;
+  o.limitSec = Math.max(0, Math.min(600, Number(o.limitSec) || 0));
+  o.revealDelaySec = Math.max(0, Math.min(600, Number(o.revealDelaySec) || 0));
+  o.autoPause = o.autoPause !== false;
+  return o;
+}
+/** Firebase는 빈 배열을 지우므로 questions가 없을 수 있다 */
+function normQuestions(qs) {
+  return (qs || []).filter(Boolean).map(q => ({
+    t: Number(q.t) || 0,
+    text: q.text || '',
+    choices: (q.choices || []).filter(c => c != null),
+    answer: Number(q.answer) || 0,
+    explain: q.explain || '',
+    limitSec: (q.limitSec === undefined || q.limitSec === null || q.limitSec === '') ? null : Number(q.limitSec)
+  }));
+}
+function normSet(raw) {
+  if (!raw) return null;
+  return {
+    title: raw.title || '제목 없음',
+    videoId: raw.videoId || '',
+    videoUrl: raw.videoUrl || '',
+    author: raw.author || '',
+    createdAt: raw.createdAt || 0,
+    updatedAt: raw.updatedAt || 0,
+    settings: normSettings(raw.settings),
+    questions: normQuestions(raw.questions)
+  };
+}
+/** 문항별 제한시간 덮어쓰기가 있으면 그것을, 없으면 세트 기본값을 쓴다 */
+function limitFor(set, i) {
+  const q = set.questions[i];
+  if (q && q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) return Math.max(0, q.limitSec);
+  return set.settings.limitSec;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   3. 라우터
+   ══════════════════════════════════════════════════════════════════════ */
+function topbar(extraHTML) {
+  return '<div class="topbar">' +
+    '<a class="brand" href="#/">🎬 영상 <span>퀴즈</span></a>' +
+    '<div class="spacer"></div>' + (extraHTML || '') + '</div>';
+}
+
+function go(hash) { location.hash = '#/' + hash; }
+
+/* 익명 로그인이 끝나기 전에는 DB를 건드릴 수 없으므로 라우팅을 잠시 미뤄 둔다 */
+let authReady = false;
+
+function router() {
+  if (!authReady) return;
+  runCleanups();
+  window.scrollTo(0, 0);
+  const raw = location.hash.replace(/^#\/?/, '');
+  const parts = raw.split('/').filter(x => x !== '');
+  const name = parts[0] || 'home';
+  const arg = parts[1] ? decodeURIComponent(parts[1]) : '';
+
+  switch (name) {
+    case 'home':  screenHome(); break;
+    case 'make':  screenMake(arg); break;
+    case 'play':  screenPlay(arg); break;
+    case 'join':  screenStudent(arg); break;
+    case 'live':  screenDashboard(arg); break;
+    case 'admin': screenAdmin(); break;
+    default:      screenHome();
+  }
+}
+window.addEventListener('hashchange', router);
+
+/* ══════════════════════════════════════════════════════════════════════
+   4. 홈
+   ══════════════════════════════════════════════════════════════════════ */
+function screenHome() {
+  APP().innerHTML = topbar() + '<div class="wrap">' +
+    '<div class="home-hero">' +
+      '<h1>영상 퀴즈 실시간 진행 도구</h1>' +
+      '<p>영상 속 정해진 순간에 퀴즈가 뜨고, 학생들은 각자 폰으로 그 문제만 풉니다.</p>' +
+    '</div>' +
+    '<div class="home-cards">' +
+      '<a class="home-card" href="#/make">' +
+        '<div class="ico">✏️</div><h3>퀴즈 세트 만들기</h3>' +
+        '<p>유튜브 영상에 타임코드별 문항을 붙여 세트를 만들고, 링크로 다른 선생님께 공유합니다.</p></a>' +
+      '<a class="home-card" href="#/join">' +
+        '<div class="ico">🙋</div><h3>학생 참여하기</h3>' +
+        '<p>선생님이 알려준 6자리 반 코드를 입력해 들어갑니다.</p></a>' +
+      '<a class="home-card" href="#/admin">' +
+        '<div class="ico">🔐</div><h3>관리자 통합 조회</h3>' +
+        '<p>전체 반의 응답과 점수를 학년·반·번호별로 모아서 봅니다. 비밀번호가 필요합니다.</p></a>' +
+    '</div>' +
+    '<div class="card" style="margin-top:20px">' +
+      '<h2>진행 흐름</h2>' +
+      '<div class="sub">콘텐츠(퀴즈 세트)와 진행(반 세션)이 분리되어 있습니다.</div>' +
+      '<ol style="margin:0;padding-left:20px;color:var(--ink-2);font-size:14px;line-height:2">' +
+        '<li><b>세트 제작</b> — 한 선생님이 영상 + 타임코드별 문항을 만들고 저장하면 <b>세트 링크</b>가 나옵니다.</li>' +
+        '<li><b>공유</b> — 그 링크를 받은 다른 선생님이 열어 <b>[우리 반 시작하기]</b>를 누르면 자기 반 코드가 새로 발급됩니다.</li>' +
+        '<li><b>진행</b> — 여러 선생님이 같은 세트를 동시에 써도 반 코드가 다르므로 응답이 섞이지 않습니다.</li>' +
+      '</ol>' +
+    '</div>' +
+  '</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   5. ① 퀴즈 세트 제작 화면
+   ══════════════════════════════════════════════════════════════════════ */
+let mk = null;          // 편집 중인 세트 상태
+let mkPlayer = null;    // 미리보기 플레이어
+let mkPlayerVid = '';   // 현재 플레이어에 로드된 영상 ID
+
+function blankQuestion(t) {
+  return { t: t || 0, text: '', choices: ['', '', '', ''], answer: 0, explain: '', limitSec: null };
+}
+
+function screenMake(setId) {
+  mk = {
+    id: setId || null,
+    title: '',
+    videoUrl: '',
+    videoId: '',
+    author: lsGet('vq_teacher'),
+    settings: Object.assign({}, DEFAULT_SETTINGS),
+    questions: [blankQuestion(0)],
+    createdAt: 0,
+    saved: false
+  };
+  mkPlayer = null;
+  mkPlayerVid = '';
+  onCleanup(() => { try { mkPlayer && mkPlayer.destroy(); } catch (e) {} mkPlayer = null; });
+
+  // 재생 위치 표시 — 화면당 한 번만 등록한다 (URL을 고칠 때마다 쌓이지 않도록)
+  every(500, () => {
+    const el = $('#mk-cur');
+    if (el && mkPlayer && mkPlayer.getCurrentTime) {
+      try { el.textContent = '현재 재생 위치: ' + fmtTime(mkPlayer.getCurrentTime()); } catch (e) {}
+    }
+  });
+
+  if (setId) {
+    APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
+    R('quiz_sets/' + setId).once('value').then(snap => {
+      const set = normSet(snap.val());
+      if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
+      mk.title = set.title;
+      mk.videoUrl = set.videoUrl;
+      mk.videoId = set.videoId;
+      mk.author = set.author || mk.author;
+      mk.settings = set.settings;
+      mk.questions = set.questions.length ? set.questions : [blankQuestion(0)];
+      mk.createdAt = set.createdAt;
+      mk.saved = true;
+      renderMake();
+    }).catch(e => { console.error(e); toast('불러오기 실패: ' + e.message); });
+  } else {
+    renderMake();
+  }
+}
+
+function renderMake() {
+  const isEdit = !!mk.id;
+  // innerHTML을 갈아끼우면 기존 iframe이 사라지므로 플레이어를 다시 만들게 한다
+  try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
+  mkPlayer = null;
+  mkPlayerVid = '';
+  APP().innerHTML = topbar(
+      (isEdit ? '<a class="btn sm" href="#/play/' + esc(mk.id) + '">▶ 진행 화면 열기</a>' : '')
+    ) +
+    '<div class="wrap">' +
+      '<h1 style="font-size:22px;margin-bottom:4px">' + (isEdit ? '퀴즈 세트 편집' : '새 퀴즈 세트 만들기') + '</h1>' +
+      '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">영상을 재생하면서 <b>[현재 시각 찍기]</b>를 누르면 그 지점이 문항 시각으로 들어갑니다.</p>' +
+
+      '<div class="card">' +
+        '<h2>1. 영상과 제목</h2>' +
+        '<div class="sub">유튜브 주소를 붙여넣으면 아래에 미리보기가 뜹니다.</div>' +
+        '<div class="field"><label class="f">세트 제목</label>' +
+          '<input type="text" id="mk-title" placeholder="예) 2학년 보건 — 감염병 예방 영상 퀴즈" value="' + esc(mk.title) + '"></div>' +
+        '<div class="grid2">' +
+          '<div class="field"><label class="f">유튜브 주소</label>' +
+            '<input type="text" id="mk-url" placeholder="https://www.youtube.com/watch?v=..." value="' + esc(mk.videoUrl) + '">' +
+            '<div class="hint" id="mk-url-hint"></div></div>' +
+          '<div class="field"><label class="f">만든 사람 (선택)</label>' +
+            '<input type="text" id="mk-author" placeholder="예) 보건교사 이○○" value="' + esc(mk.author) + '"></div>' +
+        '</div>' +
+        '<div id="mk-player-wrap" style="margin-top:6px"></div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2>2. 진행 설정</h2>' +
+        '<div class="sub">이 세트로 진행하는 모든 반에 동일하게 적용됩니다.</div>' +
+        '<div class="grid2">' +
+          '<div class="field"><label class="f">정답 공개 시점</label>' +
+            '<select id="mk-reveal">' +
+              Object.keys(REVEAL_LABEL).map(k =>
+                '<option value="' + k + '"' + (mk.settings.revealMode === k ? ' selected' : '') + '>' + REVEAL_LABEL[k] + '</option>').join('') +
+            '</select>' +
+            '<div class="hint" id="mk-reveal-hint"></div></div>' +
+          '<div class="field"><label class="f">문항당 응답 제한 시간 (초)</label>' +
+            '<input type="number" id="mk-limit" min="0" max="600" value="' + mk.settings.limitSec + '">' +
+            '<div class="hint">0을 넣으면 시간 제한 없이, 교사가 [계속 재생]을 누를 때까지 열려 있습니다.</div></div>' +
+        '</div>' +
+        '<div class="grid2">' +
+          '<div class="field" id="mk-delay-field"><label class="f">정답 자동 공개까지 (초)</label>' +
+            '<input type="number" id="mk-delay" min="0" max="600" value="' + mk.settings.revealDelaySec + '">' +
+            '<div class="hint">퀴즈가 뜬 뒤 이만큼 지나면 학생 화면에 정답·해설이 뜹니다.</div></div>' +
+          '<div class="field"><label class="f">퀴즈가 뜰 때 영상</label>' +
+            '<select id="mk-pause">' +
+              '<option value="1"' + (mk.settings.autoPause ? ' selected' : '') + '>자동으로 일시정지</option>' +
+              '<option value="0"' + (!mk.settings.autoPause ? ' selected' : '') + '>계속 재생</option>' +
+            '</select>' +
+            '<div class="hint">보통은 일시정지가 편합니다.</div></div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2>3. 문항</h2>' +
+        '<div class="sub">시각은 <span class="mono">1:23</span> 또는 초 단위 숫자로 입력합니다.</div>' +
+        '<div id="mk-questions"></div>' +
+        '<button class="btn" onclick="mkAddQuestion()">＋ 문항 추가</button> ' +
+        '<button class="btn ghost sm" onclick="mkSortQuestions()">시각 순으로 정렬</button>' +
+      '</div>' +
+
+      '<div class="card" id="mk-save-card">' +
+        '<div class="row" style="align-items:center">' +
+          '<button class="btn primary lg" onclick="mkSave()">' + (mk.id ? '변경 사항 저장' : '세트 저장하고 링크 만들기') + '</button>' +
+          (mk.id ? '<button class="btn" onclick="mkSaveAsNew()">다른 세트로 복제 저장</button>' : '') +
+          '<div class="spacer" style="flex:1"></div>' +
+        '</div>' +
+        '<div id="mk-share"></div>' +
+      '</div>' +
+    '</div>';
+
+  // 입력 → 상태 반영
+  $('#mk-title').oninput = e => { mk.title = e.target.value; };
+  $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); };
+  $('#mk-url').oninput = e => { mk.videoUrl = e.target.value; mkSyncVideo(); };
+  $('#mk-reveal').onchange = e => { mk.settings.revealMode = e.target.value; mkRevealHint(); };
+  $('#mk-limit').oninput = e => { mk.settings.limitSec = Math.max(0, Number(e.target.value) || 0); };
+  $('#mk-delay').oninput = e => { mk.settings.revealDelaySec = Math.max(0, Number(e.target.value) || 0); };
+  $('#mk-pause').onchange = e => { mk.settings.autoPause = e.target.value === '1'; };
+
+  mkRevealHint();
+  mkSyncVideo();
+  mkRenderQuestions();
+  if (mk.id) mkShowShare();
+}
+
+function mkRevealHint() {
+  const m = mk.settings.revealMode;
+  const hints = {
+    instant: '학생이 답을 고르는 즉시 각자 화면에 O/X와 해설이 뜹니다.',
+    timer:   '아래 초 설정에 따라 자동으로 공개됩니다. 교사가 [지금 공개]로 앞당길 수 있습니다.',
+    manual:  '교사가 진행 화면에서 [정답 공개]를 누를 때까지 학생은 결과를 볼 수 없습니다.',
+    never:   '학생 화면에는 끝까지 정답이 뜨지 않습니다. 교사 대시보드에서만 채점 결과를 봅니다.'
+  };
+  const el = $('#mk-reveal-hint');
+  if (el) el.textContent = hints[m] || '';
+  const df = $('#mk-delay-field');
+  if (df) df.style.opacity = (m === 'timer') ? '1' : '.4';
+}
+
+/** URL이 바뀔 때만 미리보기 플레이어를 새로 만든다 */
+function mkSyncVideo() {
+  const vid = parseYouTube(mk.videoUrl);
+  mk.videoId = vid;
+  const hint = $('#mk-url-hint');
+  if (hint) {
+    hint.textContent = mk.videoUrl ? (vid ? '영상 ID: ' + vid : '⚠ 유튜브 주소를 인식하지 못했습니다.') : '';
+    hint.style.color = (mk.videoUrl && !vid) ? 'var(--bad)' : '';
+  }
+  const wrap = $('#mk-player-wrap');
+  if (!wrap) return;
+  if (!vid) { wrap.innerHTML = ''; mkPlayer = null; mkPlayerVid = ''; return; }
+  if (vid === mkPlayerVid && mkPlayer) return;
+
+  mkPlayerVid = vid;
+  wrap.innerHTML =
+    '<div class="player-box"><div id="mk-player"></div></div>' +
+    '<div class="row" style="margin-top:10px;align-items:center">' +
+      '<button class="btn sm" onclick="mkStampNew()">📍 현재 시각으로 문항 추가</button>' +
+      '<span class="hint" id="mk-cur" style="margin:0">—</span>' +
+    '</div>';
+
+  whenYT(() => {
+    if (mkPlayerVid !== vid || !document.getElementById('mk-player')) return;
+    try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
+    mkPlayer = new YT.Player('mk-player', {
+      videoId: vid,
+      playerVars: { rel: 0, modestbranding: 1, playsinline: 1 }
+    });
+  });
+}
+
+function mkCurrentTime() {
+  try { return (mkPlayer && mkPlayer.getCurrentTime) ? mkPlayer.getCurrentTime() : 0; }
+  catch (e) { return 0; }
+}
+
+function mkRenderQuestions() {
+  const box = $('#mk-questions');
+  if (!box) return;
+  if (!mk.questions.length) {
+    box.innerHTML = '<div class="empty">문항이 없습니다. 아래에서 추가하세요.</div>';
+    return;
+  }
+  box.innerHTML = mk.questions.map((q, i) => {
+    const choices = q.choices.length ? q.choices : ['', ''];
+    return '<div class="q-card">' +
+      '<div class="q-head">' +
+        '<div class="q-no">' + (i + 1) + '</div>' +
+        '<input type="text" class="time-input mono" value="' + esc(fmtTime(q.t)) + '" ' +
+          'onchange="mkSetTime(' + i + ', this.value, this)" title="이 시각에 퀴즈가 뜹니다">' +
+        '<button class="btn sm" onclick="mkStamp(' + i + ')" title="플레이어의 현재 위치를 넣습니다">📍 현재 시각 찍기</button>' +
+        '<button class="btn sm ghost" onclick="mkSeek(' + i + ')" title="이 시각으로 영상 이동">↪ 이동</button>' +
+        '<div class="spacer"></div>' +
+        '<button class="btn sm ghost" onclick="mkMove(' + i + ',-1)" ' + (i === 0 ? 'disabled' : '') + '>↑</button>' +
+        '<button class="btn sm ghost" onclick="mkMove(' + i + ',1)" ' + (i === mk.questions.length - 1 ? 'disabled' : '') + '>↓</button>' +
+        '<button class="btn sm danger" onclick="mkDelQuestion(' + i + ')">삭제</button>' +
+      '</div>' +
+      '<div class="field"><label class="f">질문</label>' +
+        '<textarea oninput="mk.questions[' + i + '].text=this.value" placeholder="예) 감염병 전파를 막는 가장 기본적인 방법은?">' + esc(q.text) + '</textarea></div>' +
+      '<div class="field"><label class="f">보기 — 왼쪽 동그라미로 정답을 지정하세요</label>' +
+        choices.map((c, j) =>
+          '<div class="choice-row">' +
+            '<input type="radio" name="ans-' + i + '" ' + (q.answer === j ? 'checked' : '') + ' onchange="mk.questions[' + i + '].answer=' + j + '">' +
+            '<span class="cno">' + LETTERS[j] + '</span>' +
+            '<input type="text" value="' + esc(c) + '" oninput="mk.questions[' + i + '].choices[' + j + ']=this.value" placeholder="보기 ' + (j + 1) + '">' +
+            (choices.length > 2 ? '<button class="btn sm ghost" onclick="mkDelChoice(' + i + ',' + j + ')">✕</button>' : '') +
+          '</div>').join('') +
+        (choices.length < 6 ? '<button class="btn sm ghost" onclick="mkAddChoice(' + i + ')">＋ 보기 추가</button>' : '') +
+      '</div>' +
+      '<div class="grid2">' +
+        '<div class="field"><label class="f">해설 (선택)</label>' +
+          '<input type="text" value="' + esc(q.explain) + '" oninput="mk.questions[' + i + '].explain=this.value" placeholder="정답 공개 때 함께 보여줄 설명"></div>' +
+        '<div class="field"><label class="f">이 문항만 제한 시간 다르게 (선택)</label>' +
+          '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
+            'oninput="mk.questions[' + i + '].limitSec = this.value===\'\' ? null : Math.max(0,Number(this.value)||0)" ' +
+            'placeholder="비우면 세트 기본값(' + mk.settings.limitSec + '초)"></div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function mkSetTime(i, v, el) {
+  const t = parseTime(v);
+  if (isNaN(t)) { toast('시각 형식이 올바르지 않습니다 (예: 1:23)'); el.value = fmtTime(mk.questions[i].t); return; }
+  mk.questions[i].t = t;
+  el.value = fmtTime(t);
+}
+function mkStamp(i) {
+  const t = mkCurrentTime();
+  if (!mkPlayer) { toast('먼저 유튜브 주소를 입력하세요'); return; }
+  mk.questions[i].t = Math.floor(t);
+  mkRenderQuestions();
+  toast(fmtTime(t) + ' 지점으로 설정했습니다');
+}
+function mkStampNew() {
+  const t = Math.floor(mkCurrentTime());
+  mk.questions.push(blankQuestion(t));
+  mkRenderQuestions();
+  toast(fmtTime(t) + ' 지점에 문항을 추가했습니다');
+  const cards = $$('#mk-questions .q-card');
+  if (cards.length) cards[cards.length - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function mkSeek(i) {
+  if (!mkPlayer || !mkPlayer.seekTo) { toast('미리보기 플레이어가 없습니다'); return; }
+  mkPlayer.seekTo(Math.max(0, mk.questions[i].t - 3), true);
+  mkPlayer.playVideo();
+}
+function mkAddQuestion() {
+  const last = mk.questions[mk.questions.length - 1];
+  mk.questions.push(blankQuestion(last ? last.t + 30 : 0));
+  mkRenderQuestions();
+}
+function mkDelQuestion(i) {
+  if (!confirm((i + 1) + '번 문항을 삭제할까요?')) return;
+  mk.questions.splice(i, 1);
+  mkRenderQuestions();
+}
+function mkMove(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= mk.questions.length) return;
+  const tmp = mk.questions[i];
+  mk.questions[i] = mk.questions[j];
+  mk.questions[j] = tmp;
+  mkRenderQuestions();
+}
+function mkSortQuestions() {
+  mk.questions.sort((a, b) => a.t - b.t);
+  mkRenderQuestions();
+  toast('시각 순으로 정렬했습니다');
+}
+function mkAddChoice(i) {
+  if (mk.questions[i].choices.length >= 6) return;
+  mk.questions[i].choices.push('');
+  mkRenderQuestions();
+}
+function mkDelChoice(i, j) {
+  const q = mk.questions[i];
+  if (q.choices.length <= 2) return;
+  q.choices.splice(j, 1);
+  if (q.answer >= q.choices.length) q.answer = q.choices.length - 1;
+  else if (q.answer > j) q.answer--;
+  mkRenderQuestions();
+}
+
+function mkValidate() {
+  if (!mk.title.trim()) return '세트 제목을 입력하세요.';
+  if (!mk.videoId) return '유튜브 주소를 올바르게 입력하세요.';
+  if (!mk.questions.length) return '문항을 최소 1개 이상 추가하세요.';
+  for (let i = 0; i < mk.questions.length; i++) {
+    const q = mk.questions[i];
+    if (!q.text.trim()) return (i + 1) + '번 문항의 질문이 비어 있습니다.';
+    const filled = q.choices.filter(c => String(c).trim() !== '');
+    if (filled.length < 2) return (i + 1) + '번 문항의 보기를 2개 이상 채우세요.';
+    if (!String(q.choices[q.answer] || '').trim()) return (i + 1) + '번 문항의 정답으로 지정된 보기가 비어 있습니다.';
+  }
+  return null;
+}
+
+function mkPayload() {
+  // 빈 보기는 저장 시 제거하고, 정답 인덱스를 그에 맞게 다시 계산한다
+  const questions = mk.questions.map(q => {
+    const keep = [];
+    let ans = 0;
+    q.choices.forEach((c, j) => {
+      if (String(c).trim() === '') return;
+      if (j === q.answer) ans = keep.length;
+      keep.push(String(c).trim());
+    });
+    const o = { t: Math.max(0, Number(q.t) || 0), text: q.text.trim(), choices: keep, answer: ans };
+    if (q.explain && q.explain.trim()) o.explain = q.explain.trim();
+    if (q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) o.limitSec = Math.max(0, Number(q.limitSec));
+    return o;
+  }).sort((a, b) => a.t - b.t);
+
+  return {
+    title: mk.title.trim(),
+    videoId: mk.videoId,
+    videoUrl: mk.videoUrl.trim(),
+    author: (mk.author || '').trim(),
+    settings: normSettings(mk.settings),
+    questions: questions,
+    createdAt: mk.createdAt || SV_TS,
+    updatedAt: SV_TS
+  };
+}
+
+function mkSave(forceNew) {
+  const err = mkValidate();
+  if (err) { toast(err); return; }
+  const id = (forceNew || !mk.id) ? rid(8) : mk.id;
+  const isNew = (id !== mk.id);
+  const data = mkPayload();
+  if (isNew) data.createdAt = SV_TS;
+
+  R('quiz_sets/' + id).set(data).then(() => {
+    mk.id = id;
+    mk.saved = true;
+    mk.questions = normQuestions(data.questions);
+    if (location.hash !== '#/make/' + id) {
+      history.replaceState(null, '', '#/make/' + id);
+    }
+    toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
+    renderMake();
+    const card = $('#mk-save-card');
+    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }).catch(e => { console.error(e); alert('저장 실패: ' + e.message); });
+}
+function mkSaveAsNew() {
+  if (!confirm('현재 내용을 새 세트로 복제 저장합니다. 원본은 그대로 남습니다. 계속할까요?')) return;
+  mkSave(true);
+}
+
+function mkShowShare() {
+  const box = $('#mk-share');
+  if (!box || !mk.id) return;
+  const url = linkTo('play/' + mk.id);
+  box.innerHTML =
+    '<div class="notice info" style="margin:16px 0 0">' +
+      '<b>공유 링크</b> — 이 링크를 받은 선생님은 각자 [우리 반 시작하기]를 눌러 자기 반 코드를 발급받습니다.<br>' +
+      '<div class="row" style="margin-top:8px;align-items:center">' +
+        '<input type="text" class="mono" readonly value="' + esc(url) + '" style="flex:1 1 260px;font-size:13px" onclick="this.select()">' +
+        '<button class="btn sm" onclick="copyText(\'' + esc(url) + '\')">복사</button>' +
+        '<a class="btn sm primary" href="#/play/' + esc(mk.id) + '">진행 화면 열기</a>' +
+      '</div>' +
+      '<div style="margin-top:8px;font-size:12px">이 편집 화면 링크: <span class="mono">' + esc(linkTo('make/' + mk.id)) + '</span></div>' +
+    '</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   6. ② 교사 재생 화면
+   ══════════════════════════════════════════════════════════════════════ */
+let pl = null;   // 재생 화면 상태
+
+function screenPlay(setId) {
+  if (!setId) { go('make'); return; }
+  pl = {
+    setId: setId, set: null,
+    sessionId: null, code: null,
+    player: null, lastT: 0, fired: [],
+    live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    students: {}, answers: {},
+    liveRef: null
+  };
+  onCleanup(() => {
+    try { pl && pl.player && pl.player.destroy(); } catch (e) {}
+    const ov = document.getElementById('overlay');
+    if (ov) ov.remove();
+    pl = null;
+  });
+
+  APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">퀴즈 세트를 불러오는 중…</div></div>';
+
+  R('quiz_sets/' + setId).once('value').then(snap => {
+    const set = normSet(snap.val());
+    if (!set || !set.questions.length) {
+      APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">' +
+        '세트를 찾을 수 없거나 문항이 없습니다.<br>링크가 정확한지 확인해 주세요.<br><br>' +
+        '<a class="btn" href="#/make">새 세트 만들기</a></div></div></div>';
+      return;
+    }
+    pl.set = set;
+    pl.fired = set.questions.map(() => false);
+    renderPlayIntro();
+  }).catch(e => { console.error(e); APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>'; });
+}
+
+/** 반을 시작하기 전 — 세트 내용 확인 화면 */
+function renderPlayIntro() {
+  const s = pl.set;
+  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/make/' + esc(pl.setId) + '">세트 편집</a>') +
+    '<div class="wrap">' +
+      '<h1 style="font-size:22px;margin-bottom:4px">' + esc(s.title) + '</h1>' +
+      '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
+        '문항 ' + s.questions.length + '개' + (s.author ? ' · 만든 사람 ' + esc(s.author) : '') +
+        ' · 정답 공개: ' + REVEAL_LABEL[s.settings.revealMode] +
+        ' · 제한 시간 ' + (s.settings.limitSec ? s.settings.limitSec + '초' : '없음') +
+      '</p>' +
+
+      '<div class="card" style="text-align:center;padding:30px 20px">' +
+        '<h2 style="font-size:19px;margin-bottom:6px">우리 반 진행을 시작합니다</h2>' +
+        '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
+          '누르면 이 반만의 <b>새 반 코드</b>가 발급됩니다.<br>' +
+          '다른 선생님이 같은 세트를 동시에 써도 응답은 반 코드별로 따로 저장됩니다.</p>' +
+        '<div class="field" style="max-width:280px;margin:0 auto 14px">' +
+          '<label class="f">반 이름 (선택 · 나중에 구분용)</label>' +
+          '<input type="text" id="pl-label" placeholder="예) 2학년 3반" value="' + esc(lsGet('vq_last_label')) + '">' +
+        '</div>' +
+        '<button class="btn primary lg" onclick="plStartSession()">🚀 우리 반 시작하기</button>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2>문항 미리보기</h2>' +
+        '<div class="sub">영상의 이 시각에 퀴즈가 자동으로 뜹니다.</div>' +
+        s.questions.map((q, i) =>
+          '<div class="qlist-item"><span class="t">' + fmtTime(q.t) + '</span>' +
+          '<span class="x">' + (i + 1) + '. ' + esc(q.text) + '</span>' +
+          '<span class="tag mute">정답 ' + LETTERS[q.answer] + '</span></div>').join('') +
+      '</div>' +
+    '</div>';
+}
+
+/** 새 세션(반) 생성 — 반 코드가 겹치지 않을 때까지 재시도 */
+function plStartSession() {
+  const label = ($('#pl-label') && $('#pl-label').value.trim()) || '';
+  lsSet('vq_last_label', label);
+  const sessionId = rid(12);
+  const teacher = pl.set.author || '';
+
+  (function claim(tries) {
+    if (tries > 8) { alert('반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.'); return; }
+    const code = rid(6);
+    // transaction 으로 코드 선점 — 동시에 시작해도 중복되지 않는다
+    R('codes/' + code).transaction(cur => (cur === null ? { sessionId: sessionId, createdAt: Date.now() } : undefined))
+      .then(res => {
+        if (!res.committed) return claim(tries + 1);
+        return R('sessions/' + sessionId).set({
+          setId: pl.setId,
+          setTitle: pl.set.title,
+          label: label,
+          code: code,
+          teacher: teacher,
+          createdAt: SV_TS,
+          status: 'live',
+          live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+        }).then(() => {
+          pl.sessionId = sessionId;
+          pl.code = code;
+          renderPlayRun();
+        });
+      })
+      .catch(e => { console.error(e); alert('반 시작 실패: ' + e.message); });
+  })(0);
+}
+
+function renderPlayRun() {
+  const s = pl.set;
+  const joinUrl = linkTo('join/' + pl.code);
+
+  APP().innerHTML = topbar(
+      '<a class="btn sm" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
+      '<button class="btn sm ghost" onclick="plEndSession()">진행 종료</button>'
+    ) +
+    '<div class="wrap wide"><div class="play-layout">' +
+
+      '<div>' +
+        '<div class="card" style="padding:14px">' +
+          '<div class="player-box"><div id="pl-player"></div></div>' +
+          '<div class="row" style="margin-top:10px;align-items:center">' +
+            '<span class="tag mute mono" id="pl-clock">0:00</span>' +
+            '<span style="font-size:13px;color:var(--ink-2)" id="pl-next">—</span>' +
+            '<div style="flex:1"></div>' +
+            '<span style="font-size:13px;color:var(--ink-2)">참여 <b id="pl-nstu">0</b>명</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="card">' +
+          '<h2>문항</h2>' +
+          '<div class="sub">클릭하면 그 시각 3초 전으로 이동합니다. 오른쪽 버튼으로 직접 열 수도 있습니다.</div>' +
+          '<div id="pl-qlist"></div>' +
+        '</div>' +
+      '</div>' +
+
+      '<div>' +
+        '<div class="code-panel">' +
+          '<div class="lbl">우리 반 코드</div>' +
+          '<div class="code">' + esc(pl.code) + '</div>' +
+          '<div class="url">' + esc(joinUrl.replace(/^https?:\/\//, '')) + '</div>' +
+          '<div class="qr" id="pl-qr"></div>' +
+        '</div>' +
+        '<div class="card" style="margin-top:14px">' +
+          '<div style="font-size:13px;color:var(--ink-2);line-height:1.8">' +
+            '<b>' + esc(s.title) + '</b><br>' +
+            '문항 ' + s.questions.length + '개<br>' +
+            '정답 공개 — ' + REVEAL_LABEL[s.settings.revealMode] + '<br>' +
+            '제한 시간 — ' + (s.settings.limitSec ? s.settings.limitSec + '초' : '없음') +
+          '</div>' +
+          '<div style="margin-top:12px"><button class="btn sm block" onclick="copyText(\'' + esc(joinUrl) + '\')">학생 참여 링크 복사</button></div>' +
+        '</div>' +
+        '<div class="card" style="margin-top:14px">' +
+          '<h2 style="font-size:14px">참여 학생</h2>' +
+          '<div id="pl-stulist" style="font-size:13px;color:var(--ink-2);max-height:240px;overflow:auto"></div>' +
+        '</div>' +
+      '</div>' +
+
+    '</div></div>';
+
+  // QR (라이브러리 로드 실패 시 조용히 숨김)
+  try {
+    if (window.QRCode) new QRCode(document.getElementById('pl-qr'), { text: joinUrl, width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M });
+    else $('#pl-qr').style.display = 'none';
+  } catch (e) { $('#pl-qr').style.display = 'none'; }
+
+  plRenderQList();
+
+  // 실시간 구독 — 참여자, 응답, live 상태
+  watch(R('sessions/' + pl.sessionId + '/students'), 'value', snap => {
+    pl.students = snap.val() || {};
+    plRenderStudents();
+  });
+  watch(R('responses/' + pl.sessionId), 'value', snap => {
+    pl.answers = snap.val() || {};
+    plRenderQList();
+    plRenderOverlayCounts();
+  });
+  watch(R('sessions/' + pl.sessionId + '/live'), 'value', snap => {
+    pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, snap.val() || {});
+    plRenderOverlay();
+  });
+
+  // 플레이어
+  whenYT(() => {
+    if (!pl || !document.getElementById('pl-player')) return;
+    pl.player = new YT.Player('pl-player', {
+      videoId: s.videoId,
+      playerVars: { rel: 0, modestbranding: 1, playsinline: 1 }
+    });
+  });
+
+  // 타임코드 감시 루프
+  every(200, plTick);
+  every(250, plTimerTick);
+}
+
+function plTick() {
+  if (!pl || !pl.player || !pl.player.getCurrentTime) return;
+  let now;
+  try { now = pl.player.getCurrentTime(); } catch (e) { return; }
+  if (typeof now !== 'number' || isNaN(now)) return;
+
+  const prev = pl.lastT;
+  pl.lastT = now;
+
+  const clock = $('#pl-clock');
+  if (clock) clock.textContent = fmtTime(now);
+
+  // 다음 문항 안내
+  const nextEl = $('#pl-next');
+  if (nextEl) {
+    const nx = pl.set.questions.findIndex(q => q.t > now);
+    nextEl.textContent = nx === -1 ? '남은 문항 없음' :
+      '다음 문항 ' + (nx + 1) + '번까지 ' + fmtTime(pl.set.questions[nx].t - now);
+  }
+
+  if (pl.live.q >= 0) return;   // 이미 퀴즈가 열려 있으면 새로 발화하지 않음
+
+  pl.set.questions.forEach((q, i) => {
+    // 뒤로 되감으면 다시 발화할 수 있게 플래그를 푼다
+    if (now < q.t - 0.6) pl.fired[i] = false;
+    if (!pl.fired[i] && prev < q.t && q.t <= now) {
+      pl.fired[i] = true;
+      plOpenQuestion(i);
+    }
+  });
+}
+
+function plOpenQuestion(i) {
+  if (!pl || !pl.sessionId) return;
+  if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
+  R('sessions/' + pl.sessionId + '/live').set({
+    q: i,
+    openedAt: SV_TS,
+    revealed: pl.set.settings.revealMode === 'instant',
+    limitSec: limitFor(pl.set, i)
+  });
+}
+function plReveal() {
+  if (!pl || pl.live.q < 0) return;
+  R('sessions/' + pl.sessionId + '/live/revealed').set(true);
+}
+function plCloseQuestion() {
+  if (!pl) return;
+  R('sessions/' + pl.sessionId + '/live').set({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  try { pl.player.playVideo(); } catch (e) {}
+}
+function plJumpTo(i) {
+  if (!pl || !pl.player || !pl.player.seekTo) return;
+  const t = Math.max(0, pl.set.questions[i].t - 3);
+  pl.fired[i] = false;
+  pl.lastT = t;
+  pl.player.seekTo(t, true);
+  pl.player.playVideo();
+}
+function plEndSession() {
+  if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
+  R('sessions/' + pl.sessionId).update({ status: 'ended', endedAt: SV_TS });
+  R('sessions/' + pl.sessionId + '/live').set({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  toast('진행을 종료했습니다');
+  go('live/' + pl.sessionId);
+}
+
+function plRenderQList() {
+  const box = $('#pl-qlist');
+  if (!box || !pl) return;
+  box.innerHTML = pl.set.questions.map((q, i) => {
+    const resp = pl.answers[i] || {};
+    const n = Object.keys(resp).length;
+    const cls = pl.live.q === i ? ' active' : (n > 0 ? ' done' : '');
+    return '<div class="qlist-item' + cls + '">' +
+      '<span class="t" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + fmtTime(q.t) + '</span>' +
+      '<span class="x" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + (i + 1) + '. ' + esc(q.text) + '</span>' +
+      (n ? '<span class="tag mute">' + n + '명 응답</span>' : '') +
+      '<button class="btn sm ghost" onclick="plOpenQuestion(' + i + ')" title="영상과 상관없이 지금 이 문항을 엽니다">열기</button>' +
+    '</div>';
+  }).join('');
+}
+
+function plRenderStudents() {
+  const list = $('#pl-stulist'), n = $('#pl-nstu');
+  const arr = Object.keys(pl.students).map(k => pl.students[k]);
+  if (n) n.textContent = arr.length;
+  if (!list) return;
+  if (!arr.length) { list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">아직 입장한 학생이 없습니다.</div>'; return; }
+  arr.sort((a, b) => (a.grade - b.grade) || (a.klass - b.klass) || (a.num - b.num));
+  list.innerHTML = arr.map(s =>
+    '<div style="padding:3px 0">' + esc(s.grade) + '-' + esc(s.klass) + '-' + esc(s.num) + ' ' + esc(s.name) + '</div>').join('');
+}
+
+/* ── 교사 퀴즈 오버레이 ─────────────────────────────────────────────── */
+function plRenderOverlay() {
+  let ov = document.getElementById('overlay');
+  if (!pl || pl.live.q < 0) { if (ov) ov.remove(); plRenderQList(); return; }
+
+  const i = pl.live.q, q = pl.set.questions[i];
+  if (!q) return;
+  const mode = pl.set.settings.revealMode;
+
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'overlay';
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = '<div class="ov-inner">' +
+    '<div class="ov-top">' +
+      '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">문항 ' + (i + 1) + ' / ' + pl.set.questions.length + '</span>' +
+      '<span class="ov-count" id="ov-count">0 / 0 제출</span>' +
+      '<div style="flex:1"></div>' +
+      '<span class="ov-timer" id="ov-timer" style="display:none"><span>⏱</span><span id="ov-timer-n">–</span></span>' +
+    '</div>' +
+    '<div class="ov-q">' + esc(q.text) + '</div>' +
+    '<div class="ov-choices" id="ov-choices">' +
+      q.choices.map((c, j) =>
+        '<div class="ov-choice" data-c="' + j + '">' +
+          '<span class="bar"></span>' +
+          '<span class="lt">' + LETTERS[j] + '</span>' +
+          '<span>' + esc(c) + '</span>' +
+          '<span class="cnt" data-cnt="' + j + '"></span>' +
+        '</div>').join('') +
+    '</div>' +
+    (q.explain ? '<div class="ov-explain" id="ov-explain" style="display:none">💡 ' + esc(q.explain) + '</div>' : '') +
+    '<div class="ov-actions">' +
+      (mode === 'never' ? '' :
+        '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
+      '<button class="btn primary" onclick="plCloseQuestion()">▶ 계속 재생</button>' +
+      '<a class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
+    '</div>' +
+  '</div>';
+
+  plRenderOverlayCounts();
+  plRenderQList();
+}
+
+/** 교사 화면은 항상 정답 위치를 표시한다 (교실 앞이므로 학생에게는 안 보임) */
+function plRenderOverlayCounts() {
+  const ov = document.getElementById('overlay');
+  if (!ov || !pl || pl.live.q < 0) return;
+  const i = pl.live.q, q = pl.set.questions[i];
+  if (!q) return;
+  const resp = pl.answers[i] || {};
+  const keys = Object.keys(resp);
+  const total = keys.length;
+  const nStu = Math.max(Object.keys(pl.students).length, total);
+
+  const counts = q.choices.map(() => 0);
+  keys.forEach(k => { const c = resp[k].c; if (counts[c] !== undefined) counts[c]++; });
+
+  const cntEl = ov.querySelector('#ov-count');
+  if (cntEl) cntEl.textContent = total + ' / ' + nStu + ' 제출';
+
+  const revealed = !!pl.live.revealed;
+  $$('.ov-choice', ov).forEach(el => {
+    const j = Number(el.dataset.c);
+    const pct = total ? Math.round(counts[j] / total * 100) : 0;
+    el.querySelector('.bar').style.width = pct + '%';
+    el.querySelector('[data-cnt]').textContent = total ? counts[j] + '명 (' + pct + '%)' : '';
+    el.classList.toggle('correct', j === q.answer);
+  });
+  const ex = ov.querySelector('#ov-explain');
+  if (ex) ex.style.display = revealed ? '' : 'none';
+  const rv = ov.querySelector('#ov-reveal');
+  if (rv) { rv.disabled = revealed; rv.textContent = revealed ? '공개됨' : rv.textContent; }
+}
+
+/** 남은 시간 표시 — 서버 시각 기준이라 학생 화면과 어긋나지 않는다 */
+function plTimerTick() {
+  const ov = document.getElementById('overlay');
+  if (!ov || !pl || pl.live.q < 0) return;
+  const el = ov.querySelector('#ov-timer'), num = ov.querySelector('#ov-timer-n');
+  const limit = Number(pl.live.limitSec) || 0;
+  if (!limit || !pl.live.openedAt) { if (el) el.style.display = 'none'; return; }
+  const left = Math.max(0, limit - (serverNow() - pl.live.openedAt) / 1000);
+  el.style.display = '';
+  num.textContent = Math.ceil(left) + '초';
+  el.classList.toggle('urgent', left <= 5);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   7. ③ 학생 참여 화면
+   ══════════════════════════════════════════════════════════════════════ */
+let st = null;
+
+function screenStudent(codeArg) {
+  st = {
+    code: (codeArg || '').toUpperCase(),
+    sessionId: null, session: null, set: null,
+    sid: null, me: null,
+    live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    myAnswers: {},          // { 문항index: {c, ok, ms} }
+    sel: null, submitted: false,
+    uiRevealed: false, uiLocked: false, uiQ: -2
+  };
+  onCleanup(() => { st = null; });
+
+  if (st.code) stLookupCode(st.code);
+  else stRenderCodeForm('');
+}
+
+function stShell(inner) {
+  APP().innerHTML = topbar() + '<div class="stu-wrap">' + inner + '</div>';
+}
+
+function stRenderCodeForm(err) {
+  const last = lsGet('vq_last_code');
+  stShell(
+    '<div class="card" style="text-align:center;padding:30px 22px">' +
+      '<div style="font-size:40px;margin-bottom:6px">🙋</div>' +
+      '<h2 style="font-size:20px;margin-bottom:4px">반 코드 입력</h2>' +
+      '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">선생님 화면에 뜬 6자리 코드를 입력하세요.</p>' +
+      '<input type="text" id="st-code" class="mono" maxlength="6" autocapitalize="characters" autocomplete="off" ' +
+        'value="' + esc(st.code || last) + '" placeholder="ABC234" ' +
+        'style="text-align:center;font-size:32px;letter-spacing:.18em;font-weight:800;padding:14px">' +
+      (err ? '<div style="color:var(--bad);font-size:13px;margin-top:10px;font-weight:600">' + esc(err) + '</div>' : '') +
+      '<button class="btn primary lg block" style="margin-top:14px" onclick="stSubmitCode()">입장하기</button>' +
+    '</div>' +
+    '<div class="privacy-note">이 도구는 수업 참여 확인을 위해 <b>학년·반·번호·이름</b>과 문항별 응답을 저장합니다. ' +
+      '저장된 자료는 담당 교사와 관리자만 조회하며, 학교 보관 정책에 따라 삭제됩니다.</div>'
+  );
+  const inp = $('#st-code');
+  inp.oninput = e => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+  inp.onkeydown = e => { if (e.key === 'Enter') stSubmitCode(); };
+  inp.focus();
+}
+
+function stSubmitCode() {
+  const v = ($('#st-code').value || '').trim().toUpperCase();
+  if (v.length !== 6) { stRenderCodeForm('코드는 6자리입니다.'); return; }
+  stLookupCode(v);
+}
+
+function stLookupCode(code) {
+  stShell('<div class="empty">반을 찾는 중…</div>');
+  R('codes/' + code).once('value').then(snap => {
+    const v = snap.val();
+    if (!v || !v.sessionId) { st.code = ''; stRenderCodeForm('그런 반 코드가 없습니다. 다시 확인해 주세요.'); return; }
+    st.code = code;
+    st.sessionId = v.sessionId;
+    lsSet('vq_last_code', code);
+    return R('sessions/' + v.sessionId).once('value').then(s2 => {
+      const sess = s2.val();
+      if (!sess) { stRenderCodeForm('반 정보를 불러오지 못했습니다.'); return; }
+      st.session = sess;
+      return R('quiz_sets/' + sess.setId).once('value').then(s3 => {
+        st.set = normSet(s3.val());
+        if (!st.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
+        stRenderIdentityForm('');
+      });
+    });
+  }).catch(e => { console.error(e); stRenderCodeForm('접속 오류: ' + e.message); });
+}
+
+function stRenderIdentityForm(err) {
+  let saved = {};
+  try { saved = JSON.parse(lsGet('vq_student', '{}')); } catch (e) {}
+  stShell(
+    '<div class="card">' +
+      '<div style="font-size:13px;color:var(--ink-2);margin-bottom:2px">' + esc(st.code) +
+        (st.session.label ? ' · ' + esc(st.session.label) : '') + '</div>' +
+      '<h2 style="font-size:19px;margin-bottom:14px">' + esc(st.set.title) + '</h2>' +
+      '<div class="row">' +
+        '<div class="col" style="flex:1 1 80px"><label class="f">학년</label>' +
+          '<input type="number" id="st-grade" inputmode="numeric" min="1" max="6" value="' + esc(saved.grade || '') + '"></div>' +
+        '<div class="col" style="flex:1 1 80px"><label class="f">반</label>' +
+          '<input type="number" id="st-klass" inputmode="numeric" min="1" max="30" value="' + esc(saved.klass || '') + '"></div>' +
+        '<div class="col" style="flex:1 1 80px"><label class="f">번호</label>' +
+          '<input type="number" id="st-num" inputmode="numeric" min="1" max="60" value="' + esc(saved.num || '') + '"></div>' +
+      '</div>' +
+      '<div class="field" style="margin-top:12px"><label class="f">이름</label>' +
+        '<input type="text" id="st-name" autocomplete="off" value="' + esc(saved.name || '') + '" placeholder="홍길동"></div>' +
+      (err ? '<div style="color:var(--bad);font-size:13px;margin-bottom:10px;font-weight:600">' + esc(err) + '</div>' : '') +
+      '<button class="btn primary lg block" onclick="stJoin()">입장</button>' +
+      '<button class="btn ghost sm block" style="margin-top:8px" onclick="go(\'join\')">다른 반 코드 입력</button>' +
+    '</div>' +
+    '<div class="privacy-note">입력한 학년·반·번호·이름과 응답 내용이 저장됩니다. 본인 정보를 정확히 입력해 주세요.</div>'
+  );
+  $('#st-name').onkeydown = e => { if (e.key === 'Enter') stJoin(); };
+}
+
+function stJoin() {
+  const grade = Number($('#st-grade').value);
+  const klass = Number($('#st-klass').value);
+  const num   = Number($('#st-num').value);
+  const name  = ($('#st-name').value || '').trim();
+  if (!grade || !klass || !num) { stRenderIdentityForm('학년·반·번호를 모두 입력하세요.'); return; }
+  if (!name) { stRenderIdentityForm('이름을 입력하세요.'); return; }
+
+  // 학년_반_번호를 키로 삼아, 새로고침하거나 기기를 바꿔도 같은 학생으로 이어지게 한다
+  const sid = grade + '_' + klass + '_' + num;
+  const me = { grade: grade, klass: klass, num: num, name: name };
+  lsSet('vq_student', JSON.stringify(me));
+
+  R('sessions/' + st.sessionId + '/students/' + sid).once('value').then(snap => {
+    const cur = snap.val();
+    if (cur && cur.name && cur.name !== name) {
+      if (!confirm(grade + '학년 ' + klass + '반 ' + num + '번은 이미 "' + cur.name + '" 학생으로 등록되어 있습니다.\n\n번호를 잘못 입력한 것이 아니라면 [확인]을 눌러 "' + name + '"(으)로 바꿉니다.')) return;
+    }
+    st.sid = sid;
+    st.me = me;
+    return R('sessions/' + st.sessionId + '/students/' + sid)
+      .set(Object.assign({}, me, { joinedAt: SV_TS }))
+      .then(() => R('responses/' + st.sessionId).once('value'))
+      .then(rs => {
+        // 새로고침 대비 — 내가 이미 낸 답을 복원한다
+        const all = rs.val() || {};
+        Object.keys(all).forEach(qi => {
+          const r = all[qi] && all[qi][sid];
+          if (r) st.myAnswers[Number(qi)] = { c: r.c, ok: !!r.ok, ms: r.ms || 0 };
+        });
+        stStartWatching();
+      });
+  }).catch(e => { console.error(e); stRenderIdentityForm('입장 실패: ' + e.message); });
+}
+
+function stStartWatching() {
+  watch(R('sessions/' + st.sessionId + '/live'), 'value', snap => {
+    const nl = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, snap.val() || {});
+    const changed = nl.q !== st.live.q || nl.openedAt !== st.live.openedAt;
+    st.live = nl;
+    if (changed) {
+      const prev = st.myAnswers[nl.q];
+      st.sel = prev ? prev.c : null;
+      st.submitted = !!prev;
+    }
+    stRender();
+  });
+  watch(R('sessions/' + st.sessionId + '/status'), 'value', snap => {
+    if (st.session) st.session.status = snap.val() || 'live';
+    stRender();
+  });
+  every(250, stTick);
+  stRender();
+}
+
+/** 설정된 공개 방식에 따라 지금 정답을 보여줘도 되는지 */
+function stRevealed() {
+  const mode = st.set.settings.revealMode;
+  if (mode === 'never') return false;
+  if (mode === 'instant') return st.submitted;
+  if (st.live.revealed) return true;               // 교사가 직접 공개
+  if (mode === 'timer') {
+    if (!st.live.openedAt) return false;
+    return (serverNow() - st.live.openedAt) / 1000 >= st.set.settings.revealDelaySec;
+  }
+  return false;
+}
+/** 제한 시간이 지났거나 이미 제출했으면 더 못 고른다 */
+function stLocked() {
+  if (st.submitted) return true;
+  const limit = Number(st.live.limitSec) || 0;
+  if (!limit || !st.live.openedAt) return false;
+  return (serverNow() - st.live.openedAt) / 1000 >= limit;
+}
+function stLeftRatio() {
+  const limit = Number(st.live.limitSec) || 0;
+  if (!limit || !st.live.openedAt) return null;
+  const left = limit - (serverNow() - st.live.openedAt) / 1000;
+  return { left: Math.max(0, left), ratio: Math.max(0, Math.min(1, left / limit)) };
+}
+
+/** 매 프레임 전체를 다시 그리면 조작감이 나빠지므로, 바뀐 것만 갱신한다 */
+function stTick() {
+  if (!st || !st.set || st.live.q < 0) return;
+  const bar = $('#st-timer');
+  const t = stLeftRatio();
+  if (bar && t) {
+    bar.querySelector('i').style.width = (t.ratio * 100) + '%';
+    bar.classList.toggle('urgent', t.left <= 5);
+    const n = $('#st-left');
+    if (n) n.textContent = Math.ceil(t.left) + '초';
+  }
+  const rev = stRevealed(), lock = stLocked();
+  if (rev !== st.uiRevealed || lock !== st.uiLocked) stRender();
+}
+
+function stRender() {
+  if (!st || !st.set || !st.sid) return;
+  const set = st.set, i = st.live.q;
+  const ended = st.session && st.session.status === 'ended';
+  const showScore = set.settings.revealMode !== 'never';
+
+  const answered = Object.keys(st.myAnswers).length;
+  const correct = Object.keys(st.myAnswers).filter(k => st.myAnswers[k].ok).length;
+
+  const header =
+    '<div class="stu-status">' +
+      '<span class="tag">' + esc(st.code) + '</span>' +
+      '<span>' + esc(st.me.grade) + '-' + esc(st.me.klass) + '-' + esc(st.me.num) + ' ' + esc(st.me.name) + '</span>' +
+      '<span class="spacer"></span>' +
+      (showScore
+        ? '<span style="color:var(--ink-2)">' + correct + ' / ' + answered + ' 정답</span>'
+        : '<span style="color:var(--ink-2)">' + answered + '문항 제출</span>') +
+    '</div>';
+
+  if (ended) {
+    stShell(header +
+      '<div class="card"><div class="stu-wait">' +
+        '<div class="big">🎉</div><h2>수업이 끝났습니다</h2>' +
+        '<p>' + esc(set.title) + '</p>' +
+        (showScore
+          ? '<div class="result-banner ok" style="margin-top:18px">' + answered + '문항 중 ' + correct + '개 정답</div>'
+          : '<div class="result-banner mute" style="margin-top:18px">' + answered + '문항 제출 완료</div>') +
+      '</div></div>');
+    st.uiQ = -3;
+    return;
+  }
+
+  if (i < 0) {
+    stShell(header +
+      '<div class="card"><div class="stu-wait">' +
+        '<div class="big">📺</div>' +
+        '<h2>선생님 화면을 보세요</h2>' +
+        '<p>퀴즈가 나오면 이 화면에 자동으로 뜹니다.</p>' +
+        (answered ? '<p style="margin-top:14px;color:var(--ink-3);font-size:13px">지금까지 ' + answered + ' / ' + set.questions.length + ' 문항 제출</p>' : '') +
+      '</div></div>');
+    st.uiQ = -1;
+    return;
+  }
+
+  const q = set.questions[i];
+  if (!q) return;
+  const revealed = stRevealed();
+  const locked = stLocked();
+  st.uiRevealed = revealed; st.uiLocked = locked; st.uiQ = i;
+
+  const t = stLeftRatio();
+  const my = st.myAnswers[i];
+
+  let banner = '';
+  if (revealed && my) {
+    banner = my.ok
+      ? '<div class="result-banner ok">⭕ 정답입니다</div>'
+      : '<div class="result-banner bad">❌ 아쉽네요 — 정답은 ' + LETTERS[q.answer] + '번</div>';
+  } else if (revealed && !my) {
+    banner = '<div class="result-banner mute">정답은 ' + LETTERS[q.answer] + '번입니다</div>';
+  } else if (st.submitted) {
+    banner = '<div class="result-banner mute">✅ 제출 완료 — 잠시 기다리세요</div>';
+  } else if (locked) {
+    banner = '<div class="result-banner mute">⏱ 시간이 끝났습니다</div>';
+  }
+
+  stShell(header +
+    '<div class="card">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
+        '<span class="tag">문항 ' + (i + 1) + ' / ' + set.questions.length + '</span>' +
+        (t ? '<span class="spacer" style="flex:1"></span><span style="font-size:13px;font-weight:700;color:' +
+             (t.left <= 5 ? 'var(--bad)' : 'var(--ink-2)') + '" id="st-left">' + Math.ceil(t.left) + '초</span>' : '') +
+      '</div>' +
+      (t ? '<div class="stu-timer' + (t.left <= 5 ? ' urgent' : '') + '" id="st-timer"><i style="width:' + (t.ratio * 100) + '%"></i></div>' : '') +
+      banner +
+      '<div class="stu-q">' + esc(q.text) + '</div>' +
+      q.choices.map((c, j) => {
+        let cls = '';
+        if (revealed) {
+          if (j === q.answer) cls = ' correct';
+          else if (my && my.c === j) cls = ' wrong';
+        } else if (st.sel === j) cls = ' sel';
+        return '<button class="stu-choice' + cls + '" ' + (locked ? 'disabled' : '') + ' onclick="stAnswer(' + j + ')">' +
+          '<span class="lt">' + LETTERS[j] + '</span><span>' + esc(c) + '</span></button>';
+      }).join('') +
+      (revealed && q.explain ? '<div class="notice info" style="margin:14px 0 0">💡 ' + esc(q.explain) + '</div>' : '') +
+    '</div>');
+}
+
+function stAnswer(j) {
+  if (!st || st.live.q < 0 || stLocked()) return;
+  const i = st.live.q, q = st.set.questions[i];
+  if (!q || !q.choices[j]) return;
+  const ok = (j === q.answer);
+  const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
+
+  st.sel = j;
+  st.submitted = true;
+  st.myAnswers[i] = { c: j, ok: ok, ms: ms };
+  stRender();
+
+  R('responses/' + st.sessionId + '/' + i + '/' + st.sid)
+    .set({ c: j, ok: ok, at: SV_TS, ms: ms })
+    .catch(e => { console.error(e); toast('전송 실패 — 다시 눌러 주세요'); st.submitted = false; stRender(); });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   8. ④ 실시간 결과 대시보드 (진행 교사용)
+   ══════════════════════════════════════════════════════════════════════ */
+let dash = null;
+
+function screenDashboard(sessionId) {
+  if (!sessionId) { go('home'); return; }
+  dash = {
+    sessionId: sessionId, session: null, set: null,
+    students: {}, answers: {},
+    sort: { key: 'no', dir: 1 },
+    open: {}
+  };
+  onCleanup(() => { dash = null; });
+
+  APP().innerHTML = topbar() + '<div class="wrap wide"><div class="empty">불러오는 중…</div></div>';
+
+  R('sessions/' + sessionId).once('value').then(snap => {
+    const sess = snap.val();
+    if (!sess) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">반 정보를 찾을 수 없습니다.</div></div></div>'; return; }
+    dash.session = sess;
+    return R('quiz_sets/' + sess.setId).once('value').then(s2 => {
+      dash.set = normSet(s2.val()) || { title: sess.setTitle || '', questions: [], settings: normSettings(null) };
+      watch(R('sessions/' + sessionId + '/students'), 'value', s => { dash.students = s.val() || {}; renderDash(); });
+      watch(R('responses/' + sessionId), 'value', s => { dash.answers = s.val() || {}; renderDash(); });
+      watch(R('sessions/' + sessionId + '/status'), 'value', s => { if (dash.session) dash.session.status = s.val(); renderDash(); });
+    });
+  }).catch(e => { console.error(e); APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>'; });
+}
+
+/** 학생별 응답을 표로 쓰기 좋게 정리 */
+function dashBuildRows() {
+  const qn = dash.set.questions.length;
+  return Object.keys(dash.students).map(sid => {
+    const s = dash.students[sid];
+    const cells = [];
+    let correct = 0, answered = 0, msSum = 0;
+    for (let i = 0; i < qn; i++) {
+      const r = (dash.answers[i] || {})[sid];
+      cells.push(r || null);
+      if (r) { answered++; if (r.ok) correct++; msSum += (r.ms || 0); }
+    }
+    return {
+      sid: sid, grade: s.grade, klass: s.klass, num: s.num, name: s.name || '',
+      cells: cells, correct: correct, answered: answered,
+      rate: answered ? correct / answered : 0,
+      avgMs: answered ? msSum / answered : 0
+    };
+  });
+}
+
+function dashSortBy(key) {
+  if (!dash) return;
+  if (dash.sort.key === key) dash.sort.dir *= -1;
+  else dash.sort = { key: key, dir: 1 };
+  renderDash();
+}
+function dashSortRows(rows) {
+  const k = dash.sort.key, d = dash.sort.dir;
+  rows.sort((a, b) => {
+    let v = 0;
+    if (k === 'no') v = (a.grade - b.grade) || (a.klass - b.klass) || (a.num - b.num);
+    else if (k === 'name') v = String(a.name).localeCompare(String(b.name), 'ko');
+    else if (k === 'correct') v = a.correct - b.correct;
+    else if (k === 'rate') v = a.rate - b.rate;
+    else if (k === 'speed') v = (a.avgMs || Infinity) - (b.avgMs || Infinity);
+    return v * d;
+  });
+  return rows;
+}
+
+function renderDash() {
+  if (!dash || !dash.set) return;
+  const qs = dash.set.questions;
+  const rows = dashSortRows(dashBuildRows());
+  const nStu = rows.length;
+
+  let totAns = 0, totCor = 0;
+  rows.forEach(r => { totAns += r.answered; totCor += r.correct; });
+  const overall = totAns ? Math.round(totCor / totAns * 100) : 0;
+  const ended = dash.session.status === 'ended';
+  const arrow = k => dash.sort.key === k ? (dash.sort.dir > 0 ? ' ▲' : ' ▼') : '';
+
+  APP().innerHTML = topbar(
+      '<a class="btn sm ghost" href="#/play/' + esc(dash.session.setId) + '">진행 화면</a>' +
+      '<button class="btn sm" onclick="dashExportCSV()">CSV 내려받기</button>'
+    ) +
+    '<div class="wrap wide">' +
+      '<h1 style="font-size:21px;margin-bottom:3px">' + esc(dash.set.title || dash.session.setTitle) + '</h1>' +
+      '<p style="color:var(--ink-2);font-size:13.5px;margin-bottom:16px">' +
+        '반 코드 <b class="mono">' + esc(dash.session.code) + '</b>' +
+        (dash.session.label ? ' · ' + esc(dash.session.label) : '') +
+        ' · ' + fmtDate(dash.session.createdAt) +
+        ' · ' + (ended ? '<span class="tag mute">종료됨</span>' : '<span class="tag ok">진행 중</span>') +
+      '</p>' +
+
+      '<div class="stat-row">' +
+        '<div class="stat"><div class="k">참여 학생</div><div class="v">' + nStu + '</div></div>' +
+        '<div class="stat"><div class="k">문항 수</div><div class="v">' + qs.length + '</div></div>' +
+        '<div class="stat"><div class="k">제출 응답</div><div class="v">' + totAns + '</div></div>' +
+        '<div class="stat"><div class="k">전체 정답률</div><div class="v">' + overall + '%</div></div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2>문항별 응답</h2>' +
+        '<div class="sub">막대를 눌러 펼치면 선택별 명단과 미응답자를 볼 수 있습니다.</div>' +
+        (qs.length ? qs.map((q, i) => dashQuestionBlock(q, i, rows)).join('') : '<div class="empty">문항이 없습니다.</div>') +
+      '</div>' +
+
+      '<div class="card">' +
+        '<h2>학생별 결과</h2>' +
+        '<div class="sub">머리글을 눌러 정렬합니다. 반응속도는 퀴즈가 뜬 뒤 답을 고르기까지 걸린 평균 시간입니다.</div>' +
+        (nStu ? '<div class="tbl-scroll"><table class="tbl">' +
+          '<thead><tr>' +
+            '<th onclick="dashSortBy(\'no\')">학년-반-번호' + arrow('no') + '</th>' +
+            '<th onclick="dashSortBy(\'name\')">이름' + arrow('name') + '</th>' +
+            qs.map((q, i) => '<th class="ctr nosort" title="' + esc(q.text) + '">' + (i + 1) + '</th>').join('') +
+            '<th class="ctr" onclick="dashSortBy(\'correct\')">정답' + arrow('correct') + '</th>' +
+            '<th class="ctr" onclick="dashSortBy(\'rate\')">정답률' + arrow('rate') + '</th>' +
+            '<th class="ctr" onclick="dashSortBy(\'speed\')">평균 반응' + arrow('speed') + '</th>' +
+          '</tr></thead><tbody>' +
+          rows.map(r => '<tr>' +
+            '<td class="mono">' + r.grade + '-' + r.klass + '-' + r.num + '</td>' +
+            '<td>' + esc(r.name) + '</td>' +
+            r.cells.map(c => '<td class="ctr">' + (!c ? '<span class="ox-none">·</span>' :
+              (c.ok ? '<span class="ox-o">O</span>' : '<span class="ox-x">X</span>')) + '</td>').join('') +
+            '<td class="ctr">' + r.correct + ' / ' + r.answered + '</td>' +
+            '<td class="ctr">' + (r.answered ? Math.round(r.rate * 100) + '%' : '–') + '</td>' +
+            '<td class="ctr">' + (r.answered ? (r.avgMs / 1000).toFixed(1) + '초' : '–') + '</td>' +
+          '</tr>').join('') +
+          '</tbody></table></div>'
+          : '<div class="empty">아직 입장한 학생이 없습니다.</div>') +
+      '</div>' +
+    '</div>';
+}
+
+function dashQuestionBlock(q, i, rows) {
+  const resp = dash.answers[i] || {};
+  const keys = Object.keys(resp);
+  const total = keys.length;
+  const counts = q.choices.map(() => 0);
+  keys.forEach(k => { const c = resp[k].c; if (counts[c] !== undefined) counts[c]++; });
+  const nCor = keys.filter(k => resp[k].ok).length;
+  const rate = total ? Math.round(nCor / total * 100) : 0;
+  const isOpen = !!dash.open[i];
+
+  const byChoice = q.choices.map(() => []);
+  const missing = [];
+  rows.forEach(r => {
+    const rr = resp[r.sid];
+    if (!rr) { missing.push(r); return; }
+    if (byChoice[rr.c]) byChoice[rr.c].push(r);
+  });
+
+  return '<div class="acc-item">' +
+    '<div class="hd" onclick="dashToggle(' + i + ')">' +
+      '<span class="tag mute mono">' + fmtTime(q.t) + '</span>' +
+      '<span>' + (i + 1) + '. ' + esc(q.text) + '</span>' +
+      '<span class="spacer"></span>' +
+      '<span class="tag mute">' + total + '명</span>' +
+      '<span class="tag ' + (rate >= 70 ? 'ok' : rate >= 40 ? 'warn' : 'bad') + '">정답률 ' + rate + '%</span>' +
+      '<span style="color:var(--ink-3)">' + (isOpen ? '▲' : '▼') + '</span>' +
+    '</div>' +
+    (isOpen ? '<div class="bd">' +
+      q.choices.map((c, j) => {
+        const pct = total ? Math.round(counts[j] / total * 100) : 0;
+        return '<div class="dist-row' + (j === q.answer ? ' is-ans' : '') + '">' +
+          '<span class="lt">' + LETTERS[j] + '</span>' +
+          '<span class="txt" title="' + esc(c) + '">' + esc(c) + '</span>' +
+          '<span class="track"><i style="width:' + pct + '%"></i></span>' +
+          '<span class="n">' + counts[j] + '명 ' + pct + '%</span>' +
+        '</div>' +
+        (byChoice[j].length ? '<div style="font-size:12px;color:var(--ink-3);margin:-2px 0 8px 33px">' +
+          byChoice[j].map(r => esc(r.name) + '(' + r.num + ')').join(', ') + '</div>' : '');
+      }).join('') +
+      (missing.length ? '<div style="margin-top:10px;font-size:12.5px;color:var(--warn)"><b>미응답 ' + missing.length + '명</b> — ' +
+        missing.map(r => esc(r.name) + '(' + r.grade + '-' + r.klass + '-' + r.num + ')').join(', ') + '</div>' : '') +
+      (q.explain ? '<div class="notice info" style="margin:12px 0 0">💡 ' + esc(q.explain) + '</div>' : '') +
+    '</div>' : '') +
+  '</div>';
+}
+
+function dashToggle(i) { dash.open[i] = !dash.open[i]; renderDash(); }
+
+function dashExportCSV() {
+  if (!dash) return;
+  const qs = dash.set.questions;
+  const rows = dashSortRows(dashBuildRows());
+  const head = ['학년', '반', '번호', '이름'];
+  qs.forEach((q, i) => { head.push((i + 1) + '번 선택'); head.push((i + 1) + '번 정오'); head.push((i + 1) + '번 반응(초)'); });
+  head.push('정답 수', '응답 수', '정답률(%)', '평균 반응(초)');
+
+  const out = [
+    ['퀴즈 세트', dash.set.title || dash.session.setTitle],
+    ['반 코드', dash.session.code],
+    ['반 이름', dash.session.label || ''],
+    ['진행 일시', fmtDate(dash.session.createdAt)],
+    [],
+    head
+  ];
+  rows.forEach(r => {
+    const line = [r.grade, r.klass, r.num, r.name];
+    r.cells.forEach(c => {
+      line.push(c ? LETTERS[c.c] : '');
+      line.push(c ? (c.ok ? 'O' : 'X') : '미응답');
+      line.push(c ? (c.ms / 1000).toFixed(1) : '');
+    });
+    line.push(r.correct, r.answered, r.answered ? Math.round(r.rate * 100) : '', r.answered ? (r.avgMs / 1000).toFixed(1) : '');
+    out.push(line);
+  });
+
+  const safe = String(dash.set.title || '퀴즈').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+  downloadCSV(safe + '_' + dash.session.code + '_' + fmtDay(dash.session.createdAt) + '.csv', out);
+  toast('CSV를 내려받았습니다');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   9. ⑤ 관리자 통합 조회 화면
+   ══════════════════════════════════════════════════════════════════════ */
+/* 기본 비밀번호 admin1234 의 SHA-256. 관리자 화면에서 바꾸면 vq/config/adminHash 에 저장된다.
+   ※ 클라이언트 검증이므로 화면 접근을 막아줄 뿐, DB 자체를 잠그지는 못한다 (README 참고). */
+const DEFAULT_ADMIN_HASH = 'ac9689e2272427085e35b9d3e3e8bed88cb3434828b43b86fc0596cad4c6e270';
+
+let adm = null;
+
+function screenAdmin() {
+  adm = {
+    sessions: {}, resp: {}, sets: {},
+    from: '', to: '', setFilter: '', gradeFilter: '', klassFilter: '',
+    tab: 'sessions', loading: false, detail: null
+  };
+  onCleanup(() => { adm = null; });
+
+  if (ssGet('vq_admin') === '1') admRenderShell();
+  else admRenderLogin('');
+}
+
+function admRenderLogin(err) {
+  APP().innerHTML = topbar() + '<div class="wrap" style="max-width:420px">' +
+    '<div class="card" style="margin-top:40px;text-align:center;padding:30px 24px">' +
+      '<div style="font-size:38px;margin-bottom:6px">🔐</div>' +
+      '<h2 style="font-size:19px;margin-bottom:4px">관리자 로그인</h2>' +
+      '<p style="color:var(--ink-2);font-size:13.5px;margin-bottom:18px">학생 개인정보가 포함된 화면입니다.</p>' +
+      '<input type="password" id="adm-pw" placeholder="비밀번호" style="text-align:center">' +
+      (err ? '<div style="color:var(--bad);font-size:13px;margin-top:10px;font-weight:600">' + esc(err) + '</div>' : '') +
+      '<button class="btn primary lg block" style="margin-top:14px" onclick="admLogin()">로그인</button>' +
+    '</div></div>';
+  const inp = $('#adm-pw');
+  inp.onkeydown = e => { if (e.key === 'Enter') admLogin(); };
+  inp.focus();
+}
+
+function admLogin() {
+  const pw = $('#adm-pw').value;
+  if (!pw) return;
+  Promise.all([sha256(pw), R('config/adminHash').once('value')]).then(([h, snap]) => {
+    const want = snap.val() || DEFAULT_ADMIN_HASH;
+    if (h !== want) { admRenderLogin('비밀번호가 올바르지 않습니다.'); return; }
+    ssSet('vq_admin', '1');
+    admRenderShell();
+  }).catch(e => { console.error(e); admRenderLogin('확인 실패: ' + e.message); });
+}
+function admLogout() {
+  ssDel('vq_admin');
+  go('home');
+}
+
+function admRenderShell() {
+  const today = new Date();
+  const ago = new Date(today.getTime() - 29 * 86400000);
+  adm.from = adm.from || fmtDay(ago.getTime());
+  adm.to = adm.to || fmtDay(today.getTime());
+
+  APP().innerHTML = topbar('<button class="btn sm ghost" onclick="admLogout()">로그아웃</button>') +
+    '<div class="wrap wide">' +
+      '<h1 style="font-size:21px;margin-bottom:3px">관리자 통합 조회</h1>' +
+      '<p style="color:var(--ink-2);font-size:13.5px;margin-bottom:16px">전체 반의 응답을 학년·반·번호·이름 기준으로 모아 봅니다.</p>' +
+      '<div class="card">' +
+        '<div class="filters">' +
+          '<div class="fc"><label class="f">시작일</label><input type="date" id="adm-from" value="' + adm.from + '"></div>' +
+          '<div class="fc"><label class="f">종료일</label><input type="date" id="adm-to" value="' + adm.to + '"></div>' +
+          '<div class="fc"><label class="f">학년</label><input type="number" id="adm-grade" min="1" max="6" placeholder="전체" value="' + esc(adm.gradeFilter) + '"></div>' +
+          '<div class="fc"><label class="f">반</label><input type="number" id="adm-klass" min="1" max="30" placeholder="전체" value="' + esc(adm.klassFilter) + '"></div>' +
+          '<div class="fc" style="flex:1 1 220px"><label class="f">퀴즈 세트</label><select id="adm-set"><option value="">전체</option></select></div>' +
+          '<button class="btn primary" onclick="admLoad()">조회</button>' +
+        '</div>' +
+        '<div class="row">' +
+          '<button class="btn sm" onclick="admTab(\'sessions\')">진행 기록</button>' +
+          '<button class="btn sm" onclick="admTab(\'students\')">학생별 누적</button>' +
+          '<button class="btn sm" onclick="admTab(\'classes\')">학년·반 집계</button>' +
+          '<div style="flex:1"></div>' +
+          '<button class="btn sm ghost" onclick="admTab(\'manage\')">⚙ 관리</button>' +
+        '</div>' +
+      '</div>' +
+      '<div id="adm-body"><div class="empty">기간을 정하고 [조회]를 누르세요.</div></div>' +
+    '</div>';
+
+  $('#adm-from').onchange = e => { adm.from = e.target.value; };
+  $('#adm-to').onchange = e => { adm.to = e.target.value; };
+  $('#adm-grade').oninput = e => { adm.gradeFilter = e.target.value; admRenderBody(); };
+  $('#adm-klass').oninput = e => { adm.klassFilter = e.target.value; admRenderBody(); };
+  $('#adm-set').onchange = e => { adm.setFilter = e.target.value; admRenderBody(); };
+  admLoad();
+}
+
+function admTab(t) { adm.tab = t; admRenderBody(); }
+
+/** 기간에 걸린 세션만 골라 응답을 불러온다 — 전체를 매번 읽지 않기 위해 */
+function admLoad() {
+  const body = $('#adm-body');
+  body.innerHTML = '<div class="empty">불러오는 중…</div>';
+  adm.loading = true;
+  adm.detail = null;
+
+  const fromTs = adm.from ? new Date(adm.from + 'T00:00:00').getTime() : 0;
+  const toTs = adm.to ? new Date(adm.to + 'T23:59:59').getTime() : Infinity;
+
+  R('sessions').once('value').then(snap => {
+    const all = snap.val() || {};
+    const picked = {};
+    Object.keys(all).forEach(id => {
+      const s = all[id];
+      const ts = s.createdAt || 0;
+      if (ts >= fromTs && ts <= toTs) picked[id] = s;
+    });
+    adm.sessions = picked;
+
+    const ids = Object.keys(picked);
+    if (ids.length > 300) {
+      body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' + ids.length +
+        '건입니다. 기간을 좁혀서 조회해 주세요.</div></div>';
+      adm.loading = false;
+      return;
+    }
+    return Promise.all(ids.map(id => R('responses/' + id).once('value').then(s => [id, s.val() || {}])))
+      .then(pairs => {
+        adm.resp = {};
+        pairs.forEach(([id, v]) => { adm.resp[id] = v; });
+        adm.loading = false;
+        admFillSetOptions();
+        admRenderBody();
+      });
+  }).catch(e => { console.error(e); body.innerHTML = '<div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div>'; });
+}
+
+function admFillSetOptions() {
+  const sel = $('#adm-set');
+  if (!sel) return;
+  const titles = {};
+  Object.keys(adm.sessions).forEach(id => {
+    const s = adm.sessions[id];
+    if (s.setId) titles[s.setId] = s.setTitle || s.setId;
+  });
+  sel.innerHTML = '<option value="">전체 세트</option>' +
+    Object.keys(titles).map(k => '<option value="' + esc(k) + '"' + (adm.setFilter === k ? ' selected' : '') + '>' + esc(titles[k]) + '</option>').join('');
+}
+
+/** 필터를 적용한 세션 목록 + 학생 단위로 펼친 응답 레코드 */
+function admCompute() {
+  const g = adm.gradeFilter ? Number(adm.gradeFilter) : null;
+  const k = adm.klassFilter ? Number(adm.klassFilter) : null;
+
+  const sessions = Object.keys(adm.sessions)
+    .filter(id => !adm.setFilter || adm.sessions[id].setId === adm.setFilter)
+    .map(id => Object.assign({ id: id }, adm.sessions[id]))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  // 학생 키(학년_반_번호) → 누적
+  const students = {};
+  const perSession = {};
+
+  sessions.forEach(sess => {
+    const studs = sess.students || {};
+    const resp = adm.resp[sess.id] || {};
+    let sAns = 0, sCor = 0, sStu = 0;
+
+    Object.keys(studs).forEach(sid => {
+      const s = studs[sid];
+      if (g !== null && Number(s.grade) !== g) return;
+      if (k !== null && Number(s.klass) !== k) return;
+      sStu++;
+
+      let answered = 0, correct = 0;
+      Object.keys(resp).forEach(qi => {
+        const r = resp[qi][sid];
+        if (r) { answered++; if (r.ok) correct++; }
+      });
+      sAns += answered; sCor += correct;
+
+      const key = sid;
+      if (!students[key]) {
+        students[key] = {
+          key: key, grade: Number(s.grade), klass: Number(s.klass), num: Number(s.num),
+          name: s.name || '', names: {}, lastAt: 0,
+          sessions: [], answered: 0, correct: 0
+        };
+      }
+      const rec = students[key];
+      rec.names[s.name || ''] = (rec.names[s.name || ''] || 0) + 1;
+      if ((sess.createdAt || 0) >= rec.lastAt) { rec.lastAt = sess.createdAt || 0; rec.name = s.name || rec.name; }
+      rec.answered += answered;
+      rec.correct += correct;
+      rec.sessions.push({
+        id: sess.id, title: sess.setTitle || '', code: sess.code, label: sess.label || '',
+        at: sess.createdAt || 0, answered: answered, correct: correct
+      });
+    });
+
+    perSession[sess.id] = { students: sStu, answered: sAns, correct: sCor };
+  });
+
+  return { sessions: sessions, students: students, perSession: perSession };
+}
+
+function admRenderBody() {
+  const body = $('#adm-body');
+  if (!body || adm.loading) return;
+  const data = admCompute();
+
+  if (adm.detail) { body.innerHTML = admStudentDetail(data, adm.detail); return; }
+  if (adm.tab === 'manage')  { body.innerHTML = admManage(data); return; }
+  if (adm.tab === 'students'){ body.innerHTML = admStudentsView(data); return; }
+  if (adm.tab === 'classes') { body.innerHTML = admClassesView(data); return; }
+  body.innerHTML = admSessionsView(data);
+}
+
+function admSessionsView(d) {
+  if (!d.sessions.length) return '<div class="card"><div class="empty">해당 기간에 진행 기록이 없습니다.</div></div>';
+  let tS = 0, tA = 0, tC = 0;
+  d.sessions.forEach(s => { const p = d.perSession[s.id]; tS += p.students; tA += p.answered; tC += p.correct; });
+
+  return '<div class="stat-row">' +
+      '<div class="stat"><div class="k">진행 반 수</div><div class="v">' + d.sessions.length + '</div></div>' +
+      '<div class="stat"><div class="k">연인원</div><div class="v">' + tS + '</div></div>' +
+      '<div class="stat"><div class="k">제출 응답</div><div class="v">' + tA + '</div></div>' +
+      '<div class="stat"><div class="k">전체 정답률</div><div class="v">' + (tA ? Math.round(tC / tA * 100) : 0) + '%</div></div>' +
+    '</div>' +
+    '<div class="card"><h2>진행 기록</h2>' +
+      '<div class="sub">최근 순입니다. 반 코드를 누르면 그 반의 대시보드로 갑니다.</div>' +
+      '<div class="tbl-scroll"><table class="tbl"><thead><tr>' +
+        '<th class="nosort">일시</th><th class="nosort">퀴즈 세트</th><th class="nosort">반 이름</th>' +
+        '<th class="nosort">코드</th><th class="nosort ctr">학생</th><th class="nosort ctr">응답</th>' +
+        '<th class="nosort ctr">정답률</th><th class="nosort ctr">상태</th>' +
+      '</tr></thead><tbody>' +
+      d.sessions.map(s => {
+        const p = d.perSession[s.id];
+        return '<tr>' +
+          '<td>' + fmtDate(s.createdAt) + '</td>' +
+          '<td>' + esc(s.setTitle || '') + '</td>' +
+          '<td>' + esc(s.label || '') + '</td>' +
+          '<td><a class="mono" href="#/live/' + esc(s.id) + '">' + esc(s.code || '') + '</a></td>' +
+          '<td class="ctr">' + p.students + '</td>' +
+          '<td class="ctr">' + p.answered + '</td>' +
+          '<td class="ctr">' + (p.answered ? Math.round(p.correct / p.answered * 100) + '%' : '–') + '</td>' +
+          '<td class="ctr">' + (s.status === 'ended' ? '<span class="tag mute">종료</span>' : '<span class="tag ok">진행</span>') + '</td>' +
+        '</tr>';
+      }).join('') +
+      '</tbody></table></div>' +
+      '<div style="margin-top:12px"><button class="btn sm" onclick="admExportSessions()">CSV 내려받기</button></div>' +
+    '</div>';
+}
+
+function admStudentList(d) {
+  return Object.keys(d.students).map(k => d.students[k])
+    .sort((a, b) => (a.grade - b.grade) || (a.klass - b.klass) || (a.num - b.num));
+}
+
+function admStudentsView(d) {
+  const list = admStudentList(d);
+  if (!list.length) return '<div class="card"><div class="empty">해당 조건의 학생 기록이 없습니다.</div></div>';
+  return '<div class="card"><h2>학생별 누적</h2>' +
+    '<div class="sub">여러 반·여러 세트에 걸친 응답을 학년·반·번호 기준으로 합산했습니다. 이름을 누르면 개인 이력이 열립니다.</div>' +
+    '<div class="tbl-scroll"><table class="tbl"><thead><tr>' +
+      '<th class="nosort">학년</th><th class="nosort">반</th><th class="nosort">번호</th><th class="nosort">이름</th>' +
+      '<th class="nosort ctr">참여 횟수</th><th class="nosort ctr">응답</th><th class="nosort ctr">정답</th><th class="nosort ctr">정답률</th>' +
+    '</tr></thead><tbody>' +
+    list.map(s => {
+      const alias = Object.keys(s.names).filter(n => n && n !== s.name);
+      return '<tr>' +
+        '<td>' + s.grade + '</td><td>' + s.klass + '</td><td>' + s.num + '</td>' +
+        '<td><a href="javascript:void(0)" onclick="admOpenStudent(\'' + esc(s.key) + '\')">' + esc(s.name) + '</a>' +
+          (alias.length ? ' <span class="tag warn" title="다른 이름으로도 입력된 적이 있습니다">' + esc(alias.join(', ')) + '</span>' : '') + '</td>' +
+        '<td class="ctr">' + s.sessions.length + '</td>' +
+        '<td class="ctr">' + s.answered + '</td>' +
+        '<td class="ctr">' + s.correct + '</td>' +
+        '<td class="ctr">' + (s.answered ? Math.round(s.correct / s.answered * 100) + '%' : '–') + '</td>' +
+      '</tr>';
+    }).join('') +
+    '</tbody></table></div>' +
+    '<div style="margin-top:12px"><button class="btn sm" onclick="admExportStudents()">CSV 내려받기</button></div>' +
+  '</div>';
+}
+
+function admOpenStudent(key) { adm.detail = key; admRenderBody(); }
+function admCloseStudent() { adm.detail = null; admRenderBody(); }
+
+function admStudentDetail(d, key) {
+  const s = d.students[key];
+  if (!s) return '<div class="card"><div class="empty">기록이 없습니다. <button class="btn sm" onclick="admCloseStudent()">돌아가기</button></div></div>';
+  const list = s.sessions.slice().sort((a, b) => b.at - a.at);
+  return '<div class="card">' +
+    '<div class="row" style="align-items:center;margin-bottom:10px">' +
+      '<button class="btn sm ghost" onclick="admCloseStudent()">← 목록</button>' +
+      '<h2 style="font-size:18px">' + s.grade + '학년 ' + s.klass + '반 ' + s.num + '번 ' + esc(s.name) + '</h2>' +
+    '</div>' +
+    '<div class="stat-row">' +
+      '<div class="stat"><div class="k">참여 횟수</div><div class="v">' + list.length + '</div></div>' +
+      '<div class="stat"><div class="k">총 응답</div><div class="v">' + s.answered + '</div></div>' +
+      '<div class="stat"><div class="k">정답</div><div class="v">' + s.correct + '</div></div>' +
+      '<div class="stat"><div class="k">누적 정답률</div><div class="v">' + (s.answered ? Math.round(s.correct / s.answered * 100) : 0) + '%</div></div>' +
+    '</div>' +
+    '<div class="tbl-scroll"><table class="tbl"><thead><tr>' +
+      '<th class="nosort">일시</th><th class="nosort">퀴즈 세트</th><th class="nosort">반</th>' +
+      '<th class="nosort ctr">정답 / 응답</th><th class="nosort ctr">정답률</th><th class="nosort"></th>' +
+    '</tr></thead><tbody>' +
+    list.map(r => '<tr>' +
+      '<td>' + fmtDate(r.at) + '</td>' +
+      '<td>' + esc(r.title) + '</td>' +
+      '<td>' + esc(r.label || r.code) + '</td>' +
+      '<td class="ctr">' + r.correct + ' / ' + r.answered + '</td>' +
+      '<td class="ctr">' + (r.answered ? Math.round(r.correct / r.answered * 100) + '%' : '–') + '</td>' +
+      '<td><a class="btn sm ghost" href="#/live/' + esc(r.id) + '">대시보드</a></td>' +
+    '</tr>').join('') +
+    '</tbody></table></div>' +
+  '</div>';
+}
+
+function admClassesView(d) {
+  const list = admStudentList(d);
+  if (!list.length) return '<div class="card"><div class="empty">해당 조건의 기록이 없습니다.</div></div>';
+  const agg = {};
+  list.forEach(s => {
+    const k = s.grade + '-' + s.klass;
+    if (!agg[k]) agg[k] = { grade: s.grade, klass: s.klass, students: 0, answered: 0, correct: 0 };
+    agg[k].students++;
+    agg[k].answered += s.answered;
+    agg[k].correct += s.correct;
+  });
+  const rows = Object.keys(agg).map(k => agg[k]).sort((a, b) => (a.grade - b.grade) || (a.klass - b.klass));
+
+  return '<div class="card"><h2>학년·반 집계</h2>' +
+    '<div class="sub">기간 내 응답 전체를 학급 단위로 합산했습니다.</div>' +
+    '<div class="tbl-scroll"><table class="tbl"><thead><tr>' +
+      '<th class="nosort">학년</th><th class="nosort">반</th><th class="nosort ctr">참여 학생</th>' +
+      '<th class="nosort ctr">응답</th><th class="nosort ctr">정답</th><th class="nosort ctr">정답률</th><th class="nosort">분포</th>' +
+    '</tr></thead><tbody>' +
+    rows.map(r => {
+      const pct = r.answered ? Math.round(r.correct / r.answered * 100) : 0;
+      return '<tr>' +
+        '<td>' + r.grade + '</td><td>' + r.klass + '</td>' +
+        '<td class="ctr">' + r.students + '</td>' +
+        '<td class="ctr">' + r.answered + '</td>' +
+        '<td class="ctr">' + r.correct + '</td>' +
+        '<td class="ctr">' + pct + '%</td>' +
+        '<td style="min-width:160px"><span class="track" style="display:block;height:14px;background:#eceef4;border-radius:4px;overflow:hidden">' +
+          '<i style="display:block;height:100%;width:' + pct + '%;background:var(--accent)"></i></span></td>' +
+      '</tr>';
+    }).join('') +
+    '</tbody></table></div></div>';
+}
+
+function admManage(d) {
+  return '<div class="card">' +
+      '<h2>비밀번호 변경</h2>' +
+      '<div class="sub">변경하면 모든 기기에서 새 비밀번호로 로그인합니다.</div>' +
+      '<div class="row" style="align-items:flex-end">' +
+        '<div class="fc" style="flex:1 1 200px"><label class="f">새 비밀번호 (4자 이상)</label>' +
+          '<input type="password" id="adm-newpw"></div>' +
+        '<div class="fc" style="flex:1 1 200px"><label class="f">한 번 더</label>' +
+          '<input type="password" id="adm-newpw2"></div>' +
+        '<button class="btn primary" onclick="admChangePw()">변경</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<h2>기간 지정 삭제</h2>' +
+      '<div class="sub">학교 개인정보 보관 기준에 따라 오래된 기록을 지웁니다. 되돌릴 수 없습니다.</div>' +
+      '<div class="notice">현재 조회 조건(' + esc(adm.from) + ' ~ ' + esc(adm.to) + ')에 해당하는 <b>' +
+        d.sessions.length + '개 진행 기록</b>과 그 안의 모든 학생 응답이 함께 삭제됩니다. ' +
+        '퀴즈 세트 자체는 지워지지 않습니다.</div>' +
+      '<button class="btn danger" onclick="admPurge()">이 기간 기록 삭제</button>' +
+    '</div>' +
+    '<div class="card">' +
+      '<h2>안내</h2>' +
+      '<div style="font-size:13.5px;color:var(--ink-2);line-height:1.9">' +
+        '· 이 화면은 학생 개인정보(학년·반·번호·이름)를 다룹니다. 공용 PC에서는 반드시 로그아웃하세요.<br>' +
+        '· 비밀번호는 브라우저에서 확인하는 방식이라 화면 접근을 막아줄 뿐입니다. 데이터베이스 자체를 잠그려면 Firebase 인증 도입이 필요합니다.<br>' +
+        '· 세션·응답은 Firebase Realtime Database의 <span class="mono">vq/</span> 경로에 저장됩니다.' +
+      '</div>' +
+    '</div>';
+}
+
+function admChangePw() {
+  const a = $('#adm-newpw').value, b = $('#adm-newpw2').value;
+  if (!a || a.length < 4) { alert('비밀번호는 4자 이상이어야 합니다.'); return; }
+  if (a !== b) { alert('두 입력이 다릅니다.'); return; }
+  sha256(a).then(h => R('config/adminHash').set(h)).then(() => {
+    toast('비밀번호를 변경했습니다');
+    $('#adm-newpw').value = ''; $('#adm-newpw2').value = '';
+  }).catch(e => alert('변경 실패: ' + e.message));
+}
+
+function admPurge() {
+  const d = admCompute();
+  if (!d.sessions.length) { alert('삭제할 기록이 없습니다.'); return; }
+  const msg = adm.from + ' ~ ' + adm.to + ' 기간의 진행 기록 ' + d.sessions.length + '건과 모든 학생 응답을 영구 삭제합니다.\n되돌릴 수 없습니다. 계속하려면 아래에 삭제 를 입력하세요.';
+  const typed = prompt(msg, '');
+  if (typed === null) return;
+  if (typed.trim() !== '삭제') { alert('취소되었습니다.'); return; }
+
+  const updates = {};
+  d.sessions.forEach(s => {
+    updates['sessions/' + s.id] = null;
+    updates['responses/' + s.id] = null;
+    if (s.code) updates['codes/' + s.code] = null;
+  });
+  R('').update(updates).then(() => {
+    toast(d.sessions.length + '건을 삭제했습니다');
+    admLoad();
+  }).catch(e => alert('삭제 실패: ' + e.message));
+}
+
+function admExportSessions() {
+  const d = admCompute();
+  const out = [['진행 일시', '퀴즈 세트', '반 이름', '반 코드', '참여 학생', '제출 응답', '정답 수', '정답률(%)', '상태']];
+  d.sessions.forEach(s => {
+    const p = d.perSession[s.id];
+    out.push([fmtDate(s.createdAt), s.setTitle || '', s.label || '', s.code || '',
+      p.students, p.answered, p.correct, p.answered ? Math.round(p.correct / p.answered * 100) : '',
+      s.status === 'ended' ? '종료' : '진행']);
+  });
+  downloadCSV('영상퀴즈_진행기록_' + adm.from + '_' + adm.to + '.csv', out);
+}
+
+function admExportStudents() {
+  const d = admCompute();
+  const out = [['학년', '반', '번호', '이름', '참여 횟수', '제출 응답', '정답 수', '정답률(%)']];
+  admStudentList(d).forEach(s => {
+    out.push([s.grade, s.klass, s.num, s.name, s.sessions.length, s.answered, s.correct,
+      s.answered ? Math.round(s.correct / s.answered * 100) : '']);
+  });
+  downloadCSV('영상퀴즈_학생별누적_' + adm.from + '_' + adm.to + '.csv', out);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   부팅 — 익명 로그인 후 라우팅
+
+   교사도 학생도 아무것도 로그인하지 않습니다. 페이지를 여는 순간 브라우저가
+   조용히 익명 계정을 발급받고, 데이터베이스 규칙(auth != null)은 그 계정만
+   통과시킵니다. 주소만 알아낸 외부인이 학생 이름을 긁어가는 것을 막기 위한 장치입니다.
+   ══════════════════════════════════════════════════════════════════════ */
+function bootWithAuth() {
+  APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">연결 중…</div></div>';
+
+  firebase.auth().onAuthStateChanged(user => {
+    if (user && !authReady) { authReady = true; router(); }
+  });
+
+  firebase.auth().signInAnonymously().catch(err => {
+    console.error(err);
+    // operation-not-allowed = 익명 공급자만 꺼져 있음 / configuration-not-found = Authentication 자체가 미설정
+    const code = String(err.code || '');
+    const needsEnable = code.indexOf('operation-not-allowed') >= 0 || code.indexOf('configuration-not-found') >= 0;
+    APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
+      '<h2>접속할 수 없습니다</h2>' +
+      '<div class="notice" style="margin-top:12px">' +
+        (needsEnable
+          ? 'Firebase에서 <b>익명 로그인</b>이 아직 켜져 있지 않습니다.<br>' +
+            'Firebase 콘솔 → <b>Authentication → Sign-in method → 익명</b>을 사용 설정한 뒤 새로고침하세요.'
+          : '오류: ' + esc(err.message)) +
+      '</div>' +
+      '<button class="btn primary" onclick="location.reload()">새로고침</button>' +
+    '</div></div>';
+  });
+}
+bootWithAuth();
+</script>
+</body>
+</html>
