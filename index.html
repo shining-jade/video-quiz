@@ -525,7 +525,9 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="firestore-core.js"></script>
+<script src="firestore-store.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
 
@@ -553,16 +555,15 @@ const firebaseConfig = {
   appId: "1:931590286071:web:ec229442ee844b78d981f2"
 };
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-const db = firebase.database();
-const SV_TS = firebase.database.ServerValue.TIMESTAMP;
+const db = firebase.firestore();
+const store = FirestoreStore.createFirestoreStore(db, firebase.firestore.FieldValue, () => Date.now());
+const SV_TS = firebase.firestore.FieldValue.serverTimestamp();
 
 /** vq/ 네임스페이스 아래의 ref를 반환 (path가 비면 vq 루트) */
 function R(path) { return db.ref(path ? 'vq/' + path : 'vq'); }
 
-/* 서버 시각 보정 — 기기마다 시계가 달라도 카운트다운이 어긋나지 않게 한다. */
-let serverOffset = 0;
-db.ref('.info/serverTimeOffset').on('value', s => { serverOffset = s.val() || 0; });
-function serverNow() { return Date.now() + serverOffset; }
+/* 서버 시각 보정 — 인증 뒤 고유 clock 문서로 동기화한다. */
+function serverNow() { return store.serverNow(); }
 
 /* ── 연결 감시 ─────────────────────────────────────────────────────────
    무선망이 끊기거나, 무료 요금제의 동시 접속 한도(100명)를 넘겨 연결이
