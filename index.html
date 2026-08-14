@@ -3175,7 +3175,7 @@ function stBuildAnswer() {
 }
 
 function stSubmitCurrent(source) {
-  if (!st || st.live.q < 0 || stLocked() || st.submitted) return Promise.resolve(false);
+  if (!st || st.live.q < 0 || (source !== 'timer' && stLocked()) || st.submitted) return Promise.resolve(false);
   const built = stBuildAnswer();
   if (!built) {
     if (source !== 'timer') toast('답을 선택하거나 입력한 뒤 제출하세요');

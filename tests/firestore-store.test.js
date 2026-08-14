@@ -1429,6 +1429,23 @@ test('마감 시 선택한 답은 한 번 자동 제출하고 빈 답은 미제�
   assert.equal(submits, 1);
 });
 
+test('타이머 자동 제출은 마감 잠금이 시작된 순간에도 선택 답을 저장한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let sent = 0;
+  const context = {
+    st: { live: { q: 0 }, submitted: false, revision: 0 },
+    stLocked() { return true; },
+    stBuildAnswer() { return { payload: { c: 0 }, local: { c: 0 } }; },
+    stSend(payload) { sent += 1; assert.equal(payload.source, 'timer'); return Promise.resolve(); },
+    toast() {}
+  };
+  vm.runInNewContext(extractFunction(html, 'stSubmitCurrent'), context);
+
+  await context.stSubmitCurrent('timer');
+
+  assert.equal(sent, 1);
+});
+
 test('익명 인증 뒤 고유 서버 시각 동기화가 끝나야 라우터를 시작한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let authListener;
