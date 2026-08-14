@@ -267,7 +267,8 @@ textarea { resize: vertical; min-height: 62px; }
 /* 퀴즈가 열리면 영상은 왼쪽에 그대로 두고 문항을 오른쪽에 붙인다.
    iframe 을 DOM 에서 옮기면 영상이 처음부터 다시 로드되므로 CSS 로만 자리를 바꾼다. */
 @media (min-width: 900px) {
-  body.quiz-open #overlay { left: 53vw; padding: 26px 30px; }
+  /* 반쪽 패널이 되면 뒤 페이지가 비쳐 산만하므로 불투명하게 */
+  body.quiz-open #overlay { left: 53vw; padding: 26px 30px; background: #12162a; }
   body.quiz-open #pl-video {
     position: fixed; left: 0; top: 0; width: 53vw; height: 100vh; z-index: 201;
     margin: 0; padding: 0; border: 0; border-radius: 0; background: #000;
