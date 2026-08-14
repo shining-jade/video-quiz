@@ -183,6 +183,11 @@
       return db.doc('sessions/' + sessionId + '/meta/live').set(live);
     }
 
+    function revealLive(sessionId) {
+      return db.doc('sessions/' + sessionId + '/meta/live')
+        .set({ revealed: true }, { merge: true });
+    }
+
     async function endSession(sessionId) {
       await db.doc('sessions/' + sessionId).set({
         status: 'ended',
@@ -222,6 +227,7 @@
       mergeAnswer,
       getBoard,
       setLive,
+      revealLive,
       endSession,
       writeBoard,
 

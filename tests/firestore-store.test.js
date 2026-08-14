@@ -732,6 +732,22 @@ test('live 갱신은 meta/live 문서를 통째로 교체한다', async () => {
   assert.deepEqual(fake.value('sessions/a/meta/live'), waiting);
 });
 
+test('정답 공개는 revealed만 병합해 openedAt Timestamp를 그대로 보존한다', async () => {
+  const openedAt = { toMillis: () => 12_345 };
+  const fake = makeFirestoreFake({
+    'sessions/a/meta/live': { q: 2, openedAt, revealed: false, limitSec: 30 }
+  });
+  const store = createStore(fake);
+
+  await store.revealLive('a');
+
+  const live = fake.value('sessions/a/meta/live');
+  assert.equal(live.q, 2);
+  assert.equal(live.openedAt.toMillis(), 12_345);
+  assert.equal(live.revealed, true);
+  assert.equal(live.limitSec, 30);
+});
+
 test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린다', async () => {
   const fake = makeFirestoreFake({
     'sessions/a': { setId: 'set1', status: 'live' },
@@ -877,7 +893,7 @@ test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지�
   assert.equal(message, '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.');
 });
 
-test('문항 열기와 정답 공개는 meta/live 전체 상태를 저장소로 쓴다', async () => {
+test('문항 열기는 live 전체 상태를 쓰고 정답 공개는 revealed만 병합한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const serverTimestamp = Symbol('server timestamp');
   const writes = [];
@@ -891,7 +907,8 @@ test('문항 열기와 정답 공개는 meta/live 전체 상태를 저장소로 
     SV_TS: serverTimestamp,
     limitFor() { return 20; },
     store: {
-      setLive(id, value) { writes.push([id, value]); return Promise.resolve(); }
+      setLive(id, value) { writes.push(['setLive', id, value]); return Promise.resolve(); },
+      revealLive(id) { writes.push(['revealLive', id]); return Promise.resolve(); }
     }
   };
   vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
@@ -901,8 +918,8 @@ test('문항 열기와 정답 공개는 meta/live 전체 상태를 저장소로 
   await context.plReveal();
 
   assert.deepEqual(clone(writes), [
-    ['session-a', { q: 3, openedAt: serverTimestamp, revealed: false, limitSec: 20 }],
-    ['session-a', { q: 2, openedAt: 123, revealed: true, limitSec: 20 }]
+    ['setLive', 'session-a', { q: 3, openedAt: serverTimestamp, revealed: false, limitSec: 20 }],
+    ['revealLive', 'session-a']
   ]);
 });
 

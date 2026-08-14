@@ -2310,12 +2310,7 @@ function plOpenQuestion(i) {
 }
 function plReveal() {
   if (!pl || pl.live.q < 0) return;
-  return store.setLive(pl.sessionId, {
-    q: pl.live.q,
-    openedAt: pl.live.openedAt,
-    revealed: true,
-    limitSec: pl.live.limitSec
-  });
+  return store.revealLive(pl.sessionId);
 }
 async function plCloseQuestion() {
   if (!pl) return;
