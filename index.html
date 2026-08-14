@@ -412,11 +412,12 @@ textarea { resize: vertical; min-height: 62px; }
 }
 #overlay .ov-actions { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
 #overlay .ov-actions .btn { padding: 13px 24px; font-size: 16px; }
-.ov-timer {
-  display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700;
-  background: rgba(255,255,255,.14); padding: 7px 15px; border-radius: 999px;
-}
-.ov-timer.urgent { background: rgba(255,90,90,.3); }
+.quiz-timer { display:flex; align-items:center; gap:12px; flex:1 1 240px; }
+.quiz-timer-track { height:12px; flex:1; border-radius:999px; overflow:hidden; background:rgba(255,255,255,.2); }
+.quiz-timer-track > i { display:block; height:100%; width:100%; border-radius:inherit; background:#34d17f; transition:width .25s linear,background .2s; }
+.quiz-timer-number { min-width:54px; text-align:right; font-size:28px; font-variant-numeric:tabular-nums; }
+.quiz-timer.warning .quiz-timer-track > i { background:#f0a23a; }
+.quiz-timer.urgent .quiz-timer-track > i { background:#ff5a5a; }
 .ov-count { font-size: 15px; font-weight: 700; background: rgba(255,255,255,.14); padding: 7px 15px; border-radius: 999px; }
 
 /* ══════════════════════════════════════════════════════════
@@ -452,11 +453,12 @@ textarea { resize: vertical; min-height: 62px; }
 .stu-choice.wrong { border-color: var(--bad); background: var(--bad-bg); }
 .stu-choice.wrong .lt { background: var(--bad); color: #fff; }
 .stu-choice:disabled { cursor: default; opacity: 1; }
-.stu-timer {
-  height: 7px; background: #e2e5ec; border-radius: 999px; overflow: hidden; margin-bottom: 16px;
+.stu-wrap .quiz-timer { margin-bottom:16px; }
+.stu-wrap .quiz-timer-track { background:#e2e5ec; }
+.stu-wrap .quiz-timer-number { color:var(--ink-2); }
+@media (prefers-reduced-motion: reduce) {
+  .quiz-timer-track > i { transition:none; }
 }
-.stu-timer > i { display: block; height: 100%; background: var(--accent); transition: width .25s linear; }
-.stu-timer.urgent > i { background: #e04545; }
 .result-banner {
   border-radius: 12px; padding: 16px; text-align: center; font-size: 18px;
   font-weight: 800; margin-bottom: 14px;
@@ -2524,9 +2526,9 @@ function plRenderOverlay() {
     '<div class="ov-top">' +
       '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">문항 ' + (i + 1) + ' / ' + pl.set.questions.length + '</span>' +
       (type !== 'choice' ? '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">' + QTYPES[type].split(' —')[0] + '</span>' : '') +
-      '<span class="ov-count" id="ov-count">0 / 0 제출</span>' +
+      '<span class="ov-count" id="ov-count">참여 0명 · 제출 0명 · 미제출 0명</span>' +
       '<div style="flex:1"></div>' +
-      '<span class="ov-timer" id="ov-timer" style="display:none"><span>⏱</span><span id="ov-timer-n">–</span></span>' +
+      '<div class="quiz-timer" id="ov-timer" style="display:none"><div class="quiz-timer-track"><i></i></div><strong class="quiz-timer-number" id="ov-timer-n">–</strong></div>' +
     '</div>' +
     (hasImage(q) ? '<img class="q-img" id="ov-img" alt="문항 이미지">' : '') +
     '<div class="ov-q">' + esc(q.text) + '</div>' +
@@ -2618,7 +2620,7 @@ function plRenderOverlayCounts() {
   const resp = pl.responses[i] || {};
   const keys = Object.keys(resp);
   const total = keys.length;
-  const nStu = Math.max(Object.keys(pl.students).length, total);
+  const totals = FirestoreCore.submissionCounts(pl.students, resp);
 
   const type = qType(q);
   const counts = q.choices.map(() => 0);
@@ -2628,7 +2630,7 @@ function plRenderOverlayCounts() {
   });
 
   const cntEl = ov.querySelector('#ov-count');
-  if (cntEl) cntEl.textContent = total + ' / ' + nStu + ' 제출';
+  if (cntEl) cntEl.textContent = '참여 ' + totals.participants + '명 · 제출 ' + totals.submitted + '명 · 미제출 ' + totals.missing + '명';
 
   // 공개 전에는 정답 표시도, 보기별 응답 분포도 감춘다.
   // 이 화면은 교실 앞에 띄워 두는 것이라 둘 다 답을 알려주는 단서가 된다.
@@ -2668,12 +2670,13 @@ function plTimerTick() {
   if (plRevealed() !== pl.uiRevealed) plRenderOverlayCounts();
 
   const el = ov.querySelector('#ov-timer'), num = ov.querySelector('#ov-timer-n');
-  const limit = Number(pl.live.limitSec) || 0;
-  if (!limit || !pl.live.openedAt) { if (el) el.style.display = 'none'; return; }
-  const left = Math.max(0, limit - (serverNow() - pl.live.openedAt) / 1000);
+  const t = FirestoreCore.timerView(pl.live, serverNow());
+  if (!t) { if (el) el.style.display = 'none'; return; }
   el.style.display = '';
-  num.textContent = Math.ceil(left) + '초';
-  el.classList.toggle('urgent', left <= 5);
+  num.textContent = Math.ceil(t.left) + '초';
+  el.querySelector('.quiz-timer-track i').style.width = (t.ratio * 100) + '%';
+  el.classList.toggle('warning', t.phase === 'warning');
+  el.classList.toggle('urgent', t.phase === 'urgent');
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -2689,6 +2692,7 @@ function screenStudent(codeArg) {
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     myAnswers: {},          // { 문항index: {c, ok, ms} }
     sel: null, multiSel: [], draft: '', submitted: false, board: {},
+    revision: 0, deadlineHandled: '',
     uiRevealed: false, uiLocked: false, uiQ: -2
   };
   onCleanup(() => { st = null; });
@@ -2802,11 +2806,13 @@ async function stJoin() {
     Object.keys(answers).forEach(qi => {
       const r = answers[qi];
       if (!r) return;
-      st.myAnswers[Number(qi)] = {
+      const record = {
         c: r.c, cs: r.cs, txt: r.txt,
         ok: (r.ok === undefined || r.ok === null) ? null : !!r.ok,   // null = 서술형 미채점
-        ms: r.ms || 0
+        ms: r.ms || 0, submitted: r.submitted !== false, revision: Number(r.revision) || 0
       };
+      st.revision = Math.max(st.revision, record.revision);
+      if (record.submitted) st.myAnswers[Number(qi)] = record;
     });
     stStartWatching();
   } catch (e) {
@@ -2828,6 +2834,7 @@ function stStartWatching() {
       st.multiSel = prev ? parseMulti(prev.cs) : [];
       st.draft = prev ? (prev.txt || '') : '';
       st.submitted = !!prev;
+      st.deadlineHandled = '';
     }
     stRender();
     if (previousQ >= 0 && nl.q < 0) {
@@ -2853,18 +2860,15 @@ function stRevealed() {
   }
   return false;
 }
-/** 제한 시간이 지났거나 이미 제출했으면 더 못 고른다 */
+/** 제한 시간이 지났거나 공개됐으면 더 못 고른다 */
 function stLocked() {
-  if (st.submitted) return true;
+  if (stRevealed()) return true;
   const limit = Number(st.live.limitSec) || 0;
   if (!limit || !st.live.openedAt) return false;
   return (serverNow() - st.live.openedAt) / 1000 >= limit;
 }
 function stLeftRatio() {
-  const limit = Number(st.live.limitSec) || 0;
-  if (!limit || !st.live.openedAt) return null;
-  const left = limit - (serverNow() - st.live.openedAt) / 1000;
-  return { left: Math.max(0, left), ratio: Math.max(0, Math.min(1, left / limit)) };
+  return FirestoreCore.timerView(st.live, serverNow());
 }
 
 /** 매 프레임 전체를 다시 그리면 조작감이 나빠지므로, 바뀐 것만 갱신한다 */
@@ -2873,11 +2877,13 @@ function stTick() {
   const bar = $('#st-timer');
   const t = stLeftRatio();
   if (bar && t) {
-    bar.querySelector('i').style.width = (t.ratio * 100) + '%';
-    bar.classList.toggle('urgent', t.left <= 5);
+    bar.querySelector('.quiz-timer-track i').style.width = (t.ratio * 100) + '%';
+    bar.classList.toggle('warning', t.phase === 'warning');
+    bar.classList.toggle('urgent', t.phase === 'urgent');
     const n = $('#st-left');
     if (n) n.textContent = Math.ceil(t.left) + '초';
   }
+  stDeadlineTick();
   const rev = stRevealed(), lock = stLocked();
   if (rev !== st.uiRevealed || lock !== st.uiLocked) stRender();
 }
@@ -2957,10 +2963,9 @@ function stRender() {
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
         '<span class="tag">문항 ' + (i + 1) + ' / ' + set.questions.length + '</span>' +
         (type !== 'choice' ? '<span class="tag qtype">' + QTYPES[type].split(' —')[0] + '</span>' : '') +
-        (t ? '<span class="spacer" style="flex:1"></span><span style="font-size:13px;font-weight:700;color:' +
-             (t.left <= 5 ? 'var(--bad)' : 'var(--ink-2)') + '" id="st-left">' + Math.ceil(t.left) + '초</span>' : '') +
+        (t ? '<span class="spacer" style="flex:1"></span>' : '') +
       '</div>' +
-      (t ? '<div class="stu-timer' + (t.left <= 5 ? ' urgent' : '') + '" id="st-timer"><i style="width:' + (t.ratio * 100) + '%"></i></div>' : '') +
+      (t ? '<div class="quiz-timer ' + esc(t.phase) + '" id="st-timer"><div class="quiz-timer-track"><i style="width:' + (t.ratio * 100) + '%"></i></div><strong class="quiz-timer-number" id="st-left">' + Math.ceil(t.left) + '초</strong></div>' : '') +
       banner +
       (hasImage(q) ? '<img class="stu-q-img" id="st-img" alt="문항 이미지">' : '') +
       '<div class="stu-q">' + esc(q.text) + '</div>' +
@@ -3051,7 +3056,8 @@ function stAnswerUI(q, i, my, revealed, locked) {
     if (my) {
       return '<div class="stu-answer-box">' + esc(my.txt || '') + '</div>' +
         (revealed && type === 'short'
-          ? '<div class="hint">인정 답안: ' + esc((q.accept || []).join(', ')) + '</div>' : '');
+          ? '<div class="hint">인정 답안: ' + esc((q.accept || []).join(', ')) + '</div>' : '') +
+        (!locked && !revealed ? '<button class="btn block" style="margin-top:10px" onclick="stReviseAnswer()">다시 고르기</button>' : '');
     }
     if (locked) return '<div class="hint">응답 시간이 지났습니다.</div>';
     // 타이머 때문에 화면이 다시 그려져도 쓰던 글이 날아가지 않도록 st.draft 에 담아 둔다
@@ -3075,6 +3081,7 @@ function stAnswerUI(q, i, my, revealed, locked) {
       return '<button class="stu-choice' + cls + '" ' + (locked || my ? 'disabled' : '') + ' onclick="stToggleMulti(' + j + ')">' +
         '<span class="lt">' + (picked.indexOf(j) >= 0 ? '✓' : LETTERS[j]) + '</span><span>' + esc(c) + '</span></button>';
     }).join('') +
+    (my && !locked && !revealed ? '<button class="btn block" style="margin-top:10px" onclick="stReviseAnswer()">다시 고르기</button>' : '') +
     (my || locked ? '' :
       '<button class="btn primary lg block" style="margin-top:10px" onclick="stSubmitMulti()">' +
         (picked.length ? picked.length + '개 골랐어요 — 제출하기' : '고른 뒤 제출하세요') + '</button>');
@@ -3087,9 +3094,12 @@ function stAnswerUI(q, i, my, revealed, locked) {
       if (j === q.answer) cls = ' correct';
       else if (my && Number(my.c) === j) cls = ' wrong';
     } else if (st.sel === j) cls = ' sel';
-    return '<button class="stu-choice' + cls + '" ' + (locked ? 'disabled' : '') + ' onclick="stAnswer(' + j + ')">' +
+    return '<button class="stu-choice' + cls + '" ' + (locked || my ? 'disabled' : '') + ' onclick="stAnswer(' + j + ')">' +
       '<span class="lt">' + (type === 'ox' ? ['O', 'X'][j] : LETTERS[j]) + '</span><span>' + esc(c) + '</span></button>';
-  }).join('');
+  }).join('') +
+    (my && !locked && !revealed ? '<button class="btn block" style="margin-top:10px" onclick="stReviseAnswer()">다시 고르기</button>' : '') +
+    (!my && !locked ? '<button class="btn primary lg block" style="margin-top:10px" onclick="stSubmitCurrent(\'button\')">' +
+      (st.sel === null ? '고른 뒤 제출하세요' : '제출하기') + '</button>' : '');
 }
 
 /** 응답을 서버에 보내고 화면을 갱신하는 공통 경로 */
@@ -3098,7 +3108,8 @@ function stSend(payload, localRec) {
   st.submitted = true;
   st.myAnswers[i] = localRec;
   stRender();
-  return store.mergeAnswer(st.sessionId, st.sid, i, payload)
+  const send = store.setAnswerState || store.mergeAnswer;
+  return send.call(store, st.sessionId, st.sid, i, payload)
     .catch(e => {
       console.error(e);
       toast('전송 실패 — 다시 시도해 주세요');
@@ -3112,10 +3123,8 @@ function stAnswer(j) {
   if (!st || st.live.q < 0 || stLocked()) return;
   const i = st.live.q, q = st.set.questions[i];
   if (!q || !q.choices[j]) return;
-  const ok = (j === Number(q.answer));
-  const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
   st.sel = j;
-  stSend({ c: j, ok: ok, at: SV_TS, ms: ms }, { c: j, ok: ok, ms: ms });
+  stRender();
 }
 
 function stToggleMulti(j) {
@@ -3127,34 +3136,88 @@ function stToggleMulti(j) {
 }
 
 function stSubmitMulti() {
-  if (!st || st.live.q < 0 || stLocked()) return;
-  const i = st.live.q, q = st.set.questions[i];
-  const picked = st.multiSel || [];
-  if (!picked.length) { toast('하나 이상 고른 뒤 제출하세요'); return; }
-  const ok = multiCorrect(q, picked);
-  const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
-  const cs = fmtMulti(picked);
-  stSend({ cs: cs, ok: ok, at: SV_TS, ms: ms }, { cs: cs, ok: ok, ms: ms });
+  return stSubmitCurrent('button');
 }
 
 function stSubmitText() {
   if (!st || st.live.q < 0 || stLocked()) return;
   const el = $('#st-txt');
-  if (!el) return;
-  const txt = String(el.value || '').trim();
-  if (!txt) { toast('답을 입력한 뒤 제출하세요'); return; }
-  const i = st.live.q, q = st.set.questions[i];
-  const type = qType(q);
-  const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
-  const capped = txt.slice(0, type === 'short' ? 100 : 1000);
+  if (el) st.draft = el.value;
+  return stSubmitCurrent('button');
+}
 
-  if (type === 'short') {
-    const ok = shortCorrect(q, capped);
-    stSend({ txt: capped, ok: ok, at: SV_TS, ms: ms }, { txt: capped, ok: ok, ms: ms });
+function stHasDraftAnswer() {
+  if (!st || st.live.q < 0) return false;
+  const q = st.set.questions[st.live.q], type = qType(q);
+  if (type === 'multi') return !!(st.multiSel && st.multiSel.length);
+  if (type === 'short' || type === 'long') return !!String(st.draft || '').trim();
+  return st.sel !== null && st.sel !== undefined;
+}
+
+function stBuildAnswer() {
+  if (!stHasDraftAnswer()) return null;
+  const i = st.live.q, q = st.set.questions[i], type = qType(q);
+  const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
+  let payload, local;
+  if (type === 'multi') {
+    const cs = fmtMulti(st.multiSel);
+    payload = { cs, ok: multiCorrect(q, st.multiSel) };
+    local = { cs, ok: payload.ok, ms };
+  } else if (type === 'short' || type === 'long') {
+    const txt = String(st.draft || '').trim().slice(0, type === 'short' ? 100 : 1000);
+    payload = type === 'short' ? { txt, ok: shortCorrect(q, txt) } : { txt };
+    local = { txt, ok: type === 'short' ? payload.ok : null, ms };
   } else {
-    // 서술형은 채점하지 않고 보낸다 (ok 없음 = 미채점)
-    stSend({ txt: capped, at: SV_TS, ms: ms }, { txt: capped, ok: null, ms: ms });
+    payload = { c: st.sel, ok: Number(st.sel) === Number(q.answer) };
+    local = { c: st.sel, ok: payload.ok, ms };
   }
+  return { payload: Object.assign(payload, { at: SV_TS, ms }), local };
+}
+
+function stSubmitCurrent(source) {
+  if (!st || st.live.q < 0 || stLocked() || st.submitted) return Promise.resolve(false);
+  const built = stBuildAnswer();
+  if (!built) {
+    if (source !== 'timer') toast('답을 선택하거나 입력한 뒤 제출하세요');
+    return Promise.resolve(false);
+  }
+  st.revision = (Number(st.revision) || 0) + 1;
+  const payload = Object.assign({}, built.payload, {
+    submitted: true, revision: st.revision, source: source || 'button'
+  });
+  built.local.submitted = true;
+  built.local.revision = st.revision;
+  return stSend(payload, built.local).then(() => true);
+}
+
+function stReviseAnswer() {
+  if (!st || st.live.q < 0 || !st.submitted || stLocked()) return Promise.resolve(false);
+  const i = st.live.q, current = st.myAnswers[i];
+  if (!current) return Promise.resolve(false);
+  st.revision = Math.max(Number(st.revision) || 0, Number(current.revision) || 0) + 1;
+  const payload = Object.assign({}, current, { submitted: false, revision: st.revision, at: SV_TS });
+  delete st.myAnswers[i];
+  st.submitted = false;
+  stRender();
+  const send = store.setAnswerState || store.mergeAnswer;
+  return send.call(store, st.sessionId, st.sid, i, payload).then(() => true).catch(e => {
+    console.error(e);
+    st.myAnswers[i] = current;
+    st.submitted = true;
+    stRender();
+    toast('다시 고르기 실패 — 다시 시도해 주세요');
+    return false;
+  });
+}
+
+function stDeadlineTick() {
+  if (!st || st.live.q < 0 || !st.live.openedAt || !st.live.limitSec) return;
+  const t = stLeftRatio();
+  if (!t || t.left > 0) return;
+  const key = st.live.q + ':' + st.live.openedAt;
+  if (st.deadlineHandled === key) return;
+  st.deadlineHandled = key;
+  if (!st.submitted && stHasDraftAnswer()) stSubmitCurrent('timer');
 }
 
 /* ══════════════════════════════════════════════════════════════════════

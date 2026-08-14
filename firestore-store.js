@@ -182,6 +182,10 @@
       }, { merge: true });
     }
 
+    function setAnswerState(sessionId, studentId, questionIndex, answer) {
+      return mergeAnswer(sessionId, studentId, questionIndex, answer);
+    }
+
     function gradeAnswer(sessionId, studentId, questionIndex, ok) {
       return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
         answers: { [String(questionIndex)]: { ok: ok == null ? fieldValue.delete() : ok } }
@@ -269,6 +273,7 @@
       saveStudent,
       getOwnResponses,
       mergeAnswer,
+      setAnswerState,
       gradeAnswer,
       listSessions,
       purgeSessions,

@@ -84,6 +84,37 @@ test('미제출 응답은 점수에서 빼고 등록 학생 모두의 점수를 
   ), { s1: 1, s2: 2 });
 });
 
+test('기존 응답은 제출로 보고 다시 고르는 응답은 집계와 점수에서 뺀다', () => {
+  assert.equal(core.answerIsSubmitted({ c: 0 }), true);
+  assert.equal(core.answerIsSubmitted({ c: 0, submitted: true }), true);
+  assert.equal(core.answerIsSubmitted({ c: 0, submitted: false }), false);
+  assert.equal(core.answerIsSubmitted(null), false);
+
+  const docs = {
+    s1: { answers: { '0': { c: 0, ok: true }, '1': { c: 1, ok: true, submitted: false } } },
+    s2: { answers: { '0': { c: 1, ok: false, submitted: false } } }
+  };
+  assert.deepEqual(core.responseDocsToQuestionMaps(docs), {
+    '0': { s1: { c: 0, ok: true } }
+  });
+  assert.deepEqual(core.buildBoard({ s1: {}, s2: {} }, docs), { s1: 1, s2: 0 });
+});
+
+test('현재 문항의 참여 제출 미제출 인원을 계산한다', () => {
+  assert.deepEqual(core.submissionCounts(
+    { a: {}, b: {}, c: {} },
+    { a: { c: 0 }, b: { c: 1, submitted: false } }
+  ), { participants: 3, submitted: 1, missing: 2 });
+});
+
+test('서버 마감 시각으로 타이머 비율과 색상 단계를 계산한다', () => {
+  assert.deepEqual(core.timerView({ openedAt: 1000, limitSec: 15 }, 9000), {
+    left: 7, ratio: 7 / 15, phase: 'warning'
+  });
+  assert.equal(core.timerView({ openedAt: 1000, limitSec: 15 }, 13000).phase, 'urgent');
+  assert.equal(core.timerView({ openedAt: 0, limitSec: 0 }, 9000), null);
+});
+
 test('관리자 일괄 작업을 지정한 크기로 나눈다', () => {
   assert.deepEqual(core.chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
   assert.throws(() => core.chunk([1], 0), /양수/);

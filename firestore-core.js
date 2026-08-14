@@ -14,10 +14,15 @@
     return serverMillis - (startedAt + finishedAt) / 2;
   }
 
+  function answerIsSubmitted(answer) {
+    return !!answer && answer.submitted !== false;
+  }
+
   function responseDocsToQuestionMaps(docs) {
     const out = {};
     Object.keys(docs || {}).forEach(studentId => {
       Object.entries((docs[studentId] && docs[studentId].answers) || {}).forEach(([question, answer]) => {
+        if (!answerIsSubmitted(answer)) return;
         (out[question] || (out[question] = {}))[studentId] = answer;
       });
     });
@@ -28,9 +33,31 @@
     const board = {};
     Object.keys(students || {}).forEach(id => {
       const answers = (responseDocs[id] && responseDocs[id].answers) || {};
-      board[id] = Object.values(answers).filter(answer => answer && answer.ok === true).length;
+      board[id] = Object.values(answers)
+        .filter(answer => answerIsSubmitted(answer) && answer.ok === true).length;
     });
     return board;
+  }
+
+  function submissionCounts(students, responses) {
+    const participants = Math.max(
+      Object.keys(students || {}).length,
+      Object.values(responses || {}).filter(answerIsSubmitted).length
+    );
+    const submitted = Object.values(responses || {}).filter(answerIsSubmitted).length;
+    return { participants, submitted, missing: Math.max(0, participants - submitted) };
+  }
+
+  function timerView(live, now) {
+    const limit = Number(live && live.limitSec) || 0;
+    const openedAt = Number(live && live.openedAt) || 0;
+    if (!limit || !openedAt) return null;
+    const left = Math.max(0, limit - (Number(now) - openedAt) / 1000);
+    return {
+      left,
+      ratio: Math.max(0, Math.min(1, left / limit)),
+      phase: left <= 3 ? 'urgent' : left <= 7 ? 'warning' : 'normal'
+    };
   }
 
   async function claimFirstAvailableCode(codes, claim) {
@@ -48,8 +75,11 @@
   return {
     timestampMillis,
     offsetFromRoundTrip,
+    answerIsSubmitted,
     responseDocsToQuestionMaps,
     buildBoard,
+    submissionCounts,
+    timerView,
     claimFirstAvailableCode,
     chunk
   };

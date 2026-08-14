@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const core = require('../firestore-core.js');
 
 const SERVER_TIMESTAMP = Symbol('server timestamp');
 const DELETE_FIELD = Symbol('delete field');
@@ -1063,7 +1064,8 @@ test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답
     isTextType() { return false; },
     parseMulti() { return []; },
     plRevealed() { return false; },
-    $$(selector) { return selector === '.ov-choice' ? choices : []; }
+    $$(selector) { return selector === '.ov-choice' ? choices : []; },
+    FirestoreCore: core
   };
   vm.runInNewContext(extractFunction(html, 'plRenderOverlayCounts'), context);
 
@@ -1077,7 +1079,7 @@ test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답
       correct: choice.classes.has('correct')
     }))
   });
-  assert.match(rendered, /2 \/ 2 제출/);
+  assert.match(rendered, /참여 2명 · 제출 2명 · 미제출 0명/);
   assert.doesNotMatch(rendered, /1명|50%|"correct":true/);
 });
 
@@ -1122,6 +1124,22 @@ test('새 답은 같은 학생 문서의 다른 문항 답을 보존한다', asy
   assert.deepEqual(await store.getOwnResponses('a', 's1'), {
     '0': { c: 1, ok: true },
     '2': { txt: '서술', at: 123, ms: 456 }
+  });
+});
+
+test('응답 제출 상태는 현재 문항만 병합하고 다시 고르는 답도 보존한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/responses/s1': { answers: { '0': { c: 0, submitted: true } } }
+  });
+  const store = createStore(fake);
+
+  await store.setAnswerState('a', 's1', 2, {
+    c: 1, submitted: false, revision: 2
+  });
+
+  assert.deepEqual(await store.getOwnResponses('a', 's1'), {
+    '0': { c: 0, submitted: true },
+    '2': { c: 1, submitted: false, revision: 2 }
   });
 });
 
@@ -1177,7 +1195,11 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let now = 15_000;
   const live = { q: 0, openedAt: 10_000, revealed: false, limitSec: 20 };
-  const timer = { style: {}, classList: { toggle() {} } };
+  const fill = { style: {} };
+  const timer = {
+    style: {}, classList: { toggle() {} },
+    querySelector() { return fill; }
+  };
   const timerNumber = { textContent: '' };
   const overlay = {
     querySelector(selector) {
@@ -1190,7 +1212,8 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
     serverNow() { return now; },
     document: { getElementById() { return overlay; } },
     plRevealed() { return false; },
-    plRenderOverlayCounts() {}
+    plRenderOverlayCounts() {},
+    FirestoreCore: core
   };
   vm.runInNewContext(extractFunction(html, 'stLeftRatio'), context);
   vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
@@ -1247,7 +1270,9 @@ test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 �
     ['getOwnResponses', 'a', '3_2_7'],
     ['watch']
   ]);
-  assert.deepEqual(clone(context.st.myAnswers), { '0': { c: 1, cs: undefined, txt: undefined, ok: true, ms: 500 } });
+  assert.deepEqual(clone(context.st.myAnswers), {
+    '0': { c: 1, cs: undefined, txt: undefined, ok: true, ms: 500, submitted: true, revision: 0 }
+  });
 });
 
 test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수판을 한 번 읽는다', async () => {
@@ -1351,6 +1376,57 @@ test('학생 답 전송은 본인 응답 문서의 현재 문항만 병합한다
   await Promise.resolve();
 
   assert.deepEqual(writes, [['a', 's1', 2, { txt: '서술', at: 123, ms: 456 }]]);
+});
+
+test('객관식 번호 선택은 제출하지 않고 제출 버튼과 다시 고르기만 서버 상태를 바꾼다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const writes = [];
+  const context = {
+    st: {
+      sessionId: 'a', sid: 's1', live: { q: 0, openedAt: 1000, limitSec: 15 },
+      set: { questions: [{ type: 'choice', choices: ['가', '나'], answer: 1 }] },
+      myAnswers: {}, sel: null, multiSel: [], draft: '', submitted: false, revision: 0
+    },
+    store: { setAnswerState(...args) { writes.push(args); return Promise.resolve(); } },
+    qType(q) { return q.type; }, serverNow() { return 2000; }, SV_TS: 999,
+    multiCorrect() { return false; }, fmtMulti(v) { return v.join(','); }, shortCorrect() { return false; },
+    stLocked() { return false; }, stRender() {}, toast() {}, console
+  };
+  for (const name of ['stAnswer', 'stHasDraftAnswer', 'stBuildAnswer', 'stSend', 'stSubmitCurrent', 'stReviseAnswer']) {
+    vm.runInNewContext(extractFunction(html, name), context);
+  }
+
+  context.stAnswer(1);
+  assert.equal(writes.length, 0);
+  await context.stSubmitCurrent('button');
+  assert.equal(writes[0][3].submitted, true);
+  assert.equal(writes[0][3].c, 1);
+  await context.stReviseAnswer();
+  assert.equal(writes[1][3].submitted, false);
+  assert.equal(context.st.submitted, false);
+  assert.equal(context.st.sel, 1);
+});
+
+test('마감 시 선택한 답은 한 번 자동 제출하고 빈 답은 미제출로 둔다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let submits = 0;
+  const context = {
+    st: { live: { q: 0, openedAt: 1000, limitSec: 5 }, sel: 0, submitted: false, deadlineHandled: '' },
+    serverNow() { return 6000; },
+    stLeftRatio() { return { left: 0, ratio: 0 }; },
+    stHasDraftAnswer() { return context.st.sel !== null; },
+    stSubmitCurrent(source) { assert.equal(source, 'timer'); submits += 1; return Promise.resolve(); }
+  };
+  vm.runInNewContext(extractFunction(html, 'stDeadlineTick'), context);
+
+  context.stDeadlineTick();
+  context.stDeadlineTick();
+  assert.equal(submits, 1);
+
+  context.st.deadlineHandled = '';
+  context.st.sel = null;
+  context.stDeadlineTick();
+  assert.equal(submits, 1);
 });
 
 test('익명 인증 뒤 고유 서버 시각 동기화가 끝나야 라우터를 시작한다', async () => {
