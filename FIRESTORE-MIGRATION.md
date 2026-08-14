@@ -114,3 +114,13 @@ git diff --check
 - [ ] 기존 세트 JSON 내보내기·가져오기
 - [ ] 실제 GitHub Pages 배포 검증
 - [ ] 검증 기간 뒤 기존 원본 보존 또는 파기 결정 기록
+
+## Task 8 실제 환경 검증 기록 (2026-08-14)
+
+결과: **BLOCKED — 외부 변경 전 중단**
+
+- Chrome 기존 로그인 세션에서 `https://console.firebase.google.com/u/0/project/video-quiz-65798/firestore` 탭과 기존 배포 앱 `https://shining-jade.github.io/video-quiz/#/sets`를 확인했다.
+- 기존 배포 앱의 세트 목록에는 `심폐소생술` 세트 1개가 표시됐고, 화면 표시는 `문항 1개 · 타이머 종료 후 자동 공개 · 2026-08-14 15:22`였다. 계획서가 요구한 5종 문항과 일치하지 않으므로 원본 상태의 추가 확인이 필요하다.
+- 레거시 JSON 내보내기 직전 Chrome 제어가 탭 claim/DOM 읽기 단계에서 반복적으로 타임아웃되어 중단했다. 따라서 백업 JSON은 생성되지 않았고 기존 RTDB 데이터에는 변경이나 삭제를 하지 않았다.
+- 백업 선행 조건을 충족하지 못했으므로 Firestore 생성 여부·위치(`asia-southeast1`) 확인, 규칙 게시, JSON 가져오기, 로컬 다중 창 회귀 검증은 수행하지 않았다. Firebase 콘솔 또는 Firestore에 가한 외부 변경은 없다.
+- 인증, CAPTCHA, Firebase 권한 오류는 관찰되지 않았다. 차단 원인은 Chrome 브라우저 제어 호출의 반복 타임아웃이다.
