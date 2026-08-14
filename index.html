@@ -581,8 +581,22 @@ function applyCaptions(player) {
   // 'captions'는 구버전, 'cc'는 HTML5 플레이어의 모듈 이름 — 둘 다 시도한다
   ['captions', 'cc'].forEach(m => {
     try {
-      if (captionsOn) player.loadModule(m);
-      else { player.unloadModule(m); player.setOption(m, 'track', {}); }
+      if (captionsOn) {
+        // 모듈만 올려서는 자막이 나오지 않는다. 트랙 목록이 잡힌 뒤 하나를 골라줘야 한다.
+        player.loadModule(m);
+        setTimeout(() => {
+          try {
+            const list = player.getOption(m, 'tracklist');
+            if (!captionsOn || !list || !list.length) return;
+            // 한국어 트랙이 있으면 그것을, 없으면 첫 번째 트랙을 쓴다
+            const ko = list.filter(t => t && t.languageCode === 'ko')[0];
+            player.setOption(m, 'track', ko || list[0]);
+          } catch (e) {}
+        }, 500);
+      } else {
+        player.unloadModule(m);
+        player.setOption(m, 'track', {});
+      }
     } catch (e) { /* 해당 모듈이 없는 플레이어면 무시 */ }
   });
 }
