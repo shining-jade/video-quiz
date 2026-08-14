@@ -732,6 +732,18 @@ function copyText(text) {
   }
 }
 
+function downloadBlob(filename, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+function safeFileName(s) {
+  return String(s || '퀴즈').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
+}
+
 /** UTF-8 BOM 포함 — 엑셀에서 한글이 깨지지 않게 */
 function downloadCSV(filename, rows) {
   const csv = rows.map(r => r.map(c => {
@@ -1118,7 +1130,16 @@ function renderSetList() {
       '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
         '학교 안에서 만들어진 세트가 모두 보입니다. <b>복제</b>하면 원본은 그대로 두고 우리 반용으로 고쳐 쓸 수 있습니다.</p>' +
+      '<div class="notice info">' +
+        '<b>다른 프로젝트로 세트 옮기기</b> — 세트마다 있는 <b>[📤 파일]</b>로 내보낸 뒤, 옮길 곳의 이 화면에서 ' +
+        '<b>[📥 세트 가져오기]</b>로 넣으면 됩니다. 문항·설정·이미지가 그대로 따라갑니다. 백업으로도 쓸 수 있습니다.' +
+      '</div>' +
       '<div class="card" style="padding:14px">' +
+        '<div class="row" style="margin-bottom:10px">' +
+          '<label class="btn sm primary" style="margin:0">📥 세트 가져오기' +
+            '<input type="file" accept=".json,application/json" style="display:none" onchange="setImportPick(this)"></label>' +
+          '<button class="btn sm" onclick="setExportAll()">📦 전체 내보내기 (백업)</button>' +
+        '</div>' +
         '<input type="text" id="sl-q" placeholder="제목이나 만든 사람으로 찾기" value="' + esc(setList.q) + '">' +
         (nHidden ? '<div style="margin-top:10px"><label style="font-size:13px;color:var(--ink-2);cursor:pointer">' +
             '<input type="checkbox" id="sl-hidden" ' + (setList.showHidden ? 'checked' : '') + '> ' +
@@ -1162,6 +1183,7 @@ function setListRow(s) {
         : '<a class="btn sm primary" href="#/play/' + esc(s.id) + '">▶ 진행</a>' +
           '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
           '<button class="btn sm" onclick="setDuplicate(\'' + esc(s.id) + '\')">⧉ 복제</button>' +
+          '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')" title="다른 프로젝트로 옮기거나 백업할 때">📤 파일</button>' +
           '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>' +
           '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>') +
     '</div>' +
@@ -1179,6 +1201,111 @@ function setArchive(id, on) {
     toast(on ? '목록에서 숨겼습니다' : '다시 표시합니다');
     renderSetList();
   }).catch(e => { console.error(e); alert('실패: ' + e.message); });
+}
+
+/* ── 세트 내보내기 / 가져오기 ─────────────────────────────────────────
+   Firebase 프로젝트를 학년별로 나누면 프로젝트끼리는 데이터가 통하지 않는다.
+   그때 세트를 옮기려고 매번 사람을 거치지 않도록, 파일 한 개로 주고받게 한다.
+   백업 용도로도 그대로 쓸 수 있다. */
+const EXPORT_VERSION = 1;
+
+function setExport(id) {
+  Promise.all([
+    R('quiz_sets/' + id).once('value'),
+    R('images/' + id).once('value')
+  ]).then(([s, im]) => {
+    const set = s.val();
+    if (!set) { toast('세트를 찾을 수 없습니다'); return; }
+    const pack = {
+      _: '영상 퀴즈 세트 파일 — 다른 프로젝트의 세트 목록에서 [가져오기]로 넣으세요.',
+      v: EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      set: set,
+      images: im.val() || null
+    };
+    const json = JSON.stringify(pack, null, 1);
+    downloadBlob(safeFileName(set.title) + '.영상퀴즈.json',
+      new Blob([json], { type: 'application/json;charset=utf-8' }));
+    toast('세트를 파일로 내보냈습니다 (' + Math.round(json.length / 1024) + 'KB)');
+  }).catch(e => { console.error(e); alert('내보내기 실패: ' + e.message); });
+}
+
+/** 목록에 보이는 세트를 한 파일로 — 백업용 */
+function setExportAll() {
+  if (!setList) return;
+  const ids = setList.all.map(s => s.id);
+  if (!ids.length) { toast('내보낼 세트가 없습니다'); return; }
+  toast(ids.length + '개 세트를 모으는 중…');
+  Promise.all(ids.map(id => Promise.all([
+    R('quiz_sets/' + id).once('value'),
+    R('images/' + id).once('value')
+  ]).then(([s, im]) => ({ set: s.val(), images: im.val() || null }))))
+  .then(packs => {
+    const json = JSON.stringify({
+      _: '영상 퀴즈 세트 묶음 파일', v: EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      sets: packs.filter(p => p.set)
+    }, null, 1);
+    downloadBlob('영상퀴즈_세트전체_' + fmtDay(Date.now()) + '.영상퀴즈.json',
+      new Blob([json], { type: 'application/json;charset=utf-8' }));
+    toast(packs.length + '개 세트를 내보냈습니다 (' + Math.round(json.length / 1024) + 'KB)');
+  }).catch(e => { console.error(e); alert('내보내기 실패: ' + e.message); });
+}
+
+function setImportPick(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  const fr = new FileReader();
+  fr.onerror = () => alert('파일을 읽지 못했습니다.');
+  fr.onload = () => {
+    let pack;
+    try { pack = JSON.parse(fr.result); }
+    catch (e) { alert('이 파일은 영상 퀴즈 세트 파일이 아닙니다.'); return; }
+
+    const list = pack.sets ? pack.sets : (pack.set ? [{ set: pack.set, images: pack.images }] : null);
+    if (!list || !list.length) { alert('세트가 들어 있지 않은 파일입니다.'); return; }
+    if (!confirm(list.length + '개 세트를 이 프로젝트로 가져옵니다.\n기존 세트는 그대로 두고 새로 만듭니다. 계속할까요?')) return;
+
+    toast('가져오는 중…');
+    Promise.all(list.map(p => setImportOne(p)))
+      .then(ids => {
+        toast(ids.length + '개 세트를 가져왔습니다');
+        if (setList) screenSetList();
+      })
+      .catch(e => { console.error(e); alert('가져오기 실패: ' + e.message); });
+  };
+  fr.readAsText(file);
+}
+
+function setImportOne(p) {
+  const src = p.set || {};
+  const set = normSet(src);
+  if (!set || !set.questions.length) return Promise.reject(new Error('문항이 없는 세트입니다.'));
+
+  // 저장 형식으로 다시 만든다 (낯선 필드가 섞여 규칙에 걸리지 않도록)
+  const questions = set.questions.map(q => {
+    const o = { type: qType(q), t: q.t, text: q.text, choices: q.choices, answer: q.answer };
+    if ((q.answers || []).length) o.answers = q.answers;
+    if ((q.accept || []).length) o.accept = q.accept;
+    if (q.imgUrl) o.imgUrl = q.imgUrl;
+    if (q.imgUp) o.imgUp = true;
+    if (q.explain) o.explain = q.explain;
+    if (q.limitSec !== null && q.limitSec !== undefined) o.limitSec = q.limitSec;
+    return o;
+  });
+
+  const newId = rid(8);
+  const data = {
+    title: (set.title + ' (가져옴)').slice(0, 200),
+    videoId: set.videoId, videoUrl: set.videoUrl,
+    author: set.author || lsGet('vq_teacher'),
+    settings: set.settings, questions: questions,
+    createdAt: SV_TS, updatedAt: SV_TS
+  };
+  return R('quiz_sets/' + newId).set(data)
+    .then(() => (p.images ? R('images/' + newId).set(p.images) : null))
+    .then(() => newId);
 }
 
 /** 원본은 그대로 두고 새 ID로 사본을 만든다 (규칙상 세트 삭제는 막혀 있으므로 원본이 안전) */
