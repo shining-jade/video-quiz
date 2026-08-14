@@ -570,6 +570,43 @@ window.onYouTubeIframeAPIReady = function () {
 };
 function whenYT(cb) { ytReady ? cb() : ytWaiters.push(cb); }
 
+/* ── 유튜브 자막(CC) 제어 ──────────────────────────────────────────────
+   자동 생성 자막이 화면 아래쪽을 가려 수업에 방해가 되는 경우가 많아 기본은 끕니다.
+   유튜브는 플레이어가 준비될 때와 재생이 시작될 때 자막 모듈을 다시 얹으므로,
+   그 두 시점에 다시 적용해 주어야 확실히 꺼집니다. */
+let captionsOn = lsGet('vq_captions') === '1';
+
+function applyCaptions(player) {
+  if (!player) return;
+  // 'captions'는 구버전, 'cc'는 HTML5 플레이어의 모듈 이름 — 둘 다 시도한다
+  ['captions', 'cc'].forEach(m => {
+    try {
+      if (captionsOn) player.loadModule(m);
+      else { player.unloadModule(m); player.setOption(m, 'track', {}); }
+    } catch (e) { /* 해당 모듈이 없는 플레이어면 무시 */ }
+  });
+}
+function ytEvents(getPlayer) {
+  return {
+    onReady: () => applyCaptions(getPlayer()),
+    onStateChange: e => {
+      if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) applyCaptions(getPlayer());
+    }
+  };
+}
+function toggleCaptions(getPlayer) {
+  captionsOn = !captionsOn;
+  lsSet('vq_captions', captionsOn ? '1' : '0');
+  applyCaptions(getPlayer());
+  $$('.cc-btn').forEach(b => { b.textContent = ccLabel(); });
+  toast(captionsOn ? '자막을 켰습니다' : '자막을 껐습니다');
+}
+function ccLabel() { return captionsOn ? '💬 자막 끄기' : '💬 자막 켜기'; }
+function ccButton(handler) { return '<button class="btn sm cc-btn" onclick="' + handler + '">' + ccLabel() + '</button>'; }
+
+function mkToggleCC() { toggleCaptions(() => mkPlayer); }
+function plToggleCC() { toggleCaptions(() => pl && pl.player); }
+
 /* ══════════════════════════════════════════════════════════════════════
    2. 기본값 / 스키마 헬퍼
    ══════════════════════════════════════════════════════════════════════ */
@@ -868,6 +905,7 @@ function mkSyncVideo() {
     '<div class="player-box"><div id="mk-player"></div></div>' +
     '<div class="row" style="margin-top:10px;align-items:center">' +
       '<button class="btn sm" onclick="mkStampNew()">📍 현재 시각으로 문항 추가</button>' +
+      ccButton('mkToggleCC()') +
       '<span class="hint" id="mk-cur" style="margin:0">—</span>' +
     '</div>';
 
@@ -876,7 +914,8 @@ function mkSyncVideo() {
     try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
     mkPlayer = new YT.Player('mk-player', {
       videoId: vid,
-      playerVars: { rel: 0, modestbranding: 1, playsinline: 1 }
+      playerVars: { rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0 },
+      events: ytEvents(() => mkPlayer)
     });
   });
 }
@@ -1201,6 +1240,7 @@ function renderPlayRun() {
             '<span class="tag mute mono" id="pl-clock">0:00</span>' +
             '<span style="font-size:13px;color:var(--ink-2)" id="pl-next">—</span>' +
             '<div style="flex:1"></div>' +
+            ccButton('plToggleCC()') +
             '<span style="font-size:13px;color:var(--ink-2)">참여 <b id="pl-nstu">0</b>명</span>' +
           '</div>' +
         '</div>' +
@@ -1263,7 +1303,8 @@ function renderPlayRun() {
     if (!pl || !document.getElementById('pl-player')) return;
     pl.player = new YT.Player('pl-player', {
       videoId: s.videoId,
-      playerVars: { rel: 0, modestbranding: 1, playsinline: 1 }
+      playerVars: { rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0 },
+      events: ytEvents(() => pl && pl.player)
     });
   });
 
