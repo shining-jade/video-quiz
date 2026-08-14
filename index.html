@@ -992,8 +992,8 @@ const imgCache = {};
 function loadQuestionImage(setId, i) {
   const key = setId + '/' + i;
   if (imgCache[key] !== undefined) return Promise.resolve(imgCache[key]);
-  return R('images/' + setId + '/' + i).once('value')
-    .then(s => { imgCache[key] = s.val() || ''; return imgCache[key]; })
+  return store.getQuestionImage(setId, i)
+    .then(src => { imgCache[key] = src || ''; return imgCache[key]; })
     .catch(() => '');
 }
 /** 문항에 보여줄 그림이 있는지 (업로드 또는 주소) */
@@ -1084,19 +1084,22 @@ let setList = null;
 
 function screenSetList() {
   setList = { all: [], q: '', showHidden: false };
-  onCleanup(() => { setList = null; });
+  const state = setList;
+  onCleanup(() => { if (setList === state) setList = null; });
   APP().innerHTML = topbar('<a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
     '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
 
-  R('quiz_sets').once('value').then(snap => {
-    const all = snap.val() || {};
-    setList.all = Object.keys(all).map(id => {
-      const s = normSet(all[id]);
+  store.listQuizSets().then(all => {
+    if (setList !== state) return;
+    state.all = all.map(item => {
+      const s = normSet(item);
+      const id = item.id;
       s.id = id;
       return s;
     }).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
     renderSetList();
   }).catch(e => {
+    if (setList !== state) return;
     console.error(e);
     APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>';
   });
@@ -1180,7 +1183,7 @@ function setListRow(s) {
     대신 목록에서 감추는 방식으로 정리한다. 진행 기록과 링크는 그대로 살아 있다. */
 function setArchive(id, on) {
   if (on && !confirm('이 세트를 목록에서 숨길까요?\n\n기록은 지워지지 않고, 이미 공유한 링크도 계속 열립니다.\n[숨긴 세트도 보기]로 언제든 되돌릴 수 있습니다.')) return;
-  R('quiz_sets/' + id + '/archived').set(on ? true : null).then(() => {
+  store.patchQuizSet(id, { archived: !!on }).then(() => {
     const s = setList && setList.all.filter(x => x.id === id)[0];
     if (s) s.archived = on;
     toast(on ? '목록에서 숨겼습니다' : '다시 표시합니다');
@@ -1195,18 +1198,19 @@ function setArchive(id, on) {
 const EXPORT_VERSION = 1;
 
 function setExport(id) {
-  Promise.all([
-    R('quiz_sets/' + id).once('value'),
-    R('images/' + id).once('value')
-  ]).then(([s, im]) => {
-    const set = s.val();
-    if (!set) { toast('세트를 찾을 수 없습니다'); return; }
+  return Promise.all([
+    store.getQuizSet(id),
+    store.getImages(id)
+  ]).then(([savedSet, images]) => {
+    if (!savedSet) { toast('세트를 찾을 수 없습니다'); return; }
+    const set = Object.assign({}, savedSet);
+    delete set.id;
     const pack = {
       _: '영상 퀴즈 세트 파일 — 다른 프로젝트의 세트 목록에서 [가져오기]로 넣으세요.',
       v: EXPORT_VERSION,
       exportedAt: new Date().toISOString(),
       set: set,
-      images: im.val() || null
+      images: Object.keys(images).length ? images : null
     };
     const json = JSON.stringify(pack, null, 1);
     downloadBlob(safeFileName(set.title) + '.영상퀴즈.json',
@@ -1222,9 +1226,14 @@ function setExportAll() {
   if (!ids.length) { toast('내보낼 세트가 없습니다'); return; }
   toast(ids.length + '개 세트를 모으는 중…');
   Promise.all(ids.map(id => Promise.all([
-    R('quiz_sets/' + id).once('value'),
-    R('images/' + id).once('value')
-  ]).then(([s, im]) => ({ set: s.val(), images: im.val() || null }))))
+    store.getQuizSet(id),
+    store.getImages(id)
+  ]).then(([savedSet, images]) => {
+    if (!savedSet) return { set: null, images: null };
+    const set = Object.assign({}, savedSet);
+    delete set.id;
+    return { set: set, images: Object.keys(images).length ? images : null };
+  })))
   .then(packs => {
     const json = JSON.stringify({
       _: '영상 퀴즈 세트 묶음 파일', v: EXPORT_VERSION,
@@ -1288,25 +1297,22 @@ function setImportOne(p) {
     settings: set.settings, questions: questions,
     createdAt: SV_TS, updatedAt: SV_TS
   };
-  return R('quiz_sets/' + newId).set(data)
-    .then(() => (p.images ? R('images/' + newId).set(p.images) : null))
+  return store.saveQuizSet(newId, data)
+    .then(() => store.replaceImages(newId, p.images || {}))
     .then(() => newId);
 }
 
 /** 원본은 그대로 두고 새 ID로 사본을 만든다 (규칙상 세트 삭제는 막혀 있으므로 원본이 안전) */
 function setDuplicate(id) {
-  R('quiz_sets/' + id).once('value').then(snap => {
-    const src = snap.val();
+  store.getQuizSet(id).then(src => {
     if (!src) { toast('세트를 찾을 수 없습니다'); return; }
-    const copy = JSON.parse(JSON.stringify(src));
-    copy.title = ((src.title || '제목 없음') + ' (사본)').slice(0, 200);
-    copy.author = lsGet('vq_teacher') || src.author || '';
-    copy.createdAt = SV_TS;
-    copy.updatedAt = SV_TS;
     const newId = rid(8);
-    return R('images/' + id).once('value')
-      .then(im => R('quiz_sets/' + newId).set(copy).then(() => im.val()))
-      .then(imgs => imgs ? R('images/' + newId).set(imgs) : null)   // 그림도 함께 복제
+    return store.copyQuizSet(id, newId, {
+      title: ((src.title || '제목 없음') + ' (사본)').slice(0, 200),
+      author: lsGet('vq_teacher') || src.author || '',
+      createdAt: SV_TS,
+      updatedAt: SV_TS
+    })
       .then(() => {
         toast('사본을 만들었습니다');
         go('make/' + newId);
@@ -1358,8 +1364,8 @@ function screenMake(setId) {
 
   if (setId) {
     APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
-    R('quiz_sets/' + setId).once('value').then(snap => {
-      const set = normSet(snap.val());
+    store.getQuizSet(setId).then(savedSet => {
+      const set = normSet(savedSet);
       if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
       mk.title = set.title;
       mk.videoUrl = set.videoUrl;
@@ -1371,8 +1377,7 @@ function screenMake(setId) {
       mk.archived = set.archived;
       mk.saved = true;
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
-      return R('images/' + setId).once('value').then(im => {
-        const imgs = im.val() || {};
+      return store.getImages(setId).then(imgs => {
         mk.questions.forEach((q, i) => { if (q.imgUp) q._img = imgs[i] || ''; });
         renderMake();
       });
@@ -2021,8 +2026,8 @@ function mkSave(forceNew) {
   const nImg = Object.keys(built.images).length;
   if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
 
-  R('quiz_sets/' + id).set(data)
-    .then(() => R('images/' + id).set(nImg ? built.images : null))
+  return store.saveQuizSet(id, data)
+    .then(() => store.replaceImages(id, built.images))
     .then(() => {
       mk.id = id;
       mk.saved = true;
@@ -2090,8 +2095,8 @@ function screenPlay(setId) {
 
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">퀴즈 세트를 불러오는 중…</div></div>';
 
-  R('quiz_sets/' + setId).once('value').then(snap => {
-    const set = normSet(snap.val());
+  store.getQuizSet(setId).then(savedSet => {
+    const set = normSet(savedSet);
     if (!set || !set.questions.length) {
       APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">' +
         '세트를 찾을 수 없거나 문항이 없습니다.<br>링크가 정확한지 확인해 주세요.<br><br>' +

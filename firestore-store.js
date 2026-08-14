@@ -17,8 +17,92 @@
     const collectionValue = snapshot => Object.fromEntries(
       snapshot.docs.map(document => [document.id, document.data()])
     );
+    const quizSetValue = snapshot => {
+      const value = snapshotValue(snapshot);
+      if (!value) return null;
+      ['createdAt', 'updatedAt'].forEach(field => {
+        const millis = timestampMillis(value[field]);
+        if (millis !== null) value[field] = millis;
+      });
+      return value;
+    };
+    const withoutDocumentId = value => {
+      const { id, ...data } = value || {};
+      return data;
+    };
+
+    async function listQuizSets() {
+      const snapshot = await db.collection('quiz_sets').get();
+      return snapshot.docs.map(quizSetValue);
+    }
+
+    function getQuizSet(setId) {
+      return db.doc('quiz_sets/' + setId).get().then(quizSetValue);
+    }
+
+    function saveQuizSet(setId, value) {
+      return db.doc('quiz_sets/' + setId).set(withoutDocumentId(value));
+    }
+
+    function patchQuizSet(setId, value) {
+      const data = withoutDocumentId(value);
+      if (data.archived === false) data.archived = fieldValue.delete();
+      return db.doc('quiz_sets/' + setId).set(data, { merge: true });
+    }
+
+    async function getQuestionImage(setId, questionIndex) {
+      const image = await db.doc('images/' + setId + '/q/' + questionIndex).get().then(snapshotValue);
+      return image ? image.data || '' : '';
+    }
+
+    async function getImages(setId) {
+      const images = await db.collection('images/' + setId + '/q').get().then(collectionValue);
+      return Object.fromEntries(
+        Object.entries(images)
+          .filter(([, image]) => image && typeof image.data === 'string' && image.data.length > 0)
+          .map(([questionIndex, image]) => [questionIndex, image.data])
+      );
+    }
+
+    async function replaceImages(setId, images) {
+      const path = 'images/' + setId + '/q';
+      const current = await db.collection(path).get().then(collectionValue);
+      const next = Object.fromEntries(
+        Object.entries(images || {})
+          .filter(([, data]) => typeof data === 'string' && data.length > 0)
+      );
+      const batch = db.batch();
+      Object.keys(current).forEach(questionIndex => {
+        if (!Object.prototype.hasOwnProperty.call(next, questionIndex)) {
+          batch.delete(db.doc(path + '/' + questionIndex));
+        }
+      });
+      Object.entries(next).forEach(([questionIndex, data]) => {
+        batch.set(db.doc(path + '/' + questionIndex), { data });
+      });
+      await batch.commit();
+    }
+
+    async function copyQuizSet(sourceId, newId, patch) {
+      const source = await getQuizSet(sourceId);
+      if (!source) return null;
+      const images = await getImages(sourceId);
+      const copy = { ...source, ...(patch || {}), id: newId };
+      await saveQuizSet(newId, copy);
+      await replaceImages(newId, images);
+      return copy;
+    }
 
     return {
+      listQuizSets,
+      getQuizSet,
+      saveQuizSet,
+      patchQuizSet,
+      getQuestionImage,
+      getImages,
+      replaceImages,
+      copyQuizSet,
+
       getDoc(path) {
         return db.doc(path).get().then(snapshotValue);
       },
