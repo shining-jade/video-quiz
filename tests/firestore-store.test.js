@@ -1387,9 +1387,9 @@ test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', asy
   });
 
   await store.gradeAnswer('a', 's1', 3, null);
-  assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
-    txt: '학생 글', at: 10, ms: 20, ok: null
-  });
+  const ungraded = (await store.getOwnResponses('a', 's1'))['3'];
+  assert.deepEqual(ungraded, { txt: '학생 글', at: 10, ms: 20 });
+  assert.equal(Object.hasOwn(ungraded, 'ok'), false);
 });
 
 test('세션 목록은 문서 ID와 화면용 밀리초 시각을 반환한다', async () => {

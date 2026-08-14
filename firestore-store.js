@@ -184,7 +184,7 @@
 
     function gradeAnswer(sessionId, studentId, questionIndex, ok) {
       return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
-        answers: { [String(questionIndex)]: { ok } }
+        answers: { [String(questionIndex)]: { ok: ok == null ? fieldValue.delete() : ok } }
       }, { merge: true });
     }
 
