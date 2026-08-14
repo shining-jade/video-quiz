@@ -2672,25 +2672,24 @@ function stSubmitCode() {
   stLookupCode(v);
 }
 
-function stLookupCode(code) {
+async function stLookupCode(code) {
   stShell('<div class="empty">반을 찾는 중…</div>');
-  R('codes/' + code).once('value').then(snap => {
-    const v = snap.val();
+  try {
+    const v = await store.getCode(code);
     if (!v || !v.sessionId) { st.code = ''; stRenderCodeForm('그런 반 코드가 없습니다. 다시 확인해 주세요.'); return; }
     st.code = code;
     st.sessionId = v.sessionId;
     lsSet('vq_last_code', code);
-    return R('sessions/' + v.sessionId).once('value').then(s2 => {
-      const sess = s2.val();
-      if (!sess) { stRenderCodeForm('반 정보를 불러오지 못했습니다.'); return; }
-      st.session = sess;
-      return R('quiz_sets/' + sess.setId).once('value').then(s3 => {
-        st.set = normSet(s3.val());
-        if (!st.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
-        stRenderIdentityForm('');
-      });
-    });
-  }).catch(e => { console.error(e); stRenderCodeForm('접속 오류: ' + e.message); });
+    const sess = await store.getSession(v.sessionId);
+    if (!sess) { stRenderCodeForm('반 정보를 불러오지 못했습니다.'); return; }
+    st.session = sess;
+    st.set = normSet(await store.getQuizSet(sess.setId));
+    if (!st.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
+    stRenderIdentityForm('');
+  } catch (e) {
+    console.error(e);
+    stRenderCodeForm('접속 오류: ' + e.message);
+  }
 }
 
 function stRenderIdentityForm(err) {
@@ -2720,7 +2719,7 @@ function stRenderIdentityForm(err) {
   $('#st-name').onkeydown = e => { if (e.key === 'Enter') stJoin(); };
 }
 
-function stJoin() {
+async function stJoin() {
   const grade = Number($('#st-grade').value);
   const klass = Number($('#st-klass').value);
   const num   = Number($('#st-num').value);
@@ -2733,38 +2732,39 @@ function stJoin() {
   const me = { grade: grade, klass: klass, num: num, name: name };
   lsSet('vq_student', JSON.stringify(me));
 
-  R('sessions/' + st.sessionId + '/students/' + sid).once('value').then(snap => {
-    const cur = snap.val();
+  try {
+    const cur = await store.getStudent(st.sessionId, sid);
     if (cur && cur.name && cur.name !== name) {
       if (!confirm(grade + '학년 ' + klass + '반 ' + num + '번은 이미 "' + cur.name + '" 학생으로 등록되어 있습니다.\n\n번호를 잘못 입력한 것이 아니라면 [확인]을 눌러 "' + name + '"(으)로 바꿉니다.')) return;
     }
     st.sid = sid;
     st.me = me;
-    return R('sessions/' + st.sessionId + '/students/' + sid)
-      .set(Object.assign({}, me, { joinedAt: SV_TS }))
-      .then(() => R('responses/' + st.sessionId).once('value'))
-      .then(rs => {
-        // 새로고침 대비 — 내가 이미 낸 답을 복원한다
-        const all = rs.val() || {};
-        Object.keys(all).forEach(qi => {
-          const r = all[qi] && all[qi][sid];
-          if (!r) return;
-          st.myAnswers[Number(qi)] = {
-            c: r.c, cs: r.cs, txt: r.txt,
-            ok: (r.ok === undefined || r.ok === null) ? null : !!r.ok,   // null = 서술형 미채점
-            ms: r.ms || 0
-          };
-        });
-        stStartWatching();
-      });
-  }).catch(e => { console.error(e); stRenderIdentityForm('입장 실패: ' + e.message); });
+    await store.saveStudent(st.sessionId, sid, Object.assign({}, me, { joinedAt: SV_TS }));
+    const answers = await store.getOwnResponses(st.sessionId, sid);
+    // 새로고침 대비 — 내가 이미 낸 답만 복원한다
+    Object.keys(answers).forEach(qi => {
+      const r = answers[qi];
+      if (!r) return;
+      st.myAnswers[Number(qi)] = {
+        c: r.c, cs: r.cs, txt: r.txt,
+        ok: (r.ok === undefined || r.ok === null) ? null : !!r.ok,   // null = 서술형 미채점
+        ms: r.ms || 0
+      };
+    });
+    stStartWatching();
+  } catch (e) {
+    console.error(e);
+    stRenderIdentityForm('입장 실패: ' + e.message);
+  }
 }
 
 function stStartWatching() {
-  watch(R('sessions/' + st.sessionId + '/live'), 'value', snap => {
-    const nl = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, snap.val() || {});
+  onCleanup(store.subscribeLive(st.sessionId, async live => {
+    const previousQ = st.live.q;
+    const nl = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     const changed = nl.q !== st.live.q || nl.openedAt !== st.live.openedAt;
     st.live = nl;
+    if (nl.status === 'ended' && st.session) st.session.status = 'ended';
     if (changed) {
       const prev = st.myAnswers[nl.q];
       st.sel = prev ? prev.c : null;
@@ -2773,16 +2773,13 @@ function stStartWatching() {
       st.submitted = !!prev;
     }
     stRender();
-  });
-  watch(R('sessions/' + st.sessionId + '/status'), 'value', snap => {
-    if (st.session) st.session.status = snap.val() || 'live';
-    stRender();
-  });
-  // 교사 화면이 올려 주는 점수 요약만 받는다 (남의 답은 내려받지 않아 베낄 수 없다)
-  watch(R('sessions/' + st.sessionId + '/board'), 'value', snap => {
-    st.board = snap.val() || {};
-    stRender();
-  });
+    if (previousQ >= 0 && nl.q < 0) {
+      try {
+        st.board = await store.getBoard(st.sessionId);
+        stRender();
+      } catch (e) { console.error(e); }
+    }
+  }, e => console.error(e)));
   every(250, stTick);
   stRender();
 }
@@ -3044,8 +3041,7 @@ function stSend(payload, localRec) {
   st.submitted = true;
   st.myAnswers[i] = localRec;
   stRender();
-  R('responses/' + st.sessionId + '/' + i + '/' + st.sid)
-    .set(payload)
+  return store.mergeAnswer(st.sessionId, st.sid, i, payload)
     .catch(e => {
       console.error(e);
       toast('전송 실패 — 다시 시도해 주세요');
@@ -3834,9 +3830,23 @@ function admExportStudents() {
    ══════════════════════════════════════════════════════════════════════ */
 function bootWithAuth() {
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">연결 중…</div></div>';
+  let clockSyncing = false;
 
-  firebase.auth().onAuthStateChanged(user => {
-    if (user && !authReady) { authReady = true; router(); }
+  firebase.auth().onAuthStateChanged(async user => {
+    if (!user || authReady || clockSyncing) return;
+    clockSyncing = true;
+    try {
+      await store.syncClock('clock/' + user.uid + '-' + rid(8));
+      authReady = true;
+      router();
+    } catch (err) {
+      console.error(err);
+      APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
+        '<h2>접속할 수 없습니다</h2>' +
+        '<div class="notice" style="margin-top:12px">서버 시각을 확인하지 못했습니다. 새로고침해 주세요.</div>' +
+        '<button class="btn primary" onclick="location.reload()">새로고침</button>' +
+      '</div></div>';
+    }
   });
 
   firebase.auth().signInAnonymously().catch(err => {

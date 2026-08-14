@@ -26,6 +26,13 @@
       });
       return value;
     };
+    const liveValue = snapshot => {
+      const value = snapshotValue(snapshot);
+      if (!value) return null;
+      const millis = timestampMillis(value.openedAt);
+      if (millis !== null) value.openedAt = millis;
+      return value;
+    };
     const withoutDocumentId = value => {
       const { id, ...data } = value || {};
       return data;
@@ -135,7 +142,41 @@
 
     function subscribeLive(sessionId, next, error) {
       return db.doc('sessions/' + sessionId + '/meta/live')
-        .onSnapshot(snapshot => next(snapshotValue(snapshot)), error);
+        .onSnapshot(snapshot => next(liveValue(snapshot)), error);
+    }
+
+    function getCode(code) {
+      return db.doc('codes/' + code).get().then(snapshotValue);
+    }
+
+    function getSession(sessionId) {
+      return db.doc('sessions/' + sessionId).get().then(snapshotValue);
+    }
+
+    function getStudent(sessionId, studentId) {
+      return db.doc('sessions/' + sessionId + '/students/' + studentId).get().then(snapshotValue);
+    }
+
+    function saveStudent(sessionId, studentId, student) {
+      return db.doc('sessions/' + sessionId + '/students/' + studentId).set(student);
+    }
+
+    async function getOwnResponses(sessionId, studentId) {
+      const value = await db.doc('sessions/' + sessionId + '/responses/' + studentId)
+        .get().then(snapshotValue);
+      return value && value.answers ? value.answers : {};
+    }
+
+    function mergeAnswer(sessionId, studentId, questionIndex, answer) {
+      return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
+        answers: { [String(questionIndex)]: answer }
+      }, { merge: true });
+    }
+
+    async function getBoard(sessionId) {
+      const value = await db.doc('sessions/' + sessionId + '/meta/board')
+        .get().then(snapshotValue);
+      return value && value.scores ? value.scores : {};
     }
 
     function setLive(sessionId, live) {
@@ -147,7 +188,13 @@
         status: 'ended',
         endedAt: fieldValue.serverTimestamp()
       }, { merge: true });
-      await setLive(sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+      await setLive(sessionId, {
+        q: -1,
+        openedAt: 0,
+        revealed: false,
+        limitSec: 0,
+        status: 'ended'
+      });
     }
 
     function writeBoard(sessionId, board) {
@@ -167,6 +214,13 @@
       subscribeStudents,
       subscribeResponses,
       subscribeLive,
+      getCode,
+      getSession,
+      getStudent,
+      saveStudent,
+      getOwnResponses,
+      mergeAnswer,
+      getBoard,
       setLive,
       endSession,
       writeBoard,

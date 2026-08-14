@@ -22,7 +22,10 @@ function merge(current, update) {
   const result = clone(current || {});
   Object.entries(update).forEach(([key, value]) => {
     if (value === DELETE_FIELD) delete result[key];
-    else result[key] = clone(value);
+    else if (value && typeof value === 'object' && !Array.isArray(value) &&
+      result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])) {
+      result[key] = merge(result[key], value);
+    } else result[key] = clone(value);
   });
   return result;
 }
@@ -742,7 +745,7 @@ test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린
   assert.deepEqual({ setId: session.setId, status: session.status }, { setId: 'set1', status: 'ended' });
   assert.equal(session.endedAt.toMillis(), 20_000);
   assert.deepEqual(fake.value('sessions/a/meta/live'), {
-    q: -1, openedAt: 0, revealed: false, limitSec: 0
+    q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
   });
 });
 
@@ -1032,4 +1035,319 @@ test('Firestore 초기화 구간은 ref 없는 Firestore 인스턴스에서도 �
   };
 
   assert.doesNotThrow(() => vm.runInNewContext(html.slice(start, end), context));
+});
+
+test('새 답은 같은 학생 문서의 다른 문항 답을 보존한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/responses/s1': { answers: { '0': { c: 1, ok: true } } }
+  });
+  const store = createStore(fake);
+
+  await store.mergeAnswer('a', 's1', 2, { txt: '서술', at: 123, ms: 456 });
+
+  assert.deepEqual(await store.getOwnResponses('a', 's1'), {
+    '0': { c: 1, ok: true },
+    '2': { txt: '서술', at: 123, ms: 456 }
+  });
+});
+
+test('학생 단발 조회는 코드·세션·본인 문서·점수판의 정해진 경로만 읽는다', async () => {
+  const fake = makeFirestoreFake({
+    'codes/ABC234': { sessionId: 'a' },
+    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a/students/s1': { name: '가' },
+    'sessions/a/responses/s1': { answers: { '0': { c: 1 } } },
+    'sessions/a/meta/board': { scores: { s1: 1 } },
+    'sessions/a/responses/s2': { answers: { '0': { c: 0 } } }
+  });
+  const store = createStore(fake);
+
+  assert.equal((await store.getCode('ABC234')).sessionId, 'a');
+  assert.equal((await store.getSession('a')).setId, 'set1');
+  assert.equal((await store.getStudent('a', 's1')).name, '가');
+  assert.deepEqual(await store.getOwnResponses('a', 's1'), { '0': { c: 1 } });
+  assert.deepEqual(await store.getBoard('a'), { s1: 1 });
+  await store.saveStudent('a', 's1', { name: '나' });
+
+  assert.deepEqual(fake.calls().filter(call => call.operation === 'get').map(call => call.path), [
+    'codes/ABC234',
+    'sessions/a',
+    'sessions/a/students/s1',
+    'sessions/a/responses/s1',
+    'sessions/a/meta/board'
+  ]);
+  assert.deepEqual(fake.value('sessions/a/students/s1'), { name: '나' });
+  assert.equal(fake.calls().some(call => call.path === 'sessions/a/responses/s2'), false);
+});
+
+test('live 구독은 openedAt Timestamp를 서버 밀리초로 바꾼다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/meta/live': {
+      q: 1,
+      openedAt: { toMillis: () => 12_345 },
+      revealed: false,
+      limitSec: 20
+    }
+  });
+  const store = createStore(fake);
+  let received;
+
+  const stop = store.subscribeLive('a', value => { received = value; });
+  await fake.flush();
+
+  assert.equal(received.openedAt, 12_345);
+  stop();
+});
+
+test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 동일하게 계산한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let now = 15_000;
+  const live = { q: 0, openedAt: 10_000, revealed: false, limitSec: 20 };
+  const timer = { style: {}, classList: { toggle() {} } };
+  const timerNumber = { textContent: '' };
+  const overlay = {
+    querySelector(selector) {
+      return selector === '#ov-timer' ? timer : timerNumber;
+    }
+  };
+  const context = {
+    st: { live },
+    pl: { live, uiRevealed: false },
+    serverNow() { return now; },
+    document: { getElementById() { return overlay; } },
+    plRevealed() { return false; },
+    plRenderOverlayCounts() {}
+  };
+  vm.runInNewContext(extractFunction(html, 'stLeftRatio'), context);
+  vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
+
+  assert.equal(context.stLeftRatio().left, 15);
+  context.plTimerTick();
+  assert.equal(timerNumber.textContent, '15초');
+
+  now += 5_000;
+  assert.equal(context.stLeftRatio().left, 10);
+  context.plTimerTick();
+  assert.equal(timerNumber.textContent, '10초');
+});
+
+test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 복원한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const fields = {
+    '#st-grade': { value: '3' },
+    '#st-klass': { value: '2' },
+    '#st-num': { value: '7' },
+    '#st-name': { value: ' 홍길동 ' }
+  };
+  const context = {
+    st: { sessionId: 'a', myAnswers: {} },
+    $(selector) { return fields[selector]; },
+    lsSet() {},
+    SV_TS: Symbol('server timestamp'),
+    store: {
+      async getStudent(sessionId, studentId) {
+        calls.push(['getStudent', sessionId, studentId]);
+        return null;
+      },
+      async saveStudent(sessionId, studentId, value) {
+        calls.push(['saveStudent', sessionId, studentId, value]);
+      },
+      async getOwnResponses(sessionId, studentId) {
+        calls.push(['getOwnResponses', sessionId, studentId]);
+        return { '0': { c: 1, ok: true, ms: 500 } };
+      }
+    },
+    confirm() { return true; },
+    stRenderIdentityForm() {},
+    stStartWatching() { calls.push(['watch']); },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'stJoin'), context);
+
+  await context.stJoin();
+
+  assert.deepEqual(calls.map(call => call.slice(0, 3)), [
+    ['getStudent', 'a', '3_2_7'],
+    ['saveStudent', 'a', '3_2_7'],
+    ['getOwnResponses', 'a', '3_2_7'],
+    ['watch']
+  ]);
+  assert.deepEqual(clone(context.st.myAnswers), { '0': { c: 1, cs: undefined, txt: undefined, ok: true, ms: 500 } });
+});
+
+test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수판을 한 번 읽는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let liveNext;
+  const subscriptions = [];
+  let boardReads = 0;
+  const context = {
+    st: {
+      sessionId: 'a', session: { status: 'live' },
+      live: { q: 2, openedAt: 10, revealed: false, limitSec: 20 },
+      myAnswers: {}, board: {}
+    },
+    store: {
+      subscribeLive(id, next) {
+        subscriptions.push(id);
+        liveNext = next;
+        return () => {};
+      },
+      async getBoard(id) {
+        assert.equal(id, 'a');
+        boardReads += 1;
+        return { s1: 2 };
+      }
+    },
+    onCleanup() {},
+    every() {},
+    stTick() {},
+    stRender() {},
+    parseMulti() { return []; },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'stStartWatching'), context);
+
+  context.stStartWatching();
+  await liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+
+  assert.deepEqual(subscriptions, ['a']);
+  assert.equal(boardReads, 1);
+  assert.deepEqual(clone(context.st.board), { s1: 2 });
+
+  await liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended' });
+  assert.equal(context.st.session.status, 'ended');
+  assert.equal(boardReads, 1);
+});
+
+test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let liveNext;
+  let resolveBoard;
+  const boardReady = new Promise(resolve => { resolveBoard = resolve; });
+  const context = {
+    st: {
+      sessionId: 'a', session: { status: 'live' },
+      live: { q: 2, openedAt: 10, revealed: false, limitSec: 20 },
+      myAnswers: { '3': { c: 1 } }, board: {}
+    },
+    store: {
+      subscribeLive(id, next) { liveNext = next; return () => {}; },
+      async getBoard() { await boardReady; return { s1: 2 }; }
+    },
+    onCleanup() {},
+    every() {},
+    stTick() {},
+    stRender() {},
+    parseMulti() { return []; },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'stStartWatching'), context);
+  context.stStartWatching();
+
+  const closeRun = liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  await Promise.resolve();
+  await liveNext({ q: 3, openedAt: 30, revealed: false, limitSec: 20 });
+  resolveBoard();
+  await closeRun;
+
+  assert.equal(context.st.live.q, 3);
+  assert.equal(context.st.sel, 1);
+  assert.equal(context.st.submitted, true);
+});
+
+test('학생 답 전송은 본인 응답 문서의 현재 문항만 병합한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const writes = [];
+  const context = {
+    st: { sessionId: 'a', sid: 's1', live: { q: 2 }, myAnswers: {} },
+    store: {
+      mergeAnswer(...args) {
+        writes.push(args);
+        return Promise.resolve();
+      }
+    },
+    stRender() {},
+    toast() {},
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'stSend'), context);
+
+  context.stSend({ txt: '서술', at: 123, ms: 456 }, { txt: '서술', ms: 456 });
+  await Promise.resolve();
+
+  assert.deepEqual(writes, [['a', 's1', 2, { txt: '서술', at: 123, ms: 456 }]]);
+});
+
+test('익명 인증 뒤 고유 서버 시각 동기화가 끝나야 라우터를 시작한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let authListener;
+  let resolveClock;
+  let routed = 0;
+  const clockReady = new Promise(resolve => { resolveClock = resolve; });
+  const app = { innerHTML: '' };
+  const context = {
+    authReady: false,
+    APP() { return app; },
+    topbar() { return '<nav></nav>'; },
+    firebase: {
+      auth() {
+        return {
+          onAuthStateChanged(listener) { authListener = listener; },
+          signInAnonymously() { return Promise.resolve(); }
+        };
+      }
+    },
+    store: {
+      async syncClock(pathValue) {
+        assert.equal(pathValue, 'clock/user-a-SAMPLE12');
+        await clockReady;
+      }
+    },
+    rid(size) { assert.equal(size, 8); return 'SAMPLE12'; },
+    router() { routed += 1; },
+    esc(value) { return String(value); },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'bootWithAuth'), context);
+
+  context.bootWithAuth();
+  const authRun = authListener({ uid: 'user-a' });
+  await Promise.resolve();
+  assert.equal(routed, 0);
+  resolveClock();
+  await authRun;
+  assert.equal(routed, 1);
+});
+
+test('서버 시각 보정 실패는 한국어 오류를 표시하고 수업 라우팅을 차단한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let authListener;
+  let routed = 0;
+  const app = { innerHTML: '' };
+  const context = {
+    authReady: false,
+    APP() { return app; },
+    topbar() { return '<nav></nav>'; },
+    firebase: {
+      auth() {
+        return {
+          onAuthStateChanged(listener) { authListener = listener; },
+          signInAnonymously() { return Promise.resolve(); }
+        };
+      }
+    },
+    store: { async syncClock() { throw new Error('offline'); } },
+    rid() { return 'SAMPLE12'; },
+    router() { routed += 1; },
+    esc(value) { return String(value); },
+    console: { error() {} }
+  };
+  vm.runInNewContext(extractFunction(html, 'bootWithAuth'), context);
+
+  context.bootWithAuth();
+  await authListener({ uid: 'user-a' });
+
+  assert.equal(routed, 0);
+  assert.match(app.innerHTML, /서버 시각을 확인하지 못했습니다\. 새로고침해 주세요\./);
 });
