@@ -191,6 +191,60 @@ textarea { resize: vertical; min-height: 62px; }
 .txt-answer .who .spacer { flex: 1; }
 .tag.qtype { background: #eef6ff; color: #1d4ed8; }
 
+/* ── 실시간 순위표 ─────────────────────────────────────────────────── */
+.rank-row {
+  display: flex; align-items: center; gap: 9px; padding: 5px 7px;
+  border-radius: 7px; font-size: 13px;
+}
+.rank-row + .rank-row { margin-top: 2px; }
+.rank-row .rk {
+  width: 22px; height: 22px; border-radius: 6px; background: #eceef4; color: var(--ink-2);
+  display: grid; place-items: center; font-size: 11px; font-weight: 800; flex: none;
+}
+.rank-row.top1 .rk { background: #f5c518; color: #4a3600; }
+.rank-row.top2 .rk { background: #cfd4de; color: #3a3f4c; }
+.rank-row.top3 .rk { background: #e0a06a; color: #4a2a00; }
+.rank-row .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-row .sc { font-weight: 800; color: var(--accent); flex: none; font-variant-numeric: tabular-nums; }
+.rank-row .prog { flex: none; font-size: 11px; color: var(--ink-3); }
+
+#board-overlay {
+  position: fixed; inset: 0; background: #12162a; z-index: 300;
+  padding: 28px; overflow-y: auto;
+}
+#board-overlay .bo-inner { max-width: 1100px; margin: 0 auto; color: #fff; }
+#board-overlay h2 { font-size: clamp(24px, 3.2vw, 40px); margin-bottom: 6px; }
+#board-overlay .bo-sub { color: rgba(255,255,255,.6); font-size: 15px; margin-bottom: 22px; }
+#board-overlay .bo-list { display: grid; gap: 8px; }
+#board-overlay .bo-row {
+  display: flex; align-items: center; gap: 16px;
+  padding: 12px 18px; border-radius: 12px; background: rgba(255,255,255,.07);
+  font-size: clamp(16px, 1.9vw, 24px); font-weight: 700;
+}
+#board-overlay .bo-row .rk {
+  width: 44px; height: 44px; border-radius: 11px; background: rgba(255,255,255,.14);
+  display: grid; place-items: center; font-size: 19px; font-weight: 800; flex: none;
+}
+#board-overlay .bo-row.top1 { background: rgba(245,197,24,.2); }
+#board-overlay .bo-row.top1 .rk { background: #f5c518; color: #4a3600; }
+#board-overlay .bo-row.top2 .rk { background: #cfd4de; color: #3a3f4c; }
+#board-overlay .bo-row.top3 .rk { background: #e0a06a; color: #4a2a00; }
+#board-overlay .bo-row .who { flex: 1; }
+#board-overlay .bo-row .no { font-size: .7em; opacity: .6; font-weight: 600; margin-right: 8px; }
+#board-overlay .bo-row .sc { flex: none; }
+#board-overlay .bo-row .sc small { opacity: .55; font-size: .6em; font-weight: 600; }
+
+/* 학생 개인 진행 현황 */
+.stu-mystat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 18px 0 4px; }
+.stu-mystat .box {
+  background: #fff; border: 1px solid var(--line); border-radius: 11px; padding: 11px 8px; text-align: center;
+}
+.stu-mystat .box .k { font-size: 11.5px; color: var(--ink-2); font-weight: 600; }
+.stu-mystat .box .v { font-size: 24px; font-weight: 800; letter-spacing: -.02em; line-height: 1.25; }
+.stu-mystat .box .v small { font-size: 13px; font-weight: 700; color: var(--ink-3); }
+.stu-mystat .box.ok .v { color: var(--ok); }
+.stu-mystat .box.rank .v { color: var(--accent); }
+
 /* 문항 목차 버블 — 문항이 많아지면 스크롤로 오가기 번거로워 옆에 띄운다 */
 #mk-nav {
   position: fixed; right: 14px; top: 50%; transform: translateY(-50%);
@@ -1729,6 +1783,10 @@ function screenPlay(setId) {
     try { pl && pl.player && pl.player.destroy(); } catch (e) {}
     const ov = document.getElementById('overlay');
     if (ov) ov.remove();
+    const bo = document.getElementById('board-overlay');
+    if (bo) bo.remove();
+    clearTimeout(boardPushTimer);
+    lastBoardJson = '';
     document.body.classList.remove('quiz-open');
     pl = null;
   });
@@ -1862,8 +1920,13 @@ function renderPlayRun() {
           '<div style="margin-top:12px"><button class="btn sm block" onclick="copyText(\'' + esc(joinUrl) + '\')">학생 참여 링크 복사</button></div>' +
         '</div>' +
         '<div class="card" style="margin-top:14px">' +
-          '<h2 style="font-size:14px">참여 학생</h2>' +
-          '<div id="pl-stulist" style="font-size:13px;color:var(--ink-2);max-height:240px;overflow:auto"></div>' +
+          '<div class="row" style="align-items:center;margin-bottom:8px">' +
+            '<h2 style="font-size:14px">실시간 순위</h2>' +
+            '<div style="flex:1"></div>' +
+            '<button class="btn sm" onclick="plToggleBoard()" title="교실 화면에 크게 띄웁니다">🏆 크게 보기</button>' +
+          '</div>' +
+          '<div id="pl-stulist" style="max-height:300px;overflow:auto"></div>' +
+          '<div class="hint" style="margin-top:6px">숫자는 맞힌 개수입니다. 서술형은 채점 전까지 빠집니다.</div>' +
         '</div>' +
       '</div>' +
 
@@ -1881,11 +1944,16 @@ function renderPlayRun() {
   watch(R('sessions/' + pl.sessionId + '/students'), 'value', snap => {
     pl.students = snap.val() || {};
     plRenderStudents();
+    plRenderBoardOverlay();
+    plPushBoard();
   });
   watch(R('responses/' + pl.sessionId), 'value', snap => {
     pl.answers = snap.val() || {};
     plRenderQList();
     plRenderOverlayCounts();
+    plRenderStudents();
+    plRenderBoardOverlay();
+    plPushBoard();
   });
   watch(R('sessions/' + pl.sessionId + '/live'), 'value', snap => {
     pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, snap.val() || {});
@@ -1990,15 +2058,100 @@ function plRenderQList() {
   }).join('');
 }
 
+/* ── 실시간 순위 ──────────────────────────────────────────────────────
+   점수 계산은 교사 화면에서만 한다. 학생에게 responses 를 통째로 내려보내면
+   순위는 계산할 수 있지만 남의 답도 그대로 보여 베끼기가 가능해지기 때문이다.
+   대신 점수만 요약한 board 를 세션에 올리고 학생은 그것만 구독한다. */
+function plScoreboard() {
+  const rows = Object.keys(pl.students).map(sid => {
+    const s = pl.students[sid];
+    let correct = 0, answered = 0, graded = 0;
+    pl.set.questions.forEach((q, i) => {
+      const r = (pl.answers[i] || {})[sid];
+      if (!r) return;
+      answered++;
+      if (r.ok === true) { graded++; correct++; }
+      else if (r.ok === false) graded++;
+    });
+    return {
+      sid: sid, name: s.name || '', grade: s.grade, klass: s.klass, num: s.num,
+      correct: correct, answered: answered, graded: graded
+    };
+  });
+  // 같은 점수면 더 적게 풀고 맞힌 쪽을, 그다음은 번호 순
+  rows.sort((a, b) => (b.correct - a.correct) || (a.answered - b.answered) || (a.num - b.num));
+  let rank = 0, prev = null;
+  rows.forEach((r, i) => {
+    if (prev === null || r.correct !== prev) { rank = i + 1; prev = r.correct; }
+    r.rank = rank;
+  });
+  return rows;
+}
+
+let boardPushTimer = null, lastBoardJson = '';
+/** 응답이 들어올 때마다 쓰면 너무 잦으므로 잠깐 모아서 한 번에 올린다 */
+function plPushBoard() {
+  if (!pl || !pl.sessionId) return;
+  clearTimeout(boardPushTimer);
+  boardPushTimer = setTimeout(() => {
+    if (!pl || !pl.sessionId) return;
+    const board = {};
+    plScoreboard().forEach(r => { board[r.sid] = r.correct; });
+    const json = JSON.stringify(board);
+    if (json === lastBoardJson) return;
+    lastBoardJson = json;
+    R('sessions/' + pl.sessionId + '/board').set(board).catch(e => console.warn('board', e));
+  }, 900);
+}
+
 function plRenderStudents() {
   const list = $('#pl-stulist'), n = $('#pl-nstu');
-  const arr = Object.keys(pl.students).map(k => pl.students[k]);
-  if (n) n.textContent = arr.length;
+  const rows = plScoreboard();
+  if (n) n.textContent = rows.length;
   if (!list) return;
-  if (!arr.length) { list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">아직 입장한 학생이 없습니다.</div>'; return; }
-  arr.sort((a, b) => (a.grade - b.grade) || (a.klass - b.klass) || (a.num - b.num));
-  list.innerHTML = arr.map(s =>
-    '<div style="padding:3px 0">' + esc(s.grade) + '-' + esc(s.klass) + '-' + esc(s.num) + ' ' + esc(s.name) + '</div>').join('');
+  if (!rows.length) { list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">아직 입장한 학생이 없습니다.</div>'; return; }
+  const total = pl.set.questions.length;
+  list.innerHTML = rows.map(r =>
+    '<div class="rank-row' + (r.rank <= 3 ? ' top' + r.rank : '') + '">' +
+      '<span class="rk">' + r.rank + '</span>' +
+      '<span class="nm">' + esc(r.name) + ' <span style="color:var(--ink-3);font-size:11px">' + r.num + '번</span></span>' +
+      '<span class="prog">' + r.answered + '/' + total + '</span>' +
+      '<span class="sc">' + r.correct + '</span>' +
+    '</div>').join('');
+}
+
+/* ── 교실 화면용 전체 순위표 ─────────────────────────────────────────── */
+function plToggleBoard() {
+  const el = document.getElementById('board-overlay');
+  if (el) { el.remove(); return; }
+  const box = document.createElement('div');
+  box.id = 'board-overlay';
+  document.body.appendChild(box);
+  plRenderBoardOverlay();
+}
+function plRenderBoardOverlay() {
+  const box = document.getElementById('board-overlay');
+  if (!box || !pl) return;
+  const rows = plScoreboard();
+  const total = pl.set.questions.length;
+  const nUngraded = rows.reduce((a, r) => a + (r.answered - r.graded), 0);
+
+  box.innerHTML = '<div class="bo-inner">' +
+    '<h2>🏆 우리 반 순위</h2>' +
+    '<div class="bo-sub">' + esc(pl.set.title) + ' · 문항 ' + total + '개 · 참여 ' + rows.length + '명' +
+      (nUngraded ? ' · 서술형 ' + nUngraded + '개는 채점 전이라 점수에 빠져 있습니다' : '') + '</div>' +
+    (rows.length
+      ? '<div class="bo-list">' + rows.map(r =>
+          '<div class="bo-row' + (r.rank <= 3 ? ' top' + r.rank : '') + '">' +
+            '<span class="rk">' + (r.rank === 1 ? '🥇' : r.rank === 2 ? '🥈' : r.rank === 3 ? '🥉' : r.rank) + '</span>' +
+            '<span class="who"><span class="no">' + r.grade + '-' + r.klass + '-' + r.num + '</span>' + esc(r.name) + '</span>' +
+            '<span class="sc">' + r.correct + '<small> / ' + total + '</small></span>' +
+          '</div>').join('') + '</div>'
+      : '<div style="color:rgba(255,255,255,.6);padding:40px 0">아직 입장한 학생이 없습니다.</div>') +
+    '<div class="ov-actions" style="margin-top:26px">' +
+      '<button class="btn primary" onclick="plToggleBoard()">닫기</button>' +
+    '</div>' +
+  '</div>';
 }
 
 /* ── 교사 퀴즈 오버레이 ─────────────────────────────────────────────── */
@@ -2048,6 +2201,7 @@ function plRenderOverlay() {
       (mode === 'never' ? '' :
         '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
       '<button class="btn primary" onclick="plCloseQuestion()">▶ 계속 재생</button>' +
+      '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
       '<a class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
     '</div>' +
   '</div>';
@@ -2189,7 +2343,7 @@ function screenStudent(codeArg) {
     sid: null, me: null,
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     myAnswers: {},          // { 문항index: {c, ok, ms} }
-    sel: null, multiSel: [], draft: '', submitted: false,
+    sel: null, multiSel: [], draft: '', submitted: false, board: {},
     uiRevealed: false, uiLocked: false, uiQ: -2
   };
   onCleanup(() => { st = null; });
@@ -2336,6 +2490,11 @@ function stStartWatching() {
     if (st.session) st.session.status = snap.val() || 'live';
     stRender();
   });
+  // 교사 화면이 올려 주는 점수 요약만 받는다 (남의 답은 내려받지 않아 베낄 수 없다)
+  watch(R('sessions/' + st.sessionId + '/board'), 'value', snap => {
+    st.board = snap.val() || {};
+    stRender();
+  });
   every(250, stTick);
   stRender();
 }
@@ -2412,21 +2571,29 @@ function stRender() {
         '<p>' + esc(set.title) + '</p>' +
         (showScore
           ? '<div class="result-banner ok" style="margin-top:18px">' + gradedKeys.length + '문항 중 ' + correct + '개 정답' +
+              (function () {
+                const rk = stRank();
+                return rk ? '<div style="font-size:14px;font-weight:700;margin-top:6px">' + rk.total + '명 중 ' + rk.rank + '등</div>' : '';
+              })() +
               (nUngraded ? '<div style="font-size:13px;font-weight:600;margin-top:6px;color:var(--ink-2)">서술형 ' + nUngraded + '문항은 선생님이 채점합니다</div>' : '') + '</div>'
           : '<div class="result-banner mute" style="margin-top:18px">' + answered + '문항 제출 완료</div>') +
-      '</div></div>');
+      '</div>' +
+      stMyStat(set, answered, correct, gradedKeys.length, nUngraded, showScore) +
+      '</div>');
     st.uiQ = -3;
     return;
   }
 
   if (i < 0) {
     stShell(header +
-      '<div class="card"><div class="stu-wait">' +
-        '<div class="big">📺</div>' +
-        '<h2>선생님 화면을 보세요</h2>' +
-        '<p>퀴즈가 나오면 이 화면에 자동으로 뜹니다.</p>' +
-        (answered ? '<p style="margin-top:14px;color:var(--ink-3);font-size:13px">지금까지 ' + answered + ' / ' + set.questions.length + ' 문항 제출</p>' : '') +
-      '</div></div>');
+      '<div class="card">' +
+        '<div class="stu-wait" style="padding:38px 18px 8px">' +
+          '<div class="big">📺</div>' +
+          '<h2>선생님 화면을 보세요</h2>' +
+          '<p>퀴즈가 나오면 이 화면에 자동으로 뜹니다.</p>' +
+        '</div>' +
+        stMyStat(set, answered, correct, gradedKeys.length, nUngraded, showScore) +
+      '</div>');
     st.uiQ = -1;
     return;
   }
@@ -2462,6 +2629,38 @@ function stRender() {
     '</div>');
 
   if (hasImage(q)) stShowImage(q, i);
+}
+
+/** 내 순위 — 교사 화면이 올린 점수 요약(board)으로만 계산한다 */
+function stRank() {
+  const b = st.board || {};
+  const keys = Object.keys(b);
+  if (!keys.length || b[st.sid] === undefined) return null;
+  const my = Number(b[st.sid]) || 0;
+  return { rank: keys.filter(k => (Number(b[k]) || 0) > my).length + 1, total: keys.length };
+}
+
+/** 대기 화면·종료 화면에 쓰는 내 진행 현황 */
+function stMyStat(set, answered, correct, graded, ungraded, showScore) {
+  const totalQ = set.questions.length;
+  const left = Math.max(0, totalQ - answered);
+  const rk = showScore ? stRank() : null;
+
+  return '<div class="stu-mystat">' +
+      (showScore
+        ? '<div class="box ok"><div class="k">맞힌 개수</div><div class="v">' + correct + '<small> / ' + graded + '</small></div></div>'
+        : '<div class="box"><div class="k">제출</div><div class="v">' + answered + '<small> / ' + totalQ + '</small></div></div>') +
+      '<div class="box"><div class="k">남은 문항</div><div class="v">' + left + '<small>개</small></div></div>' +
+      (rk
+        ? '<div class="box rank"><div class="k">내 순위</div><div class="v">' + rk.rank + '<small> / ' + rk.total + '명</small></div></div>'
+        : '<div class="box"><div class="k">푼 문항</div><div class="v">' + answered + '<small> / ' + totalQ + '</small></div></div>') +
+    '</div>' +
+    (ungraded && showScore
+      ? '<div class="hint" style="text-align:center;margin-top:8px">서술형 ' + ungraded + '문항은 선생님이 채점한 뒤 점수에 들어갑니다</div>'
+      : '') +
+    (left === 0 && answered
+      ? '<div class="hint" style="text-align:center;margin-top:8px">문항을 모두 풀었습니다. 수고했어요!</div>'
+      : '');
 }
 
 /** 문항 이미지는 그 문항이 열릴 때만 내려받는다 */
