@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 
 const SERVER_TIMESTAMP = Symbol('server timestamp');
 
@@ -227,32 +230,34 @@ function loadStoreModule() {
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({
-    'sessions/a/meta/live': { q: 2, revealed: false }
+    'sessions/a/meta/live': { id: 'payload-live', q: 2, revealed: false }
   });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
   let received;
   const stop = store.subscribeDoc('sessions/a/meta/live', value => { received = value; });
   await fake.flush();
-  assert.deepEqual(received, { q: 2, revealed: false });
+  assert.deepEqual(received, { id: 'live', q: 2, revealed: false });
   stop();
   fake.emit('sessions/a/meta/live', { q: 3 });
   await fake.flush();
-  assert.deepEqual(received, { q: 2, revealed: false });
+  assert.deepEqual(received, { id: 'live', q: 2, revealed: false });
   assert.deepEqual(fake.subscribedPaths(), ['sessions/a/meta/live']);
 });
 
 test('문서와 컬렉션 CRUD는 Firestore 데이터를 화면용 객체로 반환한다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({
-    'quiz_sets/a': { title: '첫 세트', archived: false },
+    'quiz_sets/a': { id: 'payload-a', title: '첫 세트', archived: false },
     'quiz_sets/b': { title: '둘째 세트', archived: true }
   });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
 
-  assert.deepEqual(await store.getDoc('quiz_sets/a'), { title: '첫 세트', archived: false });
+  assert.deepEqual(await store.getDoc('quiz_sets/a'), {
+    id: 'a', title: '첫 세트', archived: false
+  });
   assert.equal(await store.getDoc('quiz_sets/missing'), null);
   assert.deepEqual(await store.getCollection('quiz_sets'), {
-    a: { title: '첫 세트', archived: false },
+    a: { id: 'payload-a', title: '첫 세트', archived: false },
     b: { title: '둘째 세트', archived: true }
   });
 
@@ -337,4 +342,34 @@ test('빈 반 코드는 한 트랜잭션에서 코드·세션·live·board를 �
   });
   assert.deepEqual(fake.value('sessions/new/meta/board'), { scores: {} });
   assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 1);
+});
+
+test('Firestore 초기화 구간은 ref 없는 Firestore 인스턴스에서도 중단되지 않는다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const start = html.indexOf('"use strict";');
+  const utilitiesHeading = html.indexOf('   1. 공용 유틸', start);
+  const end = html.lastIndexOf('/*', utilitiesHeading);
+  assert.ok(start >= 0 && utilitiesHeading >= 0 && end > start, 'Firebase 초기화 구간을 찾을 수 있어야 한다');
+
+  const firestore = () => Object.freeze({ kind: 'firestore' });
+  firestore.FieldValue = { serverTimestamp: () => ({ kind: 'server-timestamp' }) };
+  const firebase = {
+    apps: [],
+    initializeApp() { this.apps.push({}); },
+    firestore
+  };
+  const context = {
+    firebase,
+    FirestoreStore: {
+      createFirestoreStore() { return { serverNow: () => 1_000 }; }
+    },
+    document: {
+      getElementById() { return null; },
+      createElement() { return {}; },
+      body: { appendChild() {} }
+    },
+    setInterval() { return 1; }
+  };
+
+  assert.doesNotThrow(() => vm.runInNewContext(html.slice(start, end), context));
 });

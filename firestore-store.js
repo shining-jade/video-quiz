@@ -11,7 +11,9 @@
   function createFirestoreStore(db, fieldValue, nowFn) {
     let serverOffset = 0;
 
-    const snapshotValue = snapshot => snapshot.exists ? snapshot.data() : null;
+    const snapshotValue = snapshot => snapshot.exists
+      ? { ...snapshot.data(), id: snapshot.id }
+      : null;
     const collectionValue = snapshot => Object.fromEntries(
       snapshot.docs.map(document => [document.id, document.data()])
     );
