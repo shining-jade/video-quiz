@@ -145,7 +145,13 @@ textarea { resize: vertical; min-height: 62px; }
 .home-hero { text-align: center; padding: 44px 0 30px; }
 .home-hero h1 { font-size: 30px; margin-bottom: 8px; }
 .home-hero p { color: var(--ink-2); font-size: 15px; }
-.home-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+.home-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 1199px) {
+  .home-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+  .home-cards { grid-template-columns: 1fr; }
+}
 .home-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 22px; text-decoration: none; color: inherit; display: block;
@@ -1040,7 +1046,7 @@ window.addEventListener('hashchange', router);
    4. 홈
    ══════════════════════════════════════════════════════════════════════ */
 function screenHome() {
-  APP().innerHTML = topbar() + '<div class="wrap">' +
+  APP().innerHTML = topbar() + '<div class="wrap wide">' +
     '<div class="home-hero">' +
       '<h1>영상 퀴즈 실시간 진행 도구</h1>' +
       '<p>영상 속 정해진 순간에 퀴즈가 뜨고, 학생들은 각자 폰으로 그 문제만 풉니다.</p>' +
