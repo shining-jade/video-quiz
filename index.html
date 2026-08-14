@@ -1176,6 +1176,7 @@ function screenMake(setId) {
     questions: [blankQuestion(0)],
     createdAt: 0,
     archived: false,
+    settingsOpen: false,
     saved: false
   };
   mkPlayer = null;
@@ -1246,32 +1247,7 @@ function renderMake() {
         '</div>' +
       '</div>' +
 
-      '<div class="card">' +
-        '<h2>2. 진행 설정</h2>' +
-        '<div class="sub">이 세트로 진행하는 모든 반에 동일하게 적용됩니다.</div>' +
-        '<div class="grid2">' +
-          '<div class="field"><label class="f">정답 공개 시점</label>' +
-            '<select id="mk-reveal">' +
-              Object.keys(REVEAL_LABEL).map(k =>
-                '<option value="' + k + '"' + (mk.settings.revealMode === k ? ' selected' : '') + '>' + REVEAL_LABEL[k] + '</option>').join('') +
-            '</select>' +
-            '<div class="hint" id="mk-reveal-hint"></div></div>' +
-          '<div class="field"><label class="f">문항당 응답 제한 시간 (초)</label>' +
-            '<input type="number" id="mk-limit" min="0" max="600" value="' + mk.settings.limitSec + '">' +
-            '<div class="hint">0을 넣으면 시간 제한 없이, 교사가 [계속 재생]을 누를 때까지 열려 있습니다.</div></div>' +
-        '</div>' +
-        '<div class="grid2">' +
-          '<div class="field" id="mk-delay-field"><label class="f">정답 자동 공개까지 (초)</label>' +
-            '<input type="number" id="mk-delay" min="0" max="600" value="' + mk.settings.revealDelaySec + '">' +
-            '<div class="hint">퀴즈가 뜬 뒤 이만큼 지나면 학생 화면에 정답·해설이 뜹니다.</div></div>' +
-          '<div class="field"><label class="f">퀴즈가 뜰 때 영상</label>' +
-            '<select id="mk-pause">' +
-              '<option value="1"' + (mk.settings.autoPause ? ' selected' : '') + '>자동으로 일시정지</option>' +
-              '<option value="0"' + (!mk.settings.autoPause ? ' selected' : '') + '>계속 재생</option>' +
-            '</select>' +
-            '<div class="hint">보통은 일시정지가 편합니다.</div></div>' +
-        '</div>' +
-      '</div>' +
+      '<div class="card" id="mk-settings"></div>' +
 
       '<div class="mk-layout">' +
       '<div class="mk-left">' +
@@ -1307,15 +1283,78 @@ function renderMake() {
   $('#mk-title').oninput = e => { mk.title = e.target.value; };
   $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); };
   $('#mk-url').oninput = e => { mk.videoUrl = e.target.value; mkSyncVideo(); };
+
+  mkRenderSettings();
+  mkSyncVideo();
+  mkRenderQuestions();
+  if (mk.id) mkShowShare();
+}
+
+/* ── 진행 설정 ─────────────────────────────────────────────────────────
+   한 번 정하고 마는 값이라 평소에는 한 줄 요약으로 접어 둔다.
+   펼쳐 둔 채로 두면 영상이 첫 화면에서 밀려나 정작 중요한 작업이 불편해진다. */
+function mkSettingsSummary() {
+  const s = mk.settings;
+  return [
+    REVEAL_LABEL[s.revealMode],
+    s.limitSec ? '제한 ' + s.limitSec + '초' : '시간 제한 없음',
+    (s.revealMode === 'timer' ? s.revealDelaySec + '초 뒤 공개' : null),
+    s.autoPause ? '퀴즈 뜨면 일시정지' : '퀴즈 떠도 계속 재생'
+  ].filter(Boolean).join(' · ');
+}
+
+function mkToggleSettings() { mk.settingsOpen = !mk.settingsOpen; mkRenderSettings(); }
+
+function mkRenderSettings() {
+  const box = $('#mk-settings');
+  if (!box) return;
+
+  if (!mk.settingsOpen) {
+    box.innerHTML =
+      '<div class="row" style="align-items:center">' +
+        '<div style="flex:1 1 260px;min-width:0">' +
+          '<h2 style="font-size:15px">2. 진행 설정</h2>' +
+          '<div style="font-size:13px;color:var(--ink-2);margin-top:3px">' + esc(mkSettingsSummary()) + '</div>' +
+        '</div>' +
+        '<button class="btn sm" onclick="mkToggleSettings()">설정 바꾸기</button>' +
+      '</div>';
+    return;
+  }
+
+  box.innerHTML =
+    '<div class="row" style="align-items:center;margin-bottom:4px">' +
+      '<h2 style="flex:1">2. 진행 설정</h2>' +
+      '<button class="btn sm ghost" onclick="mkToggleSettings()">접기</button>' +
+    '</div>' +
+    '<div class="sub">이 세트로 진행하는 모든 반에 동일하게 적용됩니다.</div>' +
+    '<div class="grid2">' +
+      '<div class="field"><label class="f">정답 공개 시점</label>' +
+        '<select id="mk-reveal">' +
+          Object.keys(REVEAL_LABEL).map(k =>
+            '<option value="' + k + '"' + (mk.settings.revealMode === k ? ' selected' : '') + '>' + REVEAL_LABEL[k] + '</option>').join('') +
+        '</select>' +
+        '<div class="hint" id="mk-reveal-hint"></div></div>' +
+      '<div class="field"><label class="f">문항당 응답 제한 시간 (초)</label>' +
+        '<input type="number" id="mk-limit" min="0" max="600" value="' + mk.settings.limitSec + '">' +
+        '<div class="hint">0을 넣으면 시간 제한 없이, 교사가 [계속 재생]을 누를 때까지 열려 있습니다.</div></div>' +
+    '</div>' +
+    '<div class="grid2">' +
+      '<div class="field" id="mk-delay-field"><label class="f">정답 자동 공개까지 (초)</label>' +
+        '<input type="number" id="mk-delay" min="0" max="600" value="' + mk.settings.revealDelaySec + '">' +
+        '<div class="hint">퀴즈가 뜬 뒤 이만큼 지나면 학생 화면에 정답·해설이 뜹니다.</div></div>' +
+      '<div class="field"><label class="f">퀴즈가 뜰 때 영상</label>' +
+        '<select id="mk-pause">' +
+          '<option value="1"' + (mk.settings.autoPause ? ' selected' : '') + '>자동으로 일시정지</option>' +
+          '<option value="0"' + (!mk.settings.autoPause ? ' selected' : '') + '>계속 재생</option>' +
+        '</select>' +
+        '<div class="hint">보통은 일시정지가 편합니다.</div></div>' +
+    '</div>';
+
   $('#mk-reveal').onchange = e => { mk.settings.revealMode = e.target.value; mkRevealHint(); };
   $('#mk-limit').oninput = e => { mk.settings.limitSec = Math.max(0, Number(e.target.value) || 0); };
   $('#mk-delay').oninput = e => { mk.settings.revealDelaySec = Math.max(0, Number(e.target.value) || 0); };
   $('#mk-pause').onchange = e => { mk.settings.autoPause = e.target.value === '1'; };
-
   mkRevealHint();
-  mkSyncVideo();
-  mkRenderQuestions();
-  if (mk.id) mkShowShare();
 }
 
 function mkRevealHint() {
