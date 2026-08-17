@@ -1204,6 +1204,39 @@ test('진행 종료는 전체화면 UI를 정리한 뒤 기존 순서로 세션�
   ]);
 });
 
+test('브라우저 전체화면 해제가 실패해도 Firestore 세션 종료와 라우팅은 계속한다', async () => {
+  const events = [];
+  const bodyClasses = new Set(['stage-fallback-open']);
+  const stageClasses = new Set(['fullscreen-fallback']);
+  const stage = { classList: { remove(name) { stageClasses.delete(name); } } };
+  const ctx = loadStageFunctions([
+    'plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'
+  ], {
+    pl: { sessionId: 'session-a', isStageFullscreen: true, stageFallback: true },
+    confirm() { return true; },
+    document: {
+      fullscreenElement: stage,
+      exitFullscreen() { return Promise.reject(new Error('exit denied')); },
+      getElementById() { return stage; },
+      body: { classList: { remove(name) { bodyClasses.delete(name); } } }
+    },
+    store: { async endSession(id) { events.push(['end', id]); } },
+    toast(message) { events.push(['toast', message]); },
+    go(route) { events.push(['go', route]); },
+    console: { warn() {} }
+  });
+
+  await ctx.plEndSession();
+
+  assert.equal(stageClasses.has('fullscreen-fallback'), false);
+  assert.equal(bodyClasses.has('stage-fallback-open'), false);
+  assert.deepEqual(events, [
+    ['end', 'session-a'],
+    ['toast', '진행을 종료했습니다'],
+    ['go', 'live/session-a']
+  ]);
+});
+
 test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리한다', () => {
   let cleanup;
   const listeners = new Map();

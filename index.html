@@ -2452,6 +2452,8 @@ async function plEnterStageFullscreen() {
 async function plExitStageFullscreen() {
   try {
     if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
+  } catch (e) {
+    console.warn('fullscreen exit', e);
   } finally {
     plResetStageFullscreenUI();
   }
