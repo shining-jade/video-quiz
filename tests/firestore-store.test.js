@@ -1490,6 +1490,27 @@ test('넓은 화면의 문제 레이아웃은 stage 안의 실제 player-box를 
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+#pl-video/);
 });
 
+test('문제 오버레이 중에도 QR 버튼과 우상단 버블은 오버레이 위에서 클릭할 수 있다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const overlayRule = html.match(/#overlay\s*\{([^}]*)\}/s);
+  const toolsRule = html.match(/#pl-stage\.quiz-open\s+\.pl-stage-tools\s*\{([^}]*)\}/s);
+  const bubbleRule = html.match(/#pl-stage\s+#pl-qr-bubble\s*\{([^}]*)\}/s);
+
+  assert.ok(overlayRule && toolsRule && bubbleRule);
+  const overlayZ = Number(overlayRule[1].match(/z-index:\s*(\d+)/)[1]);
+  const toolsZ = Number(toolsRule[1].match(/z-index:\s*(\d+)/)[1]);
+  const bubbleZ = Number(bubbleRule[1].match(/z-index:\s*(\d+)/)[1]);
+
+  assert.ok(toolsZ > overlayZ);
+  assert.ok(bubbleZ > overlayZ);
+  assert.match(html, /<button class="btn sm" onclick="plToggleQrBubble\(\)"[^>]*>▦ QR<\/button>/);
+  assert.match(html, /aria-label="QR 닫기" onclick="plToggleQrBubble\(\)"/);
+  assert.match(bubbleRule[1], /right:\s*20px/);
+  assert.match(bubbleRule[1], /top:\s*20px/);
+  assert.doesNotMatch(toolsRule[1], /position:\s*fixed|inset:/);
+  assert.doesNotMatch(toolsRule[1] + bubbleRule[1], /pointer-events:\s*none/);
+});
+
 test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재생한다', async () => {
   let writes = 0, played = 0, exits = 0;
   const player = { playVideo() { played++; } };
