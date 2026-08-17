@@ -333,8 +333,7 @@ textarea { resize: vertical; min-height: 62px; }
 .player-box > div, .player-box iframe { width: 100%; height: 100%; border: 0; }
 
 #pl-stage { position: relative; }
-#pl-stage .pl-stage-tools,
-#pl-stage .pl-stage-qr { display: none; }
+#pl-stage .pl-stage-tools { display: none; }
 #pl-stage .pl-stage-status {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
   margin-top: 10px; color: var(--ink-2); font-size: 13px;
@@ -372,18 +371,24 @@ body.stage-fallback-open { overflow: hidden; }
 #pl-stage.fullscreen-fallback .pl-stage-tools .btn {
   border-color: rgba(255,255,255,.32); background: rgba(18,22,36,.72); color: #fff;
 }
-#pl-stage:fullscreen .pl-stage-qr,
-#pl-stage.fullscreen-fallback .pl-stage-qr {
+#pl-stage #pl-qr-bubble {
   position: absolute; right: 20px; top: 20px; z-index: 2; width: 180px; padding: 14px;
   border-radius: 12px; background: rgba(255,255,255,.96); color: #171927; text-align: center;
   box-shadow: 0 12px 36px rgba(0,0,0,.35);
 }
-#pl-stage .pl-stage-qr[hidden] { display: none; }
-#pl-stage .pl-stage-qr-code { margin: 8px auto; width: 132px; min-height: 132px; }
-#pl-stage .pl-stage-qr-code img,
-#pl-stage .pl-stage-qr-code canvas { max-width: 100%; height: auto; }
-#pl-stage .pl-stage-qr-label { font-size: 12px; color: #626779; }
-#pl-stage .pl-stage-qr-value { font: 800 27px/1.2 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+#pl-stage .pl-qr-head {
+  display: flex; align-items: center; justify-content: space-between; margin: -6px -6px 6px;
+  padding: 6px; font-size: 13px; font-weight: 800; cursor: move; touch-action: none; user-select: none;
+}
+#pl-stage .pl-qr-head button {
+  border: 0; background: transparent; color: #626779; font-size: 21px; line-height: 1; cursor: pointer;
+}
+#pl-stage #pl-qr-code { margin: 8px auto; width: 132px; min-height: 132px; }
+#pl-stage #pl-qr-code img,
+#pl-stage #pl-qr-code canvas { max-width: 100%; height: auto; }
+#pl-stage #pl-qr-bubble strong { display: block; font-size: 27px; letter-spacing: .08em; }
+#pl-stage .pl-qr-url { margin-top: 5px; color: #626779; font-size: 11px; overflow-wrap: anywhere; }
+#pl-stage #pl-qr-count { margin-top: 8px; color: #626779; font-size: 12px; }
 
 /* ══════════════════════════════════════════════════════════
    교사 재생
@@ -2214,13 +2219,16 @@ function screenPlay(setId) {
     stageFallback: false,
     qrOpen: false,
     qrPosition: null,
+    qrDrag: null,
     previousVolume: 100
   };
   document.addEventListener('fullscreenchange', plHandleFullscreenChange);
   document.addEventListener('keydown', plHandleStageKeydown);
+  window.addEventListener('resize', plClampQrBubble);
   onCleanup(() => {
     document.removeEventListener('fullscreenchange', plHandleFullscreenChange);
     document.removeEventListener('keydown', plHandleStageKeydown);
+    window.removeEventListener('resize', plClampQrBubble);
     plCleanupStageFullscreen();
     try { pl && pl.player && pl.player.destroy(); } catch (e) {}
     const ov = document.getElementById('overlay');
@@ -2325,7 +2333,7 @@ function renderPlayRun() {
             '<div class="player-box"><div id="pl-player"></div></div>' +
             '<div class="pl-stage-tools" aria-label="전체화면 진행 도구">' +
               '<button class="btn sm" onclick="plGoHomeFromStage()" title="전체화면 나가기" aria-label="전체화면 나가기">⌂ 홈</button>' +
-              '<button class="btn sm" onclick="plToggleStageQr()" title="학생 참여 QR 코드" aria-label="학생 참여 QR 코드">▦ QR</button>' +
+              '<button class="btn sm" onclick="plToggleQrBubble()" title="학생 참여 QR 코드" aria-label="학생 참여 QR 코드">▦ QR</button>' +
               '<button class="btn sm" onclick="plToggleCC();plRenderStageControls()" title="자막 켜기 또는 끄기" aria-label="자막 켜기 또는 끄기">CC 자막</button>' +
               '<button class="btn sm" id="pl-stage-mute" onclick="plToggleMute()" title="음소거 켜기 또는 끄기" aria-label="음소거 켜기 또는 끄기">🔊 음량</button>' +
               '<button class="btn sm" onclick="plExitStageFullscreen()" title="전체화면 해제" aria-label="전체화면 해제">⛶ 전체화면 해제</button>' +
@@ -2334,12 +2342,6 @@ function renderPlayRun() {
             '<div class="pl-stage-status" aria-live="polite">' +
               '<span class="mono" id="pl-clock">0:00</span><span id="pl-next">—</span>' +
               '<span>참여 <b id="pl-nstu">0</b>명</span>' +
-            '</div>' +
-            '<div class="pl-stage-qr" id="pl-stage-qr" hidden>' +
-              '<div class="pl-stage-qr-label">우리 반 코드</div>' +
-              '<div class="pl-stage-qr-value">' + esc(pl.code) + '</div>' +
-              '<div class="pl-stage-qr-code" id="pl-stage-qr-code"></div>' +
-              '<div class="pl-stage-qr-label">학생 참여 QR</div>' +
             '</div>' +
           '</div>' +
           '<div class="row pl-toolbar" style="margin-top:10px;align-items:center">' +
@@ -2389,10 +2391,6 @@ function renderPlayRun() {
     if (window.QRCode) new QRCode(document.getElementById('pl-qr'), { text: joinUrl, width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M });
     else $('#pl-qr').style.display = 'none';
   } catch (e) { $('#pl-qr').style.display = 'none'; }
-  try {
-    if (window.QRCode) new QRCode(document.getElementById('pl-stage-qr-code'), { text: joinUrl, width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M });
-  } catch (e) { console.warn('stage qr', e); }
-
   plRenderQList();
   plRenderStageControls();
 
@@ -2494,6 +2492,7 @@ function plHandleFullscreenChange() {
     return;
   }
   plResetStageFullscreenUI();
+  plClampQrBubble();
 }
 
 function plHandleStageKeydown(event) {
@@ -2518,17 +2517,102 @@ function plToggleMute() {
   }
 }
 
-function plToggleStageQr() {
+function plToggleQrBubble() {
   if (!pl) return;
   pl.qrOpen = !pl.qrOpen;
-  plRenderStageControls();
-  if (pl.qrOpen) plClampQrBubble();
+  plRenderQrBubble();
+}
+
+function plRenderQrBubble() {
+  if (!pl) return;
+  let bubble = document.getElementById('pl-qr-bubble');
+  if (!pl.qrOpen) {
+    if (bubble && bubble.remove) bubble.remove();
+    pl.qrDrag = null;
+    return;
+  }
+  const count = document.getElementById('pl-qr-count');
+  if (count) count.textContent = '참여 ' + Object.keys(pl.students || {}).length + '명';
+  if (bubble) return;
+
+  const stage = document.getElementById('pl-stage');
+  if (!stage) return;
+  const joinUrl = linkTo('join/' + pl.code);
+  bubble = document.createElement('aside');
+  bubble.id = 'pl-qr-bubble';
+  bubble.setAttribute('role', 'dialog');
+  bubble.setAttribute('aria-label', '학생 참여 QR 코드');
+  bubble.innerHTML =
+    '<div class="pl-qr-head">학생 참여 <button type="button" aria-label="QR 닫기" onclick="plToggleQrBubble()">×</button></div>' +
+    '<div id="pl-qr-code"></div>' +
+    '<strong class="mono">' + esc(pl.code) + '</strong>' +
+    '<div class="pl-qr-url">' + esc(joinUrl.replace(/^https?:\/\//, '')) + '</div>' +
+    '<div id="pl-qr-count">참여 ' + Object.keys(pl.students || {}).length + '명</div>';
+  stage.appendChild(bubble);
+
+  const head = bubble.querySelector('.pl-qr-head');
+  if (head) {
+    head.addEventListener('pointerdown', plStartQrDrag);
+    head.addEventListener('pointermove', plMoveQrDrag);
+    head.addEventListener('pointerup', plEndQrDrag);
+    head.addEventListener('pointercancel', plEndQrDrag);
+  }
+  try {
+    if (window.QRCode) {
+      new window.QRCode(document.getElementById('pl-qr-code'), {
+        text: joinUrl, width: 132, height: 132, correctLevel: window.QRCode.CorrectLevel.M
+      });
+    }
+  } catch (e) {
+    console.warn('stage qr', e);
+  }
+  plClampQrBubble();
+}
+
+function plStartQrDrag(event) {
+  if (!pl || !event || (event.button != null && event.button !== 0)) return;
+  const bubble = document.getElementById('pl-qr-bubble');
+  if (!bubble) return;
+  const position = pl.qrPosition || { x: bubble.offsetLeft || 0, y: bubble.offsetTop || 0 };
+  pl.qrDrag = {
+    pointerId: event.pointerId,
+    pointerX: event.clientX,
+    pointerY: event.clientY,
+    startX: position.x,
+    startY: position.y
+  };
+  if (event.currentTarget && event.currentTarget.setPointerCapture) {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+}
+
+function plMoveQrDrag(event) {
+  const drag = pl && pl.qrDrag;
+  if (!drag || !event || drag.pointerId !== event.pointerId || !window.TeacherStage) return;
+  const bubble = document.getElementById('pl-qr-bubble');
+  const stage = document.getElementById('pl-stage');
+  if (!bubble || !stage) return;
+  pl.qrPosition = window.TeacherStage.clampBubblePosition(
+    {
+      x: drag.startX + event.clientX - drag.pointerX,
+      y: drag.startY + event.clientY - drag.pointerY
+    },
+    { width: bubble.offsetWidth, height: bubble.offsetHeight },
+    { width: stage.clientWidth, height: stage.clientHeight },
+    16
+  );
+  bubble.style.left = pl.qrPosition.x + 'px';
+  bubble.style.top = pl.qrPosition.y + 'px';
+  bubble.style.right = 'auto';
+}
+
+function plEndQrDrag(event) {
+  if (!pl || !pl.qrDrag || !event || pl.qrDrag.pointerId !== event.pointerId) return;
+  pl.qrDrag = null;
 }
 
 function plRenderStageControls() {
   if (!pl) return;
-  const qr = document.getElementById('pl-stage-qr');
-  if (qr) qr.hidden = !pl.qrOpen;
   const mute = document.getElementById('pl-stage-mute');
   if (!mute) return;
   let muted = false;
@@ -2540,15 +2624,13 @@ function plRenderStageControls() {
 
 function plClampQrBubble() {
   const stage = document.getElementById('pl-stage');
-  const bubble = document.getElementById('pl-stage-qr');
-  if (!pl || !stage || !bubble || bubble.hidden || !window.TeacherStage) return;
-  const stageRect = stage.getBoundingClientRect();
-  const bubbleRect = bubble.getBoundingClientRect();
-  const desired = pl.qrPosition || { x: stageRect.width - bubbleRect.width - 20, y: 20 };
+  const bubble = document.getElementById('pl-qr-bubble');
+  if (!pl || !stage || !bubble || !window.TeacherStage) return;
+  const desired = pl.qrPosition || { x: stage.clientWidth - bubble.offsetWidth - 20, y: 20 };
   pl.qrPosition = window.TeacherStage.clampBubblePosition(
     desired,
-    { width: bubbleRect.width, height: bubbleRect.height },
-    { width: stageRect.width, height: stageRect.height },
+    { width: bubble.offsetWidth, height: bubble.offsetHeight },
+    { width: stage.clientWidth, height: stage.clientHeight },
     16
   );
   bubble.style.left = pl.qrPosition.x + 'px';
@@ -2682,8 +2764,12 @@ function plRenderStudents() {
   const list = $('#pl-stulist'), n = $('#pl-nstu');
   const rows = plScoreboard();
   if (n) n.textContent = rows.length;
-  if (!list) return;
-  if (!rows.length) { list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">아직 입장한 학생이 없습니다.</div>'; return; }
+  if (!list) { plRenderQrBubble(); return; }
+  if (!rows.length) {
+    list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">아직 입장한 학생이 없습니다.</div>';
+    plRenderQrBubble();
+    return;
+  }
   const total = pl.set.questions.length;
   list.innerHTML = rows.map(r =>
     '<div class="rank-row' + (r.rank <= 3 ? ' top' + r.rank : '') + '">' +
@@ -2692,6 +2778,7 @@ function plRenderStudents() {
       '<span class="prog">' + r.answered + '/' + total + '</span>' +
       '<span class="sc">' + r.correct + '</span>' +
     '</div>').join('');
+  plRenderQrBubble();
 }
 
 function plStageRoot() {

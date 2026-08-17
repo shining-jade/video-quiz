@@ -1146,6 +1146,26 @@ test('fullscreenchange로 stage를 벗어나면 UI 상태와 잠금만 정리한
   assert.equal(routed, 0);
 });
 
+test('fullscreenchange는 진입과 해제 모두에서 QR 버블 위치를 다시 보정한다', () => {
+  let clamped = 0;
+  const stage = { classList: { remove() {} } };
+  const ctx = loadStageFunctions(['plResetStageFullscreenUI', 'plHandleFullscreenChange'], {
+    pl: { isStageFullscreen: false, stageFallback: false },
+    plClampQrBubble() { clamped++; },
+    document: {
+      fullscreenElement: stage,
+      getElementById() { return stage; },
+      body: { classList: { remove() {} } }
+    }
+  });
+
+  ctx.plHandleFullscreenChange();
+  ctx.document.fullscreenElement = null;
+  ctx.plHandleFullscreenChange();
+
+  assert.equal(clamped, 2);
+});
+
 test('Escape는 fallback 전체화면만 해제하고 세션과 라우팅을 유지한다', async () => {
   let ended = 0, routed = 0, prevented = 0;
   const bodyClasses = new Set(['stage-fallback-open']);
@@ -1240,6 +1260,7 @@ test('브라우저 전체화면 해제가 실패해도 Firestore 세션 종료�
 test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리한다', () => {
   let cleanup;
   const listeners = new Map();
+  const windowListeners = new Map();
   const removed = [];
   const bodyClasses = new Set(['stage-fallback-open']);
   const context = {
@@ -1252,6 +1273,10 @@ test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리
       getElementById() { return null; },
       body: { classList: { remove(name) { bodyClasses.delete(name); } } }
     },
+    window: {
+      addEventListener(name, fn) { windowListeners.set(name, fn); },
+      removeEventListener(name, fn) { if (windowListeners.get(name) === fn) removed.push(name); }
+    },
     store: { getQuizSet() { return new Promise(() => {}); } },
     APP() { return { innerHTML: '' }; },
     topbar() { return ''; },
@@ -1260,16 +1285,31 @@ test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리
   };
   loadStageFunctions([
     'plResetStageFullscreenUI', 'plCleanupStageFullscreen',
-    'plHandleFullscreenChange', 'plHandleStageKeydown', 'screenPlay'
+    'plHandleFullscreenChange', 'plHandleStageKeydown', 'plClampQrBubble', 'screenPlay'
   ], context);
 
   context.screenPlay('set1');
   cleanup();
 
   assert.deepEqual([...listeners.keys()].sort(), ['fullscreenchange', 'keydown']);
-  assert.deepEqual(removed.sort(), ['fullscreenchange', 'keydown']);
+  assert.deepEqual([...windowListeners.keys()], ['resize']);
+  assert.deepEqual(removed.sort(), ['fullscreenchange', 'keydown', 'resize']);
   assert.equal(bodyClasses.has('stage-fallback-open'), false);
   assert.equal(context.pl, null);
+});
+
+test('학생 목록 렌더링은 열린 QR 버블의 참여 수도 함께 갱신한다', () => {
+  let rendered = 0;
+  const ctx = loadStageFunctions(['plRenderStudents'], {
+    pl: { set: { questions: [] } },
+    $() { return null; },
+    plScoreboard() { return []; },
+    plRenderQrBubble() { rendered++; }
+  });
+
+  ctx.plRenderStudents();
+
+  assert.equal(rendered, 1);
 });
 
 test('음소거 해제는 이전 음량이 0이어도 그대로 복원한다', () => {
@@ -1290,6 +1330,119 @@ test('음소거 해제는 이전 음량이 0이어도 그대로 복원한다', (
   ctx.plToggleMute();
 
   assert.equal(restored, 0);
+});
+
+test('QR 버블 열기와 닫기는 영상과 live 상태를 변경하지 않는다', () => {
+  let paused = 0, liveWrites = 0;
+  const player = { pauseVideo() { paused++; } };
+  const ctx = loadStageFunctions(['plToggleQrBubble'], {
+    store: { setLive() { liveWrites++; } },
+    pl: { qrOpen: false, player, live: { q: 0, openedAt: 1000 } },
+    plRenderQrBubble() {}
+  });
+
+  ctx.plToggleQrBubble();
+  ctx.plToggleQrBubble();
+
+  assert.equal(paused, 0);
+  assert.equal(liveWrites, 0);
+  assert.deepEqual(ctx.pl.live, { q: 0, openedAt: 1000 });
+});
+
+test('학생 수 변경은 열린 QR 버블의 참여 인원을 갱신한다', () => {
+  const count = { textContent: '' };
+  const ctx = loadStageFunctions(['plRenderQrBubble'], {
+    pl: { students: { a: {}, b: {} }, qrOpen: true, code: 'ABC123' },
+    document: { getElementById(id) { return id === 'pl-qr-count' ? count : {}; } },
+    linkTo() { return 'https://example/#/join/ABC123'; },
+    esc(value) { return String(value); }
+  });
+  ctx.plRenderQrBubble();
+  assert.equal(count.textContent, '참여 2명');
+});
+
+test('열린 QR 버블은 stage 안에 한 번만 생성하고 같은 참여 링크를 표시한다', () => {
+  const appended = [];
+  const nodes = {};
+  const stage = {
+    clientWidth: 800, clientHeight: 600,
+    appendChild(node) { appended.push(node); nodes[node.id] = node; }
+  };
+  const head = { addEventListener() {} };
+  const qrCode = {};
+  const count = { textContent: '' };
+  const ctx = loadStageFunctions([
+    'plClampQrBubble', 'plStartQrDrag', 'plMoveQrDrag', 'plEndQrDrag', 'plRenderQrBubble'
+  ], {
+    pl: { students: { a: {} }, qrOpen: true, code: 'ABC123', qrPosition: null },
+    document: {
+      getElementById(id) {
+        if (id === 'pl-stage') return stage;
+        if (id === 'pl-qr-count') return count;
+        if (id === 'pl-qr-code') return qrCode;
+        return nodes[id] || null;
+      },
+      createElement() {
+        return {
+          id: '', innerHTML: '', style: {}, offsetWidth: 180, offsetHeight: 240,
+          setAttribute() {},
+          querySelector(selector) { return selector === '.pl-qr-head' ? head : null; }
+        };
+      }
+    },
+    window: { TeacherStage: require('../teacher-stage.js') },
+    linkTo() { return 'https://example.test/#/join/ABC123'; },
+    esc(value) { return String(value); }
+  });
+
+  ctx.plRenderQrBubble();
+  ctx.plRenderQrBubble();
+
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].id, 'pl-qr-bubble');
+  assert.match(appended[0].innerHTML, /학생 참여/);
+  assert.match(appended[0].innerHTML, /ABC123/);
+  assert.match(appended[0].innerHTML, /example\.test\/#\/join\/ABC123/);
+  assert.equal(count.textContent, '참여 1명');
+});
+
+test('QR 헤더 포인터 드래그는 stage 경계 안에서 버블 위치를 갱신한다', () => {
+  let captured = null;
+  const bubble = { offsetWidth: 100, offsetHeight: 80, style: {} };
+  const stage = { clientWidth: 300, clientHeight: 200 };
+  const ctx = loadStageFunctions(['plStartQrDrag', 'plMoveQrDrag', 'plEndQrDrag'], {
+    pl: { qrPosition: { x: 100, y: 60 }, qrDrag: null },
+    document: { getElementById(id) { return id === 'pl-stage' ? stage : bubble; } },
+    window: { TeacherStage: require('../teacher-stage.js') }
+  });
+  const target = { setPointerCapture(id) { captured = id; } };
+
+  ctx.plStartQrDrag({ pointerId: 7, clientX: 10, clientY: 20, button: 0, currentTarget: target });
+  ctx.plMoveQrDrag({ pointerId: 7, clientX: 500, clientY: 500 });
+
+  assert.equal(captured, 7);
+  assert.deepEqual(ctx.pl.qrPosition, { x: 184, y: 104 });
+  assert.equal(bubble.style.left, '184px');
+  assert.equal(bubble.style.top, '104px');
+
+  ctx.plEndQrDrag({ pointerId: 7 });
+  assert.equal(ctx.pl.qrDrag, null);
+});
+
+test('stage 크기 변경은 열린 QR 버블을 새 경계 안으로 되돌린다', () => {
+  const bubble = { hidden: false, offsetWidth: 100, offsetHeight: 80, style: {} };
+  const stage = { clientWidth: 300, clientHeight: 200 };
+  const ctx = loadStageFunctions(['plClampQrBubble'], {
+    pl: { qrPosition: { x: 250, y: 150 } },
+    document: { getElementById(id) { return id === 'pl-stage' ? stage : bubble; } },
+    window: { TeacherStage: require('../teacher-stage.js') }
+  });
+
+  ctx.plClampQrBubble();
+
+  assert.deepEqual(ctx.pl.qrPosition, { x: 184, y: 104 });
+  assert.equal(bubble.style.left, '184px');
+  assert.equal(bubble.style.top, '104px');
 });
 
 test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', () => {
