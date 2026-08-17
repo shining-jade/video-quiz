@@ -308,6 +308,12 @@ function extractFunction(source, name) {
   throw new Error(name + ' 함수 끝을 찾을 수 없습니다');
 }
 
+function loadStageFunctions(names, context) {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  names.forEach(name => vm.runInNewContext(extractFunction(html, name), context));
+  return context;
+}
+
 function createStore(fake) {
   const { createFirestoreStore } = loadStoreModule();
   return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
@@ -882,6 +888,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
     plRenderBoardOverlay() {},
     plRenderOverlay() {},
     plRenderOverlayCounts() {},
+    plRenderStageControls() {},
     plPushBoard() { boardWrites += 1; },
     whenYT() {},
     every() {},
@@ -1015,6 +1022,59 @@ test('교사 수업 종료는 저장소 종료가 끝난 뒤 안내 화면으로
     ['toast', '진행을 종료했습니다'],
     ['go', 'live/session-a']
   ]);
+});
+
+test('교사 전체화면 진입은 기존 플레이어를 재생성하지 않고 stage만 요청한다', async () => {
+  let requested = 0;
+  const player = { getCurrentTime() { return 42; } };
+  const classes = new Set();
+  const stage = {
+    requestFullscreen() { requested++; return Promise.resolve(); },
+    classList: {
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); }
+    }
+  };
+  const ctx = loadStageFunctions(['plEnterStageFullscreen'], {
+    pl: { player, stageFallback: false },
+    toast() {},
+    plClampQrBubble() {},
+    document: {
+      fullscreenElement: null,
+      body: { classList: stage.classList },
+      getElementById(id) { return id === 'pl-stage' ? stage : null; }
+    }
+  });
+
+  await ctx.plEnterStageFullscreen();
+
+  assert.equal(requested, 1);
+  assert.equal(ctx.pl.player, player);
+  assert.equal(ctx.pl.player.getCurrentTime(), 42);
+});
+
+test('홈은 확인 후 전체화면만 해제하고 세션을 종료하거나 이동하지 않는다', async () => {
+  let exited = 0, ended = 0, routed = 0;
+  const classList = { add() {}, remove() {} };
+  const ctx = loadStageFunctions(['plExitStageFullscreen', 'plGoHomeFromStage'], {
+    confirm() { return true; },
+    document: {
+      fullscreenElement: {},
+      exitFullscreen() { exited++; return Promise.resolve(); },
+      getElementById() { return { classList }; },
+      body: { classList }
+    },
+    store: { endSession() { ended++; } },
+    go() { routed++; },
+    pl: { sessionId: 'session1' }
+  });
+
+  await ctx.plGoHomeFromStage();
+
+  assert.equal(exited, 1);
+  assert.equal(ended, 0);
+  assert.equal(routed, 0);
+  assert.ok(ctx.pl);
 });
 
 test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', async () => {

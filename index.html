@@ -332,6 +332,59 @@ textarea { resize: vertical; min-height: 62px; }
 .player-box { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 10px; overflow: hidden; }
 .player-box > div, .player-box iframe { width: 100%; height: 100%; border: 0; }
 
+#pl-stage { position: relative; }
+#pl-stage .pl-stage-tools,
+#pl-stage .pl-stage-qr { display: none; }
+#pl-stage .pl-stage-status {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin-top: 10px; color: var(--ink-2); font-size: 13px;
+}
+#pl-stage:fullscreen,
+#pl-stage.fullscreen-fallback {
+  width: 100vw; height: 100vh; box-sizing: border-box; padding: 20px;
+  background: #000; color: #fff; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px;
+}
+#pl-stage.fullscreen-fallback { position: fixed; inset: 0; z-index: 1000; }
+body.stage-fallback-open { overflow: hidden; }
+#pl-stage:fullscreen .player-box,
+#pl-stage.fullscreen-fallback .player-box {
+  width: min(100%, calc((100vh - 116px) * 16 / 9)); max-height: calc(100vh - 116px);
+  border-radius: 0; flex: 0 1 auto;
+}
+#pl-stage:fullscreen .pl-stage-tools,
+#pl-stage.fullscreen-fallback .pl-stage-tools {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px;
+  opacity: .38; transition: opacity .18s ease;
+}
+#pl-stage:fullscreen .pl-stage-status,
+#pl-stage.fullscreen-fallback .pl-stage-status {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px;
+  margin-top: 0; color: rgba(255,255,255,.78); font-size: 14px;
+}
+#pl-stage:fullscreen .pl-stage-tools:hover,
+#pl-stage:fullscreen .pl-stage-tools:focus-within,
+#pl-stage:fullscreen.controls-active .pl-stage-tools,
+#pl-stage.fullscreen-fallback .pl-stage-tools:hover,
+#pl-stage.fullscreen-fallback .pl-stage-tools:focus-within,
+#pl-stage.fullscreen-fallback.controls-active .pl-stage-tools { opacity: 1; }
+#pl-stage:fullscreen .pl-stage-tools .btn,
+#pl-stage.fullscreen-fallback .pl-stage-tools .btn {
+  border-color: rgba(255,255,255,.32); background: rgba(18,22,36,.72); color: #fff;
+}
+#pl-stage:fullscreen .pl-stage-qr,
+#pl-stage.fullscreen-fallback .pl-stage-qr {
+  position: absolute; right: 20px; top: 20px; z-index: 2; width: 180px; padding: 14px;
+  border-radius: 12px; background: rgba(255,255,255,.96); color: #171927; text-align: center;
+  box-shadow: 0 12px 36px rgba(0,0,0,.35);
+}
+#pl-stage .pl-stage-qr[hidden] { display: none; }
+#pl-stage .pl-stage-qr-code { margin: 8px auto; width: 132px; min-height: 132px; }
+#pl-stage .pl-stage-qr-code img,
+#pl-stage .pl-stage-qr-code canvas { max-width: 100%; height: auto; }
+#pl-stage .pl-stage-qr-label { font-size: 12px; color: #626779; }
+#pl-stage .pl-stage-qr-value { font: 800 27px/1.2 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+
 /* ══════════════════════════════════════════════════════════
    교사 재생
    ══════════════════════════════════════════════════════════ */
@@ -537,6 +590,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="firestore-core.js"></script>
 <script src="firestore-store.js"></script>
 <script src="editor-draft.js"></script>
+<script src="teacher-stage.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
 
@@ -2157,7 +2211,12 @@ function screenPlay(setId) {
     player: null, lastT: 0, fired: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     students: {}, responses: {},
-    liveRef: null
+    liveRef: null,
+    isStageFullscreen: false,
+    stageFallback: false,
+    qrOpen: false,
+    qrPosition: null,
+    previousVolume: 100
   };
   onCleanup(() => {
     try { pl && pl.player && pl.player.destroy(); } catch (e) {}
@@ -2258,13 +2317,31 @@ function renderPlayRun() {
 
       '<div>' +
         '<div class="card" id="pl-video" style="padding:14px">' +
-          '<div class="player-box"><div id="pl-player"></div></div>' +
+          '<div id="pl-stage">' +
+            '<div class="player-box"><div id="pl-player"></div></div>' +
+            '<div class="pl-stage-tools" aria-label="전체화면 진행 도구">' +
+              '<button class="btn sm" onclick="plGoHomeFromStage()" title="전체화면 나가기" aria-label="전체화면 나가기">⌂ 홈</button>' +
+              '<button class="btn sm" onclick="plToggleStageQr()" title="학생 참여 QR 코드" aria-label="학생 참여 QR 코드">▦ QR</button>' +
+              '<button class="btn sm" onclick="plToggleCC();plRenderStageControls()" title="자막 켜기 또는 끄기" aria-label="자막 켜기 또는 끄기">CC 자막</button>' +
+              '<button class="btn sm" id="pl-stage-mute" onclick="plToggleMute()" title="음소거 켜기 또는 끄기" aria-label="음소거 켜기 또는 끄기">🔊 음량</button>' +
+              '<button class="btn sm" onclick="plExitStageFullscreen()" title="전체화면 해제" aria-label="전체화면 해제">⛶ 전체화면 해제</button>' +
+              '<button class="btn sm" onclick="plEndSession()" title="수업 진행 종료" aria-label="수업 진행 종료">진행 종료</button>' +
+            '</div>' +
+            '<div class="pl-stage-status" aria-live="polite">' +
+              '<span class="mono" id="pl-clock">0:00</span><span id="pl-next">—</span>' +
+              '<span>참여 <b id="pl-nstu">0</b>명</span>' +
+            '</div>' +
+            '<div class="pl-stage-qr" id="pl-stage-qr" hidden>' +
+              '<div class="pl-stage-qr-label">우리 반 코드</div>' +
+              '<div class="pl-stage-qr-value">' + esc(pl.code) + '</div>' +
+              '<div class="pl-stage-qr-code" id="pl-stage-qr-code"></div>' +
+              '<div class="pl-stage-qr-label">학생 참여 QR</div>' +
+            '</div>' +
+          '</div>' +
           '<div class="row pl-toolbar" style="margin-top:10px;align-items:center">' +
-            '<span class="tag mute mono" id="pl-clock">0:00</span>' +
-            '<span style="font-size:13px;color:var(--ink-2)" id="pl-next">—</span>' +
+            '<button class="btn sm primary" id="pl-fs-enter" onclick="plEnterStageFullscreen()">⛶ 전체화면 진행</button>' +
             '<div style="flex:1"></div>' +
             ccButton('plToggleCC()') +
-            '<span style="font-size:13px;color:var(--ink-2)">참여 <b id="pl-nstu">0</b>명</span>' +
           '</div>' +
         '</div>' +
         '<div class="card">' +
@@ -2308,14 +2385,19 @@ function renderPlayRun() {
     if (window.QRCode) new QRCode(document.getElementById('pl-qr'), { text: joinUrl, width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M });
     else $('#pl-qr').style.display = 'none';
   } catch (e) { $('#pl-qr').style.display = 'none'; }
+  try {
+    if (window.QRCode) new QRCode(document.getElementById('pl-stage-qr-code'), { text: joinUrl, width: 132, height: 132, correctLevel: QRCode.CorrectLevel.M });
+  } catch (e) { console.warn('stage qr', e); }
 
   plRenderQList();
+  plRenderStageControls();
 
   // 실시간 구독 — 참여자, 응답, live 상태
   onCleanup(store.subscribeStudents(pl.sessionId, students => {
     pl.students = students || {};
     plRenderStudents();
     plRenderBoardOverlay();
+    plRenderStageControls();
   }, e => console.error(e)));
   onCleanup(store.subscribeResponses(pl.sessionId, responseDocs => {
     pl.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
@@ -2327,6 +2409,7 @@ function renderPlayRun() {
   onCleanup(store.subscribeLive(pl.sessionId, live => {
     pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     plRenderOverlay();
+    plRenderStageControls();
   }, e => console.error(e)));
 
   // 플레이어
@@ -2343,6 +2426,110 @@ function renderPlayRun() {
   every(200, plTick);
   every(250, plTimerTick);
 }
+
+async function plEnterStageFullscreen() {
+  const stage = document.getElementById('pl-stage');
+  if (!pl || !stage) return;
+  try {
+    if (stage.requestFullscreen) await stage.requestFullscreen();
+    else throw new Error('unsupported');
+    pl.stageFallback = false;
+  } catch (e) {
+    pl.stageFallback = true;
+    stage.classList.add('fullscreen-fallback');
+    document.body.classList.add('stage-fallback-open');
+    toast('브라우저 전체화면을 사용할 수 없어 화면 확장 모드로 열었습니다');
+  }
+  pl.isStageFullscreen = true;
+  plClampQrBubble();
+}
+
+async function plExitStageFullscreen() {
+  const stage = document.getElementById('pl-stage');
+  if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
+  if (stage) stage.classList.remove('fullscreen-fallback');
+  document.body.classList.remove('stage-fallback-open');
+  if (pl) {
+    pl.isStageFullscreen = false;
+    pl.stageFallback = false;
+  }
+}
+
+async function plGoHomeFromStage() {
+  if (!confirm('전체화면 진행 화면을 나가시겠습니까?\n수업 세션과 학생 응답은 유지됩니다.')) return;
+  await plExitStageFullscreen();
+}
+
+function plHandleFullscreenChange() {
+  const stage = document.getElementById('pl-stage');
+  if (document.fullscreenElement === stage) {
+    if (pl) pl.isStageFullscreen = true;
+    plClampQrBubble();
+    return;
+  }
+  if (stage) stage.classList.remove('fullscreen-fallback');
+  document.body.classList.remove('stage-fallback-open');
+  if (pl) {
+    pl.isStageFullscreen = false;
+    pl.stageFallback = false;
+  }
+}
+
+function plToggleMute() {
+  if (!pl || !pl.player) return;
+  try {
+    if (pl.player.isMuted()) {
+      pl.player.unMute();
+      pl.player.setVolume(pl.previousVolume || 100);
+    } else {
+      pl.previousVolume = pl.player.getVolume ? pl.player.getVolume() : 100;
+      pl.player.mute();
+    }
+    plRenderStageControls();
+  } catch (e) {
+    console.warn('volume', e);
+  }
+}
+
+function plToggleStageQr() {
+  if (!pl) return;
+  pl.qrOpen = !pl.qrOpen;
+  plRenderStageControls();
+  if (pl.qrOpen) plClampQrBubble();
+}
+
+function plRenderStageControls() {
+  if (!pl) return;
+  const qr = document.getElementById('pl-stage-qr');
+  if (qr) qr.hidden = !pl.qrOpen;
+  const mute = document.getElementById('pl-stage-mute');
+  if (!mute) return;
+  let muted = false;
+  try { muted = !!(pl.player && pl.player.isMuted && pl.player.isMuted()); } catch (e) {}
+  mute.textContent = muted ? '🔇 음소거 해제' : '🔊 음량';
+  mute.title = muted ? '음소거 해제' : '음소거';
+  mute.setAttribute('aria-label', mute.title);
+}
+
+function plClampQrBubble() {
+  const stage = document.getElementById('pl-stage');
+  const bubble = document.getElementById('pl-stage-qr');
+  if (!pl || !stage || !bubble || bubble.hidden || !window.TeacherStage) return;
+  const stageRect = stage.getBoundingClientRect();
+  const bubbleRect = bubble.getBoundingClientRect();
+  const desired = pl.qrPosition || { x: stageRect.width - bubbleRect.width - 20, y: 20 };
+  pl.qrPosition = window.TeacherStage.clampBubblePosition(
+    desired,
+    { width: bubbleRect.width, height: bubbleRect.height },
+    { width: stageRect.width, height: stageRect.height },
+    16
+  );
+  bubble.style.left = pl.qrPosition.x + 'px';
+  bubble.style.top = pl.qrPosition.y + 'px';
+  bubble.style.right = 'auto';
+}
+
+document.addEventListener('fullscreenchange', plHandleFullscreenChange);
 
 function plTick() {
   if (!pl || !pl.player || !pl.player.getCurrentTime) return;
