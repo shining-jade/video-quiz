@@ -420,17 +420,15 @@ body.stage-fallback-open { overflow: hidden; }
    iframe 을 DOM 에서 옮기면 영상이 처음부터 다시 로드되므로 CSS 로만 자리를 바꾼다. */
 @media (min-width: 900px) {
   /* 반쪽 패널이 되면 뒤 페이지가 비쳐 산만하므로 불투명하게 */
-  body.quiz-open #overlay { left: 53vw; padding: 26px 30px; background: #12162a; }
-  body.quiz-open #pl-video {
+  #pl-stage.quiz-open #overlay { left: 53vw; padding: 26px 30px; background: #12162a; }
+  #pl-stage.quiz-open .player-box {
     position: fixed; left: 0; top: 0; width: 53vw; height: 100vh; z-index: 201;
     margin: 0; padding: 0; border: 0; border-radius: 0; background: #000;
-    display: flex; align-items: center; box-shadow: none;
+    display: flex; align-items: center; box-shadow: none; aspect-ratio: auto; max-height: none;
   }
-  body.quiz-open #pl-video .player-box { border-radius: 0; }
-  body.quiz-open #pl-video .pl-toolbar { display: none; }
-  body.quiz-open #overlay .ov-q { font-size: clamp(20px, 2.1vw, 30px); }
-  body.quiz-open #overlay .ov-choice { padding: 11px 15px; font-size: clamp(15px, 1.35vw, 19px); }
-  body.quiz-open #overlay .q-img { max-height: 22vh; }
+  #pl-stage.quiz-open #overlay .ov-q { font-size: clamp(20px, 2.1vw, 30px); }
+  #pl-stage.quiz-open #overlay .ov-choice { padding: 11px 15px; font-size: clamp(15px, 1.35vw, 19px); }
+  #pl-stage.quiz-open #overlay .q-img { max-height: 22vh; }
 }
 #overlay .ov-inner { width: 100%; max-width: 960px; color: #fff; }
 #overlay .ov-top { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
@@ -2229,7 +2227,8 @@ function screenPlay(setId) {
     if (ov) ov.remove();
     const bo = document.getElementById('board-overlay');
     if (bo) bo.remove();
-    document.body.classList.remove('quiz-open');
+    const stage = document.getElementById('pl-stage');
+    if (stage) stage.classList.remove('quiz-open');
     pl = null;
   });
 
@@ -2695,13 +2694,17 @@ function plRenderStudents() {
     '</div>').join('');
 }
 
+function plStageRoot() {
+  return document.getElementById('pl-stage') || document.body;
+}
+
 /* ── 교실 화면용 전체 순위표 ─────────────────────────────────────────── */
 function plToggleBoard() {
   const el = document.getElementById('board-overlay');
   if (el) { el.remove(); return; }
   const box = document.createElement('div');
   box.id = 'board-overlay';
-  document.body.appendChild(box);
+  plStageRoot().appendChild(box);
   plRenderBoardOverlay();
 }
 function plRenderBoardOverlay() {
@@ -2732,13 +2735,14 @@ function plRenderBoardOverlay() {
 /* ── 교사 퀴즈 오버레이 ─────────────────────────────────────────────── */
 function plRenderOverlay() {
   let ov = document.getElementById('overlay');
+  const stage = plStageRoot();
   if (!pl || pl.live.q < 0) {
     if (ov) ov.remove();
-    document.body.classList.remove('quiz-open');
+    stage.classList.remove('quiz-open');
     plRenderQList();
     return;
   }
-  document.body.classList.add('quiz-open');
+  stage.classList.add('quiz-open');
 
   const i = pl.live.q, q = pl.set.questions[i];
   if (!q) return;
@@ -2747,7 +2751,7 @@ function plRenderOverlay() {
   if (!ov) {
     ov = document.createElement('div');
     ov.id = 'overlay';
-    document.body.appendChild(ov);
+    stage.appendChild(ov);
   }
   const type = qType(q);
   ov.innerHTML = '<div class="ov-inner">' +

@@ -1292,6 +1292,69 @@ test('음소거 해제는 이전 음량이 0이어도 그대로 복원한다', (
   assert.equal(restored, 0);
 });
 
+test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', () => {
+  const appended = [];
+  const stageClasses = new Set();
+  const stage = {
+    appendChild(node) { appended.push(node); },
+    classList: {
+      add(name) { stageClasses.add(name); },
+      remove(name) { stageClasses.delete(name); }
+    }
+  };
+  const body = { appendChild() { throw new Error('body에 붙이면 안 됨'); } };
+  const ctx = loadStageFunctions(['plStageRoot', 'plRenderOverlay', 'plToggleBoard'], {
+    pl: {
+      live: { q: 0 }, students: {}, responses: {},
+      set: {
+        title: '세트', settings: { revealMode: 'manual' },
+        questions: [{ type: 'choice', text: '문제', choices: ['1', '2'] }]
+      }
+    },
+    document: {
+      body,
+      getElementById(id) { return id === 'pl-stage' ? stage : null; },
+      createElement() { return { id: '', innerHTML: '', querySelector() { return null; } }; }
+    },
+    qType() { return 'choice'; },
+    isTextType() { return false; }, hasImage() { return false; },
+    esc(value) { return String(value); }, LETTERS: ['A', 'B'], QTYPES: {},
+    plRenderOverlayCounts() {}, plRenderQList() {}, plRenderBoardOverlay() {},
+    plScoreboard() { return []; }
+  });
+
+  ctx.plRenderOverlay();
+  ctx.plToggleBoard();
+
+  assert.deepEqual(appended.map(node => node.id), ['overlay', 'board-overlay']);
+  assert.equal(stageClasses.has('quiz-open'), true);
+});
+
+test('넓은 화면의 문제 레이아웃은 stage 안의 실제 player-box를 왼쪽 패널로 배치한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+
+  assert.match(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed[^}]*width:\s*53vw[^}]*height:\s*100vh/s);
+  assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+#pl-video/);
+});
+
+test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재생한다', async () => {
+  let writes = 0, played = 0, exits = 0;
+  const player = { playVideo() { played++; } };
+  const ctx = loadStageFunctions(['plCloseQuestion'], {
+    pl: { sessionId: 'session1', player },
+    plPushBoard() { return Promise.resolve(); },
+    document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
+    store: { setLive() { writes++; return Promise.resolve(); } }
+  });
+
+  await ctx.plCloseQuestion();
+
+  assert.equal(writes, 1);
+  assert.equal(played, 1);
+  assert.equal(exits, 0);
+  assert.equal(ctx.pl.player, player);
+});
+
 test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
