@@ -2218,7 +2218,12 @@ function screenPlay(setId) {
     qrPosition: null,
     previousVolume: 100
   };
+  document.addEventListener('fullscreenchange', plHandleFullscreenChange);
+  document.addEventListener('keydown', plHandleStageKeydown);
   onCleanup(() => {
+    document.removeEventListener('fullscreenchange', plHandleFullscreenChange);
+    document.removeEventListener('keydown', plHandleStageKeydown);
+    plCleanupStageFullscreen();
     try { pl && pl.player && pl.player.destroy(); } catch (e) {}
     const ov = document.getElementById('overlay');
     if (ov) ov.remove();
@@ -2445,14 +2450,34 @@ async function plEnterStageFullscreen() {
 }
 
 async function plExitStageFullscreen() {
+  try {
+    if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
+  } finally {
+    plResetStageFullscreenUI();
+  }
+}
+
+function plResetStageFullscreenUI() {
   const stage = document.getElementById('pl-stage');
-  if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
   if (stage) stage.classList.remove('fullscreen-fallback');
   document.body.classList.remove('stage-fallback-open');
   if (pl) {
     pl.isStageFullscreen = false;
     pl.stageFallback = false;
   }
+}
+
+function plCleanupStageFullscreen() {
+  const stage = document.getElementById('pl-stage');
+  if (stage && document.fullscreenElement === stage && document.exitFullscreen) {
+    try {
+      const exiting = document.exitFullscreen();
+      if (exiting && exiting.catch) exiting.catch(e => console.warn('fullscreen exit', e));
+    } catch (e) {
+      console.warn('fullscreen exit', e);
+    }
+  }
+  plResetStageFullscreenUI();
 }
 
 async function plGoHomeFromStage() {
@@ -2467,12 +2492,13 @@ function plHandleFullscreenChange() {
     plClampQrBubble();
     return;
   }
-  if (stage) stage.classList.remove('fullscreen-fallback');
-  document.body.classList.remove('stage-fallback-open');
-  if (pl) {
-    pl.isStageFullscreen = false;
-    pl.stageFallback = false;
-  }
+  plResetStageFullscreenUI();
+}
+
+function plHandleStageKeydown(event) {
+  if (!event || event.key !== 'Escape' || !pl || !pl.stageFallback) return;
+  event.preventDefault();
+  return plExitStageFullscreen();
 }
 
 function plToggleMute() {
@@ -2480,7 +2506,7 @@ function plToggleMute() {
   try {
     if (pl.player.isMuted()) {
       pl.player.unMute();
-      pl.player.setVolume(pl.previousVolume || 100);
+      pl.player.setVolume(Number.isFinite(pl.previousVolume) ? pl.previousVolume : 100);
     } else {
       pl.previousVolume = pl.player.getVolume ? pl.player.getVolume() : 100;
       pl.player.mute();
@@ -2528,8 +2554,6 @@ function plClampQrBubble() {
   bubble.style.top = pl.qrPosition.y + 'px';
   bubble.style.right = 'auto';
 }
-
-document.addEventListener('fullscreenchange', plHandleFullscreenChange);
 
 function plTick() {
   if (!pl || !pl.player || !pl.player.getCurrentTime) return;
@@ -2593,6 +2617,7 @@ function plJumpTo(i) {
 }
 async function plEndSession() {
   if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
+  await plExitStageFullscreen();
   await store.endSession(pl.sessionId);
   toast('진행을 종료했습니다');
   go('live/' + pl.sessionId);

@@ -1004,16 +1004,20 @@ test('문항 열기는 live 전체 상태를 쓰고 정답 공개는 revealed만
 });
 
 test('교사 수업 종료는 저장소 종료가 끝난 뒤 안내 화면으로 이동한다', async () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const events = [];
   const context = {
     pl: { sessionId: 'session-a' },
     confirm() { return true; },
+    document: {
+      fullscreenElement: null,
+      getElementById() { return null; },
+      body: { classList: { remove() {} } }
+    },
     store: { async endSession(id) { events.push(['end', id]); } },
     toast(message) { events.push(['toast', message]); },
     go(route) { events.push(['go', route]); }
   };
-  vm.runInNewContext(extractFunction(html, 'plEndSession'), context);
+  loadStageFunctions(['plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'], context);
 
   await context.plEndSession();
 
@@ -1056,7 +1060,7 @@ test('교사 전체화면 진입은 기존 플레이어를 재생성하지 않�
 test('홈은 확인 후 전체화면만 해제하고 세션을 종료하거나 이동하지 않는다', async () => {
   let exited = 0, ended = 0, routed = 0;
   const classList = { add() {}, remove() {} };
-  const ctx = loadStageFunctions(['plExitStageFullscreen', 'plGoHomeFromStage'], {
+  const ctx = loadStageFunctions(['plResetStageFullscreenUI', 'plExitStageFullscreen', 'plGoHomeFromStage'], {
     confirm() { return true; },
     document: {
       fullscreenElement: {},
@@ -1075,6 +1079,184 @@ test('홈은 확인 후 전체화면만 해제하고 세션을 종료하거나 �
   assert.equal(ended, 0);
   assert.equal(routed, 0);
   assert.ok(ctx.pl);
+});
+
+test('전체화면 요청 거부와 미지원은 모두 화면 확장 모드로 전환한다', async () => {
+  for (const requestFullscreen of [
+    () => Promise.reject(new Error('denied')),
+    undefined
+  ]) {
+    const stageClasses = new Set();
+    const bodyClasses = new Set();
+    const messages = [];
+    const stage = {
+      requestFullscreen,
+      classList: {
+        add(name) { stageClasses.add(name); },
+        remove(name) { stageClasses.delete(name); }
+      }
+    };
+    const ctx = loadStageFunctions(['plEnterStageFullscreen'], {
+      pl: { stageFallback: false, isStageFullscreen: false },
+      toast(message) { messages.push(message); },
+      plClampQrBubble() {},
+      document: {
+        body: { classList: {
+          add(name) { bodyClasses.add(name); },
+          remove(name) { bodyClasses.delete(name); }
+        } },
+        getElementById() { return stage; }
+      }
+    });
+
+    await ctx.plEnterStageFullscreen();
+
+    assert.equal(ctx.pl.stageFallback, true);
+    assert.equal(ctx.pl.isStageFullscreen, true);
+    assert.equal(stageClasses.has('fullscreen-fallback'), true);
+    assert.equal(bodyClasses.has('stage-fallback-open'), true);
+    assert.equal(messages.length, 1);
+  }
+});
+
+test('fullscreenchange로 stage를 벗어나면 UI 상태와 잠금만 정리한다', () => {
+  let ended = 0, routed = 0;
+  const stageClasses = new Set(['fullscreen-fallback']);
+  const bodyClasses = new Set(['stage-fallback-open']);
+  const stage = { classList: { remove(name) { stageClasses.delete(name); } } };
+  const ctx = loadStageFunctions(['plResetStageFullscreenUI', 'plHandleFullscreenChange'], {
+    pl: { isStageFullscreen: true, stageFallback: true },
+    store: { endSession() { ended++; } },
+    go() { routed++; },
+    plClampQrBubble() {},
+    document: {
+      fullscreenElement: null,
+      getElementById() { return stage; },
+      body: { classList: { remove(name) { bodyClasses.delete(name); } } }
+    }
+  });
+
+  ctx.plHandleFullscreenChange();
+
+  assert.equal(stageClasses.has('fullscreen-fallback'), false);
+  assert.equal(bodyClasses.has('stage-fallback-open'), false);
+  assert.equal(ctx.pl.isStageFullscreen, false);
+  assert.equal(ctx.pl.stageFallback, false);
+  assert.equal(ended, 0);
+  assert.equal(routed, 0);
+});
+
+test('Escape는 fallback 전체화면만 해제하고 세션과 라우팅을 유지한다', async () => {
+  let ended = 0, routed = 0, prevented = 0;
+  const bodyClasses = new Set(['stage-fallback-open']);
+  const stageClasses = new Set(['fullscreen-fallback']);
+  const stage = { classList: { remove(name) { stageClasses.delete(name); } } };
+  const ctx = loadStageFunctions([
+    'plResetStageFullscreenUI', 'plExitStageFullscreen', 'plHandleStageKeydown'
+  ], {
+    pl: { sessionId: 'session1', isStageFullscreen: true, stageFallback: true },
+    store: { endSession() { ended++; } },
+    go() { routed++; },
+    document: {
+      fullscreenElement: null,
+      getElementById() { return stage; },
+      body: { classList: { remove(name) { bodyClasses.delete(name); } } }
+    }
+  });
+
+  await ctx.plHandleStageKeydown({ key: 'Escape', preventDefault() { prevented++; } });
+
+  assert.equal(prevented, 1);
+  assert.equal(stageClasses.has('fullscreen-fallback'), false);
+  assert.equal(bodyClasses.has('stage-fallback-open'), false);
+  assert.equal(ended, 0);
+  assert.equal(routed, 0);
+});
+
+test('진행 종료는 전체화면 UI를 정리한 뒤 기존 순서로 세션을 종료한다', async () => {
+  const events = [];
+  const bodyClasses = new Set(['stage-fallback-open']);
+  const stageClasses = new Set(['fullscreen-fallback']);
+  const stage = { classList: { remove(name) { stageClasses.delete(name); } } };
+  const ctx = loadStageFunctions([
+    'plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'
+  ], {
+    pl: { sessionId: 'session-a', isStageFullscreen: true, stageFallback: true },
+    confirm() { return true; },
+    document: {
+      fullscreenElement: null,
+      getElementById() { return stage; },
+      body: { classList: { remove(name) { bodyClasses.delete(name); } } }
+    },
+    store: { async endSession(id) { events.push(['end', id]); } },
+    toast(message) { events.push(['toast', message]); },
+    go(route) { events.push(['go', route]); }
+  });
+
+  await ctx.plEndSession();
+
+  assert.equal(stageClasses.has('fullscreen-fallback'), false);
+  assert.equal(bodyClasses.has('stage-fallback-open'), false);
+  assert.deepEqual(events, [
+    ['end', 'session-a'],
+    ['toast', '진행을 종료했습니다'],
+    ['go', 'live/session-a']
+  ]);
+});
+
+test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리한다', () => {
+  let cleanup;
+  const listeners = new Map();
+  const removed = [];
+  const bodyClasses = new Set(['stage-fallback-open']);
+  const context = {
+    pl: null,
+    onCleanup(fn) { cleanup = fn; },
+    document: {
+      fullscreenElement: null,
+      addEventListener(name, fn) { listeners.set(name, fn); },
+      removeEventListener(name, fn) { if (listeners.get(name) === fn) removed.push(name); },
+      getElementById() { return null; },
+      body: { classList: { remove(name) { bodyClasses.delete(name); } } }
+    },
+    store: { getQuizSet() { return new Promise(() => {}); } },
+    APP() { return { innerHTML: '' }; },
+    topbar() { return ''; },
+    go() {},
+    console
+  };
+  loadStageFunctions([
+    'plResetStageFullscreenUI', 'plCleanupStageFullscreen',
+    'plHandleFullscreenChange', 'plHandleStageKeydown', 'screenPlay'
+  ], context);
+
+  context.screenPlay('set1');
+  cleanup();
+
+  assert.deepEqual([...listeners.keys()].sort(), ['fullscreenchange', 'keydown']);
+  assert.deepEqual(removed.sort(), ['fullscreenchange', 'keydown']);
+  assert.equal(bodyClasses.has('stage-fallback-open'), false);
+  assert.equal(context.pl, null);
+});
+
+test('음소거 해제는 이전 음량이 0이어도 그대로 복원한다', () => {
+  let restored = null;
+  const ctx = loadStageFunctions(['plToggleMute'], {
+    pl: {
+      previousVolume: 0,
+      player: {
+        isMuted() { return true; },
+        unMute() {},
+        setVolume(value) { restored = value; }
+      }
+    },
+    plRenderStageControls() {},
+    console
+  });
+
+  ctx.plToggleMute();
+
+  assert.equal(restored, 0);
 });
 
 test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', async () => {
