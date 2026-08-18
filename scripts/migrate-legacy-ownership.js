@@ -41,6 +41,17 @@ function validJson(contents) {
   return value;
 }
 
+function failClosedCompanionError(error, reservedPath) {
+  const wrapped = new Error(
+    String(error && error.message || error) +
+      '; fail-closed report remains at ' + reservedPath,
+    { cause: error }
+  );
+  if (error && error.code !== undefined) wrapped.code = error.code;
+  wrapped.failClosedPath = reservedPath;
+  return wrapped;
+}
+
 function reserveReport(filePath, initialContents, fileSystem = fs) {
   const reservedPath = filePath + '.reserved';
   const pendingPath = filePath + '.pending';
@@ -54,11 +65,13 @@ function reserveReport(filePath, initialContents, fileSystem = fs) {
   }
   let descriptor;
   let reservationCreated = false;
+  let reservationContentsSynced = false;
   try {
     descriptor = fileSystem.openSync(reservedPath, 'wx');
     reservationCreated = true;
     writeFully(fileSystem, descriptor, initialContents);
     fileSystem.fsyncSync(descriptor);
+    reservationContentsSynced = true;
     fileSystem.closeSync(descriptor);
     descriptor = undefined;
     syncDirectory(fileSystem, directory);
@@ -66,9 +79,10 @@ function reserveReport(filePath, initialContents, fileSystem = fs) {
     if (descriptor !== undefined) {
       try { fileSystem.closeSync(descriptor); } catch (_) { /* preserve original reservation error */ }
     }
-    if (reservationCreated) {
+    if (reservationCreated && !reservationContentsSynced) {
       try { fileSystem.unlinkSync(reservedPath); } catch (_) { /* remove only our incomplete reservation */ }
     }
+    if (reservationContentsSynced) throw failClosedCompanionError(error, reservedPath);
     throw error;
   }
 
@@ -94,12 +108,13 @@ function reserveReport(filePath, initialContents, fileSystem = fs) {
       throw error;
     }
     try {
-      fileSystem.renameSync(pendingPath, filePath);
+      fileSystem.linkSync(pendingPath, filePath);
       syncDirectory(fileSystem, directory);
+      fileSystem.unlinkSync(pendingPath);
       fileSystem.unlinkSync(reservedPath);
       published = true;
     } catch (error) {
-      try { fileSystem.unlinkSync(pendingPath); } catch (_) { /* it may already be atomically renamed */ }
+      try { fileSystem.unlinkSync(pendingPath); } catch (_) { /* target and reservation remain authoritative */ }
       throw error;
     }
   }

@@ -478,6 +478,11 @@ function faultingReportFileSystem(method, persistent) {
   const pathsByDescriptor = new Map();
   let failuresRemaining = persistent ? Number.POSITIVE_INFINITY : 1;
   const shouldFail = () => failuresRemaining > 0 && (failuresRemaining--, true);
+  const injectedError = operation => {
+    const error = new Error('injected ' + operation + ' failure');
+    error.code = 'EIO';
+    return error;
+  };
   return new Proxy(fs, {
     get(target, property) {
       if (property === 'openSync') return (...args) => {
@@ -486,6 +491,16 @@ function faultingReportFileSystem(method, persistent) {
         return descriptor;
       };
       if (property === 'closeSync') return descriptor => {
+        const descriptorPath = String(pathsByDescriptor.get(descriptor) || '');
+        const failReservedClose = method === 'reserved-close' && descriptorPath.endsWith('.reserved');
+        const failDirectoryClose = method === 'directory-close' &&
+          descriptorPath && !descriptorPath.endsWith('.reserved') &&
+          !descriptorPath.endsWith('.pending');
+        if ((failReservedClose || failDirectoryClose) && shouldFail()) {
+          pathsByDescriptor.delete(descriptor);
+          target.closeSync(descriptor);
+          throw injectedError(method);
+        }
         pathsByDescriptor.delete(descriptor);
         return target.closeSync(descriptor);
       };
@@ -504,16 +519,58 @@ function faultingReportFileSystem(method, persistent) {
         }
         return target.fsyncSync(descriptor);
       };
-      if (property === 'renameSync' && method === 'rename') return (...args) => {
-        if (shouldFail()) throw new Error('injected rename failure');
-        return target.renameSync(...args);
+      if (property === 'fsyncSync' && method === 'directory-fsync') return descriptor => {
+        const descriptorPath = String(pathsByDescriptor.get(descriptor) || '');
+        if (descriptorPath && !descriptorPath.endsWith('.reserved') &&
+            !descriptorPath.endsWith('.pending') && shouldFail()) {
+          throw injectedError(method);
+        }
+        return target.fsyncSync(descriptor);
+      };
+      if (property === 'linkSync' && method === 'link') return (...args) => {
+        if (shouldFail()) throw new Error('injected link failure');
+        return target.linkSync(...args);
+      };
+      if (property === 'linkSync' && method === 'unsupported-link') return () => {
+        if (shouldFail()) {
+          const error = new Error('injected unsupported link failure');
+          error.code = 'ENOTSUP';
+          throw error;
+        }
+        throw new Error('unsupported-link fault was unexpectedly exhausted');
       };
       return Reflect.get(target, property);
     }
   });
 }
 
-test('atomic report publication preserves fail-closed JSON across truncate, write, fsync, and rename faults', () => {
+test('durable report reservation survives close and directory durability errors with a discoverable path', () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-reserve-faults-'));
+  const reserved = '{"status":"reserved-fail-closed","safeToDeployStrictRules":false}\n';
+  try {
+    for (const method of ['reserved-close', 'directory-fsync', 'directory-close']) {
+      const reportPath = path.join(directory, method + '.json');
+      const reservedPath = reportPath + '.reserved';
+      let thrown;
+      assert.throws(() => command.reserveReport(
+        reportPath, reserved, faultingReportFileSystem(method)
+      ), error => {
+        thrown = error;
+        return error.message.includes('injected ' + method + ' failure');
+      });
+      assert.equal(thrown.message.includes(reservedPath), true, method);
+      assert.deepEqual(JSON.parse(fs.readFileSync(reservedPath, 'utf8')), {
+        status: 'reserved-fail-closed', safeToDeployStrictRules: false
+      }, method);
+      assert.equal(fs.existsSync(reportPath), false, method);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('atomic report publication preserves fail-closed JSON across truncate, write, fsync, and link faults', () => {
   const command = require('../scripts/migrate-legacy-ownership.js');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-faults-'));
   const reserved = '{"status":"reserved-fail-closed","safeToDeployStrictRules":false}\n';
@@ -527,7 +584,7 @@ test('atomic report publication preserves fail-closed JSON across truncate, writ
     truncateReservation.commit(safe);
     assert.equal(JSON.parse(fs.readFileSync(truncatePath, 'utf8')).safeToDeployStrictRules, true);
 
-    for (const method of ['write', 'fsync', 'rename']) {
+    for (const method of ['write', 'fsync', 'link']) {
       const reportPath = path.join(directory, method + '.json');
       const reservation = command.reserveReport(
         reportPath, reserved, faultingReportFileSystem(method)
@@ -548,11 +605,63 @@ test('atomic report publication preserves fail-closed JSON across truncate, writ
   }
 });
 
-test('CLI catch path leaves a discoverable fail-closed companion when atomic rename keeps failing', async () => {
+test('report publication never replaces a target created immediately before atomic publish', () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-race-'));
+  const reportPath = path.join(directory, 'audit.json');
+  const reserved = '{"status":"reserved-fail-closed","safeToDeployStrictRules":false}\n';
+  const safe = '{"status":"complete","safeToDeployStrictRules":true}\n';
+  const foreign = '{"status":"foreign","safeToDeployStrictRules":false}\n';
+  let barrierReached = false;
+  const racingFileSystem = new Proxy(fs, {
+    get(target, property) {
+      if (property === 'renameSync' || property === 'linkSync') return (...args) => {
+        if (!barrierReached) {
+          target.writeFileSync(reportPath, foreign, { flag: 'wx' });
+          barrierReached = true;
+        }
+        return target[property](...args);
+      };
+      return Reflect.get(target, property);
+    }
+  });
+  try {
+    const reservation = command.reserveReport(reportPath, reserved, racingFileSystem);
+    assert.throws(() => reservation.commit(safe), /EEXIST|exist/i);
+    assert.equal(barrierReached, true);
+    assert.equal(fs.readFileSync(reportPath, 'utf8'), foreign);
+    assert.equal(fs.readFileSync(reportPath + '.reserved', 'utf8'), reserved);
+    assert.notEqual(fs.readFileSync(reportPath, 'utf8'), safe);
+    assert.equal(fs.existsSync(reportPath + '.pending'), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('unsupported hard links fail closed without falling back to overwrite publication', () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-link-unsupported-'));
+  const reportPath = path.join(directory, 'audit.json');
+  const reserved = '{"status":"reserved-fail-closed","safeToDeployStrictRules":false}\n';
+  const safe = '{"status":"complete","safeToDeployStrictRules":true}\n';
+  try {
+    const reservation = command.reserveReport(
+      reportPath, reserved, faultingReportFileSystem('unsupported-link', true)
+    );
+    assert.throws(() => reservation.commit(safe), error => error.code === 'ENOTSUP');
+    assert.equal(fs.existsSync(reportPath), false);
+    assert.equal(fs.readFileSync(reportPath + '.reserved', 'utf8'), reserved);
+    assert.equal(fs.existsSync(reportPath + '.pending'), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI catch path leaves a discoverable fail-closed companion when hard-link publication keeps failing', async () => {
   const command = require('../scripts/migrate-legacy-ownership.js');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-catch-'));
   const reportPath = path.join(directory, 'audit.json');
-  const fileSystem = faultingReportFileSystem('rename', true);
+  const fileSystem = faultingReportFileSystem('link', true);
   try {
     await assert.rejects(command.main([
       '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--output', reportPath
@@ -570,7 +679,7 @@ test('CLI catch path leaves a discoverable fail-closed companion when atomic ren
         });
       },
       writeLine() {}
-    }), /injected rename failure/);
+    }), /injected link failure/);
     assert.equal(fs.existsSync(reportPath), false);
     assert.equal(
       JSON.parse(fs.readFileSync(reportPath + '.reserved', 'utf8')).safeToDeployStrictRules,
