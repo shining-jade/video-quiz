@@ -1055,27 +1055,74 @@ test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면�
   assert.equal(rendered, 0);
 });
 
-test('세트 목록 행은 videos 배열에서 영상과 전체 문항 수를 표시한다', () => {
+test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게 렌더링한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const escapeHtml = value => String(value).replace(/[&<>]/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;'
+  })[ch]);
   const context = {
     PlaylistCore: require('../playlist-core.js'),
     REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
-    esc(value) { return String(value); },
+    esc: escapeHtml,
     fmtDate() { return ''; },
     linkTo(value) { return value; }
   };
   vm.runInNewContext(extractFunction(html, 'setListRow'), context);
 
-  const row = context.setListRow({
-    id: 'legacy-normalized', title: '이전 세트', author: '', archived: false,
-    settings: { revealMode: 'timer' },
-    videos: [
-      { questions: [{ text: '1' }, { text: '2' }] },
-      { questions: [{ text: '3' }] }
-    ]
-  });
+  const cases = [
+    {
+      name: '신형 다중 영상',
+      set: {
+        id: 'playlist', title: '두 영상', author: '', archived: false,
+        settings: { revealMode: 'timer' },
+        videos: [
+          { questions: [{ text: '1' }, { text: '2' }] },
+          { questions: [{ text: '3' }] }
+        ]
+      },
+      matches: [/영상 2개 · 문항 3개/]
+    },
+    {
+      name: '구형 최상위 단일 영상',
+      set: {
+        id: 'legacy', title: '이전 세트', author: '', archived: false,
+        settings: { revealMode: 'timer' },
+        videoId: 'legacy-id', questions: [{ text: '1' }, { text: '2' }]
+      },
+      matches: [/영상 1개 · 문항 2개/]
+    },
+    {
+      name: '빈 영상 배열',
+      set: {
+        id: 'empty', title: '빈 세트', author: '', archived: false,
+        settings: { revealMode: 'timer' }, videos: []
+      },
+      matches: [/영상 1개 · 문항 0개/]
+    },
+    {
+      name: '제목과 작성자 이스케이프',
+      set: {
+        id: 'escaped', title: '<script>', author: 'A&B', archived: false,
+        settings: { revealMode: 'timer' }, videos: [{ questions: [] }]
+      },
+      matches: [/&lt;script&gt;/, /A&amp;B/],
+      rejects: [/<script>/, /A&B/]
+    },
+    {
+      name: '숨김 표시',
+      set: {
+        id: 'archived', title: '숨긴 세트', author: '', archived: true,
+        settings: { revealMode: 'timer' }, videos: [{ questions: [] }]
+      },
+      matches: [/opacity:.6/, /<span class="tag mute"[^>]*>숨김<\/span>/]
+    }
+  ];
 
-  assert.match(row, /영상 2개 · 문항 3개/);
+  for (const item of cases) {
+    const row = context.setListRow(item.set);
+    for (const pattern of item.matches) assert.match(row, pattern, item.name);
+    for (const pattern of item.rejects || []) assert.doesNotMatch(row, pattern, item.name);
+  }
 });
 
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
