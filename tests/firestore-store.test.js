@@ -3715,6 +3715,7 @@ test('a password session linked to Google is removed from the teacher UI state',
     clockUserId: 'prior-user',
     clockPromise: priorClock,
     clockPromiseUid: 'prior-user',
+    teacherAuthVersion: 0,
     AuthCore: require('../auth-core.js'),
     renderTeacherAuthArea() {}
   };
@@ -3750,6 +3751,7 @@ test('a persisted Google session remains in the teacher UI state', async () => {
     clockUserId: '',
     clockPromise: null,
     clockPromiseUid: '',
+    teacherAuthVersion: 0,
     AuthCore: require('../auth-core.js'),
     renderTeacherAuthArea() {}
   };
@@ -3758,6 +3760,62 @@ test('a persisted Google session remains in the teacher UI state', async () => {
   await context.applyTeacherUser(user);
 
   assert.equal(context.teacherUser, user);
+});
+
+test('a late Google token from an older auth observer cannot replace the newer session', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let authListener;
+  const tokenResolves = {};
+  const userA = {
+    uid: 'google-a', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return new Promise(resolve => { tokenResolves.a = resolve; });
+    }
+  };
+  const userB = {
+    uid: 'google-b', email: 'b@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return new Promise(resolve => { tokenResolves.b = resolve; });
+    }
+  };
+  const context = {
+    teacherUser: null,
+    teacherAllowance: null,
+    teacherState: null,
+    clockUserId: '',
+    clockPromise: null,
+    clockPromiseUid: '',
+    authReady: false,
+    teacherAuthVersion: 0,
+    AuthCore: require('../auth-core.js'),
+    renderTeacherAuthArea() {},
+    APP() { return { innerHTML: '' }; },
+    topbar() { return '<nav></nav>'; },
+    firebase: {
+      auth() {
+        return { onAuthStateChanged(listener) { authListener = listener; } };
+      }
+    },
+    router() {},
+    console
+  };
+  vm.runInNewContext(
+    extractFunction(html, 'applyTeacherUser') + '\n' + extractFunction(html, 'bootWithAuth'),
+    context
+  );
+
+  context.bootWithAuth();
+  const observerA = authListener(userA);
+  await Promise.resolve();
+  const observerB = authListener(userB);
+  await Promise.resolve();
+  tokenResolves.b({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await observerB;
+  assert.equal(context.teacherUser, userB);
+  tokenResolves.a({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await observerA;
+
+  assert.equal(context.teacherUser, userB);
 });
 
 test('clock synchronization does not share pending work across authenticated users', async () => {
@@ -3867,7 +3925,7 @@ test('startup does not create an anonymous student session or sync its clock', a
     authReady: false,
     APP() { return app; },
     topbar() { return '<nav></nav>'; },
-    applyTeacherUser() {},
+    applyTeacherUser() { return true; },
     firebase: {
       auth() {
         return {
@@ -3904,7 +3962,7 @@ test('startup routes after auth state without syncing a student clock', async ()
     authReady: false,
     APP() { return app; },
     topbar() { return '<nav></nav>'; },
-    applyTeacherUser() {},
+    applyTeacherUser() { return true; },
     firebase: {
       auth() {
         return {

@@ -1120,6 +1120,7 @@ let teacherState = AuthCore.teacherState(null, null);
 let clockUserId = '';
 let clockPromise = null;
 let clockPromiseUid = '';
+let teacherAuthVersion = 0;
 
 function teacherAuthMarkup() {
   if (!teacherUser) {
@@ -1136,10 +1137,12 @@ function renderTeacherAuthArea() {
 }
 
 async function applyTeacherUser(user) {
+  const updateVersion = ++teacherAuthVersion;
   let tokenResult = null;
   if (user && !user.isAnonymous && typeof user.getIdTokenResult === 'function') {
     try { tokenResult = await user.getIdTokenResult(); } catch (error) { console.error(error); }
   }
+  if (updateVersion !== teacherAuthVersion) return false;
   const nextUser = AuthCore.isGoogleSignIn(tokenResult) ? user : null;
   if (!teacherUser || !nextUser || teacherUser.uid !== nextUser.uid) {
     teacherAllowance = null;
@@ -1150,6 +1153,7 @@ async function applyTeacherUser(user) {
   teacherUser = nextUser;
   teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
   renderTeacherAuthArea();
+  return true;
 }
 
 function setTeacherAllowance(allowance) {
@@ -5215,7 +5219,8 @@ function admExportStudents() {
 function bootWithAuth() {
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">연결 중…</div></div>';
   firebase.auth().onAuthStateChanged(async user => {
-    await applyTeacherUser(user);
+    const applied = await applyTeacherUser(user);
+    if (!applied) return;
     if (!authReady) {
       authReady = true;
       router();
