@@ -322,6 +322,7 @@ test('캐시된 YouTube API가 콜백보다 먼저 준비돼도 대기 작업을
     window: { YT: { Player: function Player() {} } },
     callbackRuns: 0
   };
+  vm.runInNewContext(extractFunction(html, 'markYTReady'), context);
   vm.runInNewContext(extractFunction(html, 'whenYT'), context);
 
   vm.runInNewContext('whenYT(() => { callbackRuns += 1; })', context);
@@ -329,6 +330,32 @@ test('캐시된 YouTube API가 콜백보다 먼저 준비돼도 대기 작업을
   assert.equal(context.callbackRuns, 1);
   assert.equal(context.ytReady, true);
   assert.equal(context.ytWaiters.length, 0);
+});
+
+test('캐시된 YouTube API 준비 경로는 기존 대기 작업과 현재 작업을 한 번씩 비운다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const blockStart = html.indexOf('let ytReady = false;');
+  const blockEnd = html.indexOf('/* ── 유튜브 자막', blockStart);
+  assert.ok(blockStart >= 0 && blockEnd > blockStart, 'YouTube 준비 블록을 찾을 수 있어야 한다');
+
+  const context = { window: { YT: { Player: function Player() {} } } };
+  vm.runInNewContext(html.slice(blockStart, blockEnd), context);
+  vm.runInNewContext(`
+    var priorRuns = 0;
+    var currentRuns = 0;
+    ytWaiters.push(() => { priorRuns += 1; });
+    whenYT(() => { currentRuns += 1; });
+  `, context);
+
+  assert.equal(context.priorRuns, 1);
+  assert.equal(context.currentRuns, 1);
+  assert.equal(vm.runInNewContext('ytWaiters.length', context), 0);
+
+  vm.runInNewContext('window.onYouTubeIframeAPIReady(); window.onYouTubeIframeAPIReady();', context);
+
+  assert.equal(context.priorRuns, 1);
+  assert.equal(context.currentRuns, 1);
+  assert.equal(vm.runInNewContext('ytWaiters.length', context), 0);
 });
 
 function createStore(fake) {

@@ -833,12 +833,13 @@ function every(ms, fn) {
 /* ── YouTube IFrame API 준비 대기 ──────────────────────────────────── */
 let ytReady = false;
 const ytWaiters = [];
-window.onYouTubeIframeAPIReady = function () {
+function markYTReady() {
   ytReady = true;
   while (ytWaiters.length) ytWaiters.shift()();
-};
+}
+window.onYouTubeIframeAPIReady = markYTReady;
 function whenYT(cb) {
-  if (!ytReady && window.YT && typeof window.YT.Player === 'function') ytReady = true;
+  if (!ytReady && window.YT && typeof window.YT.Player === 'function') markYTReady();
   ytReady ? cb() : ytWaiters.push(cb);
 }
 
