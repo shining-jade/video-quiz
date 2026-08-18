@@ -1522,6 +1522,38 @@ test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다',
   assert.deepEqual(loaded, [[1, true]]);
 });
 
+test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문항 종료 뒤 다시 센다', () => {
+  const loaded = [];
+  const ctx = loadStageFunctions(['plTick'], {
+    pl: {
+      videoIndex: 0, transitionUntil: 4000, playlistDone: false,
+      playerLoading: false, pendingLiveQuestion: -1,
+      lastT: 40, fired: [], live: { q: -1 }, flatQuestions: [],
+      set: { videos: [
+        { startSec: 10, endSec: 40, questions: [] },
+        { startSec: 20, endSec: 50, questions: [] }
+      ] },
+      player: { getCurrentTime() { return 40; }, pauseVideo() {} }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; }, fmtTime() { return ''; },
+    plLoadVideo(index, autoplay) { loaded.push([index, autoplay]); },
+    plRenderTransition() {}
+  });
+
+  ctx.plTick();
+  ctx.pl.pendingLiveQuestion = 1;
+  ctx.Date.now = () => 2000;
+  ctx.plTick();
+
+  assert.equal(ctx.pl.transitionUntil, 0);
+  assert.deepEqual(loaded, []);
+
+  ctx.pl.pendingLiveQuestion = -1;
+  ctx.plTick();
+  assert.equal(ctx.pl.transitionUntil, 5000);
+});
+
 test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간다', () => {
   let completed = 0, paused = 0;
   const ctx = loadStageFunctions(['plCompletePlaylist', 'plTick'], {
@@ -1649,6 +1681,7 @@ test('마지막 영상 완료는 세션을 종료하지 않는다', () => {
   });
 
   ctx.plCompletePlaylist();
+  ctx.plCompletePlaylist();
 
   assert.equal(ctx.pl.playlistDone, true);
   assert.equal(ctx.pl.transitionUntil, 0);
@@ -1715,7 +1748,7 @@ test('완료 메뉴는 순위·대시보드·처음부터 재생·명시적 진�
 
 test('YouTube 상태는 새 영상 로드 잠금을 풀고 종료는 tick에 위임하며 오류는 자동 건너뛰지 않는다', () => {
   let ticks = 0, errors = 0, loads = 0;
-  const ctx = loadStageFunctions(['plHandlePlayerStateChange', 'plHandlePlayerError'], {
+  const ctx = loadStageFunctions(['plPlayerEventVideoId', 'plHandlePlayerStateChange', 'plHandlePlayerError'], {
     pl: { playbackEnded: false, playerError: null, playerLoading: true },
     YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
     plTick() { ticks++; },
@@ -1736,6 +1769,56 @@ test('YouTube 상태는 새 영상 로드 잠금을 풀고 종료는 tick에 위
   assert.equal(ctx.pl.playerLoading, false);
   assert.equal(errors, 1);
   assert.equal(loads, 0);
+});
+
+test('이전 영상의 지연 ENDED와 오류는 다음 영상 및 다시 보기 세대에 영향을 주지 않는다', () => {
+  let currentVideoId = 'a', ticks = 0, errors = 0;
+  const player = {
+    getVideoData() { return { video_id: currentVideoId }; },
+    loadVideoById() {}
+  };
+  const ctx = loadStageFunctions([
+    'plLoadVideo', 'plReplayPlaylist', 'plPlayerEventVideoId',
+    'plHandlePlayerStateChange', 'plHandlePlayerError'
+  ], {
+    pl: {
+      videoIndex: 0, loadGeneration: 1, activePlaybackGeneration: 1,
+      expectedVideoId: 'a', playbackEnded: false, playerLoading: false,
+      fired: [true, true],
+      set: { videos: [
+        { videoId: 'a', startSec: 10 },
+        { videoId: 'b', startSec: 20 }
+      ] },
+      player
+    },
+    YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
+    plTick() { ticks++; },
+    plRenderPlayerError() { errors++; }
+  });
+
+  ctx.plLoadVideo(1, true);
+  ctx.plHandlePlayerStateChange({ data: 0, target: player });
+  assert.equal(ctx.pl.playbackEnded, false);
+  assert.equal(ticks, 0);
+
+  currentVideoId = 'b';
+  ctx.plHandlePlayerStateChange({ data: 1, target: player });
+  assert.equal(ctx.pl.activePlaybackGeneration, ctx.pl.loadGeneration);
+  assert.equal(ctx.pl.playbackEnded, false);
+
+  ctx.pl.playbackEnded = true;
+  ctx.plReplayPlaylist();
+  ctx.plHandlePlayerError({ data: 100, target: player });
+  assert.equal(errors, 0);
+  assert.equal(ctx.pl.playerError, null);
+  assert.equal(ctx.pl.playbackEnded, true);
+
+  currentVideoId = 'a';
+  ctx.plHandlePlayerStateChange({ data: 1, target: player });
+  assert.equal(ctx.pl.playbackEnded, false);
+  ctx.plHandlePlayerStateChange({ data: 0, target: player });
+  assert.equal(ticks, 1);
+  assert.equal(ctx.pl.playbackEnded, true);
 });
 
 test('YouTube 공용 이벤트는 자막 처리 뒤 교사 종료·오류 콜백을 전달한다', () => {
@@ -1778,7 +1861,7 @@ test('처음부터 다시 보기는 응답과 참여 상태를 유지하고 첫 
 
   assert.equal(ctx.pl.playlistDone, false);
   assert.equal(ctx.pl.transitionUntil, 0);
-  assert.equal(ctx.pl.playbackEnded, false);
+  assert.equal(ctx.pl.playbackEnded, true);
   assert.deepEqual(ctx.pl.fired, [false, false]);
   assert.equal(ctx.pl.students, students);
   assert.equal(ctx.pl.responses, responses);
@@ -1854,6 +1937,36 @@ test('교사 문항 목록은 모든 영상의 전역 번호를 이어서 렌더
   assert.match(box.innerHTML, /1\. 첫 영상 문항/);
   assert.match(box.innerHTML, /2\. 둘째 영상 문항/);
   assert.doesNotMatch(box.innerHTML, /구형 문항/);
+});
+
+test('다른 영상 문항으로 이동하면 로드 뒤 목표 3초 전을 기준 시각으로 유지한다', () => {
+  const loads = [], seeks = [];
+  const player = {
+    loadVideoById(options) { loads.push(options); },
+    seekTo(time) { seeks.push(time); },
+    playVideo() {}
+  };
+  const ctx = loadStageFunctions(['plLoadVideo', 'plJumpTo'], {
+    pl: {
+      videoIndex: 0, fired: [true, true], lastT: 0,
+      flatQuestions: [
+        { videoIndex: 1, t: 15, text: '앞 문항' },
+        { videoIndex: 1, t: 30, text: '목표 문항' }
+      ],
+      set: { videos: [
+        { videoId: 'a', startSec: 0 },
+        { videoId: 'b', startSec: 10 }
+      ] },
+      player
+    }
+  });
+
+  ctx.plJumpTo(1);
+
+  assert.deepEqual(clone(loads), [{ videoId: 'b', startSeconds: 10 }]);
+  assert.deepEqual(seeks, [27]);
+  assert.equal(ctx.pl.lastT, 27);
+  assert.equal(ctx.pl.fired[1], false);
 });
 
 test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 전달한다', async () => {

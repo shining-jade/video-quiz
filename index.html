@@ -2275,6 +2275,7 @@ function screenPlay(setId) {
     setId: setId, set: null,
     videos: [], flatQuestions: [], videoIndex: 0,
     playlistDone: false, transitionUntil: 0, playbackEnded: false,
+    loadGeneration: 0, activePlaybackGeneration: 0, expectedVideoId: '',
     sessionId: null, code: null,
     player: null, lastT: 0, fired: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
@@ -2499,6 +2500,10 @@ function renderPlayRun() {
   // 플레이어
   whenYT(() => {
     if (!pl || !document.getElementById('pl-player')) return;
+    pl.loadGeneration++;
+    pl.activePlaybackGeneration = 0;
+    pl.expectedVideoId = firstVideo.videoId;
+    pl.playerLoading = true;
     pl.player = new YT.Player('pl-player', {
       videoId: firstVideo.videoId,
       playerVars: {
@@ -2742,7 +2747,9 @@ function plLoadVideo(index, autoplay) {
   pl.videoIndex = index;
   pl.playlistDone = false;
   pl.transitionUntil = 0;
-  pl.playbackEnded = false;
+  pl.loadGeneration = (Number(pl.loadGeneration) || 0) + 1;
+  pl.activePlaybackGeneration = 0;
+  pl.expectedVideoId = video.videoId;
   pl.playerLoading = true;
   pl.playerError = null;
   pl.lastT = Math.max(0, Number(video.startSec) || 0) - 0.6;
@@ -2768,7 +2775,7 @@ function plAdvanceVideo() {
 }
 
 function plCompletePlaylist() {
-  if (!pl) return;
+  if (!pl || pl.playlistDone) return;
   pl.playlistDone = true;
   pl.transitionUntil = 0;
   try { if (pl.player && pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
@@ -2779,7 +2786,6 @@ function plReplayPlaylist() {
   if (!pl) return;
   pl.playlistDone = false;
   pl.transitionUntil = 0;
-  pl.playbackEnded = false;
   pl.fired = pl.fired.map(() => false);
   plLoadVideo(0, true);
 }
@@ -2845,18 +2851,36 @@ function plRetryVideo() {
   plLoadVideo(pl.videoIndex, true);
 }
 
+function plPlayerEventVideoId(event) {
+  const player = event && event.target ? event.target : (pl && pl.player);
+  try {
+    const data = player && player.getVideoData ? player.getVideoData() : null;
+    return data && (data.video_id || data.videoId) ? String(data.video_id || data.videoId) : '';
+  } catch (e) { return ''; }
+}
+
 function plHandlePlayerStateChange(event) {
   if (!pl || !event) return;
+  const currentVideoId = plPlayerEventVideoId(event);
+  const matchesExpected = !pl.expectedVideoId || currentVideoId === String(pl.expectedVideoId);
   if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.CUED) {
+    if (!matchesExpected) return;
     pl.playerLoading = false;
+    pl.activePlaybackGeneration = pl.loadGeneration;
+    pl.playbackEnded = false;
+    pl.playerError = null;
   }
   if (event.data !== YT.PlayerState.ENDED) return;
+  if (!matchesExpected || pl.playerLoading || pl.activePlaybackGeneration !== pl.loadGeneration) return;
   pl.playbackEnded = true;
   plTick();
 }
 
 function plHandlePlayerError(event) {
   if (!pl) return;
+  const currentVideoId = plPlayerEventVideoId(event);
+  if (pl.expectedVideoId && currentVideoId !== String(pl.expectedVideoId)) return;
+  if (!pl.playerLoading && pl.activePlaybackGeneration !== pl.loadGeneration) return;
   pl.playerLoading = false;
   pl.playerError = event && event.data;
   plRenderPlayerError();
@@ -2868,6 +2892,14 @@ function plTick() {
   if (pl.playerLoading) return;
 
   if (pl.transitionUntil) {
+    if (pl.live.q >= 0 || pl.pendingLiveQuestion >= 0) {
+      pl.transitionUntil = 0;
+      if (typeof document !== 'undefined') {
+        const transition = document.getElementById('pl-transition');
+        if (transition && transition.remove) transition.remove();
+      }
+      return;
+    }
     if (Date.now() >= pl.transitionUntil) {
       pl.transitionUntil = 0;
       plLoadVideo(pl.videoIndex + 1, true);
@@ -2961,9 +2993,9 @@ function plJumpTo(i) {
   const question = pl.flatQuestions[i];
   if (!question) return;
   const t = Math.max(0, question.t - 3);
+  if (question.videoIndex !== pl.videoIndex) plLoadVideo(question.videoIndex, true);
   pl.fired[i] = false;
   pl.lastT = t;
-  if (question.videoIndex !== pl.videoIndex) plLoadVideo(question.videoIndex, true);
   pl.player.seekTo(t, true);
   pl.player.playVideo();
 }
