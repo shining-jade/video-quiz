@@ -194,7 +194,7 @@ service cloud.firestore {
       return live is map &&
         live.keys().hasAll(['q', 'openedAt', 'limitSec', 'revealed']) &&
         live.keys().hasOnly([
-          'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer', 'status',
+          'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer',
           'responseClosesAt', 'submitGraceUntil', 'revealAt', 'accepting', 'liveToken'
         ]) &&
         live.q is int &&
@@ -205,7 +205,6 @@ service cloud.firestore {
         live.revealed is bool &&
         (!('accepting' in live) || live.accepting is bool) &&
         (!('liveToken' in live) || live.liveToken is string) &&
-        (!('status' in live) || live.status is string) &&
         ((!('responseClosesAt' in live) &&
             !('submitGraceUntil' in live) &&
             !('revealAt' in live)) ||
@@ -227,6 +226,17 @@ service cloud.firestore {
             validPublicQuestion(live.publicQuestion) &&
             ((live.revealed == false && !('publicAnswer' in live)) ||
               (live.revealed == true && validPublicAnswer(live.publicAnswer)))));
+    }
+
+    function validEndedLiveData(live) {
+      return live is map &&
+        live.keys().hasAll(['q', 'openedAt', 'limitSec', 'revealed', 'status']) &&
+        live.keys().hasOnly(['q', 'openedAt', 'limitSec', 'revealed', 'status']) &&
+        live.q == -1 &&
+        live.openedAt == 0 &&
+        live.limitSec == 0 &&
+        live.revealed == false &&
+        live.status == 'ended';
     }
 
     function validStudentScore(studentId) {
@@ -301,6 +311,15 @@ service cloud.firestore {
         (request.resource.data.q == resource.data.q &&
           (resource.data.get('accepting', true) == false ||
             request.resource.data.get('accepting', true) == true || graceFinished));
+    }
+
+    function validAtomicSessionEndLive(sessionId) {
+      let sessionPath = /databases/$(database)/documents/sessions/$(sessionId);
+      return exists(sessionPath) &&
+        existsAfter(sessionPath) &&
+        get(sessionPath).data.get('status', null) != 'ended' &&
+        getAfter(sessionPath).data.get('status', null) == 'ended' &&
+        validEndedLiveData(request.resource.data);
     }
 
     function currentQuestionKey(sessionId) {
@@ -426,12 +445,14 @@ service cloud.firestore {
 
       match /meta/live {
         allow get: if isAdmin() || ownsSession(sessionId) ||
-          (isRegisteredStudent(sessionId) && validLiveData(resource.data));
+          (isRegisteredStudent(sessionId) &&
+            (validLiveData(resource.data) || validEndedLiveData(resource.data)));
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data);
         allow update: if ownsSessionAfter(sessionId) &&
-          validLiveData(request.resource.data) &&
-          validLiveUpdateTransition() && validAcceptingTransition();
+          ((validLiveData(request.resource.data) &&
+              validLiveUpdateTransition() && validAcceptingTransition()) ||
+            validAtomicSessionEndLive(sessionId));
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }

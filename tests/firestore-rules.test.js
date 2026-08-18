@@ -651,6 +651,13 @@ rulesTest('등록 학생 live listener는 atomic endSession의 ended projection�
   const student = actorFirestore('student');
   const ownerStore = emulatorStore(actorFirestore('owner'));
   const liveReference = doc(student, 'sessions/s1/meta/live');
+  const now = Date.now();
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    accepting: true,
+    responseClosesAt: Timestamp.fromMillis(now + 10_000),
+    submitGraceUntil: Timestamp.fromMillis(now + 60_000),
+    revealAt: Timestamp.fromMillis(now + 60_000)
+  }));
   let initialResolve;
   let endedResolve;
   let initialReject;
@@ -672,15 +679,116 @@ rulesTest('등록 학생 live listener는 atomic endSession의 ended projection�
     endedReject(error);
   });
 
-  await initial;
-  await ownerStore.endSession('s1');
-  const endedLive = await ended;
-  unsubscribe();
+  let endedLive;
+  try {
+    await initial;
+    await ownerStore.endSession('s1');
+    endedLive = await ended;
+  } finally {
+    unsubscribe();
+  }
 
-  assert.equal(endedLive.status, 'ended');
-  assert.equal(endedLive.q, -1);
+  assert.deepEqual(endedLive, {
+    q: -1,
+    openedAt: 0,
+    revealed: false,
+    limitSec: 0,
+    status: 'ended'
+  });
   assert.equal((await assertSucceeds(getDoc(doc(student, 'sessions/s1')))).data().status, 'ended');
   assert.equal((await assertSucceeds(getDoc(liveReference))).data().status, 'ended');
+  await assertFails(updateDoc(doc(student, 'sessions/s1/students/student-uid'), {
+    name: '종료 뒤 변경'
+  }));
+  await assertFails(updateDoc(doc(student, 'sessions/s1/responses/student-uid'), {
+    'answers.0': { answer: 0, submitted: true, revision: 2 }
+  }));
+  await assertFails(getDoc(doc(actorFirestore('anonymous'), 'sessions/s1/meta/live')));
+});
+
+rulesTest('fix-round-4: ended live projection은 같은 atomic parent 종료에서만 쓸 수 있다', async t => {
+  const safeEndedLive = {
+    q: -1,
+    openedAt: 0,
+    revealed: false,
+    limitSec: 0,
+    status: 'ended'
+  };
+
+  await t.test('parent-only 종료는 유지되지만 뒤이은 live-only ended 쓰기를 허용하지 않는다', async () => {
+    await resetFirestore();
+    const owner = actorFirestore('owner');
+    const sessionReference = doc(owner, 'sessions/s1');
+    const liveReference = doc(owner, 'sessions/s1/meta/live');
+
+    await assertSucceeds(updateDoc(sessionReference, {
+      status: 'ended',
+      endedAt: serverTimestamp()
+    }));
+    assert.equal((await getDoc(liveReference)).data().q, 0);
+    await assertFails(setDoc(liveReference, safeEndedLive));
+  });
+
+  await t.test('live-only forged ended는 grace가 끝난 뒤에도 거부된다', async () => {
+    await resetFirestore();
+    const owner = actorFirestore('owner');
+    const now = Date.now();
+    await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+      accepting: true,
+      responseClosesAt: Timestamp.fromMillis(now - 2_000),
+      submitGraceUntil: Timestamp.fromMillis(now - 1_000),
+      revealAt: Timestamp.fromMillis(now - 1_000)
+    }));
+
+    await assertFails(setDoc(doc(owner, 'sessions/s1/meta/live'), safeEndedLive));
+  });
+
+  await t.test('다른 교사는 atomic endSession을 사용할 수 없다', async () => {
+    await resetFirestore();
+    await assertFails(emulatorStore(actorFirestore('otherTeacher')).endSession('s1'));
+  });
+
+  const unsafeAtomicLives = [
+    ['다른 문항', liveQuestion(1, {
+      openedAt: serverTimestamp(),
+      accepting: true,
+      liveToken: 'forged-ended-q1',
+      status: 'ended'
+    })],
+    ['정답 공개', liveQuestion(0, {
+      revealed: true,
+      accepting: true,
+      publicAnswer: { answer: 1 },
+      status: 'ended'
+    })],
+    ['status 없는 일반 close', {
+      q: -1,
+      openedAt: 0,
+      revealed: false,
+      limitSec: 0
+    }]
+  ];
+  for (const [name, unsafeLive] of unsafeAtomicLives) {
+    await t.test(`atomic 종료 예외로 ${name} 전환은 허용하지 않는다`, async () => {
+      await resetFirestore();
+      const owner = actorFirestore('owner');
+      const now = Date.now();
+      await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+        accepting: true,
+        responseClosesAt: Timestamp.fromMillis(now + 10_000),
+        submitGraceUntil: Timestamp.fromMillis(now + 60_000),
+        revealAt: Timestamp.fromMillis(now + 60_000)
+      }));
+      const batch = writeBatch(owner);
+      batch.set(doc(owner, 'sessions/s1'), {
+        status: 'ended',
+        endedAt: serverTimestamp()
+      }, { merge: true });
+      batch.set(doc(owner, 'sessions/s1/meta/live'), unsafeLive);
+
+      await assertFails(batch.commit());
+    });
+  }
 });
 
 rulesTest('expired lease에서도 등록 학생 read/reconnect는 유지되고 join과 모든 학생 write는 닫힌다', async () => {

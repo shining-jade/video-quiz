@@ -2579,10 +2579,20 @@ test('live token identity works while the local openedAt server timestamp is unr
   assert.equal(fake.value('sessions/a/meta/live').accepting, false);
 });
 
-test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린다', async () => {
+test('세션 종료는 타이머 제출 유예 중에도 parent와 안전한 ended live를 원자적으로 쓴다', async () => {
   const fake = makeFirestoreFake({
     'sessions/a': { setId: 'set1', status: 'live' },
-    'sessions/a/meta/live': { q: 2, openedAt: 10, revealed: true, limitSec: 30 }
+    'sessions/a/meta/live': {
+      q: 2,
+      openedAt: 10,
+      revealed: false,
+      accepting: true,
+      limitSec: 30,
+      publicQuestion: { number: 3, total: 3, type: 'mc', text: 'question', choices: [] },
+      responseClosesAt: new Date(19_000),
+      submitGraceUntil: new Date(21_000),
+      revealAt: new Date(21_000)
+    }
   }, { committedServerMillis: 20_000 });
   const store = createStore(fake);
 
