@@ -347,15 +347,18 @@ test('기존 JSON의 희소 이미지 배열은 null 슬롯을 이미지 문서�
 
 test('구형 숫자 이미지 문서는 첫 영상의 신형 키로 읽는다', async () => {
   const fake = makeFirestoreFake({
-    'images/set1/q/0': { data: 'legacy' },
+    'images/set1/q/0': { data: 'legacy-shadowed' },
+    'images/set1/q/1': { data: 'legacy-only' },
+    'images/set1/q/v0q0': { data: 'canonical' },
     'images/set1/q/v1q0': { data: 'second-video' }
   });
   const store = createStore(fake);
 
   assert.deepEqual(await store.getImages('set1'), {
-    v0q0: 'legacy', v1q0: 'second-video'
+    v0q0: 'canonical', v0q1: 'legacy-only', v1q0: 'second-video'
   });
-  assert.equal(await store.getQuestionImage('set1', 'v0q0'), 'legacy');
+  assert.equal(await store.getQuestionImage('set1', 'v0q0'), 'canonical');
+  assert.equal(await store.getQuestionImage('set1', 'v0q1'), 'legacy-only');
   assert.equal(await store.getQuestionImage('set1', 'v1q0'), 'second-video');
 });
 
@@ -629,6 +632,52 @@ test('편집 payload는 영상별 문항과 업로드 이미지를 신형 키로
   assert.equal(payload.set.questions, undefined);
 });
 
+test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지를 복원한다', async () => {
+  const app = { innerHTML: '' };
+  const errors = [];
+  let rendered = 0;
+  const context = {
+    mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    lsGet() { return '기본 교사'; },
+    DEFAULT_SETTINGS: {},
+    blankQuestion(t) { return { t }; },
+    document: { addEventListener() {}, removeEventListener() {} },
+    mkHandleSaveShortcut() {},
+    onCleanup() {}, clearTimeout() {}, every() {}, $() { return null; },
+    APP() { return app; }, topbar() { return '<nav></nav>'; },
+    store: {
+      async getQuizSet() {
+        return {
+          title: '세트', author: '교사', settings: {}, createdAt: 10, updatedAt: 20,
+          videos: [
+            { videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 20,
+              questions: [{ text: 'A', imgUp: true, _img: '' }] },
+            { videoId: 'b', videoUrl: 'url-b', startSec: 30, endSec: 60,
+              questions: [{ text: 'B', imgUp: true, _img: '' }] }
+          ]
+        };
+      },
+      async getImages() { return { v0q0: 'img-a', v1q0: 'img-b' }; }
+    },
+    normSet(value) { return value; }, mkRestoreDraft() { return false; },
+    renderMake() { rendered += 1; },
+    console: { error(error) { errors.push(error); } }, toast() {}
+  };
+  loadStageFunctions(['screenMake'], context);
+
+  context.screenMake('set1');
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(errors, []);
+  assert.equal(rendered, 1);
+  assert.deepEqual(context.mk.videos.map(video => video.videoId), ['a', 'b']);
+  assert.equal(context.mk.videoId, 'a');
+  assert.equal(context.mk.questions, context.mk.videos[0].questions);
+  assert.equal(context.mk.videos[0].questions[0]._img, 'img-a');
+  assert.equal(context.mk.videos[1].questions[0]._img, 'img-b');
+});
+
 test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
@@ -711,6 +760,68 @@ test('편집 변경은 로컬 초안을 남기고 정식 저장 성공 뒤 삭�
   await context.mkSave(false);
 
   assert.deepEqual(calls, [['draft', 'set1'], ['clear', 'set1']]);
+});
+
+test('live 편집 초안은 첫 영상 수정과 나머지 영상을 함께 보존한다', () => {
+  let savedModel;
+  const context = {
+    mk: {
+      id: 'set1', title: '세트', videoId: 'a-new', videoUrl: 'url-a-new',
+      questions: [{ text: '수정 문항' }],
+      videos: [
+        { videoId: 'a-old', videoUrl: 'url-a-old', questions: [{ text: '이전 문항' }] },
+        { videoId: 'b', videoUrl: 'url-b', questions: [{ text: '둘째 영상 문항' }] }
+      ]
+    },
+    localStorage: {}, Date,
+    EditorDraft: { write(storage, id, model) { savedModel = clone(model); } }
+  };
+  loadStageFunctions(['mkPersistDraft'], context);
+
+  context.mkPersistDraft();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(savedModel.videos.map(video => ({
+    videoId: video.videoId, videoUrl: video.videoUrl,
+    questions: video.questions.map(question => question.text)
+  })))), [
+    { videoId: 'a-new', videoUrl: 'url-a-new', questions: ['수정 문항'] },
+    { videoId: 'b', videoUrl: 'url-b', questions: ['둘째 영상 문항'] }
+  ]);
+});
+
+test('두 번째 Ctrl+S는 첫 저장 뒤 수정한 문항 값을 다시 저장한다', async () => {
+  const saved = [];
+  const context = {
+    mk: {
+      id: 'set1', title: '세트', author: '', settings: {}, createdAt: 10,
+      videoId: 'a', videoUrl: 'url-a', questions: [
+        { type: 'long', t: 10, text: '첫 값', choices: [] }
+      ], saved: false
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    qType(q) { return q.type; }, normSettings(value) { return value; },
+    mkValidate() { return ''; }, rid() { return 'new-id'; }, SV_TS: {},
+    store: {
+      async saveQuizSet(id, value) { saved.push(clone(value)); },
+      async replaceImages() {}
+    },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set1' }, history: { replaceState() {} },
+    renderMake() {}, $() { return null; }, Date, console, alert() {}
+  };
+  loadStageFunctions(['mkPayload', 'mkSave', 'mkHandleSaveShortcut'], context);
+  const shortcut = () => ({
+    key: 's', ctrlKey: true, metaKey: false, preventDefault() {}
+  });
+
+  context.mkHandleSaveShortcut(shortcut());
+  await new Promise(resolve => setImmediate(resolve));
+  context.mk.questions[0].text = '두 번째 값';
+  context.mkHandleSaveShortcut(shortcut());
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(saved.map(value => value.videos[0].questions[0].text), ['첫 값', '두 번째 값']);
 });
 
 test('문항 추가처럼 입력 이벤트가 없는 편집도 로컬 초안을 갱신한다', () => {

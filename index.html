@@ -1421,6 +1421,13 @@ function mkSetSaveStatus(state, detail) {
 
 function mkPersistDraft() {
   if (!mk || typeof EditorDraft === 'undefined') return;
+  if (Array.isArray(mk.questions)) {
+    const current = Array.isArray(mk.videos) && mk.videos.length ? mk.videos[0] : {};
+    const first = Object.assign({}, current, {
+      videoUrl: mk.videoUrl || '', videoId: mk.videoId || '', questions: mk.questions
+    });
+    mk.videos = [first].concat(Array.isArray(mk.videos) ? mk.videos.slice(1) : []);
+  }
   EditorDraft.write(localStorage, mk.id, mk, Date.now());
 }
 
@@ -1440,7 +1447,7 @@ function mkMarkDirty() {
 function mkHandleSaveShortcut(event) {
   if (!mk || !event || String(event.key).toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) return;
   event.preventDefault();
-  mkSave(false);
+  return mkSave(false);
 }
 
 function mkRestoreDraft(savedAt) {
@@ -1452,6 +1459,11 @@ function mkRestoreDraft(savedAt) {
     return false;
   }
   Object.assign(mk, value.model, { id: mk.id, saved: false });
+  if (Array.isArray(mk.videos) && mk.videos.length) {
+    mk.videoUrl = mk.videos[0].videoUrl;
+    mk.videoId = mk.videos[0].videoId;
+    mk.questions = mk.videos[0].questions;
+  }
   return true;
 }
 
@@ -1502,18 +1514,23 @@ function screenMake(setId) {
       const set = normSet(savedSet);
       if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
       mk.title = set.title;
-      mk.videoUrl = set.videoUrl;
-      mk.videoId = set.videoId;
       mk.author = set.author || mk.author;
       mk.settings = set.settings;
-      mk.questions = set.questions.length ? set.questions : [blankQuestion(0)];
+      mk.videos = set.videos;
+      mk.videoUrl = mk.videos[0].videoUrl;
+      mk.videoId = mk.videos[0].videoId;
+      mk.questions = mk.videos[0].questions;
       mk.createdAt = set.createdAt;
       mk.archived = set.archived;
       mk.saved = true;
       mkRestoreDraft(set.updatedAt || set.createdAt || 0);
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
-        mk.questions.forEach((q, i) => { if (q.imgUp) q._img = imgs[i] || ''; });
+        mk.videos.forEach((video, videoIndex) => {
+          video.questions.forEach((q, questionIndex) => {
+            if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
+          });
+        });
         renderMake();
       });
     }).catch(e => { console.error(e); toast('불러오기 실패: ' + e.message); });
@@ -2106,6 +2123,13 @@ function mkValidate() {
 }
 
 function mkPayload() {
+  if (Array.isArray(mk.questions)) {
+    const current = Array.isArray(mk.videos) && mk.videos.length ? mk.videos[0] : {};
+    const first = Object.assign({}, current, {
+      videoUrl: mk.videoUrl || '', videoId: mk.videoId || '', questions: mk.questions
+    });
+    mk.videos = [first].concat(Array.isArray(mk.videos) ? mk.videos.slice(1) : []);
+  }
   const images = {};
   const ordered = PlaylistCore.normalizeVideos(mk).map((video, videoIndex) => {
     const orderedQuestions = video.questions.slice().sort((a, b) => a.t - b.t);
@@ -2198,6 +2222,9 @@ function mkSave(forceNew) {
             return q;
           })
         }));
+        mk.videoUrl = mk.videos[0].videoUrl;
+        mk.videoId = mk.videos[0].videoId;
+        mk.questions = mk.videos[0].questions;
       } else {
         mk.questions = normQuestions(data.questions);
         mk.questions.forEach((q, i) => { if (q.imgUp) q._img = built.images['v0q' + i] || built.images[i] || ''; });
