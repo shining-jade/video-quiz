@@ -34,9 +34,17 @@ emulatorTest('Firebase Admin operator dry-runs then atomically migrates only the
 
   try {
     await clearDemoFirestore();
+    await db.doc('teacher_allowlist/owner@school.kr').set({ enabled: true, role: 'teacher' });
+    const provisioned = await migration.runLegacyMigration({
+      db, auth, projectId, ownerUid: 'teacher-uid', apply: true, confirmProject: projectId,
+      provisionOwnerEmail: 'owner@school.kr', targetMode: 'emulator'
+    });
+    assert.equal(provisioned.ownerConfigAction, 'created');
+    assert.deepEqual((await db.doc('config/legacy_owner').get()).data(), {
+      uid: 'teacher-uid', email: 'owner@school.kr'
+    });
+
     await Promise.all([
-      db.doc('config/legacy_owner').set({ uid: 'teacher-uid', email: 'owner@school.kr' }),
-      db.doc('teacher_allowlist/owner@school.kr').set({ enabled: true, role: 'teacher' }),
       db.doc('quiz_sets/legacy-set').set({ title: 'Legacy' }),
       db.doc('sessions/legacy-session').set({ setId: 'legacy-set', status: 'ended' }),
       db.doc('sessions/legacy-session/responses/student-1').set({
@@ -75,6 +83,14 @@ emulatorTest('Firebase Admin operator dry-runs then atomically migrates only the
     assert.equal(retry.safeToDeployStrictRules, true);
     assert.equal(retry.categories.responses.skipped.ids.includes('legacy-session/student-1'), true);
     assert.equal(retry.categories.grades.skipped.ids.includes('legacy-session/student-1__0'), true);
+
+    const removed = await migration.removeLegacyOwner({
+      db, auth, projectId, ownerUid: 'teacher-uid', apply: true,
+      confirmProject: projectId, targetMode: 'emulator'
+    });
+    assert.equal(removed.action, 'removed');
+    assert.equal(removed.migrationAudit.safeToDeployStrictRules, true);
+    assert.equal((await db.doc('config/legacy_owner').get()).exists, false);
   } finally {
     await clearDemoFirestore();
     await deleteApp(app);

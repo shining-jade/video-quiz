@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const adminMigration = require('../legacy-migration-admin.js');
 
@@ -54,13 +57,15 @@ function makeAdminFake(initial, options) {
       const transaction = {
         get: async ref => snapshot(ref.path),
         set(ref, value, setOptions) { pending.push(['set', ref.path, clone(value), setOptions]); },
-        create(ref, value) { pending.push(['create', ref.path, clone(value)]); }
+        create(ref, value) { pending.push(['create', ref.path, clone(value)]); },
+        delete(ref) { pending.push(['delete', ref.path]); }
       };
       const result = await callback(transaction);
       const next = new Map([...values].map(([path, value]) => [path, clone(value)]));
       for (const [operation, path, value, setOptions] of pending) {
         if (operation === 'create' && next.has(path)) throw new Error('already-exists');
-        next.set(path, setOptions && setOptions.merge
+        if (operation === 'delete') next.delete(path);
+        else next.set(path, setOptions && setOptions.merge
           ? { ...(next.get(path) || {}), ...value }
           : value);
       }
@@ -69,7 +74,9 @@ function makeAdminFake(initial, options) {
       pending.forEach(([operation, path]) => writes.push({ operation, path }));
       if (options && options.ambiguousTransactionAt === transactionCount) {
         const error = new Error('commit result unknown');
-        error.code = 'deadline-exceeded';
+        error.code = options.ambiguousCode === undefined
+          ? 'deadline-exceeded'
+          : options.ambiguousCode;
         throw error;
       }
       return result;
@@ -151,12 +158,80 @@ test('canonical UID anchors verified Google Auth, allowlist, and exact config em
   }
 });
 
+test('owner provisioning creates only when absent, accepts an exact match, and never overwrites mismatch', async () => {
+  const withoutConfig = {
+    'teacher_allowlist/owner@school.kr': { enabled: true, role: 'teacher' }
+  };
+  const fake = makeAdminFake(withoutConfig);
+  const created = await adminMigration.runLegacyMigration({
+    db: fake.db, auth: fake.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz', provisionOwnerEmail: 'owner@school.kr'
+  });
+  assert.deepEqual(fake.value('config/legacy_owner'), {
+    uid: 'teacher-uid', email: 'owner@school.kr'
+  });
+  assert.equal(created.ownerConfigAction, 'created');
+
+  const matched = await adminMigration.runLegacyMigration({
+    db: fake.db, auth: fake.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz', provisionOwnerEmail: 'owner@school.kr'
+  });
+  assert.equal(matched.ownerConfigAction, 'matched');
+
+  const mismatch = makeAdminFake({
+    ...withoutConfig,
+    'config/legacy_owner': { uid: 'different-uid', email: 'different@school.kr' }
+  });
+  await assert.rejects(adminMigration.runLegacyMigration({
+    db: mismatch.db, auth: mismatch.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz', provisionOwnerEmail: 'owner@school.kr'
+  }), /already exists|mismatch/i);
+  assert.deepEqual(mismatch.value('config/legacy_owner'), {
+    uid: 'different-uid', email: 'different@school.kr'
+  });
+});
+
+test('owner removal requires a clean authoritative audit and exact current identity', async () => {
+  const clean = makeAdminFake(baseIdentity());
+  const removed = await adminMigration.removeLegacyOwner({
+    db: clean.db, auth: clean.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz', targetMode: 'emulator'
+  });
+  assert.equal(clean.value('config/legacy_owner'), undefined);
+  assert.equal(removed.action, 'removed');
+  assert.equal(removed.targetMode, 'emulator');
+  assert.equal(removed.migrationAudit.safeToDeployStrictRules, true);
+  assert.match(removed.auditDigest, /^[a-f0-9]{64}$/);
+
+  const incomplete = makeAdminFake(baseIdentity({
+    'sessions/session-a': { teacherUid: 'teacher-uid', teacherEmail: 'owner@school.kr' },
+    'sessions/session-a/responses/student-1': {
+      uid: 'student-1', answers: { 0: { answer: 1, ok: true } }
+    }
+  }));
+  const blocked = await adminMigration.removeLegacyOwner({
+    db: incomplete.db, auth: incomplete.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz'
+  });
+  assert.equal(blocked.action, 'blocked');
+  assert.notEqual(incomplete.value('config/legacy_owner'), undefined);
+  assert.equal(blocked.migrationAudit.safeToDeployStrictRules, false);
+
+  const mismatched = makeAdminFake(baseIdentity());
+  await assert.rejects(adminMigration.removeLegacyOwner({
+    db: mismatched.db, auth: mismatched.auth, projectId: 'demo-video-quiz', ownerUid: 'other-uid',
+    apply: true, confirmProject: 'demo-video-quiz'
+  }), /canonical owner UID|legacy owner/i);
+  assert.notEqual(mismatched.value('config/legacy_owner'), undefined);
+});
+
 test('CLI parsing defaults to dry-run and apply requires exact project confirmation', () => {
   assert.deepEqual(
     adminMigration.parseCliArgs(['--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid']),
     {
       projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
-      apply: false, confirmProject: '', provisionOwnerEmail: '', output: ''
+      apply: false, confirmProject: '', provisionOwnerEmail: '',
+      removeOwner: false, emulator: false, output: ''
     }
   );
   assert.throws(
@@ -194,19 +269,177 @@ test('operator command initializes only the confirmed project, defaults to dry-r
         calls.push(['run', options.projectId, options.ownerUid, options.apply]);
         return Promise.resolve(report);
       },
-      writeFile(path, contents) { written = { path, contents }; },
+      reserveReport(path) {
+        calls.push(['reserve', path]);
+        return { commit(contents) { written = { path, contents }; } };
+      },
       writeLine(line) { calls.push(['stdout', line]); }
     }
   );
 
   assert.equal(exitCode, 2);
-  assert.deepEqual(calls.slice(0, 2), [
+  assert.deepEqual(calls.slice(0, 3), [
+    ['reserve', 'audit.json'],
     ['initialize', 'demo-video-quiz'],
     ['run', 'demo-video-quiz', 'teacher-uid', false]
   ]);
   assert.equal(written.path, 'audit.json');
   assert.deepEqual(JSON.parse(written.contents), report);
   assert.equal(calls.flat().some(value => /credential|private.?key/i.test(String(value))), false);
+});
+
+test('CLI rejects emulator environment leakage before Admin initialization unless explicit safe emulator mode is valid', async () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  for (const environment of [
+    { FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080' },
+    { FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099' }
+  ]) {
+    let initialized = 0;
+    await assert.rejects(command.main(
+      ['--project', 'production-video-quiz', '--owner-uid', 'teacher-uid'],
+      {
+        environment,
+        initialize() { initialized += 1; throw new Error('must not initialize'); }
+      }
+    ), /--emulator|emulator environment/i);
+    assert.equal(initialized, 0);
+  }
+
+  for (const argv of [
+    ['--project', 'production-video-quiz', '--owner-uid', 'teacher-uid', '--emulator'],
+    ['--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--emulator']
+  ]) {
+    let initialized = 0;
+    await assert.rejects(command.main(argv, {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: argv[1].startsWith('demo-') ? '' : '127.0.0.1:9099'
+      },
+      initialize() { initialized += 1; throw new Error('must not initialize'); }
+    }), /demo-|emulator host|expected local/i);
+    assert.equal(initialized, 0);
+  }
+
+  await assert.rejects(command.main([
+    '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--emulator'
+  ], {
+    environment: {
+      FIRESTORE_EMULATOR_HOST: '127.0.0.1:8081',
+      FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+    },
+    initialize() { throw new Error('must not initialize'); }
+  }), /expected local|:8080/i);
+
+  const calls = [];
+  const exitCode = await command.main([
+    '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--emulator', '--output', 'audit.json'
+  ], {
+    environment: {
+      FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+      FIREBASE_AUTH_EMULATOR_HOST: 'localhost:9099'
+    },
+    initialize(projectId) { calls.push(['initialize', projectId]); return { db: {}, auth: {} }; },
+    runLegacyMigration(options) {
+      calls.push(['target', options.targetMode]);
+      return Promise.resolve({
+        projectId: options.projectId, mode: 'dry-run', targetMode: options.targetMode,
+        safeToDeployStrictRules: true, remainingResponseLeakCount: 0,
+        auditFailures: [], auditDigest: 'b'.repeat(64), categories: {}
+      });
+    },
+    reserveReport() { return { commit() {} }; },
+    writeLine() {}
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(calls, [['initialize', 'demo-video-quiz'], ['target', 'emulator']]);
+});
+
+test('CLI reserves a fail-closed report before Admin initialization and reports later failures', async () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  let initialized = 0;
+  await assert.rejects(command.main([
+    '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--apply',
+    '--confirm-project', 'demo-video-quiz', '--output', 'existing.json'
+  ], {
+    environment: {},
+    reserveReport() { throw new Error('report already exists'); },
+    initialize() { initialized += 1; throw new Error('must not initialize'); }
+  }), /already exists/);
+  assert.equal(initialized, 0);
+
+  const events = [];
+  let finalContents = '';
+  await assert.rejects(command.main([
+    '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--apply',
+    '--confirm-project', 'demo-video-quiz', '--output', 'failure.json'
+  ], {
+    environment: {},
+    reserveReport(path, initialContents) {
+      events.push('reserve');
+      assert.equal(path, 'failure.json');
+      const initial = JSON.parse(initialContents);
+      assert.equal(initial.status, 'reserved-fail-closed');
+      assert.equal(initial.safeToDeployStrictRules, false);
+      return { commit(contents) { events.push('commit'); finalContents = contents; } };
+    },
+    initialize() { events.push('initialize'); return { db: {}, auth: {} }; },
+    async runLegacyMigration() { events.push('run'); throw new Error('migration stopped'); },
+    writeLine() {}
+  }), /migration stopped/);
+  assert.deepEqual(events, ['reserve', 'initialize', 'run', 'commit']);
+  const failure = JSON.parse(finalContents);
+  assert.equal(failure.status, 'failed');
+  assert.equal(failure.safeToDeployStrictRules, false);
+  assert.equal(failure.auditDigestKind, 'checksum');
+  assert.match(failure.auditDigest, /^[a-f0-9]{64}$/);
+});
+
+test('report reservation is exclusive and immediately contains a fail-closed artifact', () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-'));
+  const reportPath = path.join(directory, 'audit.json');
+  try {
+    const reservation = command.reserveReport(reportPath, '{"status":"reserved-fail-closed"}\n');
+    assert.equal(JSON.parse(fs.readFileSync(reportPath, 'utf8')).status, 'reserved-fail-closed');
+    assert.throws(() => command.reserveReport(reportPath, '{}\n'), /exist|EEXIST/i);
+    reservation.commit('{"status":"failed","safeToDeployStrictRules":false}\n');
+    assert.deepEqual(JSON.parse(fs.readFileSync(reportPath, 'utf8')), {
+      status: 'failed', safeToDeployStrictRules: false
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI selects the isolated owner-removal workflow and never combines it with provisioning', async () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  assert.throws(() => adminMigration.parseCliArgs([
+    '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--apply',
+    '--confirm-project', 'demo-video-quiz', '--remove-owner',
+    '--provision-owner-email', 'owner@school.kr'
+  ]), /cannot be combined/i);
+
+  const calls = [];
+  const exitCode = await command.main([
+    '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--apply',
+    '--confirm-project', 'demo-video-quiz', '--remove-owner', '--output', 'remove.json'
+  ], {
+    environment: {},
+    reserveReport() { return { commit() {} }; },
+    initialize() { return { db: {}, auth: {} }; },
+    runLegacyMigration() { throw new Error('wrong workflow'); },
+    removeLegacyOwner(options) {
+      calls.push(options);
+      return Promise.resolve({
+        projectId: options.projectId, mode: 'apply', targetMode: options.targetMode,
+        action: 'removed', safeToRemoveOwner: true, auditDigest: 'c'.repeat(64)
+      });
+    },
+    writeLine() {}
+  });
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].apply, true);
 });
 
 test('Admin apply authoritatively enumerates, migrates atomically, audits exact coverage, and digests report', async () => {
@@ -293,6 +526,27 @@ test('ambiguous commits and incomplete snapshot metadata fail the deployment gat
   assert.equal(second.safeToDeployStrictRules, false);
 });
 
+test('numeric and string Firestore ambiguous commit codes close the gate after a successful reread', async () => {
+  const codes = [
+    1, 2, 4, 8, 10, 13, 14, 15,
+    '1', '2 UNKNOWN', '4 DEADLINE_EXCEEDED', '10 ABORTED',
+    '13 INTERNAL', '14 UNAVAILABLE', '8 RESOURCE_EXHAUSTED', '15 DATA_LOSS',
+    'cancelled', 'deadline-exceeded'
+  ];
+  for (const code of codes) {
+    const fake = makeAdminFake(baseIdentity({
+      'quiz_sets/legacy-set': { title: 'Legacy' }
+    }), { ambiguousTransactionAt: 1, ambiguousCode: code });
+    const report = await adminMigration.runLegacyMigration({
+      db: fake.db, auth: fake.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+      apply: true, confirmProject: 'demo-video-quiz'
+    });
+    assert.equal(report.ambiguousCommitRereads.length, 1, String(code));
+    assert.equal(report.ambiguousCommitRereads[0].confirmed, true, String(code));
+    assert.equal(report.safeToDeployStrictRules, false, String(code));
+  }
+});
+
 test('orphan response, grade, and snapshot documents fail exact parent coverage', async () => {
   const fake = makeAdminFake(baseIdentity({
     'sessions/orphan/responses/student-1': {
@@ -334,6 +588,45 @@ test('unknown existing snapshotVersion is audited without being downgraded or fa
   assert.equal(report.safeToDeployStrictRules, false);
 });
 
+test('snapshotImages rejects aliases, invalid keys, empty data, and non-string data without partial writes', async () => {
+  const cases = [
+    ['alias collision', { 1: 'legacy', v0q1: 'canonical' }],
+    ['invalid key', { question1: 'image' }],
+    ['empty data', { v0q1: '' }],
+    ['non-string data', { v0q1: { data: 'image' } }]
+  ];
+  for (const [name, snapshotImages] of cases) {
+    const fake = makeAdminFake(baseIdentity({
+      'sessions/session-a': {
+        teacherUid: 'teacher-uid', teacherEmail: 'owner@school.kr',
+        setSnapshot: { title: 'Historic' }, snapshotImages
+      }
+    }));
+    const report = await adminMigration.runLegacyMigration({
+      db: fake.db, auth: fake.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+      apply: true, confirmProject: 'demo-video-quiz'
+    });
+    assert.equal(report.safeToDeployStrictRules, false, name);
+    assert.equal(report.categories.snapshots.failed.count > 0, true, name);
+    assert.equal(fake.value('sessions/session-a/snapshot/set'), undefined, name);
+    assert.equal(fake.value('sessions/session-a').snapshotVersion, undefined, name);
+  }
+
+  const withoutSet = makeAdminFake(baseIdentity({
+    'sessions/session-a': {
+      teacherUid: 'teacher-uid', teacherEmail: 'owner@school.kr',
+      snapshotImages: { v0q1: 'orphaned-embedded-image' }
+    }
+  }));
+  const report = await adminMigration.runLegacyMigration({
+    db: withoutSet.db, auth: withoutSet.auth, projectId: 'demo-video-quiz',
+    ownerUid: 'teacher-uid', apply: true, confirmProject: 'demo-video-quiz'
+  });
+  assert.equal(report.safeToDeployStrictRules, false);
+  assert.equal(report.categories.snapshots.failed.count > 0, true);
+  assert.equal(withoutSet.value('sessions/session-a/snapshot_images/v0q1'), undefined);
+});
+
 test('authoritative enumeration failures still produce a digested fail-closed audit report', async () => {
   const fake = makeAdminFake(baseIdentity(), { failCollectionGroup: 'responses' });
 
@@ -346,6 +639,33 @@ test('authoritative enumeration failures still produce a digested fail-closed au
     item.category === 'enumeration' && /responses/.test(item.reason)
   ), true);
   assert.match(report.auditDigest, /^[a-f0-9]{64}$/);
+});
+
+test('every malformed collection-group result path is audited instead of silently dropped', async () => {
+  const unexpectedPaths = [
+    'unexpected/set/q/image',
+    'unexpected/session/snapshot/set',
+    'unexpected/session/snapshot_images/v0q0',
+    'sessions/session-a/nested/students/student-1',
+    'sessions/session-a/nested/responses/student-1',
+    'sessions/session-a/nested/grades/student-1__0'
+  ];
+  const fake = makeAdminFake(baseIdentity(Object.fromEntries(
+    unexpectedPaths.map(path => [path, { value: path }])
+  )));
+
+  const report = await adminMigration.runLegacyMigration({
+    db: fake.db, auth: fake.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid'
+  });
+
+  assert.equal(report.safeToDeployStrictRules, false);
+  assert.deepEqual(
+    report.auditFailures
+      .filter(item => item.category === 'enumeration-path')
+      .map(item => item.id)
+      .sort(),
+    unexpectedPaths.sort()
+  );
 });
 
 test('document read failures are reported instead of escaping without an audit artifact', async () => {

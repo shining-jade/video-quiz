@@ -5,7 +5,8 @@ const CATEGORY_NAMES = [
   'sets', 'images', 'sessions', 'snapshots', 'students', 'responses', 'grades'
 ];
 const AMBIGUOUS_CODES = new Set([
-  'deadline-exceeded', 'unavailable', 'unknown', 'internal', 'aborted'
+  'cancelled', 'unknown', 'deadline-exceeded', 'resource-exhausted', 'aborted',
+  'internal', 'unavailable', 'data-loss'
 ]);
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -26,7 +27,7 @@ function sameValue(left, right) {
 function parseCliArgs(argv) {
   const result = {
     projectId: '', ownerUid: '', apply: false, confirmProject: '',
-    provisionOwnerEmail: '', output: ''
+    provisionOwnerEmail: '', removeOwner: false, emulator: false, output: ''
   };
   const valueFlags = new Map([
     ['--project', 'projectId'],
@@ -39,6 +40,14 @@ function parseCliArgs(argv) {
     const argument = argv[index];
     if (argument === '--apply') {
       result.apply = true;
+      continue;
+    }
+    if (argument === '--emulator') {
+      result.emulator = true;
+      continue;
+    }
+    if (argument === '--remove-owner') {
+      result.removeOwner = true;
       continue;
     }
     const field = valueFlags.get(argument);
@@ -59,10 +68,26 @@ function parseCliArgs(argv) {
   if (result.provisionOwnerEmail && !result.apply) {
     throw new Error('--provision-owner-email requires --apply.');
   }
+  if (result.removeOwner && !result.apply) {
+    throw new Error('--remove-owner requires --apply.');
+  }
+  if (result.removeOwner && result.provisionOwnerEmail) {
+    throw new Error('--remove-owner cannot be combined with --provision-owner-email.');
+  }
   return result;
 }
 
-function createReport(projectId, identity, apply, now) {
+function attachAuditDigest(report) {
+  report.auditDigestKind = 'checksum';
+  report.auditDigestAlgorithm = 'sha256';
+  report.auditDigest = '';
+  report.auditDigest = crypto.createHash('sha256')
+    .update(JSON.stringify(stableValue(report)))
+    .digest('hex');
+  return report;
+}
+
+function createReport(projectId, identity, apply, targetMode, now) {
   const categories = Object.fromEntries(CATEGORY_NAMES.map(name => [name, {
     success: { count: 0, ids: [] },
     skipped: { count: 0, ids: [] },
@@ -75,6 +100,7 @@ function createReport(projectId, identity, apply, now) {
     schemaVersion: 1,
     projectId,
     mode: apply ? 'apply' : 'dry-run',
+    targetMode,
     generatedAt: now(),
     owner: { uid: identity.uid, email: identity.email },
     categories,
@@ -83,6 +109,8 @@ function createReport(projectId, identity, apply, now) {
     remainingResponseLeakCount: 0,
     remainingResponseLeakIds: [],
     safeToDeployStrictRules: false,
+    auditDigestKind: 'checksum',
+    auditDigestAlgorithm: 'sha256',
     auditDigest: ''
   };
 
@@ -147,6 +175,7 @@ async function verifiedIdentity(db, auth, ownerUid, expectedEmail) {
 
 async function enumerate(db) {
   const result = Object.fromEntries(CATEGORY_NAMES.map(name => [name, new Map()]));
+  result.unexpectedPaths = [];
   const add = (category, id, document) => result[category].set(id, {
     id,
     path: document.ref.path,
@@ -169,14 +198,17 @@ async function enumerate(db) {
   images.docs.forEach(document => {
     const match = /^images\/([^/]+)\/q\/([^/]+)$/.exec(document.ref.path);
     if (match) add('images', match[1] + '/' + match[2], document);
+    else result.unexpectedPaths.push(document.ref.path);
   });
   snapshots.docs.forEach(document => {
     const match = /^sessions\/([^/]+)\/snapshot\/set$/.exec(document.ref.path);
     if (match) add('snapshots', match[1] + '/set', document);
+    else result.unexpectedPaths.push(document.ref.path);
   });
   snapshotImages.docs.forEach(document => {
     const match = /^sessions\/([^/]+)\/snapshot_images\/([^/]+)$/.exec(document.ref.path);
     if (match) add('snapshots', match[1] + '/image/' + match[2], document);
+    else result.unexpectedPaths.push(document.ref.path);
   });
   for (const [category, snapshot] of [
     ['students', students], ['responses', responses], ['grades', grades]
@@ -184,26 +216,56 @@ async function enumerate(db) {
     snapshot.docs.forEach(document => {
       const match = new RegExp('^sessions/([^/]+)/' + category + '/([^/]+)$').exec(document.ref.path);
       if (match) add(category, match[1] + '/' + match[2], document);
+      else result.unexpectedPaths.push(document.ref.path);
     });
   }
+  result.unexpectedPaths.sort();
   return result;
 }
 
 function errorCode(error) {
-  return String(error && error.code || '').replace(/^\d+\s*/, '').toLowerCase();
+  const raw = String(error && error.code != null ? error.code : '').trim();
+  const numeric = /^(\d+)(?:\s+.*)?$/.exec(raw);
+  const grpcCodes = {
+    1: 'cancelled',
+    2: 'unknown',
+    4: 'deadline-exceeded',
+    8: 'resource-exhausted',
+    10: 'aborted',
+    13: 'internal',
+    14: 'unavailable',
+    15: 'data-loss'
+  };
+  if (numeric && grpcCodes[Number(numeric[1])]) return grpcCodes[Number(numeric[1])];
+  return raw.toLowerCase().replace(/_/g, '-');
 }
 
-function normalizedImages(images) {
+function validateNormalizedImages(images) {
   const result = {};
+  const errors = [];
+  const prototype = images != null && typeof images === 'object'
+    ? Object.getPrototypeOf(images) : null;
+  if (images != null && (typeof images !== 'object' || Array.isArray(images) ||
+      (prototype !== Object.prototype && prototype !== null))) {
+    return { images: result, errors: [{ key: '*', reason: 'snapshotImages must be a map.' }] };
+  }
   for (const [key, data] of Object.entries(images || {})) {
     const legacy = /^(0|[1-9]\d*)$/.exec(key);
     const versioned = /^v(0|[1-9]\d*)q(0|[1-9]\d*)$/.exec(key);
     const id = legacy ? 'v0q' + Number(key) : versioned
       ? 'v' + Number(versioned[1]) + 'q' + Number(versioned[2])
       : '';
-    if (id && typeof data === 'string' && data) result[id] = data;
+    if (!id) {
+      errors.push({ key, reason: 'Snapshot image key is not canonicalizable.' });
+    } else if (typeof data !== 'string' || !data) {
+      errors.push({ key, reason: 'Snapshot image data must be a nonempty string.' });
+    } else if (own(result, id)) {
+      errors.push({ key, reason: 'Snapshot image aliases collide at ' + id + '.' });
+    } else {
+      result[id] = data;
+    }
   }
-  return result;
+  return { images: result, errors };
 }
 
 function gradeValue(grade) {
@@ -228,7 +290,8 @@ function validGrade(id, value) {
 async function runLegacyMigration(options) {
   const {
     db, auth, projectId, ownerUid, apply = false, confirmProject = '',
-    provisionOwnerEmail = '', now = () => new Date().toISOString()
+    provisionOwnerEmail = '', targetMode = 'production',
+    now = () => new Date().toISOString()
   } = options || {};
   if (!db || !auth || !projectId || !ownerUid) {
     throw new Error('db, auth, projectId, and ownerUid are required.');
@@ -237,6 +300,7 @@ async function runLegacyMigration(options) {
     throw new Error('Apply requires an exact project confirmation.');
   }
   let identity;
+  let ownerConfigAction = '';
   if (provisionOwnerEmail) {
     if (!apply) throw new Error('Provisioning the legacy owner requires apply mode.');
     const canonical = migrationCore.normalizeEmail(provisionOwnerEmail);
@@ -244,15 +308,24 @@ async function runLegacyMigration(options) {
       throw new Error('The provisioned legacy owner email must be canonical.');
     }
     identity = await verifiedIdentity(db, auth, ownerUid, canonical);
-    await db.runTransaction(async transaction => {
-      transaction.set(db.doc('config/legacy_owner'), { uid: ownerUid, email: canonical });
+    ownerConfigAction = await db.runTransaction(async transaction => {
+      const reference = db.doc('config/legacy_owner');
+      const current = await transaction.get(reference);
+      if (current.exists) {
+        const value = current.data() || {};
+        if (value.uid === ownerUid && value.email === canonical) return 'matched';
+        throw new Error('The Admin-only legacy owner config already exists with a mismatch.');
+      }
+      transaction.create(reference, { uid: ownerUid, email: canonical });
+      return 'created';
     });
   } else {
     identity = await verifiedIdentity(db, auth, ownerUid);
   }
 
-  const tracker = createReport(projectId, identity, apply, now);
+  const tracker = createReport(projectId, identity, apply, targetMode, now);
   const { report, statuses, errors, record, auditFailure } = tracker;
+  if (ownerConfigAction) report.ownerConfigAction = ownerConfigAction;
   function finalizeReport() {
     if (Object.keys(errors).length) report.errors = errors;
     report.auditFailures = report.auditFailures.map(({ key, ...item }) => item);
@@ -264,11 +337,12 @@ async function runLegacyMigration(options) {
       report.auditFailures.length === 0 &&
       report.ambiguousCommitRereads.length === 0 &&
       report.remainingResponseLeakCount === 0;
-    const digestSource = { ...report, auditDigest: '' };
-    report.auditDigest = crypto.createHash('sha256')
-      .update(JSON.stringify(stableValue(digestSource)))
-      .digest('hex');
-    return report;
+    return attachAuditDigest(report);
+  }
+  function auditEnumerationPaths(data) {
+    (data.unexpectedPaths || []).forEach(path => {
+      auditFailure('enumeration-path', path, 'Unexpected collection-group path.');
+    });
   }
   let initial;
   try {
@@ -277,6 +351,7 @@ async function runLegacyMigration(options) {
     auditFailure('enumeration', 'initial', String(error && error.message || error));
     return finalizeReport();
   }
+  auditEnumerationPaths(initial);
   const changedParents = { sets: new Set(), sessions: new Set() };
 
   async function migrateParent(category, item, uidField, emailField) {
@@ -342,6 +417,7 @@ async function runLegacyMigration(options) {
     auditFailure('enumeration', 'after-parent-claims', String(error && error.message || error));
     return finalizeReport();
   }
+  auditEnumerationPaths(parentsAfterClaim);
   for (const item of initial.images.values()) {
     const setId = item.id.split('/')[0];
     const parent = parentsAfterClaim.sets.get(setId);
@@ -409,11 +485,27 @@ async function runLegacyMigration(options) {
       item.id.startsWith(sessionId + '/image/')
     );
     const sourceSet = sessionData.setSnapshot;
-    if (sourceSet && typeof sourceSet === 'object' && !Array.isArray(sourceSet)) {
+    const hasSourceSet = !!sourceSet && typeof sourceSet === 'object' && !Array.isArray(sourceSet);
+    const imageValidation = validateNormalizedImages(sessionData.snapshotImages);
+    if (imageValidation.errors.length) {
+      record('snapshots', 'failed', snapshotId,
+        new Error('Embedded snapshotImages cannot be preserved losslessly.'));
+      imageValidation.errors.forEach(error => record(
+        'snapshots', 'failed', sessionId + '/source-image/' + error.key,
+        new Error(error.reason)
+      ));
+      continue;
+    }
+    if (Object.keys(imageValidation.images).length && !hasSourceSet) {
+      record('snapshots', 'failed', snapshotId,
+        new Error('Embedded snapshotImages exist without an embedded setSnapshot.'));
+      continue;
+    }
+    if (hasSourceSet) {
       const desiredSet = { ...sourceSet };
       delete desiredSet.id;
       await createIfMissing('snapshots', snapshotId, snapshotPath, desiredSet);
-      const sourceImages = normalizedImages(sessionData.snapshotImages);
+      const sourceImages = imageValidation.images;
       for (const [imageId, data] of Object.entries(sourceImages)) {
         await createIfMissing(
           'snapshots', sessionId + '/image/' + imageId,
@@ -428,8 +520,7 @@ async function runLegacyMigration(options) {
       if (existingSet) record('snapshots', 'skipped', snapshotId);
       existingImages.forEach(image => record('snapshots', 'skipped', image.id));
     }
-    const hasOrWillHaveSet = !!existingSet ||
-      !!(sourceSet && typeof sourceSet === 'object' && !Array.isArray(sourceSet));
+    const hasOrWillHaveSet = !!existingSet || hasSourceSet;
     if (hasOrWillHaveSet && sessionData.snapshotVersion != null && sessionData.snapshotVersion !== 1) {
       record('snapshots', 'failed', snapshotId,
         new Error('Unknown existing snapshotVersion must not be overwritten.'));
@@ -549,7 +640,7 @@ async function runLegacyMigration(options) {
     }
   }
 
-  // Re-validate identity and immediately re-enumerate before producing the signed audit report.
+  // Re-validate identity and immediately re-enumerate before producing the checksummed audit report.
   let finalIdentity;
   try {
     finalIdentity = await verifiedIdentity(db, auth, ownerUid);
@@ -567,6 +658,7 @@ async function runLegacyMigration(options) {
     auditFailure('enumeration', 'final', String(error && error.message || error));
     return finalizeReport();
   }
+  auditEnumerationPaths(finalData);
 
   for (const category of CATEGORY_NAMES) {
     for (const id of finalData[category].keys()) {
@@ -606,13 +698,27 @@ async function runLegacyMigration(options) {
     if (set && data.snapshotVersion !== 1) {
       auditFailure('snapshots', item.id, 'snapshot/set exists without snapshotVersion 1.');
     }
-    if (data.setSnapshot && typeof data.setSnapshot === 'object' && !Array.isArray(data.setSnapshot)) {
+    const hasEmbeddedSet = !!data.setSnapshot && typeof data.setSnapshot === 'object' &&
+      !Array.isArray(data.setSnapshot);
+    const imageValidation = validateNormalizedImages(data.snapshotImages);
+    imageValidation.errors.forEach(error => {
+      const id = item.id + '/source-image/' + error.key;
+      record('snapshots', 'failed', id, new Error(error.reason));
+      auditFailure('snapshots', id, error.reason);
+    });
+    if (Object.keys(imageValidation.images).length && !hasEmbeddedSet) {
+      record('snapshots', 'failed', item.id + '/set',
+        new Error('Embedded snapshotImages exist without an embedded setSnapshot.'));
+      auditFailure('snapshots', item.id,
+        'Embedded snapshotImages exist without an embedded setSnapshot.');
+    }
+    if (hasEmbeddedSet) {
       const expectedSet = { ...data.setSnapshot };
       delete expectedSet.id;
       if (!set || !sameValue(set.data, expectedSet)) {
         auditFailure('snapshots', item.id, 'Embedded setSnapshot is not completely preserved.');
       }
-      const expectedImages = normalizedImages(data.snapshotImages);
+      const expectedImages = imageValidation.images;
       for (const [imageId, imageData] of Object.entries(expectedImages)) {
         const image = finalData.snapshots.get(item.id + '/image/' + imageId);
         if (!image || !sameValue(image.data, { data: imageData })) {
@@ -656,10 +762,54 @@ async function runLegacyMigration(options) {
   return finalizeReport();
 }
 
+async function removeLegacyOwner(options) {
+  const {
+    db, auth, projectId, ownerUid, apply = false, confirmProject = '',
+    targetMode = 'production', now = () => new Date().toISOString()
+  } = options || {};
+  if (!db || !auth || !projectId || !ownerUid) {
+    throw new Error('db, auth, projectId, and ownerUid are required.');
+  }
+  if (!apply || confirmProject !== projectId) {
+    throw new Error('Legacy owner removal requires apply and an exact project confirmation.');
+  }
+  const identity = await verifiedIdentity(db, auth, ownerUid);
+  const migrationAudit = await runLegacyMigration({
+    db, auth, projectId, ownerUid, apply: false, targetMode, now
+  });
+  const report = {
+    tool: 'legacy-owner-removal-admin',
+    schemaVersion: 1,
+    projectId,
+    mode: 'apply',
+    targetMode,
+    generatedAt: now(),
+    owner: { uid: identity.uid, email: identity.email },
+    action: migrationAudit.safeToDeployStrictRules ? 'pending-removal' : 'blocked',
+    migrationAudit,
+    safeToRemoveOwner: false
+  };
+  if (!migrationAudit.safeToDeployStrictRules) return attachAuditDigest(report);
+
+  await db.runTransaction(async transaction => {
+    const reference = db.doc('config/legacy_owner');
+    const current = await transaction.get(reference);
+    const value = current.exists ? current.data() || {} : null;
+    if (!value || value.uid !== identity.uid || value.email !== identity.email) {
+      throw new Error('The Admin-only legacy owner config no longer matches the canonical owner.');
+    }
+    transaction.delete(reference);
+  });
+  report.action = 'removed';
+  report.safeToRemoveOwner = true;
+  return attachAuditDigest(report);
+}
+
 module.exports = {
   CATEGORY_NAMES,
   enumerate,
   parseCliArgs,
+  removeLegacyOwner,
   runLegacyMigration,
   verifiedIdentity
 };
