@@ -672,10 +672,118 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
   assert.deepEqual(errors, []);
   assert.equal(rendered, 1);
   assert.deepEqual(context.mk.videos.map(video => video.videoId), ['a', 'b']);
-  assert.equal(context.mk.videoId, 'a');
-  assert.equal(context.mk.questions, context.mk.videos[0].questions);
+  assert.equal(context.mk.activeVideo, 0);
+  assert.equal(context.mk.videoId, undefined);
+  assert.equal(context.mk.questions, undefined);
   assert.equal(context.mk.videos[0].questions[0]._img, 'img-a');
   assert.equal(context.mk.videos[1].questions[0]._img, 'img-b');
+});
+
+test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한다', () => {
+  const app = { innerHTML: '' };
+  const elements = new Map();
+  const context = {
+    mk: {
+      id: null, title: '세트', author: '', settings: {}, activeVideo: 0, saved: false,
+      videos: [
+        { videoId: 'a', videoUrl: 'a', startSec: 10, endSec: 60, durationSec: 90, questions: [] },
+        { videoId: 'b', videoUrl: 'b', startSec: 0, endSec: null, durationSec: null, questions: [] }
+      ]
+    },
+    mkPlayer: null, mkPlayerVid: '',
+    APP() { return app; }, topbar() { return ''; }, esc(value) { return String(value ?? ''); },
+    fmtTime(value) { return '0:' + String(value || 0).padStart(2, '0'); },
+    PlaylistCore: require('../playlist-core.js'),
+    qType(q) { return q.type || 'choice'; }, QTYPES: { choice: '객관식' },
+    mkAnswerField() { return ''; }, mkImageField() { return ''; },
+    mkRenderSettings() {}, mkInitResizer() {}, mkSyncVideo() {}, mkRenderQuestions() {},
+    mkShowShare() {}, mkMarkDirty() {}, lsSet() {},
+    $: selector => {
+      if (!elements.has(selector)) elements.set(selector, { addEventListener() {}, style: {} });
+      return elements.get(selector);
+    }
+  };
+  loadStageFunctions(['renderMake'], context);
+
+  context.renderMake();
+
+  assert.match(app.innerHTML, /class="mk-video-card[^\"]*" data-video-index="0"/);
+  assert.match(app.innerHTML, /class="mk-video-card[^\"]*" data-video-index="1"/);
+  assert.match(app.innerHTML, /다음 YouTube 영상 추가/);
+  assert.equal((app.innerHTML.match(/id="mk-player-wrap"/g) || []).length, 1);
+});
+
+test('영상 카드는 추가·복사·이동·삭제해도 서로의 문항을 공유하지 않는다', () => {
+  const context = {
+    mk: {
+      activeVideo: 0,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 60,
+        durationSec: 90, questions: [{ text: 'A' }] }]
+    },
+    blankQuestion(t) { return { t, text: '' }; }, renderMake() {}, mkMarkDirty() {},
+    confirm() { return true; }
+  };
+  loadStageFunctions(['mkAddVideo', 'mkCopyVideo', 'mkMoveVideo', 'mkRemoveVideo'], context);
+
+  context.mkAddVideo();
+  assert.equal(context.mk.videos.length, 2);
+  assert.equal(context.mk.activeVideo, 1);
+  context.mkCopyVideo(0);
+  context.mk.videos[1].questions[0].text = '사본 수정';
+  assert.equal(context.mk.videos[0].questions[0].text, 'A');
+  context.mkMoveVideo(1, 1);
+  assert.equal(context.mk.videos[2].videoId, 'a');
+  context.mkRemoveVideo(2);
+  assert.equal(context.mk.videos.length, 2);
+});
+
+test('구간 손잡이와 직접 입력은 1초 간격을 지키며 같은 초 값을 갱신한다', () => {
+  const context = {
+    mk: { videos: [{ startSec: 10, endSec: 90, durationSec: 120 }] },
+    parseTime(value) {
+      if (typeof value === 'number') return value;
+      const parts = String(value).split(':').map(Number);
+      return parts.length === 2 ? parts[0] * 60 + parts[1] : Number(value);
+    },
+    renderMake() {}, mkMarkDirty() {}
+  };
+  loadStageFunctions(['mkSetRange'], context);
+
+  context.mkSetRange(0, 'start', '00:20');
+  context.mkSetRange(0, 'end', 100);
+  assert.deepEqual([context.mk.videos[0].startSec, context.mk.videos[0].endSec], [20, 100]);
+  context.mkSetRange(0, 'start', 100);
+  assert.deepEqual([context.mk.videos[0].startSec, context.mk.videos[0].endSec], [99, 100]);
+});
+
+test('타임라인 문항 시각은 현재 영상의 원본 YouTube 초로 저장된다', () => {
+  const context = {
+    mk: { videos: [{ startSec: 120, endSec: 630, durationSec: 700, questions: [{ t: 375 }] }] },
+    parseTime(value) { return Number(value); }, renderMake() {}, mkMarkDirty() {}
+  };
+  loadStageFunctions(['mkSetQuestionTime'], context);
+
+  context.mkSetQuestionTime(0, 0, 500);
+  assert.equal(context.mk.videos[0].questions[0].t, 500);
+  context.mkSetQuestionTime(0, 0, 999);
+  assert.equal(context.mk.videos[0].questions[0].t, 630);
+});
+
+test('저장 검증은 모든 영상의 재생 구간 오류에 영상 번호를 붙인다', () => {
+  const context = {
+    mk: {
+      title: '세트', videos: [
+        { videoId: 'a', startSec: 0, endSec: 60, durationSec: 60,
+          questions: [{ type: 'long', t: 20, text: 'A', choices: [] }] },
+        { videoId: 'b', startSec: 30, endSec: 60, durationSec: 90,
+          questions: [{ type: 'long', t: 20, text: 'B', choices: [] }] }
+      ]
+    },
+    PlaylistCore: require('../playlist-core.js'), qType(q) { return q.type; }
+  };
+  loadStageFunctions(['mkValidate'], context);
+
+  assert.equal(context.mkValidate(), '영상 2: 1번 문항이 재생 구간 밖에 있습니다.');
 });
 
 test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한다', async () => {
@@ -762,14 +870,13 @@ test('편집 변경은 로컬 초안을 남기고 정식 저장 성공 뒤 삭�
   assert.deepEqual(calls, [['draft', 'set1'], ['clear', 'set1']]);
 });
 
-test('live 편집 초안은 첫 영상 수정과 나머지 영상을 함께 보존한다', () => {
+test('영상 배열 중심 편집 초안은 모든 영상의 현재 값을 함께 보존한다', () => {
   let savedModel;
   const context = {
     mk: {
-      id: 'set1', title: '세트', videoId: 'a-new', videoUrl: 'url-a-new',
-      questions: [{ text: '수정 문항' }],
+      id: 'set1', title: '세트', activeVideo: 0,
       videos: [
-        { videoId: 'a-old', videoUrl: 'url-a-old', questions: [{ text: '이전 문항' }] },
+        { videoId: 'a-new', videoUrl: 'url-a-new', questions: [{ text: '수정 문항' }] },
         { videoId: 'b', videoUrl: 'url-b', questions: [{ text: '둘째 영상 문항' }] }
       ]
     },
@@ -794,9 +901,9 @@ test('두 번째 Ctrl+S는 첫 저장 뒤 수정한 문항 값을 다시 저장�
   const context = {
     mk: {
       id: 'set1', title: '세트', author: '', settings: {}, createdAt: 10,
-      videoId: 'a', videoUrl: 'url-a', questions: [
-        { type: 'long', t: 10, text: '첫 값', choices: [] }
-      ], saved: false
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: '첫 값', choices: [] }] }],
+      activeVideo: 0, saved: false
     },
     PlaylistCore: require('../playlist-core.js'),
     qType(q) { return q.type; }, normSettings(value) { return value; },
@@ -817,7 +924,7 @@ test('두 번째 Ctrl+S는 첫 저장 뒤 수정한 문항 값을 다시 저장�
 
   context.mkHandleSaveShortcut(shortcut());
   await new Promise(resolve => setImmediate(resolve));
-  context.mk.questions[0].text = '두 번째 값';
+  context.mk.videos[0].questions[0].text = '두 번째 값';
   context.mkHandleSaveShortcut(shortcut());
   await new Promise(resolve => setImmediate(resolve));
 
@@ -828,13 +935,13 @@ test('문항 추가처럼 입력 이벤트가 없는 편집도 로컬 초안을 
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let dirty = 0;
   const context = {
-    mk: { questions: [{ t: 10 }] },
+    mk: { videos: [{ startSec: 0, endSec: null, questions: [{ t: 10 }] }] },
     blankQuestion(t) { return { t }; },
-    mkRenderQuestions() {}, mkFocusQuestion() {}, mkMarkDirty() { dirty += 1; }
+    renderMake() {}, mkFocusQuestion() {}, mkMarkDirty() { dirty += 1; }
   };
   vm.runInNewContext(extractFunction(html, 'mkAddQuestion'), context);
 
-  context.mkAddQuestion();
+  context.mkAddQuestion(0);
 
   assert.equal(dirty, 1);
 });
