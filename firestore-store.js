@@ -67,6 +67,28 @@
       return result;
     };
 
+    const permissionDenied = error =>
+      String(error && error.code || '').indexOf('permission-denied') >= 0;
+
+    async function probeTeacherAllowance(email) {
+      const normalizedEmail = String(email || '').trim().toLowerCase();
+      if (!normalizedEmail) return null;
+      const key = encodeURIComponent(normalizedEmail);
+      try {
+        await db.doc('quiz_sets/__teacher_allowance_probe__' + key).get();
+      } catch (error) {
+        if (permissionDenied(error)) return null;
+        throw error;
+      }
+      try {
+        await db.doc('config/__admin_allowance_probe__' + key).get();
+        return { enabled: true, role: 'admin' };
+      } catch (error) {
+        if (permissionDenied(error)) return { enabled: true, role: 'teacher' };
+        throw error;
+      }
+    }
+
     async function listQuizSets() {
       const snapshot = await db.collection('quiz_sets').get();
       return snapshot.docs.map(quizSetValue);
@@ -85,6 +107,18 @@
       ownerUid: teacher && teacher.uid || '',
       ownerEmail: teacher && teacher.email || ''
     });
+
+    function stableValue(value) {
+      if (value && typeof value.toMillis === 'function') return ['timestamp', value.toMillis()];
+      if (Array.isArray(value)) return value.map(stableValue);
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+      }
+      return value;
+    }
+
+    const sameRevision = (left, right) =>
+      JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right));
 
     async function saveQuizSetWithImages(setId, value, images) {
       const path = 'images/' + setId + '/q';
@@ -163,18 +197,38 @@
     }
 
     async function copyOwnedQuizSet(sourceId, newId, teacher) {
-      const source = await getQuizSet(sourceId);
-      if (!source) return null;
-      const images = await getImages(sourceId);
-      const copy = ownedQuizSet({
-        ...source,
-        id: newId,
-        title: ((source.title || '제목 없음') + ' (사본)').slice(0, 200),
-        createdAt: fieldValue.serverTimestamp(),
-        updatedAt: fieldValue.serverTimestamp()
-      }, teacher);
-      await saveQuizSetWithImages(newId, copy, images);
-      return { ...copy, id: newId };
+      const sourceReference = db.doc('quiz_sets/' + sourceId);
+      const destinationReference = db.doc('quiz_sets/' + newId);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const before = await getQuizSet(sourceId);
+        if (!before) return null;
+        const images = await getImages(sourceId);
+        const entries = Object.entries(normalizedImages(images));
+        if (1 + entries.length > 500) {
+          throw new Error('세트와 이미지를 한 번에 저장할 수 있는 500개 작업 한도를 넘었습니다.');
+        }
+        const result = await db.runTransaction(async transaction => {
+          const currentSnapshot = await transaction.get(sourceReference);
+          const current = quizSetValue(currentSnapshot);
+          if (!current) return { missing: true };
+          if (!sameRevision(before, current)) return { retry: true };
+          const copy = ownedQuizSet({
+            ...current,
+            id: newId,
+            title: ((current.title || '제목 없음') + ' (사본)').slice(0, 200),
+            createdAt: fieldValue.serverTimestamp(),
+            updatedAt: fieldValue.serverTimestamp()
+          }, teacher);
+          transaction.set(destinationReference, withoutDocumentId(copy));
+          entries.forEach(([questionIndex, data]) => {
+            transaction.set(db.doc('images/' + newId + '/q/' + questionIndex), { data });
+          });
+          return { copy };
+        });
+        if (result.missing) return null;
+        if (!result.retry) return { ...result.copy, id: newId };
+      }
+      throw new Error('원본 세트가 계속 변경되어 사본을 만들지 못했습니다. 다시 시도해 주세요.');
     }
 
     function claimSessionCode(code, sessionId, session) {
@@ -367,6 +421,7 @@
     }
 
     return {
+      probeTeacherAllowance,
       listQuizSets,
       getQuizSet,
       saveQuizSet,

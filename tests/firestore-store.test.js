@@ -364,6 +364,50 @@ function createStore(fake) {
   return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
 }
 
+test('교사 승인 프로브는 정규화 이메일의 보호 문서만 읽고 역할을 판정한다', async () => {
+  const paths = [];
+  const denied = Object.assign(new Error('permission denied'), { code: 'permission-denied' });
+  const db = {
+    doc(path) {
+      return {
+        async get() {
+          paths.push(path);
+          if (path.startsWith('config/')) throw denied;
+          return { exists: false, id: path.split('/').at(-1), data() {} };
+        }
+      };
+    }
+  };
+  const { createFirestoreStore } = loadStoreModule();
+  const store = createFirestoreStore(db, {}, () => 0);
+
+  const allowance = await store.probeTeacherAllowance(' Teacher@School.KR ');
+
+  assert.deepEqual(allowance, { enabled: true, role: 'teacher' });
+  assert.deepEqual(paths, [
+    'quiz_sets/__teacher_allowance_probe__teacher%40school.kr',
+    'config/__admin_allowance_probe__teacher%40school.kr'
+  ]);
+});
+
+test('승인 프로브는 교사 보호 문서가 거부되면 미승인으로 끝내고 admin은 구분한다', async () => {
+  const denied = Object.assign(new Error('permission denied'), { code: 'permission-denied' });
+  const makeStore = results => {
+    let index = 0;
+    const db = { doc() { return { get() { return results[index++](); } }; } };
+    return loadStoreModule().createFirestoreStore(db, {}, () => 0);
+  };
+
+  assert.equal(await makeStore([
+    () => Promise.reject(denied)
+  ]).probeTeacherAllowance('blocked@school.kr'), null);
+
+  assert.deepEqual(await makeStore([
+    () => Promise.resolve({ exists: false, id: 'teacher', data() {} }),
+    () => Promise.resolve({ exists: false, id: 'admin', data() {} })
+  ]).probeTeacherAllowance('admin@school.kr'), { enabled: true, role: 'admin' });
+});
+
 test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
   const fake = makeFirestoreFake();
   const store = createStore(fake);
@@ -371,7 +415,7 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   await store.saveOwnedQuizSet(
     's1',
     { title: 'A', videos: [], ownerUid: 'spoofed', ownerEmail: 'spoofed@example.com' },
-    {},
+    { v0q0: 'source-image' },
     { uid: 't1', email: 't@school.kr' }
   );
   assert.equal(fake.value('quiz_sets/s1').ownerUid, 't1');
@@ -386,10 +430,78 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   assert.equal(fake.value('quiz_sets/s2').ownerEmail, 'other@school.kr');
   assert.equal(copied.ownerUid, 't2');
   assert.equal(copied.ownerEmail, 'other@school.kr');
+  assert.deepEqual(await store.getImages('s2'), { v0q0: 'source-image' });
+});
+
+test('소유 세트 복사는 원본과 이미지가 동시에 바뀌면 같은 최신 리비전으로 재시도한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/source': { title: '원본 v1', ownerUid: 'owner', ownerEmail: 'owner@school.kr' },
+    'images/source/q/v0q0': { data: 'image-v1' }
+  });
+  const originalCollection = fake.db.collection;
+  let firstImageRead = true;
+  fake.db.collection = path => {
+    const reference = originalCollection(path);
+    if (path !== 'images/source/q') return reference;
+    return {
+      ...reference,
+      async get() {
+        const snapshot = await reference.get();
+        if (firstImageRead) {
+          firstImageRead = false;
+          fake.emit('quiz_sets/source', {
+            title: '원본 v2', ownerUid: 'owner', ownerEmail: 'owner@school.kr'
+          });
+          fake.emit('images/source/q/v0q0', { data: 'image-v2' });
+        }
+        return snapshot;
+      }
+    };
+  };
+  const store = createStore(fake);
+
+  const copied = await store.copyOwnedQuizSet(
+    'source', 'copy', { uid: 'teacher-2', email: 'teacher2@school.kr' }
+  );
+
+  assert.equal(copied.title, '원본 v2 (사본)');
+  assert.equal(fake.value('quiz_sets/copy').title, '원본 v2 (사본)');
+  assert.deepEqual(await store.getImages('copy'), { v0q0: 'image-v2' });
+  assert.ok(fake.calls().filter(call => call.operation === 'transactionGet' &&
+    call.path === 'quiz_sets/source').length >= 2);
+});
+
+test('소유 세트 복사 중 원본이 삭제되면 목적지를 만들지 않고 null을 반환한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/source': { title: '원본', ownerUid: 'owner', ownerEmail: 'owner@school.kr' },
+    'images/source/q/v0q0': { data: 'source-image' }
+  });
+  const originalCollection = fake.db.collection;
+  fake.db.collection = path => {
+    const reference = originalCollection(path);
+    if (path !== 'images/source/q') return reference;
+    return {
+      ...reference,
+      async get() {
+        const snapshot = await reference.get();
+        fake.emit('quiz_sets/source', undefined);
+        return snapshot;
+      }
+    };
+  };
+  const store = createStore(fake);
+
+  const copied = await store.copyOwnedQuizSet(
+    'source', 'copy', { uid: 'teacher-2', email: 'teacher2@school.kr' }
+  );
+
+  assert.equal(copied, null);
+  assert.equal(fake.has('quiz_sets/copy'), false);
+  assert.equal(fake.has('images/copy/q/v0q0'), false);
 });
 
 test('세트 편집은 관리자 여부와 무관하게 기록된 소유자에게만 허용한다', () => {
-  const context = {};
+  const context = { AuthCore: require('../auth-core.js') };
   loadStageFunctions(['canEditSet'], context);
 
   assert.equal(context.canEditSet(
@@ -403,6 +515,14 @@ test('세트 편집은 관리자 여부와 무관하게 기록된 소유자에�
   assert.equal(context.canEditSet(
     {},
     { uid: 'teacher-1', role: 'teacher' }
+  ), false);
+  assert.equal(context.canEditSet(
+    { ownerUid: 'teacher-1' },
+    { status: 'unapproved', uid: 'teacher-1', role: '' }
+  ), false);
+  assert.equal(context.canEditSet(
+    { ownerUid: 'teacher-1' },
+    { status: 'unverified', uid: 'teacher-1', role: '' }
   ), false);
 });
 
@@ -641,19 +761,18 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
 
 test('사본 만들기는 현재 교사를 소유자로 지정하는 복사 API를 사용한다', async () => {
   const calls = [];
+  const notices = [];
+  const routes = [];
   const context = {
     teacherState: { uid: 'teacher-2', email: 'teacher2@school.kr', role: 'teacher' },
     store: {
-      async getQuizSet() {
-        return { id: 'source', title: '원본', author: '원 교사', ownerUid: 'teacher-1' };
-      },
       async copyOwnedQuizSet(...args) {
         calls.push(clone(args));
         return { id: args[1] };
       }
     },
     rid() { return 'copy-1'; }, lsGet() { return '새 교사'; }, SV_TS: {},
-    toast() {}, go() {}, console,
+    toast(message) { notices.push(message); }, go(route) { routes.push(route); }, console,
     alert(message) { throw new Error(message); }
   };
   loadStageFunctions(['setDuplicate'], context);
@@ -665,6 +784,26 @@ test('사본 만들기는 현재 교사를 소유자로 지정하는 복사 API�
     'source', 'copy-1',
     { uid: 'teacher-2', email: 'teacher2@school.kr', role: 'teacher' }
   ]]);
+  assert.deepEqual(notices, ['사본을 만들었습니다']);
+  assert.deepEqual(routes, ['make/copy-1']);
+});
+
+test('복사 API가 null을 반환하면 성공 안내나 편집 이동을 하지 않는다', async () => {
+  const notices = [];
+  const routes = [];
+  const context = {
+    teacherState: { uid: 'teacher-2', email: 'teacher2@school.kr', role: 'teacher' },
+    store: { async copyOwnedQuizSet() { return null; } },
+    rid() { return 'copy-1'; },
+    toast(message) { notices.push(message); }, go(route) { routes.push(route); },
+    console, alert(message) { throw new Error(message); }
+  };
+  loadStageFunctions(['setDuplicate'], context);
+
+  await context.setDuplicate('missing-source');
+
+  assert.deepEqual(notices, ['세트를 찾을 수 없습니다']);
+  assert.deepEqual(routes, []);
 });
 
 test('단일 세트 내보내기는 Firestore 문서 ID를 빼고 기존 JSON 형식을 유지한다', async () => {
@@ -811,6 +950,7 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
   const context = {
     mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
     teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
     lsGet() { return '기본 교사'; },
     DEFAULT_SETTINGS: {},
     blankQuestion(t) { return { t }; },
@@ -859,6 +999,7 @@ test('비소유 세트 편집 URL은 읽기 전용 안내와 시작·사본 동�
   const context = {
     mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
     teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
     lsGet() { return '교사'; }, DEFAULT_SETTINGS: {}, blankQuestion(t) { return { t }; },
     document: { addEventListener() {}, removeEventListener() {} },
     mkHandleSaveShortcut() {}, onCleanup() {}, clearTimeout() {}, every() {}, $() { return null; },
@@ -886,6 +1027,43 @@ test('비소유 세트 편집 URL은 읽기 전용 안내와 시작·사본 동�
   assert.match(app.innerHTML, /우리 반 시작하기/);
   assert.match(app.innerHTML, /사본 만들기/);
   assert.doesNotMatch(app.innerHTML, /변경 사항 저장|세트 편집/);
+});
+
+test('세트 로드 중 승인이 취소되면 같은 UID 소유자도 편집 화면을 열지 않는다', async () => {
+  const app = { innerHTML: '' };
+  let finishSet;
+  let imageReads = 0;
+  let editorRenders = 0;
+  const context = {
+    mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    teacherState: { status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
+    lsGet() { return '교사'; }, DEFAULT_SETTINGS: {}, blankQuestion(t) { return { t }; },
+    document: { addEventListener() {}, removeEventListener() {} },
+    mkHandleSaveShortcut() {}, onCleanup() {}, clearTimeout() {}, every() {}, $() { return null; },
+    APP() { return app; }, topbar() { return '<nav></nav>'; }, esc(value) { return String(value); },
+    store: {
+      getQuizSet() { return new Promise(resolve => { finishSet = resolve; }); },
+      async getImages() { imageReads += 1; return {}; }
+    },
+    normSet(value) { return value; }, mkRestoreDraft() { return false; },
+    renderMake() { editorRenders += 1; }, console, toast() {}
+  };
+  loadStageFunctions(['canEditSet', 'screenMake'], context);
+
+  context.screenMake('owned-1');
+  context.teacherState = {
+    status: 'unapproved', uid: 'teacher-1', email: 'teacher@school.kr', role: ''
+  };
+  finishSet({
+    id: 'owned-1', title: '내 세트', ownerUid: 'teacher-1', ownerEmail: 'teacher@school.kr',
+    settings: {}, videos: [{ videoId: 'a', questions: [{ text: 'A' }] }]
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(imageReads, 0);
+  assert.equal(editorRenders, 0);
+  assert.match(app.innerHTML, /읽기 전용/);
 });
 
 test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한다', () => {
@@ -1317,6 +1495,7 @@ test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게
   })[ch]);
   const context = {
     PlaylistCore: require('../playlist-core.js'),
+    AuthCore: require('../auth-core.js'),
     REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
     teacherState: { uid: 'teacher-1', role: 'teacher' },
     esc: escapeHtml,
@@ -1384,6 +1563,7 @@ test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게
 test('세트 목록은 소유자만 편집·숨김을 표시하고 공유·이전 세트는 시작·사본만 표시한다', () => {
   const context = {
     PlaylistCore: require('../playlist-core.js'),
+    AuthCore: require('../auth-core.js'),
     REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
     teacherState: { uid: 'owner-1', role: 'teacher' },
     esc(value) { return String(value); },
@@ -1420,6 +1600,7 @@ test('공유 세트 진행 화면은 시작·사본만 제공하고 소유자에
   const app = { innerHTML: '' };
   const context = {
     teacherState: { uid: 'teacher-1', role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
     pl: {
       setId: 'shared-1',
       set: {
@@ -1450,6 +1631,7 @@ test('비소유 세트는 숨김 진입점을 직접 호출해도 저장소를 �
   const notices = [];
   const context = {
     teacherState: { uid: 'teacher-1', role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
     setList: { all: [{ id: 'shared-1', ownerUid: 'teacher-2', archived: true }] },
     store: { patchQuizSet() { writes += 1; return Promise.resolve(); } },
     confirm() { return true; }, toast(message) { notices.push(message); },
@@ -1562,11 +1744,14 @@ test('이미 존재하는 반 코드는 덮어쓰지 않는다', async () => {
   assert.equal(fake.calls().some(call => call.operation === 'transactionSet'), false);
 });
 
-test('빈 반 코드는 한 트랜잭션에서 코드·세션·live·board를 초기화한다', async () => {
+test('빈 반 코드는 소유 교사 정보와 함께 한 트랜잭션에서 코드·세션·live·board를 초기화한다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({}, { committedServerMillis: 20_000 });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1_000);
-  const session = { setId: 'set1', label: '3학년 2반', status: 'active' };
+  const session = {
+    setId: 'set1', label: '3학년 2반', status: 'active',
+    teacherUid: 'teacher-1', teacherEmail: 'teacher@school.kr'
+  };
 
   assert.equal(await store.claimSessionCode('ABC234', 'new', session), true);
   const codeDocument = fake.value('codes/ABC234');
@@ -2507,6 +2692,10 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
   const generated = ['SESSION12345', 'OLD234', 'NEW234'];
   const context = {
     pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'),
     $(selector) { return selector === '#pl-label' ? { value: '  2학년 3반  ' } : null; },
     lsSet() {},
     rid() { return generated.shift(); },
@@ -2530,6 +2719,7 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
     session: {
       setId: 'set1', setTitle: '첫 세트', label: '2학년 3반',
       teacher: '교사', createdAt: serverTimestamp, status: 'live',
+      teacherUid: 'teacher-1', teacherEmail: 'teacher@school.kr',
       setSnapshot: { title: '첫 세트', author: '교사' }, snapshotImages: {}
     },
     codes: ['OLD234', 'NEW234']
@@ -2539,11 +2729,47 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
   assert.equal(rendered, 1);
 });
 
+test('이미지 스냅샷을 읽는 동안 승인이 취소되면 세션을 만들지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let finishImages;
+  let starts = 0;
+  const context = {
+    pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'),
+    $() { return { value: '' }; }, lsSet() {}, rid() { return 'SESSION12345'; },
+    SV_TS: Symbol('server timestamp'),
+    store: {
+      getImages() { return new Promise(resolve => { finishImages = resolve; }); },
+      async startSession() { starts += 1; return 'NEW234'; }
+    },
+    renderPlayRun() {}, alert() {}, console
+  };
+  vm.runInNewContext(extractFunction(html, 'plStartSession'), context);
+
+  const starting = context.plStartSession();
+  context.teacherState = {
+    status: 'unapproved', uid: 'teacher-1', email: 'teacher@school.kr', role: ''
+  };
+  finishImages({});
+  await starting;
+
+  assert.equal(starts, 0);
+  assert.equal(context.pl.sessionId, undefined);
+  assert.equal(context.pl.startingSession, false);
+});
+
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let message = '';
   const context = {
     pl: { setId: 'set1', set: { title: '첫 세트', author: '' } },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'),
     $() { return { value: '' }; },
     lsSet() {},
     rid() { return 'SESSION12345'; },
@@ -4010,7 +4236,10 @@ test('a password session linked to Google is removed from the teacher UI state',
     clockPromiseUid: 'prior-user',
     teacherAuthVersion: 0,
     AuthCore: require('../auth-core.js'),
-    renderTeacherAuthArea() {}
+    renderTeacherAuthArea() {},
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; }
+    }
   };
   vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
 
@@ -4046,13 +4275,83 @@ test('a persisted Google session remains in the teacher UI state', async () => {
     clockPromiseUid: '',
     teacherAuthVersion: 0,
     AuthCore: require('../auth-core.js'),
-    renderTeacherAuthArea() {}
+    renderTeacherAuthArea() {},
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; }
+    }
   };
   vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
 
   await context.applyTeacherUser(user);
 
   assert.equal(context.teacherUser, user);
+  assert.equal(context.teacherState.status, 'teacher');
+});
+
+test('a verified Google session hydrates teacher allowance through the normalized protected probe', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const probed = [];
+  const user = {
+    uid: 'google-user', email: ' Teacher@School.KR ', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+    }
+  };
+  const context = {
+    teacherUser: null, teacherAllowance: null, teacherState: null,
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 0,
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {},
+    store: {
+      async probeTeacherAllowance(email) {
+        probed.push(email);
+        return { enabled: true, role: 'teacher' };
+      }
+    }
+  };
+  vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
+
+  await context.applyTeacherUser(user);
+
+  assert.deepEqual(probed, ['teacher@school.kr']);
+  assert.equal(context.teacherState.status, 'teacher');
+  assert.equal(context.teacherState.uid, 'google-user');
+});
+
+test('a late allowance probe from an older auth generation cannot authorize the replacement user', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let resolveA;
+  const googleUser = (uid, email) => ({
+    uid, email, emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+    }
+  });
+  const userA = googleUser('google-a', 'a@school.kr');
+  const userB = googleUser('google-b', 'b@school.kr');
+  const context = {
+    teacherUser: null, teacherAllowance: null, teacherState: null,
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 0,
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {},
+    store: {
+      probeTeacherAllowance(email) {
+        if (email === 'a@school.kr') return new Promise(resolve => { resolveA = resolve; });
+        return Promise.resolve({ enabled: true, role: 'teacher' });
+      }
+    }
+  };
+  vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
+
+  const applyingA = context.applyTeacherUser(userA);
+  await new Promise(resolve => setImmediate(resolve));
+  const applyingB = context.applyTeacherUser(userB);
+  await applyingB;
+  assert.equal(context.teacherState.uid, 'google-b');
+  assert.equal(context.teacherState.status, 'teacher');
+
+  resolveA({ enabled: true, role: 'admin' });
+  assert.equal(await applyingA, false);
+  assert.equal(context.teacherState.uid, 'google-b');
+  assert.equal(context.teacherState.status, 'teacher');
 });
 
 test('a late Google token from an older auth observer cannot replace the newer session', async () => {
@@ -4081,6 +4380,9 @@ test('a late Google token from an older auth observer cannot replace the newer s
     authReady: false,
     teacherAuthVersion: 0,
     AuthCore: require('../auth-core.js'),
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; }
+    },
     renderTeacherAuthArea() {},
     APP() { return { innerHTML: '' }; },
     topbar() { return '<nav></nav>'; },

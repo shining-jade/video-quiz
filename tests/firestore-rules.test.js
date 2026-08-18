@@ -247,6 +247,49 @@ rulesTest('미승인 계정과 학생은 원본 세트를 읽지 못한다', asy
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
 });
 
+rulesTest('보호된 비존재 문서 프로브는 allowlist를 공개하지 않고 교사와 admin 권한만 구분한다', async () => {
+  const owner = actorFirestore('owner');
+  const admin = actorFirestore('admin');
+  const unapproved = actorFirestore('unapproved');
+  const student = actorFirestore('student');
+  const teacherProbe = 'quiz_sets/__teacher_allowance_probe__owner%40school.kr';
+  const adminProbe = 'config/__admin_allowance_probe__admin%40school.kr';
+
+  await assertSucceeds(getDoc(doc(owner, teacherProbe)));
+  await assertSucceeds(getDoc(doc(admin, teacherProbe)));
+  await assertFails(getDoc(doc(unapproved, teacherProbe)));
+  await assertFails(getDoc(doc(student, teacherProbe)));
+  await assertSucceeds(getDoc(doc(admin, adminProbe)));
+  await assertFails(getDoc(doc(owner, adminProbe)));
+  await assertFails(getDoc(doc(owner, 'teacher_allowlist/owner@school.kr')));
+});
+
+rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 사본을 트랜잭션으로 만든다', async () => {
+  const teacher = actorFirestore('otherTeacher');
+  const sourceReference = doc(teacher, 'quiz_sets/set1');
+  const before = await assertSucceeds(getDoc(sourceReference));
+  const images = await assertSucceeds(getDocs(collection(teacher, 'images/set1/q')));
+
+  await assertSucceeds(runTransaction(teacher, async transaction => {
+    const current = await transaction.get(sourceReference);
+    assert.deepEqual(current.data(), before.data());
+    transaction.set(doc(teacher, 'quiz_sets/copied-by-other'), {
+      ...current.data(),
+      ownerUid: actors.otherTeacher.uid,
+      ownerEmail: actors.otherTeacher.email,
+      title: '공유 사본'
+    });
+    images.forEach(image => {
+      transaction.set(doc(teacher, `images/copied-by-other/q/${image.id}`), image.data());
+    });
+  }));
+
+  const copied = await assertSucceeds(getDoc(doc(teacher, 'quiz_sets/copied-by-other')));
+  assert.equal(copied.data().ownerUid, actors.otherTeacher.uid);
+  const copiedImages = await assertSucceeds(getDocs(collection(teacher, 'images/copied-by-other/q')));
+  assert.equal(copiedImages.size, 1);
+});
+
 rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
   const student = anonymousContext('student-uid');
   const own = doc(student, 'sessions/s1/responses/student-uid');
