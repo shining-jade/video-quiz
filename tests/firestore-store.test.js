@@ -1363,6 +1363,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   assert.equal(context.pl.live.q, 0);
   assert.equal(boardWrites, 0);
   assert.match(app.innerHTML, /id="pl-stage" onpointerdown="plActivateStageControls\(\)"/);
+  assert.match(app.innerHTML, /id="pl-quiz-timeline"/);
   assert.doesNotMatch(app.innerHTML, /class="pl-stage-status"[^>]*aria-live/);
   assert.match(app.innerHTML, /<span aria-live="polite">참여 <b id="pl-nstu">0<\/b>명<\/span>/);
   assert.equal(playerConfigs.length, 1);
@@ -2700,37 +2701,47 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
   assert.equal(stageClasses.has('quiz-open'), true);
 });
 
-test('넓은 화면의 문제 레이아웃은 stage 안의 실제 player-box를 왼쪽 패널로 배치한다', () => {
+test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 유지한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 
-  assert.match(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed[^}]*width:\s*53vw[^}]*height:\s*100vh/s);
-  assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+#pl-video/);
+  assert.match(html, /#pl-stage:fullscreen \.player-box,[\s\S]*width:\s*min\(92vw,\s*calc\(92vh \* 16 \/ 9\)\)[^}]*aspect-ratio:\s*16\s*\/\s*9[^}]*margin:\s*auto/);
+  assert.match(html, /#pl-stage\.quiz-open \.player-box\s*\{[^}]*filter:\s*brightness\(\.42\)/s);
+  assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed/s);
+  assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*width:/s);
+  assert.match(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*top:\s*50%[^}]*transform:\s*translate\(-50%,\s*-50%\)[^}]*width:\s*min\(64vw,\s*960px\)/s);
+  assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*#pl-stage\.quiz-open #overlay\s*\{[^}]*width:\s*calc\(100% - 32px\)/);
+  assert.doesNotMatch(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*left:\s*53vw/s);
 });
 
-test('문제 오버레이 중 도구와 상태는 화면 가장자리에 고정되고 QR 제어는 클릭할 수 있다', () => {
+test('중앙 문제·순위 카드 위에서 교사 도구와 QR을 조작하고 타임라인은 흐름을 유지한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const overlayRule = html.match(/^#overlay\s*\{([^}]*)\}/ms);
   const toolsRule = html.match(/#pl-stage\.quiz-open\s+\.pl-stage-tools\s*\{([^}]*)\}/s);
-  const statusRule = html.match(/#pl-stage:fullscreen\.quiz-open\s+\.pl-stage-status,\s*#pl-stage\.fullscreen-fallback\.quiz-open\s+\.pl-stage-status\s*\{([^}]*)\}/s);
   const bubbleRule = html.match(/#pl-stage\s+#pl-qr-bubble\s*\{([^}]*)\}/s);
+  const timelineRule = html.match(/#pl-quiz-timeline\s*\{([^}]*)\}/s);
+  const boardRule = html.match(/^#board-overlay\s*\{([^}]*)\}/ms);
+  const rankToolsRule = html.match(/#pl-stage\.rank-open\s+\.pl-stage-tools\s*\{([^}]*)\}/s);
 
-  assert.ok(overlayRule && toolsRule && statusRule && bubbleRule);
+  assert.ok(overlayRule && toolsRule && bubbleRule && timelineRule && boardRule && rankToolsRule);
   const overlayZ = Number(overlayRule[1].match(/z-index:\s*(\d+)/)[1]);
   const toolsZ = Number(toolsRule[1].match(/z-index:\s*(\d+)/)[1]);
   const bubbleZ = Number(bubbleRule[1].match(/z-index:\s*(\d+)/)[1]);
+  const boardZ = Number(boardRule[1].match(/z-index:\s*(\d+)/)[1]);
 
   assert.ok(toolsZ > overlayZ);
   assert.ok(bubbleZ > overlayZ);
+  assert.ok(toolsZ > boardZ);
+  assert.ok(bubbleZ > boardZ);
   assert.match(html, /<button class="btn sm" onclick="plToggleQrBubble\(\)"[^>]*>▦ QR<\/button>/);
   assert.match(html, /aria-label="QR 닫기" onclick="plToggleQrBubble\(\)"/);
   assert.match(bubbleRule[1], /right:\s*20px/);
   assert.match(bubbleRule[1], /top:\s*20px/);
   assert.match(toolsRule[1], /position:\s*fixed/);
   assert.match(toolsRule[1], /top:\s*16px/);
-  assert.match(statusRule[1], /position:\s*fixed/);
-  assert.match(statusRule[1], /bottom:\s*16px/);
-  assert.match(html, /@media \(min-width:\s*900px\)[\s\S]*#pl-stage\.fullscreen-fallback\.quiz-open \.pl-stage-status\s*\{[^}]*right:\s*calc\(47vw \+ 20px\)/);
-  assert.match(html, /#pl-stage:fullscreen\.quiz-open #overlay,\s*#pl-stage\.fullscreen-fallback\.quiz-open #overlay\s*\{[^}]*padding-top:\s*104px[^}]*padding-bottom:\s*64px/);
+  assert.match(timelineRule[1], /position:\s*relative/);
+  assert.doesNotMatch(timelineRule[1], /position:\s*(?:fixed|absolute)/);
+  assert.match(boardRule[1], /left:\s*50%[^}]*top:\s*50%[^}]*width:\s*min\(64vw,\s*960px\)/s);
+  assert.match(rankToolsRule[1], /z-index:\s*202/);
   assert.doesNotMatch(toolsRule[1] + bubbleRule[1], /pointer-events:\s*none/);
 });
 
@@ -2832,6 +2843,110 @@ test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답
   });
   assert.match(rendered, /참여 2명 · 제출 2명 · 미제출 0명/);
   assert.doesNotMatch(rendered, /1명|50%|"correct":true/);
+});
+
+test('centered overlay preserves the player node and only toggles stage presentation', () => {
+  const player = { id: 'pl-player' };
+  const classes = new Set();
+  const stage = {
+    querySelector(selector) { return selector === '#pl-player' ? player : null; },
+    classList: {
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); }
+    }
+  };
+  const ctx = loadStageFunctions(['plStageRoot', 'plRenderCenteredOverlay'], {
+    document: { getElementById() { return stage; }, body: {} }
+  });
+
+  assert.equal(ctx.plRenderCenteredOverlay(true), stage);
+  assert.equal(classes.has('quiz-open'), true);
+  assert.equal(stage.querySelector('#pl-player'), player);
+  ctx.plRenderCenteredOverlay(false);
+  assert.equal(classes.has('quiz-open'), false);
+  assert.equal(stage.querySelector('#pl-player'), player);
+});
+
+test('quiz timeline maps progress and question markers to the active video range', () => {
+  let writes = 0;
+  const progress = { style: {} };
+  const remaining = { textContent: '' };
+  const timeline = {
+    _html: '',
+    set innerHTML(value) { writes += 1; this._html = value; },
+    get innerHTML() { return this._html; },
+    querySelector(selector) {
+      if (selector === '.pl-timeline-progress') return progress;
+      if (selector === '.pl-timeline-next') return remaining;
+      return null;
+    }
+  };
+  const ctx = loadStageFunctions(['plTimelineDomain', 'plUpdateTimeline', 'plRenderTimeline'], {
+    pl: {
+      videoIndex: 0,
+      set: { videos: [{ startSec: 120, endSec: 620 }] },
+      flatQuestions: [
+        { videoIndex: 0, t: 170, number: 1 },
+        { videoIndex: 0, t: 220, number: 2 },
+        { videoIndex: 0, t: 370, number: 3 },
+        { videoIndex: 1, t: 15, number: 4 }
+      ],
+      live: { q: 1 }, fired: [true, true, false, false],
+      player: { getCurrentTime() { return 220; }, getDuration() { return 900; } }
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    document: { getElementById(id) { return id === 'pl-quiz-timeline' ? timeline : null; } },
+    fmtTime(value) { return Math.round(value) + 's'; }
+  });
+
+  ctx.plRenderTimeline();
+
+  assert.equal(writes, 1);
+  assert.equal(progress.style.width, '20%');
+  assert.match(timeline.innerHTML, /pl-timeline-marker completed[^>]*left:10%/);
+  assert.match(timeline.innerHTML, /pl-timeline-marker current[^>]*left:20%/);
+  assert.match(timeline.innerHTML, /pl-timeline-marker upcoming[^>]*left:50%/);
+  assert.doesNotMatch(timeline.innerHTML, /left:-?21%/);
+  assert.match(timeline.innerHTML, /pl-timeline-announcement[^>]*aria-live="polite"/);
+  assert.doesNotMatch(timeline.innerHTML, /pl-timeline-next[^>]*aria-live/);
+  assert.equal(remaining.textContent, '다음 문제 3 · 150초');
+
+  ctx.plUpdateTimeline(270, ctx.plTimelineDomain());
+  assert.equal(writes, 1, 'ticks update progress and text without rebuilding markers');
+  assert.equal(progress.style.width, '30%');
+  assert.equal(remaining.textContent, '다음 문제 3 · 100초');
+});
+
+test('quiz timeline uses player duration when the active video has no end time', () => {
+  const ctx = loadStageFunctions(['plTimelineDomain'], {
+    pl: {
+      videoIndex: 0,
+      set: { videos: [{ startSec: 30, endSec: null }] },
+      player: { getDuration() { return 330; } }
+    }
+  });
+
+  assert.deepEqual(clone(ctx.plTimelineDomain()), { start: 30, end: 330 });
+});
+
+test('video switch rebuilds quiz timeline markers for the new active video', () => {
+  let renders = 0;
+  const loads = [];
+  const ctx = loadStageFunctions(['plLoadVideo'], {
+    pl: {
+      videoIndex: 0, playlistDone: false, transitionUntil: 0,
+      loadGeneration: 1, activePlaybackGeneration: 1, expectedVideoId: 'old',
+      set: { videos: [{ videoId: 'first', startSec: 0 }, { videoId: 'second', startSec: 40 }] },
+      player: { loadVideoById(value) { loads.push(value); } }
+    },
+    document: { getElementById() { return null; } },
+    plRenderTimeline() { renders += 1; }
+  });
+
+  ctx.plLoadVideo(1, true);
+
+  assert.equal(renders, 1);
+  assert.deepEqual(clone(loads), [{ videoId: 'second', startSeconds: 40 }]);
 });
 
 test('Firestore 초기화 구간은 ref 없는 Firestore 인스턴스에서도 중단되지 않는다', () => {

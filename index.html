@@ -226,10 +226,12 @@ textarea { resize: vertical; min-height: 62px; }
 .rank-row .prog { flex: none; font-size: 11px; color: var(--ink-3); }
 
 #board-overlay {
-  position: fixed; inset: 0; background: #12162a; z-index: 300;
-  padding: 28px; overflow-y: auto;
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(64vw, 960px); max-height: calc(100% - 144px); box-sizing: border-box;
+  background: rgba(18,22,42,.96); border: 1px solid rgba(255,255,255,.15); border-radius: 22px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.5); z-index: 200; padding: 28px; overflow-y: auto;
 }
-#board-overlay .bo-inner { max-width: 1100px; margin: 0 auto; color: #fff; }
+#board-overlay .bo-inner { width: 100%; margin: 0 auto; color: #fff; }
 #board-overlay h2 { font-size: clamp(24px, 3.2vw, 40px); margin-bottom: 6px; }
 #board-overlay .bo-sub { color: rgba(255,255,255,.6); font-size: 15px; margin-bottom: 22px; }
 #board-overlay .bo-list { display: grid; gap: 8px; }
@@ -308,9 +310,11 @@ textarea { resize: vertical; min-height: 62px; }
 body.stage-fallback-open { overflow: hidden; }
 #pl-stage:fullscreen .player-box,
 #pl-stage.fullscreen-fallback .player-box {
-  width: min(100%, calc((100vh - 116px) * 16 / 9)); max-height: calc(100vh - 116px);
-  border-radius: 0; flex: 0 1 auto;
+  width: min(92vw, calc(92vh * 16 / 9)); aspect-ratio: 16 / 9; margin: auto;
+  max-height: calc(100vh - 132px); border-radius: 0; flex: 0 1 auto;
 }
+#pl-stage.quiz-open .player-box { filter: brightness(.42); }
+#pl-stage.rank-open .player-box { filter: brightness(.42); }
 #pl-stage:fullscreen .pl-stage-tools,
 #pl-stage.fullscreen-fallback .pl-stage-tools {
   display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px;
@@ -334,15 +338,8 @@ body.stage-fallback-open { overflow: hidden; }
 #pl-stage.quiz-open .pl-stage-tools {
   position: fixed; top: 16px; left: 16px; right: 16px; z-index: 202;
 }
-#pl-stage:fullscreen.quiz-open .pl-stage-status,
-#pl-stage.fullscreen-fallback.quiz-open .pl-stage-status {
-  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 202;
-  width: fit-content; margin: 0 auto; padding: 6px 10px; border-radius: 8px;
-  background: rgba(18,22,36,.72);
-}
-#pl-stage:fullscreen.quiz-open #overlay,
-#pl-stage.fullscreen-fallback.quiz-open #overlay {
-  padding-top: 104px; padding-bottom: 64px;
+#pl-stage.rank-open .pl-stage-tools {
+  position: fixed; top: 16px; left: 16px; right: 16px; z-index: 202;
 }
 #pl-stage #pl-qr-bubble {
   position: absolute; right: 20px; top: 20px; z-index: 203; width: 180px; padding: 14px;
@@ -362,6 +359,33 @@ body.stage-fallback-open { overflow: hidden; }
 #pl-stage #pl-qr-bubble strong { display: block; font-size: 27px; letter-spacing: .08em; }
 #pl-stage .pl-qr-url { margin-top: 5px; color: #626779; font-size: 11px; overflow-wrap: anywhere; }
 #pl-stage #pl-qr-count { margin-top: 8px; color: #626779; font-size: 12px; }
+
+#pl-quiz-timeline {
+  position: relative; width: 100%; box-sizing: border-box; margin-top: 10px; padding: 8px 10px 6px;
+  border-radius: 10px; background: #171927; color: rgba(255,255,255,.82); z-index: 12;
+}
+.pl-timeline-track { position: relative; height: 18px; margin: 0 7px; }
+.pl-timeline-rail,
+.pl-timeline-progress { position: absolute; left: 0; top: 8px; height: 4px; border-radius: 999px; }
+.pl-timeline-rail { width: 100%; background: rgba(255,255,255,.2); }
+.pl-timeline-progress { width: 0; background: #7c83ff; }
+.pl-timeline-markers { position: absolute; inset: 0; }
+.pl-timeline-marker {
+  position: absolute; top: 3px; width: 14px; height: 14px; padding: 0; transform: translateX(-50%);
+  border: 2px solid #171927; border-radius: 50%; background: #f5c518; box-shadow: 0 0 0 1px rgba(255,255,255,.55);
+}
+.pl-timeline-marker.completed { background: #34d17f; }
+.pl-timeline-marker.current { background: #fff; box-shadow: 0 0 0 3px rgba(124,131,255,.8); }
+.pl-timeline-marker.upcoming { background: #f5c518; }
+.pl-timeline-next { display: block; min-height: 16px; margin-top: 2px; font-size: 12px; text-align: center; }
+.pl-timeline-announcement {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+#pl-stage:fullscreen #pl-quiz-timeline,
+#pl-stage.fullscreen-fallback #pl-quiz-timeline {
+  width: min(92vw, calc(92vh * 16 / 9)); margin-left: auto; margin-right: auto; flex: none;
+}
 
 /* ══════════════════════════════════════════════════════════
    교사 재생
@@ -390,28 +414,18 @@ body.stage-fallback-open { overflow: hidden; }
 
 /* 교사 퀴즈 오버레이 */
 #overlay {
-  position: fixed; inset: 0; background: rgba(14,17,30,.93); z-index: 200;
-  display: flex; align-items: center; justify-content: center; padding: 24px;
-  overflow-y: auto;
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(64vw, 960px); max-height: calc(100% - 144px); box-sizing: border-box;
+  background: rgba(18,22,42,.96); border: 1px solid rgba(255,255,255,.15); border-radius: 22px;
+  box-shadow: 0 24px 80px rgba(0,0,0,.5); z-index: 200; padding: 26px 30px; overflow-y: auto;
 }
-/* 퀴즈가 열리면 영상은 왼쪽에 그대로 두고 문항을 오른쪽에 붙인다.
-   iframe 을 DOM 에서 옮기면 영상이 처음부터 다시 로드되므로 CSS 로만 자리를 바꾼다. */
-@media (min-width: 900px) {
-  #pl-stage.quiz-open .pl-stage-tools,
-  #pl-stage:fullscreen.quiz-open .pl-stage-status,
-  #pl-stage.fullscreen-fallback.quiz-open .pl-stage-status {
-    left: 20px; right: calc(47vw + 20px);
-  }
-  /* 반쪽 패널이 되면 뒤 페이지가 비쳐 산만하므로 불투명하게 */
-  #pl-stage.quiz-open #overlay { left: 53vw; padding: 26px 30px; background: #12162a; }
-  #pl-stage.quiz-open .player-box {
-    position: fixed; left: 0; top: 0; width: 53vw; height: 100vh; z-index: 201;
-    margin: 0; padding: 0; border: 0; border-radius: 0; background: #000;
-    display: flex; align-items: center; box-shadow: none; aspect-ratio: auto; max-height: none;
-  }
-  #pl-stage.quiz-open #overlay .ov-q { font-size: clamp(20px, 2.1vw, 30px); }
-  #pl-stage.quiz-open #overlay .ov-choice { padding: 11px 15px; font-size: clamp(15px, 1.35vw, 19px); }
-  #pl-stage.quiz-open #overlay .q-img { max-height: 22vh; }
+#pl-stage.quiz-open #overlay {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(64vw, 960px);
+}
+/* iframe을 옮기거나 다시 만들지 않고 같은 영상 위에 중앙 카드를 겹친다. */
+@media (max-width: 900px) {
+  #pl-stage.quiz-open #overlay { width: calc(100% - 32px); }
+  #pl-stage.rank-open #board-overlay { width: calc(100% - 32px); }
 }
 #overlay .ov-inner { width: 100%; max-width: 960px; color: #fff; }
 #overlay .ov-top { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
@@ -2307,7 +2321,10 @@ function screenPlay(setId) {
     const completion = document.getElementById('pl-completion');
     if (completion && completion.remove) completion.remove();
     const stage = document.getElementById('pl-stage');
-    if (stage) stage.classList.remove('quiz-open');
+    if (stage) {
+      stage.classList.remove('quiz-open');
+      stage.classList.remove('rank-open');
+    }
     pl = null;
   });
 
@@ -2413,6 +2430,7 @@ function renderPlayRun() {
         '<div class="card" id="pl-video" style="padding:14px">' +
           '<div id="pl-stage" onpointerdown="plActivateStageControls()">' +
             '<div class="player-box"><div id="pl-player"></div></div>' +
+            '<div id="pl-quiz-timeline" aria-label="현재 영상 퀴즈 타임라인"></div>' +
             '<div class="pl-stage-tools" aria-label="전체화면 진행 도구">' +
               '<button class="btn sm" onclick="plGoHomeFromStage()" title="전체화면 나가기" aria-label="전체화면 나가기">⌂ 홈</button>' +
               '<button class="btn sm" onclick="plToggleQrBubble()" title="학생 참여 QR 코드" aria-label="학생 참여 QR 코드">▦ QR</button>' +
@@ -2474,6 +2492,7 @@ function renderPlayRun() {
     else $('#pl-qr').style.display = 'none';
   } catch (e) { $('#pl-qr').style.display = 'none'; }
   plRenderQList();
+  if (typeof plRenderTimeline === 'function') plRenderTimeline(true);
   plRenderStageControls();
 
   // 실시간 구독 — 참여자, 응답, live 상태
@@ -2494,6 +2513,7 @@ function renderPlayRun() {
     pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     if (pl.pendingLiveQuestion === pl.live.q) pl.pendingLiveQuestion = -1;
     plRenderOverlay();
+    if (typeof plRenderTimeline === 'function') plRenderTimeline();
     plRenderStageControls();
   }, e => console.error(e)));
 
@@ -2740,6 +2760,71 @@ function plClampQrBubble() {
   bubble.style.right = 'auto';
 }
 
+function plTimelineDomain() {
+  const video = pl && pl.set && pl.set.videos && pl.set.videos[pl.videoIndex];
+  if (!video) return { start: 0, end: 1 };
+  const start = Math.max(0, Number(video.startSec) || 0);
+  let end = video.endSec;
+  if (end === null || end === undefined || end === '') {
+    try { end = pl.player && pl.player.getDuration ? pl.player.getDuration() : null; } catch (e) { end = null; }
+  }
+  end = Number(end);
+  if (!Number.isFinite(end) || end <= start) end = start + 1;
+  return { start: start, end: end };
+}
+
+function plUpdateTimeline(now, domain) {
+  const timeline = document.getElementById('pl-quiz-timeline');
+  if (!timeline || !pl) return;
+  const range = domain || plTimelineDomain();
+  const current = Number(now);
+  const safeNow = Number.isFinite(current) ? current : range.start;
+  const progress = timeline.querySelector('.pl-timeline-progress');
+  if (progress) progress.style.width = (PlaylistCore.timelineRatio(safeNow, range.start, range.end) * 100) + '%';
+  const next = pl.flatQuestions.find((question) =>
+    question.videoIndex === pl.videoIndex && Number(question.t) > safeNow
+  );
+  const label = timeline.querySelector('.pl-timeline-next');
+  if (label) label.textContent = next
+    ? '다음 문제 ' + (next.number || pl.flatQuestions.indexOf(next) + 1) + ' · ' +
+      Math.max(0, Math.ceil(Number(next.t) - safeNow)) + '초'
+    : '현재 영상의 남은 문제 없음';
+}
+
+function plRenderTimeline(force) {
+  const timeline = document.getElementById('pl-quiz-timeline');
+  if (!timeline || !pl) return;
+  const liveQuestion = pl.live && Number.isInteger(pl.live.q) ? pl.live.q : -1;
+  const renderKey = pl.videoIndex + ':' + liveQuestion;
+  if (!force && pl.timelineRenderKey === renderKey) return;
+  pl.timelineRenderKey = renderKey;
+  const domain = plTimelineDomain();
+  const now = (() => {
+    try { return pl.player && pl.player.getCurrentTime ? pl.player.getCurrentTime() : domain.start; }
+    catch (e) { return domain.start; }
+  })();
+  const markers = pl.flatQuestions.map((question, index) => ({ question, index }))
+    .filter(item => item.question.videoIndex === pl.videoIndex)
+    .map(item => {
+      const ratio = PlaylistCore.timelineRatio(Number(item.question.t), domain.start, domain.end);
+      const left = Math.round(ratio * 10000) / 100;
+      const state = item.index === liveQuestion ? 'current' : (pl.fired[item.index] ? 'completed' : 'upcoming');
+      const number = item.question.number || item.index + 1;
+      return '<span class="pl-timeline-marker ' + state + '" style="left:' + left + '%" ' +
+        'title="Question ' + number + ' · ' + fmtTime(Number(item.question.t) - domain.start) + '" ' +
+        'aria-label="Question ' + number + '"></span>';
+    }).join('');
+  const announcement = liveQuestion >= 0
+    ? '문제 ' + (pl.flatQuestions[liveQuestion].number || liveQuestion + 1) + ' 표시'
+    : '영상 ' + (pl.videoIndex + 1) + ' 퀴즈 타임라인';
+  timeline.innerHTML = '<div class="pl-timeline-track">' +
+    '<span class="pl-timeline-rail"></span><span class="pl-timeline-progress"></span>' +
+    '<div class="pl-timeline-markers">' + markers + '</div></div>' +
+    '<span class="pl-timeline-next"></span>' +
+    '<span class="pl-timeline-announcement" aria-live="polite">' + announcement + '</span>';
+  plUpdateTimeline(now, domain);
+}
+
 function plLoadVideo(index, autoplay) {
   if (!pl || !pl.player || !pl.player.loadVideoById) return;
   const video = pl.set && pl.set.videos && pl.set.videos[index];
@@ -2750,6 +2835,7 @@ function plLoadVideo(index, autoplay) {
   pl.loadGeneration = (Number(pl.loadGeneration) || 0) + 1;
   pl.activePlaybackGeneration = 0;
   pl.expectedVideoId = video.videoId;
+  pl.timelineVideoReady = -1;
   pl.playerLoading = true;
   pl.playerError = null;
   pl.lastT = Math.max(0, Number(video.startSec) || 0) - 0.6;
@@ -2761,6 +2847,7 @@ function plLoadVideo(index, autoplay) {
     const error = document.getElementById('pl-player-error');
     if (error && error.remove) error.remove();
   }
+  if (typeof plRenderTimeline === 'function') plRenderTimeline(true);
   pl.player.loadVideoById({
     videoId: video.videoId,
     startSeconds: Math.max(0, Number(video.startSec) || 0)
@@ -2885,6 +2972,11 @@ function plHandlePlayerStateChange(event) {
     pl.activePlaybackGeneration = pl.loadGeneration;
     pl.playbackEnded = false;
     pl.playerError = null;
+    if (event.data === YT.PlayerState.PLAYING &&
+        pl.timelineVideoReady !== pl.videoIndex && typeof plRenderTimeline === 'function') {
+      pl.timelineVideoReady = pl.videoIndex;
+      plRenderTimeline(true);
+    }
   }
   if (event.data !== YT.PlayerState.ENDED) return;
   if (!matchesExpected || pl.playerLoading || pl.activePlaybackGeneration !== pl.loadGeneration) return;
@@ -2952,6 +3044,9 @@ function plTick() {
 
   const clock = $('#pl-clock');
   if (clock) clock.textContent = fmtTime(now);
+  if (typeof plUpdateTimeline === 'function' && typeof plTimelineDomain === 'function') {
+    plUpdateTimeline(now, plTimelineDomain());
+  }
 
   // 다음 문항 안내
   const nextEl = $('#pl-next');
@@ -3113,13 +3208,22 @@ function plStageRoot() {
   return document.getElementById('pl-stage') || document.body;
 }
 
+function plRenderCenteredOverlay(open) {
+  const stage = plStageRoot();
+  if (open) stage.classList.add('quiz-open');
+  else stage.classList.remove('quiz-open');
+  return stage;
+}
+
 /* ── 교실 화면용 전체 순위표 ─────────────────────────────────────────── */
 function plToggleBoard() {
   const el = document.getElementById('board-overlay');
-  if (el) { el.remove(); return; }
+  const stage = plStageRoot();
+  if (el) { el.remove(); stage.classList.remove('rank-open'); return; }
   const box = document.createElement('div');
   box.id = 'board-overlay';
-  plStageRoot().appendChild(box);
+  stage.classList.add('rank-open');
+  stage.appendChild(box);
   plRenderBoardOverlay();
 }
 function plRenderBoardOverlay() {
@@ -3150,14 +3254,17 @@ function plRenderBoardOverlay() {
 /* ── 교사 퀴즈 오버레이 ─────────────────────────────────────────────── */
 function plRenderOverlay() {
   let ov = document.getElementById('overlay');
-  const stage = plStageRoot();
   if (!pl || pl.live.q < 0) {
     if (ov) ov.remove();
-    stage.classList.remove('quiz-open');
+    if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(false);
+    else plStageRoot().classList.remove('quiz-open');
     plRenderQList();
     return;
   }
-  stage.classList.add('quiz-open');
+  const stage = typeof plRenderCenteredOverlay === 'function'
+    ? plRenderCenteredOverlay(true)
+    : plStageRoot();
+  if (typeof plRenderCenteredOverlay !== 'function') stage.classList.add('quiz-open');
 
   const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
