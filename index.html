@@ -1090,15 +1090,24 @@ async function prepareImage(file) {
 
 /** 문항 이미지를 그때그때 받아 캐시한다 (교사 재생 화면과 학생 화면 공용) */
 const imgCache = {};
-function loadQuestionImage(setId, i, sessionId) {
+function loadQuestionImage(setId, i, sessionId, snapshotVersion) {
   const key = (sessionId || setId) + '/' + i;
   if (imgCache[key] !== undefined) return Promise.resolve(imgCache[key]);
   const loading = sessionId && store.getSessionQuestionImage
-    ? store.getSessionQuestionImage(sessionId, setId, i)
+    ? store.getSessionQuestionImage(
+        snapshotVersion === undefined
+          ? sessionId
+          : { id: sessionId, setId: setId, snapshotVersion: snapshotVersion },
+        snapshotVersion === undefined ? setId : i,
+        snapshotVersion === undefined ? i : undefined
+      )
     : store.getQuestionImage(setId, i);
   return loading
     .then(src => { imgCache[key] = src || ''; return imgCache[key]; })
-    .catch(() => '');
+    .catch(error => {
+      if (snapshotVersion !== undefined) throw error;
+      return '';
+    });
 }
 /** 문항에 보여줄 그림이 있는지 (업로드 또는 주소) */
 function hasImage(q) { return !!(q && (q.image || q.imgUp || q.imgUrl)); }
@@ -2574,7 +2583,7 @@ function screenPlay(setId) {
     videos: [], flatQuestions: [], videoIndex: 0,
     playlistDone: false, transitionUntil: 0, playbackEnded: false,
     loadGeneration: 0, activePlaybackGeneration: 0, expectedVideoId: '',
-    sessionId: null, code: null,
+    sessionId: null, code: null, snapshotVersion: undefined,
     player: null, lastT: 0, fired: [], dueQuestions: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     liveGeneration: 0,
@@ -2712,28 +2721,41 @@ function plStartSession() {
   const label = ($('#pl-label') && $('#pl-label').value.trim()) || '';
   lsSet('vq_last_label', label);
   const sessionId = rid(12);
-  const teacher = state.set.author || '';
 
-  const loadImages = store.getImages ? store.getImages(state.setId) : Promise.resolve({});
-  return loadImages.then(snapshotImages => {
+  const loadSnapshot = store.getQuizSetSnapshot
+    ? store.getQuizSetSnapshot(state.setId)
+    : (store.getImages ? store.getImages(state.setId) : Promise.resolve({}))
+      .then(snapshotImages => ({ setSnapshot: state.set, snapshotImages: snapshotImages }));
+  return loadSnapshot.then(snapshot => {
     if (pl !== state || !AuthCore.isTeacher(teacherState) ||
         teacherState.uid !== authState.uid || teacherState.email !== authState.email) return null;
+    const setSnapshot = typeof normSet === 'function'
+      ? normSet(snapshot && snapshot.setSnapshot)
+      : snapshot && snapshot.setSnapshot;
+    if (!setSnapshot) throw new Error('세션 스냅샷을 만들 퀴즈 세트를 찾을 수 없습니다.');
     return store.startSession(sessionId, {
       setId: state.setId,
-      setTitle: state.set.title,
+      setTitle: setSnapshot.title,
       label: label,
-      teacher: teacher,
+      teacher: setSnapshot.author || '',
       teacherUid: authState.uid,
       teacherEmail: authState.email,
       createdAt: SV_TS,
       status: 'live',
-      setSnapshot: state.set,
-      snapshotImages: snapshotImages
+      setSnapshot: setSnapshot,
+      snapshotImages: snapshot && snapshot.snapshotImages || {}
     }, () => rid(6));
-  }).then(code => {
-    if (pl !== state || !code) return;
+  }).then(async code => {
+    if (!code) return;
+    const stillOwner = AuthCore.isTeacher(teacherState) &&
+      teacherState.uid === authState.uid && teacherState.email === authState.email;
+    if (pl !== state || !stillOwner) {
+      if (stillOwner) await store.endSession(sessionId);
+      return;
+    }
     state.sessionId = sessionId;
     state.code = code;
+    state.snapshotVersion = 1;
     renderPlayRun();
   }).catch(e => {
     if (pl !== state) return;
@@ -3476,7 +3498,6 @@ function plQueueDueQuestions(prev, now) {
       markerStateChanged = true;
     }
     if (!pl.fired[i] && prev < q.t && q.t <= now) {
-      pl.fired[i] = true;
       if (pl.dueQuestions.indexOf(i) < 0) pl.dueQuestions.push(i);
       markerStateChanged = true;
     }
@@ -3486,10 +3507,19 @@ function plQueueDueQuestions(prev, now) {
 
 function plOpenNextDueQuestion() {
   if (!pl || (pl.live && pl.live.q >= 0) || pl.pendingLiveQuestion >= 0 ||
-      !Array.isArray(pl.dueQuestions) || !pl.dueQuestions.length) return false;
-  const next = pl.dueQuestions.shift();
-  plOpenQuestion(next);
-  return true;
+      pl.openError || !Array.isArray(pl.dueQuestions) || !pl.dueQuestions.length) return false;
+  const state = pl;
+  const next = state.dueQuestions[0];
+  const published = plOpenQuestion(next);
+  const finish = opened => {
+    if (opened === false || pl !== state) return false;
+    state.dueQuestions = state.dueQuestions.filter(index => index !== next);
+    state.fired[next] = true;
+    return true;
+  };
+  return published && typeof published.then === 'function'
+    ? published.then(finish)
+    : finish(published);
 }
 
 function plTick() {
@@ -3550,7 +3580,13 @@ function plTick() {
     return;
   }
 
-  if (plOpenNextDueQuestion() || !reachedEnd) return;
+  const opening = plOpenNextDueQuestion();
+  if (opening && typeof opening.then === 'function') opening.catch(() => {});
+  if (opening || !reachedEnd) return;
+  if (pl.openError && pl.dueQuestions && pl.dueQuestions.length) {
+    try { if (pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
+    return;
+  }
 
   if (pl.videoIndex >= pl.set.videos.length - 1) {
     plCompletePlaylist();
@@ -3573,10 +3609,20 @@ async function plOpenQuestion(i) {
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
   pl.pendingLiveQuestion = i;
   let image = '';
-  if (question.imgUrl) image = question.imgUrl;
-  else if (question.imgUp) image = await loadQuestionImage(
-    state.setId, question.key || i, state.sessionId
-  );
+  try {
+    if (question.imgUrl) image = question.imgUrl;
+    else if (question.imgUp) image = await loadQuestionImage(
+      state.setId, question.key || i, state.sessionId, state.snapshotVersion
+    );
+  } catch (e) {
+    if (pl === state && state.pendingLiveQuestion === i) {
+      state.pendingLiveQuestion = -1;
+      state.openError = e && e.message ? e.message : String(e);
+      if (typeof plRenderQList === 'function') plRenderQList();
+      toast('문항 공개 실패 — 문항의 [열기]를 눌러 다시 시도해 주세요');
+    }
+    throw e;
+  }
   if (pl !== state || state.pendingLiveQuestion !== i) return false;
   const mode = state.set.settings.revealMode;
   const revealed = mode === 'instant';
@@ -3607,9 +3653,21 @@ async function plOpenQuestion(i) {
   if (revealed) live.publicAnswer = FirestoreStore.publicAnswer(question);
   try {
     await store.setLive(state.sessionId, live);
+    if (pl !== state || state.pendingLiveQuestion !== i) return false;
+    state.openError = '';
+    state.dueQuestions = (state.dueQuestions || []).filter(index => index !== i);
+    if (!Array.isArray(state.fired)) state.fired = [];
+    state.fired[i] = true;
+    if (typeof plRenderQList === 'function') plRenderQList();
+    if (typeof plRenderTimeline === 'function') plRenderTimeline();
     return true;
   } catch (e) {
-    if (pl === state && state.pendingLiveQuestion === i) state.pendingLiveQuestion = -1;
+    if (pl === state && state.pendingLiveQuestion === i) {
+      state.pendingLiveQuestion = -1;
+      state.openError = e && e.message ? e.message : String(e);
+      if (typeof plRenderQList === 'function') plRenderQList();
+      toast('문항 공개 실패 — 문항의 [열기]를 눌러 다시 시도해 주세요');
+    }
     throw e;
   }
 }
@@ -3679,7 +3737,11 @@ function plCloseQuestion() {
     }
     state.closeError = '';
     state.pendingLiveQuestion = -1;
-    if (plOpenNextDueQuestion()) return true;
+    try {
+      if (await plOpenNextDueQuestion()) return true;
+    } catch (error) {
+      return false;
+    }
     if (typeof plTick === 'function') plTick();
     if (state.transitionUntil || state.playlistDone) return true;
     try { state.player.playVideo(); } catch (e) {}
@@ -3737,7 +3799,10 @@ function plRenderQList() {
       (n ? '<span class="tag mute">' + n + '명 응답</span>' : '') +
       '<button class="btn sm ghost" onclick="plOpenQuestion(' + i + ')" title="영상과 상관없이 지금 이 문항을 엽니다">열기</button>' +
     '</div>';
-  }).join('');
+  }).join('') + (pl.openError
+    ? '<div class="notice bad" role="alert">문항 공개 실패: ' + esc(pl.openError) +
+      ' · 해당 문항의 [열기]를 눌러 다시 시도해 주세요.</div>'
+    : '');
 }
 
 /* ── 실시간 순위 ──────────────────────────────────────────────────────
@@ -3923,7 +3988,9 @@ function plRenderOverlay() {
     const state = pl;
     const imgEl = ov.querySelector('#ov-img');
     if (q.imgUrl) imgEl.src = q.imgUrl;
-    else loadQuestionImage(pl.setId, q.key || i, pl.sessionId).then(src => {
+    else loadQuestionImage(
+      pl.setId, q.key || i, pl.sessionId, pl.snapshotVersion
+    ).then(src => {
       const now = document.querySelector('#ov-img');
       if (pl === state && state.live.q === i && now === imgEl && src) now.src = src;
     });
@@ -4093,7 +4160,7 @@ function screenStudent(codeArg, authUser) {
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     myAnswers: {},          // { 문항index: {answer, submitted, revision, ok?} }
     sel: null, multiSel: [], draft: '', submitted: false, ownScore: null,
-    revision: 0, deadlineHandled: '', writeQueues: {},
+    revision: 0, deadlineHandled: '', writeQueues: {}, optimisticRevisions: {},
     uiRevealed: false, uiLocked: false, uiQ: -2
   };
   const state = st;
@@ -4550,22 +4617,30 @@ function stSend(payload, localRec) {
   const i = state.live.q;
   const revision = Number(payload && payload.revision) || 0;
   const previous = state.myAnswers[i];
+  if (!state.optimisticRevisions) state.optimisticRevisions = {};
+  state.optimisticRevisions[i] = revision;
   state.submitted = true;
   state.myAnswers[i] = localRec;
   stRender();
   return stQueueWrite(state, i, () => store.writeStudentAnswer(
     state.sessionId, state.authUid, i, payload
   ))
-    .then(() => true)
+    .then(() => {
+      if (state.optimisticRevisions && state.optimisticRevisions[i] === revision) {
+        delete state.optimisticRevisions[i];
+      }
+      return true;
+    })
     .catch(e => {
       console.error(e);
-      if (st === state && state.live.q === i && Number(state.revision) === revision &&
-          state.myAnswers[i] === localRec) {
-        toast('전송 실패 — 다시 시도해 주세요');
-        state.submitted = !!previous;
+      if (st === state && state.optimisticRevisions &&
+          state.optimisticRevisions[i] === revision && state.myAnswers[i] === localRec) {
+        delete state.optimisticRevisions[i];
         if (previous) state.myAnswers[i] = previous;
         else delete state.myAnswers[i];
+        if (state.live.q === i) state.submitted = !!previous;
         stRender();
+        toast('전송 실패 — 다시 시도해 주세요');
       }
       return false;
     });
@@ -4649,17 +4724,25 @@ function stReviseAnswer() {
     revision: revision,
     submittedAt: SV_TS
   };
+  if (!state.optimisticRevisions) state.optimisticRevisions = {};
+  state.optimisticRevisions[i] = revision;
   delete state.myAnswers[i];
   state.submitted = false;
   stRender();
   return stQueueWrite(state, i, () => store.writeStudentAnswer(
     state.sessionId, state.authUid, i, payload
-  )).then(() => true).catch(e => {
+  )).then(() => {
+    if (state.optimisticRevisions && state.optimisticRevisions[i] === revision) {
+      delete state.optimisticRevisions[i];
+    }
+    return true;
+  }).catch(e => {
     console.error(e);
-    if (st === state && state.live.q === i && Number(state.revision) === revision &&
-        !state.myAnswers[i] && !state.submitted) {
+    if (st === state && state.optimisticRevisions &&
+        state.optimisticRevisions[i] === revision && !state.myAnswers[i]) {
+      delete state.optimisticRevisions[i];
       state.myAnswers[i] = current;
-      state.submitted = true;
+      if (state.live.q === i) state.submitted = true;
       stRender();
       toast('다시 고르기 실패 — 다시 시도해 주세요');
     }
@@ -4700,7 +4783,7 @@ function screenDashboard(sessionId) {
     if (!sess) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">반 정보를 찾을 수 없습니다.</div></div></div>'; return; }
     state.session = sess;
     const setLoad = store.getSessionQuizSet
-      ? store.getSessionQuizSet(sessionId, sess.setId)
+      ? store.getSessionQuizSet(sess)
       : store.getQuizSet(sess.setId);
     return setLoad.then(savedSet => {
       if (dash !== state) return;
@@ -5025,7 +5108,8 @@ function screenAdmin() {
     sessions: {}, resp: {}, sets: {},
     from: '', to: '', setFilter: '', gradeFilter: '', klassFilter: '',
     tab: 'sessions', loading: false, detail: null,
-    loadGeneration: 0, displayedSessionIds: [], displayedRange: null
+    loadGeneration: 0, displayedSessionIds: [], purgeSessionIds: [], displayedRange: null,
+    rangeRejected: false, rejectedSessionCount: 0
   };
   onCleanup(() => { adm = null; });
 
@@ -5115,6 +5199,10 @@ function admLoad() {
   body.innerHTML = '<div class="empty">불러오는 중…</div>';
   state.loading = true;
   state.detail = null;
+  state.displayedSessionIds = [];
+  state.purgeSessionIds = [];
+  state.rangeRejected = false;
+  state.rejectedSessionCount = 0;
 
   const fromTs = filter.from ? new Date(filter.from + 'T00:00:00').getTime() : 0;
   const toTs = filter.to ? new Date(filter.to + 'T23:59:59').getTime() : Infinity;
@@ -5131,10 +5219,13 @@ function admLoad() {
     const ids = Object.keys(picked);
     if (ids.length > 300) {
       if (!isCurrent()) return;
-      state.sessions = picked;
+      state.sessions = {};
       state.resp = {};
       state.displayedSessionIds = [];
+      state.purgeSessionIds = [];
       state.displayedRange = { from: filter.from, to: filter.to };
+      state.rangeRejected = true;
+      state.rejectedSessionCount = ids.length;
       body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' + ids.length +
         '건입니다. 기간을 좁혀서 조회해 주세요.</div></div>';
       state.loading = false;
@@ -5146,9 +5237,10 @@ function admLoad() {
       const session = picked[id];
       const setId = session.setId;
       if (!setId) return Promise.resolve([id, null, false]);
-      const hasSnapshot = session.snapshotVersion && store.getSessionQuizSet;
+      const hasSnapshot = Object.prototype.hasOwnProperty.call(session, 'snapshotVersion') &&
+        store.getSessionQuizSet;
       if (hasSnapshot || (!store.getQuizSet && store.getSessionQuizSet)) {
-        return store.getSessionQuizSet(id, setId).then(rawSet => [id, rawSet, true]);
+        return store.getSessionQuizSet(session).then(rawSet => [id, rawSet, true]);
       }
       if (nextSets[setId]) return Promise.resolve([id, nextSets[setId].set, false]);
       if (!legacyLoads[setId]) legacyLoads[setId] = store.getQuizSet(setId);
@@ -5185,7 +5277,10 @@ function admLoad() {
         state.sets = nextSets;
         state.resp = nextResp;
         state.displayedSessionIds = ids.slice();
+        state.purgeSessionIds = ids.slice();
         state.displayedRange = { from: filter.from, to: filter.to };
+        state.rangeRejected = false;
+        state.rejectedSessionCount = 0;
         state.loading = false;
         admFillSetOptions();
         admRenderBody();
@@ -5193,6 +5288,12 @@ function admLoad() {
   }).catch(e => {
     if (!isCurrent()) return;
     state.loading = false;
+    state.sessions = {};
+    state.resp = {};
+    state.displayedSessionIds = [];
+    state.purgeSessionIds = [];
+    state.rangeRejected = false;
+    state.rejectedSessionCount = 0;
     console.error(e);
     body.innerHTML = '<div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div>';
   });
@@ -5277,8 +5378,17 @@ function admCompute() {
 function admRenderBody() {
   const body = $('#adm-body');
   if (!body || adm.loading) return;
+  if (adm.rangeRejected) {
+    adm.displayedSessionIds = [];
+    adm.purgeSessionIds = [];
+    body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' +
+      (Number(adm.rejectedSessionCount) || 0) +
+      '건입니다. 기간을 좁혀서 조회해 주세요.</div></div>';
+    return;
+  }
   const data = admCompute();
   adm.displayedSessionIds = data.sessions.map(session => session.id);
+  adm.purgeSessionIds = adm.displayedSessionIds.slice();
 
   if (adm.detail) { body.innerHTML = admStudentDetail(data, adm.detail); return; }
   if (adm.tab === 'manage')  { body.innerHTML = admManage(data); return; }
@@ -5424,7 +5534,7 @@ function admClassesView(d) {
 }
 
 function admManage(d) {
-  const displayedIds = (adm.displayedSessionIds || []).slice();
+  const displayedIds = (adm.purgeSessionIds || []).slice();
   const displayedRange = adm.displayedRange || { from: adm.from, to: adm.to };
   return '<div class="card">' +
       '<h2>비밀번호 변경</h2>' +
@@ -5466,9 +5576,9 @@ function admChangePw() {
 }
 
 function admPurge() {
-  const sessionIds = Array.isArray(adm.displayedSessionIds)
-    ? adm.displayedSessionIds.slice()
-    : admCompute().sessions.map(session => session.id);
+  const sessionIds = Array.isArray(adm.purgeSessionIds)
+    ? adm.purgeSessionIds.slice()
+    : [];
   const range = adm.displayedRange || { from: adm.from, to: adm.to };
   if (!sessionIds.length) { alert('삭제할 기록이 없습니다.'); return; }
   const msg = range.from + ' ~ ' + range.to + ' 기간의 진행 기록 ' + sessionIds.length + '건과 모든 학생 응답을 영구 삭제합니다.\n되돌릴 수 없습니다. 계속하려면 아래에 삭제 를 입력하세요.';

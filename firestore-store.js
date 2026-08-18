@@ -9,6 +9,23 @@
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
 
+  function estimateBatchRequest(set, images) {
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(JSON.stringify(set || {})).length +
+      Object.entries(images || {}).reduce((count, [key, data]) =>
+        count + encoder.encode(key).length + encoder.encode(data).length + 64, 0
+      );
+    const imageWrites = Object.keys(images || {}).length;
+    const transformWrites = 2;
+    const writes = 1 + imageWrites + transformWrites;
+    return {
+      writes,
+      bytes,
+      allowed: writes <= 500 && bytes <= 9_500_000,
+      reason: writes > 500 ? 'writes' : bytes > 9_500_000 ? 'bytes' : ''
+    };
+  }
+
   function createLiveToken() {
     const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
     if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
@@ -93,6 +110,9 @@
 
   function createFirestoreStore(db, fieldValue, nowFn) {
     let serverOffset = 0;
+    const serverTimestampProbe = fieldValue && typeof fieldValue.serverTimestamp === 'function'
+      ? fieldValue.serverTimestamp()
+      : null;
 
     const snapshotValue = snapshot => snapshot.exists
       ? { ...snapshot.data(), id: snapshot.id }
@@ -168,6 +188,47 @@
         });
       return result;
     };
+    const isServerTimestamp = value => {
+      if (serverTimestampProbe !== null && value === serverTimestampProbe) return true;
+      if (!value || typeof value !== 'object') return false;
+      const methodName = value._methodName ||
+        value._delegate && value._delegate._methodName || '';
+      return methodName === 'FieldValue.serverTimestamp' || methodName === 'serverTimestamp';
+    };
+    const transformCount = value => {
+      if (isServerTimestamp(value)) return 1;
+      if (Array.isArray(value)) {
+        return value.reduce((count, item) => count + transformCount(item), 0);
+      }
+      if (value && typeof value === 'object') {
+        return Object.values(value).reduce(
+          (count, item) => count + transformCount(item), 0
+        );
+      }
+      return 0;
+    };
+    const requestEstimate = (set, images, extraWrites) => {
+      const estimate = estimateBatchRequest(set, images);
+      estimate.writes = 1 + Object.keys(images || {}).length +
+        transformCount(set) + (Number(extraWrites) || 0);
+      estimate.allowed = estimate.writes <= 500 && estimate.bytes <= 9_500_000;
+      estimate.reason = estimate.writes > 500
+        ? 'writes'
+        : estimate.bytes > 9_500_000 ? 'bytes' : '';
+      return estimate;
+    };
+    const assertRequestAllowed = estimate => {
+      if (estimate.allowed) return;
+      if (estimate.reason === 'writes') {
+        throw new Error(
+          '세트와 이미지를 한 번에 저장할 수 있는 Firestore 500개 쓰기·변환 한도를 넘었습니다.'
+        );
+      }
+      throw new Error(
+        '세트와 이미지 저장 요청이 Firestore 10 MiB 한도에 가까워 저장할 수 없습니다. ' +
+        '이미지 크기나 개수를 줄여 주세요.'
+      );
+    };
 
     const permissionDenied = error =>
       String(error && error.code || '').indexOf('permission-denied') >= 0;
@@ -228,18 +289,17 @@
 
     async function saveQuizSetWithImages(setId, value, images) {
       const path = 'images/' + setId + '/q';
-      const current = await db.collection(path).get().then(collectionValue);
       const next = normalizedImages(images);
+      const storedSet = withContentRevision(value);
+      assertRequestAllowed(requestEstimate(storedSet, next));
+      const current = await db.collection(path).get().then(collectionValue);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
       );
-      const operationCount = 1 + deletes.length + Object.keys(next).length;
-      if (operationCount > 500) {
-        throw new Error('세트와 이미지를 한 번에 저장할 수 있는 500개 작업 한도를 넘었습니다.');
-      }
+      assertRequestAllowed(requestEstimate(storedSet, next, deletes.length));
       const batch = db.batch();
-      batch.set(db.doc('quiz_sets/' + setId), withContentRevision(value));
+      batch.set(db.doc('quiz_sets/' + setId), storedSet);
       deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
       Object.entries(next).forEach(([questionIndex, data]) => {
         batch.set(db.doc(path + '/' + questionIndex), { data });
@@ -276,22 +336,33 @@
       ));
     }
 
+    async function getQuizSetSnapshot(setId) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const before = await getQuizSet(setId);
+        if (!before) throw new Error('세션 스냅샷을 만들 퀴즈 세트를 찾을 수 없습니다.');
+        const snapshotImages = await getImages(setId);
+        const after = await getQuizSet(setId);
+        if (!after) throw new Error('세션 스냅샷을 만들던 중 퀴즈 세트가 삭제되었습니다.');
+        if (sameRevision(before, after)) {
+          return { setSnapshot: after, snapshotImages };
+        }
+      }
+      throw new Error('퀴즈 세트가 계속 변경되어 같은 리비전의 세션 스냅샷을 만들지 못했습니다.');
+    }
+
     async function replaceImages(setId, images) {
       const path = 'images/' + setId + '/q';
-      const current = await db.collection(path).get().then(collectionValue);
       const next = normalizedImages(images);
+      const revisionPatch = { contentRevision: fieldValue.serverTimestamp() };
+      assertRequestAllowed(requestEstimate(revisionPatch, next));
+      const current = await db.collection(path).get().then(collectionValue);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
       );
-      const operationCount = 1 + deletes.length + Object.keys(next).length;
-      if (operationCount > 500) {
-        throw new Error('세트와 이미지를 한 번에 저장할 수 있는 500개 작업 한도를 넘었습니다.');
-      }
+      assertRequestAllowed(requestEstimate(revisionPatch, next, deletes.length));
       const batch = db.batch();
-      batch.set(db.doc('quiz_sets/' + setId), {
-        contentRevision: fieldValue.serverTimestamp()
-      }, { merge: true });
+      batch.set(db.doc('quiz_sets/' + setId), revisionPatch, { merge: true });
       deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
       Object.entries(next).forEach(([questionIndex, data]) => {
         batch.set(db.doc(path + '/' + questionIndex), { data });
@@ -311,27 +382,26 @@
     async function copyOwnedQuizSet(sourceId, newId, teacher) {
       const sourceReference = db.doc('quiz_sets/' + sourceId);
       const destinationReference = db.doc('quiz_sets/' + newId);
+      const copyValue = current => ownedQuizSet({
+        ...current,
+        id: newId,
+        title: ((current.title || '제목 없음') + ' (사본)').slice(0, 200),
+        createdAt: fieldValue.serverTimestamp(),
+        updatedAt: fieldValue.serverTimestamp(),
+        contentRevision: fieldValue.serverTimestamp()
+      }, teacher);
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const before = await getQuizSet(sourceId);
         if (!before) return null;
         const images = await getImages(sourceId);
         const entries = Object.entries(normalizedImages(images));
-        if (1 + entries.length > 500) {
-          throw new Error('세트와 이미지를 한 번에 저장할 수 있는 500개 작업 한도를 넘었습니다.');
-        }
+        assertRequestAllowed(requestEstimate(copyValue(before), Object.fromEntries(entries)));
         const result = await db.runTransaction(async transaction => {
           const currentSnapshot = await transaction.get(sourceReference);
           const current = quizSetValue(currentSnapshot);
           if (!current) return { missing: true };
           if (!sameRevision(before, current)) return { retry: true };
-          const copy = ownedQuizSet({
-            ...current,
-            id: newId,
-            title: ((current.title || '제목 없음') + ' (사본)').slice(0, 200),
-            createdAt: fieldValue.serverTimestamp(),
-            updatedAt: fieldValue.serverTimestamp(),
-            contentRevision: fieldValue.serverTimestamp()
-          }, teacher);
+          const copy = copyValue(current);
           transaction.set(destinationReference, withoutDocumentId(copy));
           entries.forEach(([questionIndex, data]) => {
             transaction.set(db.doc('images/' + newId + '/q/' + questionIndex), { data });
@@ -351,9 +421,19 @@
       delete storedSession.setSnapshot;
       delete storedSession.snapshotImages;
       if (setSnapshot) storedSession.snapshotVersion = 1;
-      const operationCount = 4 + (setSnapshot ? 1 : 0) + Object.keys(snapshotImages).length;
-      if (operationCount > 500) {
-        return Promise.reject(new Error('세션 snapshot이 Firestore 500개 작업 한도를 넘었습니다.'));
+      const snapshotRequest = estimateBatchRequest(setSnapshot || {}, snapshotImages);
+      snapshotRequest.writes = 4 + (setSnapshot ? 1 : 0) +
+        Object.keys(snapshotImages).length + transformCount(storedSession) + 1 +
+        transformCount(setSnapshot || {});
+      snapshotRequest.bytes += estimateBatchRequest(storedSession, {}).bytes + 512;
+      snapshotRequest.allowed = snapshotRequest.writes <= 500 && snapshotRequest.bytes <= 9_500_000;
+      snapshotRequest.reason = snapshotRequest.writes > 500
+        ? 'writes'
+        : snapshotRequest.bytes > 9_500_000 ? 'bytes' : '';
+      try {
+        assertRequestAllowed(snapshotRequest);
+      } catch (error) {
+        return Promise.reject(error);
       }
       return db.runTransaction(async transaction => {
         const codeReference = db.doc('codes/' + code);
@@ -424,26 +504,67 @@
       return db.doc('sessions/' + sessionId).get().then(sessionValue);
     }
 
-    async function getSessionQuizSet(sessionId, setId) {
-      const snapshot = await db.doc('sessions/' + sessionId + '/snapshot/set').get();
+    const sessionReader = (sessionOrId, setId) => {
+      if (sessionOrId && typeof sessionOrId === 'object') {
+        return {
+          id: String(sessionOrId.id || ''),
+          setId: String(sessionOrId.setId || ''),
+          snapshotVersion: sessionOrId.snapshotVersion,
+          versioned: Object.prototype.hasOwnProperty.call(sessionOrId, 'snapshotVersion')
+        };
+      }
+      return {
+        id: String(sessionOrId || ''),
+        setId: String(setId || ''),
+        snapshotVersion: undefined,
+        versioned: false
+      };
+    };
+    const validSnapshotSet = value => !!value && Array.isArray(value.videos) &&
+      value.videos.every(video => video && Array.isArray(video.questions));
+
+    async function getSessionQuizSet(sessionOrId, setId) {
+      const session = sessionReader(sessionOrId, setId);
+      const strict = session.versioned;
+      if (strict && session.snapshotVersion !== 1) {
+        throw new Error('지원하지 않는 세션 스냅샷 버전입니다.');
+      }
+      const snapshot = await db.doc('sessions/' + session.id + '/snapshot/set').get();
       if (snapshot.exists) {
         const value = { ...snapshot.data() };
+        if (!validSnapshotSet(value)) {
+          if (strict) throw new Error('세션 세트 스냅샷이 손상되었습니다.');
+          return getQuizSet(session.setId);
+        }
         ['createdAt', 'updatedAt'].forEach(field => {
           const millis = timestampMillis(value[field]);
           if (millis !== null) value[field] = millis;
         });
         return value;
       }
-      return getQuizSet(setId);
+      if (strict) throw new Error('세션 세트 스냅샷을 찾을 수 없습니다.');
+      return getQuizSet(session.setId);
     }
 
-    async function getSessionQuestionImage(sessionId, setId, questionIndex) {
-      const key = imageKey(questionIndex);
-      if (!key) return '';
+    async function getSessionQuestionImage(sessionOrId, setId, questionIndex) {
+      const objectSession = sessionOrId && typeof sessionOrId === 'object';
+      const session = sessionReader(sessionOrId, objectSession ? undefined : setId);
+      const requestedQuestion = objectSession ? setId : questionIndex;
+      const strict = session.versioned;
+      if (strict && session.snapshotVersion !== 1) {
+        throw new Error('지원하지 않는 세션 스냅샷 버전입니다.');
+      }
+      const key = imageKey(requestedQuestion);
+      if (!key) {
+        if (strict) throw new Error('세션 스냅샷 이미지 키가 손상되었습니다.');
+        return '';
+      }
       const image = await db.doc(
-        'sessions/' + sessionId + '/snapshot_images/' + key
+        'sessions/' + session.id + '/snapshot_images/' + key
       ).get().then(snapshotValue);
-      return image ? image.data || '' : getQuestionImage(setId, key);
+      if (image && typeof image.data === 'string' && image.data) return image.data;
+      if (strict) throw new Error('세션 스냅샷 이미지를 찾을 수 없거나 손상되었습니다.');
+      return getQuestionImage(session.setId, key);
     }
 
     function getStudent(sessionId, studentId) {
@@ -673,6 +794,7 @@
       patchQuizSet,
       getQuestionImage,
       getImages,
+      getQuizSetSnapshot,
       replaceImages,
       copyQuizSet,
       copyOwnedQuizSet,
@@ -763,6 +885,7 @@
 
   return {
     createFirestoreStore,
+    estimateBatchRequest,
     publicQuestion,
     publicAnswer,
     createLiveToken,

@@ -47,6 +47,25 @@ function updateFieldPaths(current, update, resolveValue = clone) {
   return result;
 }
 
+function requestTransformCount(value) {
+  if (value === SERVER_TIMESTAMP) return 1;
+  if (Array.isArray(value)) {
+    return value.reduce((count, item) => count + requestTransformCount(item), 0);
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value).reduce(
+      (count, item) => count + requestTransformCount(item), 0
+    );
+  }
+  return 0;
+}
+
+function requestBytes(value) {
+  return new TextEncoder().encode(JSON.stringify(value, (key, item) =>
+    item === SERVER_TIMESTAMP ? '__server_timestamp__' : item
+  ) || '').length;
+}
+
 function makeFirestoreFake(initial = {}, options = {}) {
   const committedServerMillis = options.committedServerMillis ?? 50_000;
   const documents = new Map(Object.entries(initial).map(([path, value]) => [path, clone(value)]));
@@ -218,6 +237,18 @@ function makeFirestoreFake(initial = {}, options = {}) {
         async commit() {
           batchCommitCount += 1;
           calls.push({ operation: 'batchCommit', size: operations.length });
+          const requestWrites = operations.length + operations.reduce(
+            (count, operation) => count + requestTransformCount(operation.value), 0
+          );
+          const batchBytes = operations.reduce((count, operation) =>
+            count + requestBytes(operation.ref.path) + requestBytes(operation.value) + 64, 0
+          );
+          if (options.maxRequestWrites && requestWrites > options.maxRequestWrites) {
+            throw new Error('fake Firestore request exceeds write limit');
+          }
+          if (options.maxRequestBytes && batchBytes > options.maxRequestBytes) {
+            throw new Error('fake Firestore request exceeds byte limit');
+          }
           if (options.failBatchCommitAt === batchCommitCount) {
             throw new Error('planned batch failure ' + batchCommitCount);
           }
@@ -239,6 +270,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
       calls.push({ operation: 'runTransaction' });
       const staged = new Map(documents);
       const touched = new Set();
+      const requestOperations = [];
       const transaction = {
         async get(ref) {
           calls.push({ operation: 'transactionGet', path: ref.path });
@@ -246,6 +278,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
         },
         set(ref, value, optionsArg) {
           calls.push({ operation: 'transactionSet', path: ref.path, value: clone(value), options: clone(optionsArg) });
+          requestOperations.push({ operation: 'set', ref, value });
           const resolved = resolveServerTimestamps(value);
           staged.set(ref.path, optionsArg && optionsArg.merge
             ? merge(staged.get(ref.path), resolved)
@@ -255,6 +288,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
         },
         update(ref, value) {
           calls.push({ operation: 'transactionUpdate', path: ref.path, value: clone(value) });
+          requestOperations.push({ operation: 'update', ref, value });
           if (!staged.has(ref.path)) throw new Error('not-found');
           staged.set(ref.path, updateFieldPaths(
             staged.get(ref.path), value, resolveServerTimestamps
@@ -264,12 +298,25 @@ function makeFirestoreFake(initial = {}, options = {}) {
         },
         delete(ref) {
           calls.push({ operation: 'transactionDelete', path: ref.path });
+          requestOperations.push({ operation: 'delete', ref });
           staged.delete(ref.path);
           touched.add(ref.path);
           return transaction;
         }
       };
       const result = await updateFunction(transaction);
+      const requestWrites = requestOperations.length + requestOperations.reduce(
+        (count, operation) => count + requestTransformCount(operation.value), 0
+      );
+      const transactionBytes = requestOperations.reduce((count, operation) =>
+        count + requestBytes(operation.ref.path) + requestBytes(operation.value) + 64, 0
+      );
+      if (options.maxRequestWrites && requestWrites > options.maxRequestWrites) {
+        throw new Error('fake Firestore transaction exceeds write limit');
+      }
+      if (options.maxRequestBytes && transactionBytes > options.maxRequestBytes) {
+        throw new Error('fake Firestore transaction exceeds byte limit');
+      }
       documents.clear();
       staged.forEach((value, path) => documents.set(path, value));
       touched.forEach(notify);
@@ -2138,6 +2185,43 @@ test('세션 시작은 열 후보가 모두 충돌하면 더 만들지 않고 �
   assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 10);
 });
 
+test('세션 snapshot reader는 세트 구조와 이미지를 같은 content revision에서 다시 읽는다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': {
+      title: 'v1', contentRevision: 1, videos: [{ questions: [{ imgUp: true }] }]
+    },
+    'images/set1/q/v0q0': { data: 'image-v1' }
+  });
+  const originalCollection = fake.db.collection;
+  let firstImageRead = true;
+  fake.db.collection = path => {
+    const reference = originalCollection(path);
+    if (path !== 'images/set1/q') return reference;
+    return {
+      ...reference,
+      async get() {
+        const snapshot = await reference.get();
+        if (firstImageRead) {
+          firstImageRead = false;
+          fake.emit('quiz_sets/set1', {
+            title: 'v2', contentRevision: 2,
+            videos: [{ questions: [{ imgUp: true }] }]
+          });
+          fake.emit('images/set1/q/v0q0', { data: 'image-v2' });
+        }
+        return snapshot;
+      }
+    };
+  };
+  const store = createStore(fake);
+
+  const snapshot = await store.getQuizSetSnapshot('set1');
+
+  assert.equal(snapshot.setSnapshot.title, 'v2');
+  assert.deepEqual(snapshot.snapshotImages, { v0q0: 'image-v2' });
+  assert.ok(fake.calls().filter(call => call.path === 'quiz_sets/set1').length >= 4);
+});
+
 test('학생·응답·live 구독은 세션의 각 Firestore 경로 데이터만 반환한다', async () => {
   const fake = makeFirestoreFake({
     'sessions/a/students/s1': { name: '가' },
@@ -3607,7 +3691,7 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
   let rendered = 0;
   const generated = ['SESSION12345', 'OLD234', 'NEW234'];
   const context = {
-    pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
+    pl: { setId: 'set1', set: { title: '오래된 세트', author: '이전 교사' } },
     teacherState: {
       status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
     },
@@ -3617,6 +3701,12 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
     rid() { return generated.shift(); },
     SV_TS: serverTimestamp,
     store: {
+      async getQuizSetSnapshot() {
+        return {
+          setSnapshot: { title: '첫 세트', author: '교사' },
+          snapshotImages: { v0q0: 'exact-image' }
+        };
+      },
       async startSession(sessionId, session, createCode) {
         received = { sessionId, session, codes: [createCode(), createCode()] };
         return 'NEW234';
@@ -3636,7 +3726,8 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
       setId: 'set1', setTitle: '첫 세트', label: '2학년 3반',
       teacher: '교사', createdAt: serverTimestamp, status: 'live',
       teacherUid: 'teacher-1', teacherEmail: 'teacher@school.kr',
-      setSnapshot: { title: '첫 세트', author: '교사' }, snapshotImages: {}
+      setSnapshot: { title: '첫 세트', author: '교사' },
+      snapshotImages: { v0q0: 'exact-image' }
     },
     codes: ['OLD234', 'NEW234']
   });
@@ -3675,6 +3766,41 @@ test('이미지 스냅샷을 읽는 동안 승인이 취소되면 세션을 만�
   assert.equal(starts, 0);
   assert.equal(context.pl.sessionId, undefined);
   assert.equal(context.pl.startingSession, false);
+});
+
+test('세션 할당 뒤 화면을 떠나면 소유 교사 권한으로 고아 세션을 즉시 종료한다', async () => {
+  let finishStart;
+  const ended = [];
+  const oldState = { setId: 'set1', set: { title: '첫 세트', author: '교사' } };
+  const context = {
+    pl: oldState,
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'),
+    $() { return { value: '' }; }, lsSet() {}, rid() { return 'SESSION12345'; },
+    SV_TS: Symbol('server timestamp'),
+    store: {
+      async getImages() { return {}; },
+      startSession() { return new Promise(resolve => { finishStart = resolve; }); },
+      async endSession(sessionId) { ended.push(sessionId); }
+    },
+    renderPlayRun() { throw new Error('떠난 화면을 렌더하면 안 된다'); },
+    alert() {}, console
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'plStartSession'
+  ), context);
+
+  const starting = context.plStartSession();
+  await new Promise(resolve => setImmediate(resolve));
+  context.pl = { setId: 'other' };
+  finishStart('NEW234');
+  await starting;
+
+  assert.deepEqual(ended, ['SESSION12345']);
+  assert.equal(oldState.sessionId, undefined);
+  assert.equal(oldState.code, undefined);
 });
 
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
@@ -6064,6 +6190,48 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
   assert.equal(context.adm.loading, false);
 });
 
+test('관리자 조회도 snapshotVersion 필드가 있으면 값의 truthiness와 무관하게 strict reader를 사용한다', async () => {
+  const calls = [];
+  const body = { innerHTML: '' };
+  const session = {
+    id: 'version-zero', setId: 'set1', snapshotVersion: 0,
+    createdAt: new Date('2024-01-15T00:00:00').getTime()
+  };
+  const context = {
+    adm: {
+      sessions: {}, resp: {}, sets: {}, from: '2024-01-01', to: '2024-01-31',
+      loading: false, detail: null
+    },
+    store: {
+      async listSessions() { return [session]; },
+      async getSessionQuizSet(value) {
+        calls.push(['snapshot', value.snapshotVersion]);
+        throw new Error('지원하지 않는 세션 스냅샷 버전입니다.');
+      },
+      async getQuizSet() {
+        calls.push(['mutable']);
+        return { videos: [] };
+      },
+      async getCollection() { return {}; }
+    },
+    FirestoreCore: require('../firestore-core.js'),
+    PlaylistCore: require('../playlist-core.js'),
+    normSet(value) { return value; },
+    $(selector) { return selector === '#adm-body' ? body : null; },
+    admFillSetOptions() {}, admRenderBody() {}, esc(value) { return String(value); },
+    Date, console: { error() {} }
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'admLoad'
+  ), context);
+
+  await context.admLoad();
+
+  assert.deepEqual(calls, [['snapshot', 0]]);
+  assert.deepEqual(Object.keys(context.adm.sessions), []);
+  assert.deepEqual(Array.from(context.adm.purgeSessionIds), []);
+});
+
 test('관리자 집계는 세트별 평탄 문항 키만 포함하고 범위 밖 응답은 제외한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {
@@ -6144,8 +6312,9 @@ test('관리자 기간 삭제는 화면에서 경로를 만들지 않고 저장�
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const context = {
-    adm: { from: '2024-01-01', to: '2024-01-31' },
-    admCompute() { return { sessions: [{ id: 'a' }, { id: 'b' }] }; },
+    adm: {
+      from: '2024-01-01', to: '2024-01-31', purgeSessionIds: ['a', 'b']
+    },
     prompt() { return '삭제'; },
     store: {
       async purgeSessions(ids) { calls.push(['purgeSessions', ids]); }
@@ -6228,6 +6397,95 @@ test('세트 구조와 이미지는 하나의 batch에서 함께 교체된다', 
   );
 });
 
+test('estimateBatchRequest는 transform 포함 500 쓰기와 10 MiB 안전 경계를 계산한다', () => {
+  const { estimateBatchRequest } = loadStoreModule();
+  const atLimit = Object.fromEntries(
+    Array.from({ length: 497 }, (_, index) => ['v0q' + index, 'x'])
+  );
+  const overWrites = Object.assign({}, atLimit, { v0q497: 'x' });
+
+  assert.deepEqual(estimateBatchRequest({ title: '세트' }, atLimit), {
+    writes: 500, bytes: 35195, allowed: true, reason: ''
+  });
+  assert.equal(estimateBatchRequest({ title: '세트' }, overWrites).writes, 501);
+  assert.equal(estimateBatchRequest({ title: '세트' }, overWrites).reason, 'writes');
+
+  const overBytes = estimateBatchRequest({}, { v0q0: '가'.repeat(3_166_667) });
+  assert.equal(overBytes.allowed, false);
+  assert.equal(overBytes.reason, 'bytes');
+  assert.ok(overBytes.bytes > 9_500_000);
+});
+
+test('세트 이미지 저장은 실제 transform 수와 10 MiB를 Firestore 호출 전에 거부한다', async () => {
+  const transformFake = makeFirestoreFake({}, {
+    maxRequestWrites: 500,
+    maxRequestBytes: 10_000_000
+  });
+  const transformStore = createStore(transformFake);
+  const images = Object.fromEntries(
+    Array.from({ length: 497 }, (_, index) => ['v0q' + index, 'x'])
+  );
+
+  await assert.rejects(
+    () => transformStore.saveQuizSetWithImages('set1', {
+      title: '세트', createdAt: SERVER_TIMESTAMP, updatedAt: SERVER_TIMESTAMP
+    }, images),
+    /500개.*변환/
+  );
+  assert.deepEqual(transformFake.calls(), []);
+
+  const byteFake = makeFirestoreFake({}, {
+    maxRequestWrites: 500,
+    maxRequestBytes: 10_000_000
+  });
+  const byteStore = createStore(byteFake);
+  await assert.rejects(
+    () => byteStore.saveQuizSetWithImages('set1', { title: '세트' }, {
+      v0q0: '가'.repeat(3_166_667)
+    }),
+    /10 MiB/
+  );
+  assert.deepEqual(byteFake.calls(), []);
+});
+
+test('사본과 세션 snapshot 트랜잭션도 transform 수와 10 MiB를 쓰기 전에 거부한다', async () => {
+  const sourceImages = Object.fromEntries(
+    Array.from({ length: 497 }, (_, index) => [
+      'images/source/q/v0q' + index, { data: 'x' }
+    ])
+  );
+  const copyFake = makeFirestoreFake({
+    'quiz_sets/source': {
+      title: '원본', videos: [{ questions: [] }], ownerUid: 'owner'
+    },
+    ...sourceImages
+  }, { maxRequestWrites: 500, maxRequestBytes: 10_000_000 });
+  const copyStore = createStore(copyFake);
+  await assert.rejects(
+    () => copyStore.copyOwnedQuizSet('source', 'copy', {
+      uid: 'teacher-1', email: 'teacher@school.kr'
+    }),
+    /500개.*변환/
+  );
+  assert.equal(copyFake.calls().some(call => call.operation === 'runTransaction'), false);
+
+  const huge = '가'.repeat(3_166_667);
+  const sessionFake = makeFirestoreFake({}, {
+    maxRequestWrites: 500,
+    maxRequestBytes: 10_000_000
+  });
+  const sessionStore = createStore(sessionFake);
+  await assert.rejects(
+    () => sessionStore.startSession('session1', {
+      setId: 'set1', createdAt: SERVER_TIMESTAMP,
+      setSnapshot: { title: '세트', videos: [{ questions: [] }] },
+      snapshotImages: { v0q0: huge }
+    }, () => 'ABC234'),
+    /10 MiB/
+  );
+  assert.equal(sessionFake.calls().some(call => call.operation === 'runTransaction'), false);
+});
+
 test('이미지 batch가 실패하면 새 세트 구조도 공개되지 않는다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/set1': { title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }] },
@@ -6269,6 +6527,47 @@ test('세션 시작은 세트와 이미지 revision을 고정하고 이후 편�
   assert.equal(fake.value('sessions/session1/snapshot/set').title, '시작 전');
 });
 
+test('snapshotVersion 1은 누락되거나 손상된 snapshot을 mutable 세트로 fallback하지 않는다', async () => {
+  const missingFake = makeFirestoreFake({
+    'quiz_sets/set1': { title: '수정 가능한 현재 세트', videos: [{ questions: [] }] }
+  });
+  const missingStore = createStore(missingFake);
+
+  await assert.rejects(
+    () => missingStore.getSessionQuizSet({ id: 's1', setId: 'set1', snapshotVersion: 1 }),
+    /스냅샷/
+  );
+  assert.equal(missingFake.calls().some(call => call.path === 'quiz_sets/set1'), false);
+
+  const corruptFake = makeFirestoreFake({
+    'sessions/s1/snapshot/set': { title: 'videos가 없는 손상 문서' },
+    'quiz_sets/set1': { title: '현재 세트', videos: [{ questions: [] }] }
+  });
+  const corruptStore = createStore(corruptFake);
+  await assert.rejects(
+    () => corruptStore.getSessionQuizSet({ id: 's1', setId: 'set1', snapshotVersion: 1 }),
+    /스냅샷/
+  );
+  await assert.rejects(
+    () => corruptStore.getSessionQuestionImage(
+      { id: 's1', setId: 'set1', snapshotVersion: 1 }, 'v0q0'
+    ),
+    /스냅샷 이미지/
+  );
+});
+
+test('snapshotVersion 없는 legacy 세션만 현재 세트와 이미지 fallback을 사용한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { title: 'legacy 현재 세트', videos: [{ questions: [] }] },
+    'images/set1/q/v0q0': { data: 'legacy-image' }
+  });
+  const store = createStore(fake);
+  const legacySession = { id: 'legacy', setId: 'set1' };
+
+  assert.equal((await store.getSessionQuizSet(legacySession)).title, 'legacy 현재 세트');
+  assert.equal(await store.getSessionQuestionImage(legacySession, 'v0q0'), 'legacy-image');
+});
+
 test('학생은 세션 snapshot과 현재 편집본을 읽지 않고 공개 live만 기다린다', async () => {
   const calls = [];
   const context = {
@@ -6301,9 +6600,11 @@ test('대시보드는 세션 snapshot을 현재 편집본보다 우선한다', a
   const context = {
     dash: null,
     store: {
-      async getSession() { return { id: 'session1', setId: 'set1', setTitle: '원래 세트' }; },
-      async getSessionQuizSet(sessionId, setId) {
-        calls.push(['snapshot', sessionId, setId]);
+      async getSession() {
+        return { id: 'session1', setId: 'set1', setTitle: '원래 세트', snapshotVersion: 1 };
+      },
+      async getSessionQuizSet(session) {
+        calls.push(['snapshot', session]);
         return { title: '원래 세트', videos: [{ questions: [{ text: '원래 문항' }] }] };
       },
       async getQuizSet() { calls.push(['mutable']); return null; },
@@ -6318,7 +6619,9 @@ test('대시보드는 세션 snapshot을 현재 편집본보다 우선한다', a
 
   await context.screenDashboard('session1');
 
-  assert.deepEqual(calls, [['snapshot', 'session1', 'set1']]);
+  assert.deepEqual(calls, [['snapshot', {
+    id: 'session1', setId: 'set1', setTitle: '원래 세트', snapshotVersion: 1
+  }]]);
   assert.equal(context.dash.flatQuestions[0].text, '원래 문항');
 });
 
@@ -6467,6 +6770,96 @@ test('이전 편집 화면의 지연 초안 저장은 새 화면 내용을 저�
   assert.equal(writes, 0);
 });
 
+test('live 공개 실패는 due 문항을 제거하거나 fired 처리하지 않고 재시도 상태를 남긴다', async () => {
+  const notices = [];
+  let pauses = 0;
+  const error = Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
+  const context = {
+    pl: {
+      sessionId: 'session1', setId: 'set1', live: { q: -1 }, pendingLiveQuestion: -1,
+      dueQuestions: [1], fired: [false, false],
+      flatQuestions: [
+        { type: 'choice', text: 'A', choices: [] },
+        { number: 2, type: 'choice', text: 'B', choices: [] }
+      ],
+      set: { settings: { autoPause: true, revealMode: 'manual', limitSec: 20 } },
+      player: { pauseVideo() { pauses += 1; } }
+    },
+    SV_TS: 999,
+    limitFor() { return 20; },
+    FirestoreStore: loadStoreModule(),
+    store: { async setLive() { throw error; } },
+    plRenderQList() {}, plRenderTimeline() {},
+    toast(message) { notices.push(message); },
+    console: { error() {} }
+  };
+  loadStageFunctions(['plOpenQuestion', 'plOpenNextDueQuestion'], context);
+
+  await assert.rejects(() => context.plOpenNextDueQuestion(), /permission-denied/);
+
+  assert.deepEqual(Array.from(context.pl.dueQuestions), [1]);
+  assert.equal(context.pl.fired[1], false);
+  assert.equal(context.pl.pendingLiveQuestion, -1);
+  assert.equal(pauses, 1);
+  assert.match(context.pl.openError, /permission-denied/);
+  assert.equal(notices.length, 1);
+});
+
+test('수동 문항 공개 성공은 같은 due 항목을 제거하고 fired를 완료 처리한다', async () => {
+  const context = {
+    pl: {
+      sessionId: 'session1', setId: 'set1', live: { q: -1 }, pendingLiveQuestion: -1,
+      dueQuestions: [1], fired: [false, false],
+      flatQuestions: [
+        { type: 'choice', text: 'A', choices: [] },
+        { number: 2, type: 'choice', text: 'B', choices: [] }
+      ],
+      set: { settings: { autoPause: false, revealMode: 'manual', limitSec: 20 } },
+      player: {}
+    },
+    SV_TS: 999,
+    limitFor() { return 20; },
+    FirestoreStore: loadStoreModule(),
+    store: { async setLive() {} },
+    plRenderQList() {}, plRenderTimeline() {}, toast() {}, console
+  };
+  loadStageFunctions(['plOpenQuestion'], context);
+
+  assert.equal(await context.plOpenQuestion(1), true);
+  assert.deepEqual(Array.from(context.pl.dueQuestions), []);
+  assert.equal(context.pl.fired[1], true);
+});
+
+test('snapshot 이미지 누락은 빈 이미지 공개로 진행하지 않고 due 재시도 상태를 보존한다', async () => {
+  let liveWrites = 0;
+  const notices = [];
+  const context = {
+    pl: {
+      sessionId: 'session1', setId: 'set1', snapshotVersion: 1,
+      live: { q: -1 }, pendingLiveQuestion: -1,
+      dueQuestions: [0], fired: [false],
+      flatQuestions: [{ number: 1, key: 'v0q0', type: 'choice', text: 'A', choices: [], imgUp: true }],
+      set: { settings: { autoPause: true, revealMode: 'manual', limitSec: 20 } },
+      player: { pauseVideo() {} }
+    },
+    SV_TS: 999, limitFor() { return 20; },
+    loadQuestionImage() { return Promise.reject(new Error('세션 스냅샷 이미지를 찾을 수 없습니다.')); },
+    FirestoreStore: loadStoreModule(),
+    store: { async setLive() { liveWrites += 1; } },
+    plRenderQList() {}, plRenderTimeline() {}, toast(message) { notices.push(message); },
+    console: { error() {} }
+  };
+  loadStageFunctions(['plOpenQuestion', 'plOpenNextDueQuestion'], context);
+
+  await assert.rejects(() => context.plOpenNextDueQuestion(), /스냅샷 이미지/);
+
+  assert.equal(liveWrites, 0);
+  assert.deepEqual(Array.from(context.pl.dueQuestions), [0]);
+  assert.equal(context.pl.fired[0], false);
+  assert.equal(context.pl.pendingLiveQuestion, -1);
+  assert.equal(notices.length, 1);
+});
+
 test('같은 tick에 지난 문항은 모두 queue에 남고 첫 문항만 연다', () => {
   const opened = [];
   const context = {
@@ -6490,7 +6883,7 @@ test('같은 tick에 지난 문항은 모두 queue에 남고 첫 문항만 연�
 
   assert.deepEqual(opened, [0]);
   assert.deepEqual(context.pl.dueQuestions, [1]);
-  assert.deepEqual(context.pl.fired, [true, true]);
+  assert.deepEqual(context.pl.fired, [true, false]);
 });
 
 test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 먼저 연다', async () => {
@@ -6711,6 +7104,39 @@ test('이전 revision 실패는 뒤이은 학생 답의 낙관 상태를 rollbac
   assert.equal(context.st.myAnswers[0], secondLocal);
 });
 
+test('학생 queued 쓰기 실패는 live 문항이 바뀌어도 소유 revision을 rollback하고 알린다', async () => {
+  let rejectWrite;
+  const notices = [];
+  const context = {
+    st: {
+      sessionId: 'session1', authUid: 'student1', sid: 'student1', live: { q: 0 },
+      myAnswers: {}, submitted: false, revision: 1, writeQueues: {}
+    },
+    store: {
+      writeStudentAnswer() {
+        return new Promise((resolve, reject) => { rejectWrite = reject; });
+      }
+    },
+    stRender() {}, toast(message) { notices.push(message); }, console: { error() {} }
+  };
+  loadStageFunctions(['stQueueWrite', 'stSend'], context);
+  const local = { answer: 0, revision: 1, submitted: true };
+
+  const sending = context.stSend(
+    { answer: 0, revision: 1, submitted: true, submittedAt: 999 }, local
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  context.st.live = { q: 1 };
+  context.st.revision = 2;
+  context.st.submitted = false;
+  rejectWrite(new Error('permission-denied'));
+  assert.equal(await sending, false);
+
+  assert.equal(context.st.myAnswers[0], undefined);
+  assert.equal(context.st.submitted, false);
+  assert.deepEqual(notices, ['전송 실패 — 다시 시도해 주세요']);
+});
+
 test('겹친 관리자 조회는 최신 filter snapshot만 게시한다', async () => {
   const pending = [];
   const body = { innerHTML: '' };
@@ -6744,12 +7170,49 @@ test('겹친 관리자 조회는 최신 filter snapshot만 게시한다', async 
   assert.deepEqual(JSON.parse(JSON.stringify(context.adm.displayedRange)), { from: '2024-02-01', to: '2024-02-29' });
 });
 
+test('300건 초과 결과는 sessions를 게시하지 않고 탭 전환 뒤에도 purge 대상이 되지 않는다', async () => {
+  const body = { innerHTML: '' };
+  const sessions = Array.from({ length: 301 }, (_, index) => ({
+    id: 'session-' + index,
+    createdAt: new Date('2024-01-15T00:00:00').getTime(),
+    setId: 'set1'
+  }));
+  const context = {
+    adm: {
+      sessions: { stale: { setId: 'old' } }, resp: {}, sets: {},
+      from: '2024-01-01', to: '2024-01-31', setFilter: '', gradeFilter: '', klassFilter: '',
+      tab: 'sessions', loading: false, detail: null, loadGeneration: 0,
+      displayedSessionIds: ['stale'], purgeSessionIds: ['stale']
+    },
+    store: { async listSessions() { return sessions; } },
+    $(selector) { return selector === '#adm-body' ? body : null; },
+    admCompute() {
+      return {
+        sessions: Object.keys(context.adm.sessions).map(id => ({ id })),
+        students: {}, perSession: {}
+      };
+    },
+    admSessionsView() { return 'sessions'; }, admManage() { return 'manage'; },
+    admStudentsView() { return 'students'; }, admClassesView() { return 'classes'; },
+    esc(value) { return String(value); }, Date, console
+  };
+  loadStageFunctions(['admLoad', 'admRenderBody'], context);
+
+  await context.admLoad();
+  context.adm.tab = 'manage';
+  context.admRenderBody();
+
+  assert.deepEqual(Object.keys(context.adm.sessions), []);
+  assert.deepEqual(Array.from(context.adm.displayedSessionIds), []);
+  assert.deepEqual(Array.from(context.adm.purgeSessionIds), []);
+});
+
 test('관리자 삭제는 입력 변경과 무관하게 게시된 immutable 결과만 지운다', async () => {
   let purged;
   const context = {
     adm: {
       from: '2024-02-01', to: '2024-02-29', displayedRange: { from: '2024-01-01', to: '2024-01-31' },
-      displayedSessionIds: ['shown-session']
+      displayedSessionIds: ['changed-session'], purgeSessionIds: ['shown-session']
     },
     admCompute() { return { sessions: [{ id: 'changed-session' }] }; },
     prompt() { return '삭제'; }, alert() {}, toast() {}, admLoad() {},
@@ -6771,7 +7234,8 @@ test('관리자 렌더는 세트 filter가 적용된 표시 결과 ID를 삭제 
         one: { setId: 'set-a', students: {} },
         two: { setId: 'set-b', students: {} }
       },
-      resp: {}, sets: {}, gradeFilter: '', klassFilter: '', displayedSessionIds: []
+      resp: {}, sets: {}, gradeFilter: '', klassFilter: '',
+      displayedSessionIds: [], purgeSessionIds: []
     },
     $(selector) { return selector === '#adm-body' ? body : null; },
     admCompute() {
@@ -6788,6 +7252,7 @@ test('관리자 렌더는 세트 filter가 적용된 표시 결과 ID를 삭제 
   context.admRenderBody();
 
   assert.deepEqual(Array.from(context.adm.displayedSessionIds), ['two']);
+  assert.deepEqual(Array.from(context.adm.purgeSessionIds), ['two']);
   assert.equal(body.innerHTML, 'rendered');
 });
 
