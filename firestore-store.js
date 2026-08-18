@@ -46,6 +46,26 @@
       const { id, ...data } = value || {};
       return data;
     };
+    const imageKey = value => {
+      const key = String(value == null ? '' : value);
+      if (/^\d+$/.test(key)) return 'v0q' + Number(key);
+      const match = /^v(\d+)q(\d+)$/.exec(key);
+      return match ? 'v' + Number(match[1]) + 'q' + Number(match[2]) : null;
+    };
+    const normalizedImages = images => {
+      const result = {};
+      const entries = Object.entries(images || {});
+      entries
+        .filter(([key]) => /^\d+$/.test(key))
+        .concat(entries.filter(([key]) => !/^\d+$/.test(key)))
+        .forEach(([key, data]) => {
+          const normalizedKey = imageKey(key);
+          if (normalizedKey && typeof data === 'string' && data.length > 0) {
+            result[normalizedKey] = data;
+          }
+        });
+      return result;
+    };
 
     async function listQuizSets() {
       const snapshot = await db.collection('quiz_sets').get();
@@ -67,29 +87,32 @@
     }
 
     async function getQuestionImage(setId, questionIndex) {
-      const image = await db.doc('images/' + setId + '/q/' + questionIndex).get().then(snapshotValue);
+      const key = imageKey(questionIndex);
+      if (!key) return '';
+      let image = await db.doc('images/' + setId + '/q/' + key).get().then(snapshotValue);
+      if (!image && key.startsWith('v0q')) {
+        image = await db.doc('images/' + setId + '/q/' + key.slice(3)).get().then(snapshotValue);
+      }
       return image ? image.data || '' : '';
     }
 
     async function getImages(setId) {
       const images = await db.collection('images/' + setId + '/q').get().then(collectionValue);
-      return Object.fromEntries(
+      return normalizedImages(Object.fromEntries(
         Object.entries(images)
           .filter(([, image]) => image && typeof image.data === 'string' && image.data.length > 0)
           .map(([questionIndex, image]) => [questionIndex, image.data])
-      );
+      ));
     }
 
     async function replaceImages(setId, images) {
       const path = 'images/' + setId + '/q';
       const current = await db.collection(path).get().then(collectionValue);
-      const next = Object.fromEntries(
-        Object.entries(images || {})
-          .filter(([, data]) => typeof data === 'string' && data.length > 0)
-      );
+      const next = normalizedImages(images);
       const batch = db.batch();
       Object.keys(current).forEach(questionIndex => {
-        if (!Object.prototype.hasOwnProperty.call(next, questionIndex)) {
+        if (questionIndex !== imageKey(questionIndex) ||
+            !Object.prototype.hasOwnProperty.call(next, questionIndex)) {
           batch.delete(db.doc(path + '/' + questionIndex));
         }
       });

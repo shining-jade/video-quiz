@@ -328,7 +328,9 @@ test('이미지를 문항별 문서로 교체하고 기존 화면 형태로 읽�
 
   await store.replaceImages('set1', { '0': 'new', '2': 'third' });
 
-  assert.deepEqual(await store.getImages('set1'), { '0': 'new', '2': 'third' });
+  assert.deepEqual(await store.getImages('set1'), { v0q0: 'new', v0q2: 'third' });
+  assert.equal(fake.has('images/set1/q/0'), false);
+  assert.equal(fake.value('images/set1/q/v0q0').data, 'new');
   assert.equal(fake.has('images/set1/q/3'), false);
 });
 
@@ -338,8 +340,39 @@ test('기존 JSON의 희소 이미지 배열은 null 슬롯을 이미지 문서�
 
   await store.replaceImages('set1', ['first', null, 'third']);
 
-  assert.deepEqual(await store.getImages('set1'), { '0': 'first', '2': 'third' });
+  assert.deepEqual(await store.getImages('set1'), { v0q0: 'first', v0q2: 'third' });
+  assert.equal(fake.value('images/set1/q/v0q0').data, 'first');
   assert.equal(fake.has('images/set1/q/1'), false);
+});
+
+test('구형 숫자 이미지 문서는 첫 영상의 신형 키로 읽는다', async () => {
+  const fake = makeFirestoreFake({
+    'images/set1/q/0': { data: 'legacy' },
+    'images/set1/q/v1q0': { data: 'second-video' }
+  });
+  const store = createStore(fake);
+
+  assert.deepEqual(await store.getImages('set1'), {
+    v0q0: 'legacy', v1q0: 'second-video'
+  });
+  assert.equal(await store.getQuestionImage('set1', 'v0q0'), 'legacy');
+  assert.equal(await store.getQuestionImage('set1', 'v1q0'), 'second-video');
+});
+
+test('다중 영상 세트와 영상별 이미지 키를 보존한다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+  const videos = [
+    { videoId: 'a', questions: [{ text: 'A' }] },
+    { videoId: 'b', questions: [{ text: 'B' }] }
+  ];
+
+  await store.saveQuizSet('set1', { title: '세트', videos });
+  await store.replaceImages('set1', { v0q0: 'img-a', v1q0: 'img-b' });
+
+  assert.deepEqual(fake.value('quiz_sets/set1').videos, videos);
+  assert.equal(fake.value('images/set1/q/v0q0').data, 'img-a');
+  assert.equal(fake.value('images/set1/q/v1q0').data, 'img-b');
 });
 
 test('세트 목록과 단건 읽기는 문서 ID를 우선하고 문항 배열을 보존한다', async () => {
@@ -362,6 +395,38 @@ test('세트 목록과 단건 읽기는 문서 ID를 우선하고 문항 배열�
     title: '첫 세트',
     questions: [{ type: 'choice', text: '문항' }]
   });
+});
+
+test('구형·신형 세트를 영상 배열 중심의 같은 화면 모델로 정규화한다', () => {
+  const context = {
+    DEFAULT_SETTINGS: { revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true },
+    REVEAL_LABEL: { timer: '타이머' },
+    QTYPES: { choice: '객관식' },
+    OX_CHOICES: ['O', 'X'],
+    PlaylistCore: require('../playlist-core.js')
+  };
+  loadStageFunctions(['normSettings', 'normQuestions', 'normSet'], context);
+
+  const legacy = context.normSet({
+    title: '구형', videoId: 'a', videoUrl: 'url-a', questions: [{ t: 10, text: 'A' }]
+  });
+  const modern = context.normSet({
+    title: '신형', videos: [
+      { videoId: 'a', startSec: 10, endSec: 20, questions: [{ t: 15, text: 'A' }] },
+      { videoId: 'b', startSec: 30, endSec: 60, questions: [{ t: 40, text: 'B' }] }
+    ]
+  });
+
+  assert.deepEqual(JSON.parse(JSON.stringify(legacy.videos)), [{
+    videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+    questions: [{
+      type: 'choice', t: 10, text: 'A', choices: [], answer: 0, answers: [], accept: [],
+      imgUrl: '', imgUp: false, _img: '', explain: '', limitSec: null
+    }]
+  }]);
+  assert.deepEqual(modern.videos.map(video => video.videoId), ['a', 'b']);
+  assert.equal(legacy.questions, undefined);
+  assert.equal(legacy.videoId, undefined);
 });
 
 test('세트 날짜 Timestamp는 기존 화면과 내보내기가 쓰는 밀리초 숫자로 바꾼다', async () => {
@@ -426,7 +491,7 @@ test('세트 숨김 해제는 기존 내보내기처럼 archived 필드를 제�
 });
 
 test('문항 이미지 한 장은 data만 반환하고 없으면 빈 문자열을 반환한다', async () => {
-  const fake = makeFirestoreFake({ 'images/set1/q/2': { data: 'data:image/png;base64,abc' } });
+  const fake = makeFirestoreFake({ 'images/set1/q/v0q2': { data: 'data:image/png;base64,abc' } });
   const store = createStore(fake);
 
   assert.equal(await store.getQuestionImage('set1', 2), 'data:image/png;base64,abc');
@@ -458,7 +523,9 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
     title: '원본 (사본)', author: '새 교사',
     questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100
   });
-  assert.deepEqual(await store.getImages('copy'), { '0': 'first-image', '2': 'third-image' });
+  assert.deepEqual(await store.getImages('copy'), { v0q0: 'first-image', v0q2: 'third-image' });
+  assert.equal(fake.value('images/copy/q/v0q0').data, 'first-image');
+  assert.equal(fake.has('images/copy/q/0'), false);
 });
 
 test('단일 세트 내보내기는 Firestore 문서 ID를 빼고 기존 JSON 형식을 유지한다', async () => {
@@ -470,7 +537,7 @@ test('단일 세트 내보내기는 Firestore 문서 ID를 빼고 기존 JSON �
   const context = {
     store: {
       async getQuizSet() { return { id: 'set1', title: '내보내기', questions: [{ text: '문항' }] }; },
-      async getImages() { return { '0': 'image-data' }; }
+      async getImages() { return { v0q0: 'image-data' }; }
     },
     EXPORT_VERSION: 1,
     Date,
@@ -489,9 +556,77 @@ test('단일 세트 내보내기는 Firestore 문서 ID를 빼고 기존 JSON �
   assert.deepEqual(JSON.parse(JSON.stringify(pack.set)), {
     title: '내보내기', questions: [{ text: '문항' }]
   });
-  assert.deepEqual(JSON.parse(JSON.stringify(pack.images)), { '0': 'image-data' });
+  assert.deepEqual(JSON.parse(JSON.stringify(pack.images)), { v0q0: 'image-data' });
   assert.equal(pack.v, 1);
   assert.match(pack.exportedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('가져오기는 모든 영상과 문항을 videos 배열로 저장한다', async () => {
+  const saved = [];
+  const images = [];
+  const context = {
+    normSet() {
+      return {
+        title: '세트', author: '교사', settings: { limitSec: 20 },
+        videos: [
+          { videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 20, questions: [{ type: 'long', t: 15, text: 'A' }] },
+          { videoId: 'b', videoUrl: 'url-b', startSec: 30, endSec: 60, questions: [{ type: 'long', t: 40, text: 'B' }] }
+        ]
+      };
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    qType(q) { return q.type; },
+    rid() { return 'new-set'; },
+    lsGet() { return ''; },
+    SV_TS: { kind: 'timestamp' },
+    store: {
+      async saveQuizSet(id, value) { saved.push([id, clone(value)]); },
+      async replaceImages(id, value) { images.push([id, clone(value)]); }
+    }
+  };
+  loadStageFunctions(['setImportOne'], context);
+
+  await context.setImportOne({ set: {}, images: { '0': 'legacy-image', v1q0: 'new-image' } });
+
+  assert.deepEqual(saved[0][1].videos.map(video => ({
+    videoId: video.videoId, startSec: video.startSec, endSec: video.endSec,
+    questions: video.questions.map(question => question.text)
+  })), [
+    { videoId: 'a', startSec: 10, endSec: 20, questions: ['A'] },
+    { videoId: 'b', startSec: 30, endSec: 60, questions: ['B'] }
+  ]);
+  assert.equal(saved[0][1].questions, undefined);
+  assert.deepEqual(images, [['new-set', { '0': 'legacy-image', v1q0: 'new-image' }]]);
+});
+
+test('편집 payload는 영상별 문항과 업로드 이미지를 신형 키로 보존한다', () => {
+  const context = {
+    mk: {
+      title: ' 세트 ', author: ' 교사 ', settings: {}, createdAt: 10, archived: false,
+      videos: [
+        { videoId: 'a', videoUrl: ' url-a ', startSec: 10, endSec: 20,
+          questions: [{ type: 'long', t: 15, text: ' A ', choices: [], imgUp: true, _img: 'img-a' }] },
+        { videoId: 'b', videoUrl: ' url-b ', startSec: 30, endSec: 60,
+          questions: [{ type: 'long', t: 40, text: ' B ', choices: [], imgUp: true, _img: 'img-b' }] }
+      ]
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    qType(q) { return q.type; },
+    normSettings(value) { return value; },
+    SV_TS: { kind: 'timestamp' }
+  };
+  loadStageFunctions(['mkPayload'], context);
+
+  const payload = context.mkPayload();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.set.videos)), [
+    { videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 20,
+      questions: [{ type: 'long', t: 15, text: 'A', choices: [], answer: 0, imgUp: true }] },
+    { videoId: 'b', videoUrl: 'url-b', startSec: 30, endSec: 60,
+      questions: [{ type: 'long', t: 40, text: 'B', choices: [], answer: 0, imgUp: true }] }
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.images)), { v0q0: 'img-a', v1q0: 'img-b' });
+  assert.equal(payload.set.questions, undefined);
 });
 
 test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한다', async () => {

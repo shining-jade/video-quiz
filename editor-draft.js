@@ -12,11 +12,9 @@
   function snapshot(model, now) {
     const clean = {
       title: model.title,
-      videoUrl: model.videoUrl,
-      videoId: model.videoId,
       author: model.author,
       settings: model.settings,
-      questions: model.questions,
+      videos: model.videos,
       createdAt: model.createdAt,
       archived: model.archived
     };

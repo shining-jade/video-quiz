@@ -14,8 +14,8 @@ function memoryStorage(initial = {}) {
 
 test('편집 초안은 새 세트와 기존 세트를 서로 다른 키에 보관한다', () => {
   const storage = memoryStorage();
-  draft.write(storage, '', { title: '새 세트', questions: [] }, 1000);
-  draft.write(storage, 'set-a', { title: '기존 세트', questions: [] }, 2000);
+  draft.write(storage, '', { title: '새 세트', videos: [] }, 1000);
+  draft.write(storage, 'set-a', { title: '기존 세트', videos: [] }, 2000);
 
   assert.equal(draft.read(storage, '').model.title, '새 세트');
   assert.equal(draft.read(storage, 'set-a').model.title, '기존 세트');
@@ -25,20 +25,34 @@ test('편집 초안은 새 세트와 기존 세트를 서로 다른 키에 보�
 test('편집 초안은 저장용 필드만 복제하고 저장 시각으로 복구 여부를 정한다', () => {
   const storage = memoryStorage();
   const model = {
-    title: '수정', videoUrl: 'https://youtu.be/x', videoId: 'x', author: '교사',
-    settings: { limitSec: 15 }, questions: [{ text: '문항' }], createdAt: 10,
+    title: '수정', author: '교사', settings: { limitSec: 15 },
+    videos: [{ videoUrl: 'https://youtu.be/x', videoId: 'x', questions: [{ text: '문항' }] }], createdAt: 10,
     archived: false, saved: false, settingsOpen: true
   };
 
   draft.write(storage, 'set-a', model, 2000);
-  model.questions[0].text = '나중 변경';
+  model.videos[0].questions[0].text = '나중 변경';
   const restored = draft.read(storage, 'set-a');
 
-  assert.equal(restored.model.questions[0].text, '문항');
+  assert.equal(restored.model.videos[0].questions[0].text, '문항');
+  assert.equal(restored.model.videoId, undefined);
+  assert.equal(restored.model.questions, undefined);
   assert.equal(restored.model.saved, undefined);
   assert.equal(restored.model.settingsOpen, undefined);
   assert.equal(draft.isNewer(restored, 1999), true);
   assert.equal(draft.isNewer(restored, 2000), false);
+});
+
+test('편집 초안은 다중 영상과 영상별 문항을 보존한다', () => {
+  const storage = memoryStorage();
+  const model = { title: '세트', videos: [
+    { videoId: 'a', startSec: 10, endSec: 20, questions: [{ t: 15 }] },
+    { videoId: 'b', startSec: 30, endSec: 60, questions: [{ t: 40 }] }
+  ] };
+
+  draft.write(storage, 'set-a', model, 1000);
+
+  assert.deepEqual(draft.read(storage, 'set-a').model.videos, model.videos);
 });
 
 test('깨진 편집 초안은 무시하고 정식 저장 뒤 지울 수 있다', () => {

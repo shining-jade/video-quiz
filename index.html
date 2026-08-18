@@ -1004,16 +1004,17 @@ function normQuestions(qs) {
 }
 function normSet(raw) {
   if (!raw) return null;
+  const videos = PlaylistCore.normalizeVideos(raw).map(video => Object.assign({}, video, {
+    questions: normQuestions(video.questions)
+  }));
   return {
     title: raw.title || '제목 없음',
-    videoId: raw.videoId || '',
-    videoUrl: raw.videoUrl || '',
     author: raw.author || '',
     createdAt: raw.createdAt || 0,
     updatedAt: raw.updatedAt || 0,
     archived: !!raw.archived,
     settings: normSettings(raw.settings),
-    questions: normQuestions(raw.questions)
+    videos: videos
   };
 }
 /* ── 문항 이미지 ────────────────────────────────────────────────────────
@@ -1349,26 +1350,31 @@ function setImportPick(input) {
 function setImportOne(p) {
   const src = p.set || {};
   const set = normSet(src);
-  if (!set || !set.questions.length) return Promise.reject(new Error('문항이 없는 세트입니다.'));
+  if (!set || !PlaylistCore.flattenQuestions(set.videos).length) return Promise.reject(new Error('문항이 없는 세트입니다.'));
 
   // 저장 형식으로 다시 만든다 (낯선 필드가 섞여 규칙에 걸리지 않도록)
-  const questions = set.questions.map(q => {
-    const o = { type: qType(q), t: q.t, text: q.text, choices: q.choices, answer: q.answer };
-    if ((q.answers || []).length) o.answers = q.answers;
-    if ((q.accept || []).length) o.accept = q.accept;
-    if (q.imgUrl) o.imgUrl = q.imgUrl;
-    if (q.imgUp) o.imgUp = true;
-    if (q.explain) o.explain = q.explain;
-    if (q.limitSec !== null && q.limitSec !== undefined) o.limitSec = q.limitSec;
-    return o;
-  });
+  const videos = set.videos.map(video => ({
+    videoId: video.videoId,
+    videoUrl: video.videoUrl,
+    startSec: video.startSec,
+    endSec: video.endSec,
+    questions: video.questions.map(q => {
+      const o = { type: qType(q), t: q.t, text: q.text, choices: q.choices, answer: q.answer };
+      if ((q.answers || []).length) o.answers = q.answers;
+      if ((q.accept || []).length) o.accept = q.accept;
+      if (q.imgUrl) o.imgUrl = q.imgUrl;
+      if (q.imgUp) o.imgUp = true;
+      if (q.explain) o.explain = q.explain;
+      if (q.limitSec !== null && q.limitSec !== undefined) o.limitSec = q.limitSec;
+      return o;
+    })
+  }));
 
   const newId = rid(8);
   const data = {
     title: (set.title + ' (가져옴)').slice(0, 200),
-    videoId: set.videoId, videoUrl: set.videoUrl,
     author: set.author || lsGet('vq_teacher'),
-    settings: set.settings, questions: questions,
+    settings: set.settings, videos: videos,
     createdAt: SV_TS, updatedAt: SV_TS
   };
   return store.saveQuizSet(newId, data)
@@ -2100,57 +2106,62 @@ function mkValidate() {
 }
 
 function mkPayload() {
-  // 저장 전에 시각 순으로 맞춰 둔다 (이미지도 같은 순서로 따라가야 하므로 여기서 한 번에)
-  const ordered = mk.questions.slice().sort((a, b) => a.t - b.t);
-
-  const questions = ordered.map(q => {
-    const type = qType(q);
-    const o = { type: type, t: Math.max(0, Number(q.t) || 0), text: q.text.trim() };
-
-    if (type === 'short') {
-      o.accept = (q.accept || []).map(s => String(s).trim().slice(0, 100)).filter(Boolean);
-      o.choices = [];
-      o.answer = 0;
-    } else if (type === 'long') {
-      o.choices = [];
-      o.answer = 0;
-    } else if (type === 'ox') {
-      const cur = (q.choices || []).map(c => String(c).trim()).filter(Boolean);
-      o.choices = (cur.length >= 2) ? cur.slice(0, 2) : OX_CHOICES.slice();
-      o.answer = Math.min(1, Math.max(0, Number(q.answer) || 0));
-    } else {
-      // 빈 보기는 빼고, 정답 위치를 그에 맞게 다시 계산한다
-      const keep = [], remap = {};
-      q.choices.forEach((c, j) => {
-        if (String(c).trim() === '') return;
-        remap[j] = keep.length;
-        keep.push(String(c).trim());
-      });
-      o.choices = keep;
-      o.answer = (remap[q.answer] !== undefined) ? remap[q.answer] : 0;
-      if (type === 'multi') {
-        o.answers = (q.answers || []).map(j => remap[j]).filter(x => x !== undefined).sort((a, b) => a - b);
-      }
-    }
-
-    if (q.imgUp && q._img) o.imgUp = true;
-    else if (q.imgUrl) o.imgUrl = q.imgUrl;
-    if (q.explain && q.explain.trim()) o.explain = q.explain.trim();
-    if (q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) o.limitSec = Math.max(0, Number(q.limitSec));
-    return o;
-  });
-
-  // 업로드 이미지는 세트가 아니라 images 하위 컬렉션에 둔다 (학생이 통째로 받지 않도록)
   const images = {};
-  ordered.forEach((q, i) => { if (q.imgUp && q._img) images[i] = q._img; });
+  const ordered = PlaylistCore.normalizeVideos(mk).map((video, videoIndex) => {
+    const orderedQuestions = video.questions.slice().sort((a, b) => a.t - b.t);
+    const questions = orderedQuestions.map((q, questionIndex) => {
+      const type = qType(q);
+      const o = { type: type, t: Math.max(0, Number(q.t) || 0), text: q.text.trim() };
+
+      if (type === 'short') {
+        o.accept = (q.accept || []).map(s => String(s).trim().slice(0, 100)).filter(Boolean);
+        o.choices = [];
+        o.answer = 0;
+      } else if (type === 'long') {
+        o.choices = [];
+        o.answer = 0;
+      } else if (type === 'ox') {
+        const cur = (q.choices || []).map(c => String(c).trim()).filter(Boolean);
+        o.choices = (cur.length >= 2) ? cur.slice(0, 2) : OX_CHOICES.slice();
+        o.answer = Math.min(1, Math.max(0, Number(q.answer) || 0));
+      } else {
+        // 빈 보기는 빼고, 정답 위치를 그에 맞게 다시 계산한다
+        const keep = [], remap = {};
+        (q.choices || []).forEach((c, j) => {
+          if (String(c).trim() === '') return;
+          remap[j] = keep.length;
+          keep.push(String(c).trim());
+        });
+        o.choices = keep;
+        o.answer = (remap[q.answer] !== undefined) ? remap[q.answer] : 0;
+        if (type === 'multi') {
+          o.answers = (q.answers || []).map(j => remap[j]).filter(x => x !== undefined).sort((a, b) => a - b);
+        }
+      }
+
+      if (q.imgUp && q._img) {
+        o.imgUp = true;
+        images['v' + videoIndex + 'q' + questionIndex] = q._img;
+      } else if (q.imgUrl) o.imgUrl = q.imgUrl;
+      if (q.explain && q.explain.trim()) o.explain = q.explain.trim();
+      if (q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) o.limitSec = Math.max(0, Number(q.limitSec));
+      return o;
+    });
+    return {
+      videoId: video.videoId,
+      videoUrl: String(video.videoUrl || '').trim(),
+      startSec: Math.max(0, Number(video.startSec) || 0),
+      endSec: (video.endSec === null || video.endSec === undefined || video.endSec === '')
+        ? null : Math.max(0, Number(video.endSec) || 0),
+      questions: questions
+    };
+  });
 
   const out = {
     title: mk.title.trim(),
-    videoId: mk.videoId,
-    videoUrl: mk.videoUrl.trim(),
     author: (mk.author || '').trim(),
     settings: normSettings(mk.settings),
-    questions: questions,
+    videos: ordered,
     createdAt: mk.createdAt || SV_TS,
     updatedAt: SV_TS
   };
@@ -2180,8 +2191,17 @@ function mkSave(forceNew) {
       mkClearDraft(draftId);
       if (draftId !== id) mkClearDraft(id);
       // 저장 결과를 그대로 다시 읽어들여, 정렬·인덱스 재계산이 화면에도 반영되게 한다
-      mk.questions = normQuestions(data.questions);
-      mk.questions.forEach((q, i) => { if (q.imgUp) q._img = built.images[i] || ''; });
+      if (Array.isArray(data.videos)) {
+        mk.videos = data.videos.map((video, videoIndex) => Object.assign({}, video, {
+          questions: normQuestions(video.questions).map((q, questionIndex) => {
+            if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
+            return q;
+          })
+        }));
+      } else {
+        mk.questions = normQuestions(data.questions);
+        mk.questions.forEach((q, i) => { if (q.imgUp) q._img = built.images['v0q' + i] || built.images[i] || ''; });
+      }
       Object.keys(built.images).forEach(i => { imgCache[id + '/' + i] = built.images[i]; });
       if (location.hash !== '#/make/' + id) {
         history.replaceState(null, '', '#/make/' + id);
