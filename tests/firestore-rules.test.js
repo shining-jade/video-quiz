@@ -13,8 +13,10 @@ const {
   getDoc,
   getDocs,
   query,
+  runTransaction,
   setDoc,
   setLogLevel,
+  Timestamp,
   updateDoc,
   where
 } = require('firebase/firestore');
@@ -94,6 +96,27 @@ const actors = {
 const actorNames = Object.keys(actors);
 const approvedTeachers = ['owner', 'otherTeacher', 'admin'];
 
+function publicQuestion(number = 1) {
+  return {
+    number,
+    total: 2,
+    type: 'mc',
+    text: `공개 문항 ${number}`,
+    choices: ['A', 'B']
+  };
+}
+
+function liveQuestion(q = 0, patch = {}) {
+  return {
+    q,
+    openedAt: Timestamp.fromMillis(1),
+    limitSec: 30,
+    revealed: false,
+    publicQuestion: publicQuestion(q + 1),
+    ...patch
+  };
+}
+
 function actorFirestore(actorName) {
   const actor = actors[actorName];
   return testEnvironment.authenticatedContext(actor.uid, actor.claims).firestore();
@@ -144,17 +167,25 @@ async function seedFirestore() {
       setDoc(doc(db, 'sessions/s1'), {
         teacherUid: 'owner-uid',
         teacherEmail: 'owner@school.kr',
-        status: 'active'
+        status: 'live'
       }),
       setDoc(doc(db, 'sessions/s2'), {
         teacherUid: 'other-teacher-uid',
         teacherEmail: 'other@school.kr',
-        status: 'active'
+        status: 'live'
       }),
       setDoc(doc(db, 'sessions/s1/meta/live'), {
         q: 0,
+        openedAt: Timestamp.fromMillis(1),
+        limitSec: 30,
         revealed: false,
-        publicQuestion: { text: '공개 문항' }
+        publicQuestion: {
+          number: 1,
+          total: 2,
+          type: 'mc',
+          text: '공개 문항',
+          choices: ['A', 'B']
+        }
       }),
       setDoc(doc(db, 'sessions/s1/meta/board'), { scores: {} }),
       setDoc(doc(db, 'sessions/s1/snapshot/set'), { title: '비공개 세트' }),
@@ -239,8 +270,16 @@ rulesTest('current-live-question response validation', async () => {
 
   await adminWrite('sessions/s1/meta/live', {
     q: 1,
+    openedAt: Timestamp.fromMillis(1),
+    limitSec: 30,
     revealed: false,
-    publicQuestion: { text: '두 번째 문항' }
+    publicQuestion: {
+      number: 2,
+      total: 2,
+      type: 'mc',
+      text: '두 번째 문항',
+      choices: ['A', 'B']
+    }
   });
 
   await assertSucceeds(updateDoc(own, {
@@ -256,6 +295,276 @@ rulesTest('current-live-question response validation', async () => {
       2: { answer: 3, submitted: true, revision: 1 }
     }
   }));
+});
+
+rulesTest('fix-round: teacher code allocation reads unused and foreign collision candidates', async () => {
+  const owner = actorFirestore('owner');
+  const created = await assertSucceeds(runTransaction(owner, async transaction => {
+    const codeReference = doc(owner, 'codes/UNUSED');
+    const candidate = await transaction.get(codeReference);
+    if (candidate.exists()) return false;
+
+    transaction.set(codeReference, { sessionId: 'created-session' });
+    transaction.set(doc(owner, 'sessions/created-session'), {
+      teacherUid: 'owner-uid',
+      teacherEmail: 'owner@school.kr',
+      status: 'live'
+    });
+    transaction.set(doc(owner, 'sessions/created-session/meta/live'), {
+      q: -1,
+      openedAt: 0,
+      limitSec: 0,
+      revealed: false
+    });
+    transaction.set(doc(owner, 'sessions/created-session/meta/board'), { scores: {} });
+    return true;
+  }));
+  assert.equal(created, true);
+
+  const collided = await assertSucceeds(runTransaction(owner, async transaction => {
+    const candidate = await transaction.get(doc(owner, 'codes/OTHER1'));
+    return candidate.exists();
+  }));
+  assert.equal(collided, true);
+});
+
+rulesTest('fix-round: live session supports read-before-create student join flow', async () => {
+  const student = anonymousContext('joining-student-uid');
+
+  const code = await assertSucceeds(getDoc(doc(student, 'codes/ABC123')));
+  assert.equal(code.data().sessionId, 's1');
+  const session = await assertSucceeds(getDoc(doc(student, 'sessions/s1')));
+  assert.equal(session.data().status, 'live');
+  const studentReference = doc(student, 'sessions/s1/students/joining-student-uid');
+  const missingStudent = await assertSucceeds(getDoc(studentReference));
+  assert.equal(missingStudent.exists(), false);
+  await assertSucceeds(setDoc(studentReference, {
+    uid: 'joining-student-uid',
+    grade: 1,
+    class: 2,
+    number: 5,
+    name: '신규 학생'
+  }));
+  const missingResponse = await assertSucceeds(getDoc(
+    doc(student, 'sessions/s1/responses/joining-student-uid')
+  ));
+  assert.equal(missingResponse.exists(), false);
+});
+
+rulesTest('fix-round: code update cannot move ownership across sessions', async () => {
+  const owner = actorFirestore('owner');
+  await assertFails(updateDoc(doc(owner, 'codes/OTHER1'), { sessionId: 's1' }));
+  await assertFails(updateDoc(doc(owner, 'codes/ABC123'), { sessionId: 's2' }));
+});
+
+rulesTest('fix-round: live projection rejects private or malformed fields', async t => {
+  const cases = [
+    ['pre-reveal publicAnswer', {
+      ...liveQuestion(),
+      publicAnswer: { answer: 1 }
+    }],
+    ['nested answer', {
+      ...liveQuestion(),
+      publicQuestion: { ...publicQuestion(), answer: 1 }
+    }],
+    ['top-level private answers', {
+      ...liveQuestion(),
+      answers: [1]
+    }],
+    ['nested private material', {
+      ...liveQuestion(),
+      publicQuestion: { ...publicQuestion(), privateMaterial: { score: 10 } }
+    }],
+    ['malformed choices', {
+      ...liveQuestion(),
+      publicQuestion: { ...publicQuestion(), choices: 'A,B' }
+    }],
+    ['nested private choice', {
+      ...liveQuestion(),
+      publicQuestion: { ...publicQuestion(), choices: [{ answer: 1 }] }
+    }]
+  ];
+
+  for (const [name, value] of cases) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      await assertFails(setDoc(
+        doc(actorFirestore('owner'), 'sessions/s1/meta/live'),
+        value
+      ));
+    });
+  }
+
+  await t.test('valid pre-reveal and reveal projections', async () => {
+    await resetFirestore();
+    const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
+    await assertSucceeds(setDoc(live, liveQuestion()));
+    await assertSucceeds(setDoc(live, liveQuestion(0, {
+      revealed: true,
+      publicAnswer: { answer: 1, explain: '해설' }
+    })));
+  });
+});
+
+async function seedOrphanSession() {
+  await testEnvironment.withSecurityRulesDisabled(async context => {
+    const db = context.firestore();
+    await Promise.all([
+      setDoc(doc(db, 'sessions/orphan/meta/live'), liveQuestion()),
+      setDoc(doc(db, 'sessions/orphan/meta/board'), { scores: {} }),
+      setDoc(doc(db, 'sessions/orphan/students/student-uid'), {
+        uid: 'student-uid',
+        grade: 1,
+        class: 2,
+        number: 3,
+        name: '고아 학생'
+      }),
+      setDoc(doc(db, 'sessions/orphan/responses/student-uid'), {
+        answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+      })
+    ]);
+  });
+}
+
+rulesTest('fix-round: orphan child documents grant no student access', async t => {
+  const cases = [
+    ['live get', db => getDoc(doc(db, 'sessions/orphan/meta/live'))],
+    ['board get', db => getDoc(doc(db, 'sessions/orphan/meta/board'))],
+    ['student get', db => getDoc(doc(db, 'sessions/orphan/students/student-uid'))],
+    ['student update', db => updateDoc(
+      doc(db, 'sessions/orphan/students/student-uid'),
+      { name: '변조 학생' }
+    )],
+    ['response get', db => getDoc(doc(db, 'sessions/orphan/responses/student-uid'))],
+    ['response update', db => updateDoc(
+      doc(db, 'sessions/orphan/responses/student-uid'),
+      { answers: { 0: { answer: 2, submitted: true, revision: 2 } } }
+    )]
+  ];
+
+  for (const [name, request] of cases) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      await seedOrphanSession();
+      await assertFails(request(actorFirestore('student')));
+    });
+  }
+});
+
+rulesTest('fix-round: response validation rejects stale, closed, and malformed writes', async t => {
+  const invalidCases = [
+    ['equal revision', async () => {}, {
+      answers: { 0: { answer: 2, submitted: true, revision: 1 } }
+    }],
+    ['decreasing revision', async () => {}, {
+      answers: { 0: { answer: 2, submitted: true, revision: 0 } }
+    }],
+    ['nested ok and score', async () => {}, {
+      answers: { 0: { answer: { ok: true, score: 10 }, submitted: true, revision: 2 } }
+    }],
+    ['nested list answer', async () => {}, {
+      answers: { 0: { answer: [{ ok: true }], submitted: true, revision: 2 } }
+    }],
+    ['invalid submittedAt', async () => {}, {
+      answers: { 0: { answer: 2, submitted: true, revision: 2, submittedAt: 'now' } }
+    }],
+    ['missing live', () => adminWrite('sessions/s1/meta/live', undefined), {
+      answers: { 0: { answer: 2, submitted: true, revision: 2 } }
+    }],
+    ['missing publicQuestion', () => adminWrite('sessions/s1/meta/live', {
+      q: 0, openedAt: Timestamp.fromMillis(1), limitSec: 30, revealed: false
+    }), {
+      answers: { 0: { answer: 2, submitted: true, revision: 2 } }
+    }],
+    ['closed live', () => adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+      revealed: true,
+      publicAnswer: { answer: 1 }
+    })), {
+      answers: { 0: { answer: 2, submitted: true, revision: 2 } }
+    }],
+    ['ended parent', () => adminWrite('sessions/s1', {
+      teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'ended'
+    }), {
+      answers: { 0: { answer: 2, submitted: true, revision: 2 } }
+    }]
+  ];
+
+  for (const [name, arrange, value] of invalidCases) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      await arrange();
+      await assertFails(updateDoc(
+        doc(actorFirestore('student'), 'sessions/s1/responses/student-uid'),
+        value
+      ));
+    });
+  }
+
+  await t.test('waiting q -1', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/s1/meta/live', {
+      q: -1, openedAt: 0, limitSec: 0, revealed: false
+    });
+    await adminWrite('sessions/s1/responses/student-uid', undefined);
+    await assertFails(setDoc(
+      doc(actorFirestore('student'), 'sessions/s1/responses/student-uid'),
+      { answers: { '-1': { answer: 1, submitted: true, revision: 1 } } }
+    ));
+  });
+
+  await t.test('supported scalar and list answers with timestamp', async () => {
+    await resetFirestore();
+    const response = doc(actorFirestore('student'), 'sessions/s1/responses/student-uid');
+    await assertSucceeds(updateDoc(response, {
+      answers: {
+        0: {
+          answer: 2,
+          submitted: true,
+          revision: 2,
+          submittedAt: Timestamp.fromMillis(2)
+        }
+      }
+    }));
+    await assertSucceeds(updateDoc(response, {
+      answers: {
+        0: {
+          answer: [1, 2],
+          submitted: true,
+          revision: 3,
+          submittedAt: Timestamp.fromMillis(3)
+        }
+      }
+    }));
+  });
+});
+
+rulesTest('fix-round: adversarial queries and ownership spoofing stay denied', async () => {
+  const owner = actorFirestore('owner');
+  const student = actorFirestore('student');
+
+  await assertFails(getDocs(collection(owner, 'codes')));
+  await assertFails(getDocs(query(collection(owner, 'codes'), where('sessionId', '==', 's2'))));
+  await assertFails(getDocs(query(
+    collection(owner, 'sessions'),
+    where('teacherUid', '==', 'other-teacher-uid')
+  )));
+  await assertFails(setDoc(doc(owner, 'quiz_sets/spoofed'), {
+    ownerUid: 'other-teacher-uid',
+    ownerEmail: 'other@school.kr',
+    title: '위조 세트'
+  }));
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), {
+    ownerUid: 'other-teacher-uid'
+  }));
+  await assertFails(setDoc(doc(owner, 'sessions/spoofed'), {
+    teacherUid: 'other-teacher-uid',
+    teacherEmail: 'other@school.kr',
+    status: 'live'
+  }));
+  await assertFails(updateDoc(doc(owner, 'sessions/s1'), {
+    teacherUid: 'other-teacher-uid'
+  }));
+  await assertFails(getDoc(doc(student, 'sessions/s1/students/missing-student-uid')));
 });
 
 const readMatrix = [
@@ -282,7 +591,7 @@ const readMatrix = [
           collection(db, 'codes'),
           where('sessionId', '==', actorName === 'otherTeacher' ? 's2' : 's1')
         )),
-    get: ['owner', 'admin', 'student', 'otherStudent', 'anonymous'],
+    get: ['owner', 'otherTeacher', 'admin', 'student', 'otherStudent', 'anonymous'],
     listAllowed: approvedTeachers
   },
   {
@@ -394,7 +703,7 @@ const writeMatrix = [
     createValue: actorName => ({
       teacherUid: actors[actorName].uid,
       teacherEmail: actors[actorName].email || '',
-      status: 'active'
+      status: 'live'
     }),
     updateValue: () => ({ status: 'ended' }),
     allowed: {
@@ -408,8 +717,8 @@ const writeMatrix = [
     target: () => 'sessions/s1/meta/live',
     createTarget: () => 'sessions/s1/meta/live',
     beforeCreate: () => adminWrite('sessions/s1/meta/live', undefined),
-    createValue: () => ({ q: 1, revealed: false, publicQuestion: { text: '새 문항' } }),
-    updateValue: () => ({ revealed: true }),
+    createValue: () => liveQuestion(1),
+    updateValue: () => ({ revealed: true, publicAnswer: { answer: 1 } }),
     allowed: { create: ['owner'], update: ['owner'], delete: ['owner', 'admin'] }
   },
   {

@@ -60,13 +60,18 @@ service cloud.firestore {
         getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
     }
 
-    function sessionIsActive(sessionId) {
+    function sessionExists(sessionId) {
+      return exists(/databases/$(database)/documents/sessions/$(sessionId));
+    }
+
+    function sessionIsJoinable(sessionId) {
       return exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
-        get(/databases/$(database)/documents/sessions/$(sessionId)).data.status == 'active';
+        get(/databases/$(database)/documents/sessions/$(sessionId)).data.status in ['active', 'live'];
     }
 
     function isJoinedStudent(sessionId) {
       return anonymousStudent() &&
+        sessionExists(sessionId) &&
         exists(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)).data.uid == request.auth.uid;
     }
@@ -80,13 +85,102 @@ service cloud.firestore {
         request.resource.data.uid == request.auth.uid;
     }
 
+    function validChoiceList(values) {
+      return values is list &&
+        values.size() <= 6 &&
+        (values.size() < 1 || values[0] is string) &&
+        (values.size() < 2 || values[1] is string) &&
+        (values.size() < 3 || values[2] is string) &&
+        (values.size() < 4 || values[3] is string) &&
+        (values.size() < 5 || values[4] is string) &&
+        (values.size() < 6 || values[5] is string);
+    }
+
+    function validNumberList(values) {
+      return values is list &&
+        values.size() > 0 &&
+        values.size() <= 6 &&
+        values[0] is number &&
+        (values.size() < 2 || values[1] is number) &&
+        (values.size() < 3 || values[2] is number) &&
+        (values.size() < 4 || values[3] is number) &&
+        (values.size() < 5 || values[4] is number) &&
+        (values.size() < 6 || values[5] is number);
+    }
+
+    function validAnswerValue(value) {
+      return value is number ||
+        value is string ||
+        value is bool ||
+        validNumberList(value);
+    }
+
     function validAnswer(answer) {
       return answer is map &&
         answer.keys().hasAll(['answer', 'submitted', 'revision']) &&
         answer.keys().hasOnly(['answer', 'submitted', 'revision', 'submittedAt']) &&
+        validAnswerValue(answer.answer) &&
         answer.submitted is bool &&
         answer.revision is int &&
-        answer.revision > 0;
+        answer.revision > 0 &&
+        (!('submittedAt' in answer) || answer.submittedAt is timestamp);
+    }
+
+    function validPublicQuestion(question) {
+      return question is map &&
+        question.keys().hasAll(['number', 'total', 'type', 'text', 'choices']) &&
+        question.keys().hasOnly(['number', 'total', 'type', 'text', 'choices', 'image']) &&
+        question.number is int &&
+        question.number > 0 &&
+        question.total is int &&
+        question.total >= question.number &&
+        question.type is string &&
+        question.text is string &&
+        validChoiceList(question.choices) &&
+        (!('image' in question) || question.image is string || question.image is path);
+    }
+
+    function validPublicAnswer(answer) {
+      return answer is map &&
+        answer.keys().hasAny(['answer', 'answers', 'accept', 'explain']) &&
+        answer.keys().hasOnly(['answer', 'answers', 'accept', 'explain']) &&
+        (!('answer' in answer) || validAnswerValue(answer.answer)) &&
+        (!('answers' in answer) || validNumberList(answer.answers)) &&
+        (!('accept' in answer) || answer.accept is list) &&
+        (!('explain' in answer) || answer.explain is string);
+    }
+
+    function validLiveData(live) {
+      return live is map &&
+        live.keys().hasAll(['q', 'openedAt', 'limitSec', 'revealed']) &&
+        live.keys().hasOnly([
+          'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer', 'status'
+        ]) &&
+        live.q is int &&
+        live.q >= -1 &&
+        (live.openedAt is timestamp || live.openedAt == 0) &&
+        live.limitSec is number &&
+        live.limitSec >= 0 &&
+        live.revealed is bool &&
+        (!('status' in live) || live.status is string) &&
+        ((live.q == -1 &&
+            live.revealed == false &&
+            !('publicQuestion' in live) &&
+            !('publicAnswer' in live)) ||
+          (live.q >= 0 &&
+            validPublicQuestion(live.publicQuestion) &&
+            ((live.revealed == false && !('publicAnswer' in live)) ||
+              (live.revealed == true && validPublicAnswer(live.publicAnswer)))));
+    }
+
+    function currentQuestionIsOpen(sessionId) {
+      return sessionIsJoinable(sessionId) &&
+        exists(/databases/$(database)/documents/sessions/$(sessionId)/meta/live) &&
+        validLiveData(get(
+          /databases/$(database)/documents/sessions/$(sessionId)/meta/live
+        ).data) &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)/meta/live).data.q >= 0 &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)/meta/live).data.revealed == false;
     }
 
     function currentQuestionKey(sessionId) {
@@ -96,15 +190,15 @@ service cloud.firestore {
     }
 
     function validStudentResponseCreate(sessionId) {
-      let questionKey = currentQuestionKey(sessionId);
-      return request.resource.data.keys().hasOnly(['answers']) &&
+      return currentQuestionIsOpen(sessionId) &&
+        request.resource.data.keys().hasOnly(['answers']) &&
         request.resource.data.answers is map &&
-        request.resource.data.answers.keys().hasAll([questionKey]) &&
-        request.resource.data.answers.keys().hasOnly([questionKey]) &&
-        validAnswer(request.resource.data.answers[questionKey]);
+        request.resource.data.answers.keys().hasAll([currentQuestionKey(sessionId)]) &&
+        request.resource.data.answers.keys().hasOnly([currentQuestionKey(sessionId)]) &&
+        validAnswer(request.resource.data.answers[currentQuestionKey(sessionId)]);
     }
 
-    function validStudentResponseUpdate(sessionId) {
+    function validOpenStudentResponseUpdate(sessionId) {
       let questionKey = currentQuestionKey(sessionId);
       let previousAnswer = resource.data.answers.get(questionKey, { 'revision': 0 });
       return request.resource.data.keys().hasOnly(['answers']) &&
@@ -115,6 +209,11 @@ service cloud.firestore {
         validAnswer(request.resource.data.answers[questionKey]) &&
         previousAnswer is map &&
         request.resource.data.answers[questionKey].revision > previousAnswer.get('revision', 0);
+    }
+
+    function validStudentResponseUpdate(sessionId) {
+      return currentQuestionIsOpen(sessionId) &&
+        validOpenStudentResponseUpdate(sessionId);
     }
 
     match /teacher_allowlist/{email} {
@@ -141,16 +240,18 @@ service cloud.firestore {
     }
 
     match /codes/{code} {
-      allow get: if anonymousStudent() || isAdmin() || ownsSession(resource.data.sessionId);
+      allow get: if anonymousStudent() || isApprovedTeacher();
       allow list: if isAdmin() || ownsSession(resource.data.sessionId);
-      allow create, update: if ownsSessionAfter(request.resource.data.sessionId);
+      allow create: if ownsSessionAfter(request.resource.data.sessionId);
+      allow update: if ownsSession(resource.data.sessionId) &&
+        ownsSessionAfter(request.resource.data.sessionId);
       allow delete: if isAdmin() || ownsSession(resource.data.sessionId);
       allow read, write: if false;
     }
 
     match /sessions/{sessionId} {
       allow get: if isAdmin() || ownsSession(sessionId) ||
-        (anonymousStudent() && sessionIsActive(sessionId));
+        (anonymousStudent() && sessionIsJoinable(sessionId));
       allow list: if isAdmin() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid);
       allow create: if isApprovedTeacher() &&
@@ -165,7 +266,8 @@ service cloud.firestore {
       match /meta/live {
         allow get: if isAdmin() || ownsSession(sessionId) || isJoinedStudent(sessionId);
         allow list: if isAdmin() || ownsSession(sessionId);
-        allow create, update: if ownsSessionAfter(sessionId);
+        allow create, update: if ownsSessionAfter(sessionId) &&
+          validLiveData(request.resource.data);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
@@ -185,10 +287,14 @@ service cloud.firestore {
 
       match /students/{studentId} {
         allow get: if isAdmin() || ownsSession(sessionId) ||
-          (isJoinedStudent(sessionId) && studentId == request.auth.uid);
+          (anonymousStudent() &&
+            sessionIsJoinable(sessionId) &&
+            studentId == request.auth.uid);
         allow list: if isAdmin() || ownsSession(sessionId);
-        allow create: if anonymousStudent() && sessionIsActive(sessionId) && validStudent(studentId);
-        allow update: if isJoinedStudent(sessionId) && validStudent(studentId) &&
+        allow create: if anonymousStudent() && sessionIsJoinable(sessionId) && validStudent(studentId);
+        allow update: if isJoinedStudent(sessionId) &&
+          sessionIsJoinable(sessionId) &&
+          validStudent(studentId) &&
           request.resource.data.uid == resource.data.uid;
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
@@ -199,10 +305,12 @@ service cloud.firestore {
           (isJoinedStudent(sessionId) && studentId == request.auth.uid);
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if isJoinedStudent(sessionId) &&
+          sessionIsJoinable(sessionId) &&
           studentId == request.auth.uid &&
           validStudentResponseCreate(sessionId);
         allow update: if isAdmin() || ownsSession(sessionId) ||
           (isJoinedStudent(sessionId) &&
+            sessionIsJoinable(sessionId) &&
             studentId == request.auth.uid &&
             validStudentResponseUpdate(sessionId));
         allow delete: if isAdmin() || ownsSession(sessionId);
