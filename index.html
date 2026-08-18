@@ -310,8 +310,9 @@ textarea { resize: vertical; min-height: 62px; }
 body.stage-fallback-open { overflow: hidden; }
 #pl-stage:fullscreen .player-box,
 #pl-stage.fullscreen-fallback .player-box {
-  width: min(92vw, calc(92vh * 16 / 9)); aspect-ratio: 16 / 9; margin: auto;
-  max-height: calc(100vh - 132px); border-radius: 0; flex: 0 1 auto;
+  width: var(--pl-player-width, min(92vw, calc((100vh - 176px) * 16 / 9)));
+  height: var(--pl-player-height, min(calc(92vw * 9 / 16), calc(100vh - 176px)));
+  aspect-ratio: 16 / 9; margin: auto; max-height: none; border-radius: 0; flex: none;
 }
 #pl-stage.quiz-open .player-box { filter: brightness(.42); }
 #pl-stage.rank-open .player-box { filter: brightness(.42); }
@@ -424,6 +425,11 @@ body.stage-fallback-open { overflow: hidden; }
 }
 /* iframe을 옮기거나 다시 만들지 않고 같은 영상 위에 중앙 카드를 겹친다. */
 @media (max-width: 900px) {
+  #pl-stage:fullscreen .player-box,
+  #pl-stage.fullscreen-fallback .player-box {
+    width: var(--pl-player-width, min(92vw, calc((100vh - 252px) * 16 / 9)));
+    height: var(--pl-player-height, min(calc(92vw * 9 / 16), calc(100vh - 252px)));
+  }
   #pl-stage.quiz-open #overlay { width: calc(100% - 32px); }
   #pl-stage.rank-open #board-overlay { width: calc(100% - 32px); }
 }
@@ -2306,10 +2312,16 @@ function screenPlay(setId) {
   document.addEventListener('fullscreenchange', plHandleFullscreenChange);
   document.addEventListener('keydown', plHandleStageKeydown);
   window.addEventListener('resize', plClampQrBubble);
+  if (typeof plApplyStagePlayerGeometry === 'function') {
+    window.addEventListener('resize', plApplyStagePlayerGeometry);
+  }
   onCleanup(() => {
     document.removeEventListener('fullscreenchange', plHandleFullscreenChange);
     document.removeEventListener('keydown', plHandleStageKeydown);
     window.removeEventListener('resize', plClampQrBubble);
+    if (typeof plApplyStagePlayerGeometry === 'function') {
+      window.removeEventListener('resize', plApplyStagePlayerGeometry);
+    }
     plCleanupStageFullscreen();
     try { pl && pl.player && pl.player.destroy(); } catch (e) {}
     const ov = document.getElementById('overlay');
@@ -2492,6 +2504,7 @@ function renderPlayRun() {
     else $('#pl-qr').style.display = 'none';
   } catch (e) { $('#pl-qr').style.display = 'none'; }
   plRenderQList();
+  if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
   if (typeof plRenderTimeline === 'function') plRenderTimeline(true);
   plRenderStageControls();
 
@@ -2553,6 +2566,7 @@ async function plEnterStageFullscreen() {
     toast('브라우저 전체화면을 사용할 수 없어 화면 확장 모드로 열었습니다');
   }
   pl.isStageFullscreen = true;
+  if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
   plClampQrBubble();
 }
 
@@ -2598,6 +2612,7 @@ function plHandleFullscreenChange() {
   const stage = document.getElementById('pl-stage');
   if (document.fullscreenElement === stage) {
     if (pl) pl.isStageFullscreen = true;
+    if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
     plClampQrBubble();
     return;
   }
@@ -2760,6 +2775,25 @@ function plClampQrBubble() {
   bubble.style.right = 'auto';
 }
 
+function plStagePlayerGeometry(viewportWidth, viewportHeight, reservedHeight) {
+  const width = Math.max(0, Number(viewportWidth) || 0);
+  const height = Math.max(0, Number(viewportHeight) || 0);
+  const reserved = Math.max(0, Number.isFinite(Number(reservedHeight)) ? Number(reservedHeight) : 176);
+  const availableWidth = width * .92;
+  const availableHeight = Math.max(0, height - reserved);
+  const playerWidth = Math.min(availableWidth, availableHeight * 16 / 9);
+  return { width: playerWidth, height: playerWidth * 9 / 16 };
+}
+
+function plApplyStagePlayerGeometry() {
+  const stage = document.getElementById('pl-stage');
+  if (!stage || !stage.style || typeof window === 'undefined') return;
+  const reservedHeight = window.innerWidth < 900 ? 252 : 176;
+  const size = plStagePlayerGeometry(window.innerWidth, window.innerHeight, reservedHeight);
+  stage.style.setProperty('--pl-player-width', size.width + 'px');
+  stage.style.setProperty('--pl-player-height', size.height + 'px');
+}
+
 function plTimelineDomain() {
   const video = pl && pl.set && pl.set.videos && pl.set.videos[pl.videoIndex];
   if (!video) return { start: 0, end: 1 };
@@ -2769,7 +2803,7 @@ function plTimelineDomain() {
     try { end = pl.player && pl.player.getDuration ? pl.player.getDuration() : null; } catch (e) { end = null; }
   }
   end = Number(end);
-  if (!Number.isFinite(end) || end <= start) end = start + 1;
+  if (!Number.isFinite(end) || end <= start) return null;
   return { start: start, end: end };
 }
 
@@ -2777,6 +2811,7 @@ function plUpdateTimeline(now, domain) {
   const timeline = document.getElementById('pl-quiz-timeline');
   if (!timeline || !pl) return;
   const range = domain || plTimelineDomain();
+  if (!range) return;
   const current = Number(now);
   const safeNow = Number.isFinite(current) ? current : range.start;
   const progress = timeline.querySelector('.pl-timeline-progress');
@@ -2795,10 +2830,18 @@ function plRenderTimeline(force) {
   const timeline = document.getElementById('pl-quiz-timeline');
   if (!timeline || !pl) return;
   const liveQuestion = pl.live && Number.isInteger(pl.live.q) ? pl.live.q : -1;
-  const renderKey = pl.videoIndex + ':' + liveQuestion;
-  if (!force && pl.timelineRenderKey === renderKey) return;
-  pl.timelineRenderKey = renderKey;
   const domain = plTimelineDomain();
+  if (!domain) {
+    if (force && timeline.innerHTML) timeline.innerHTML = '';
+    pl.timelineRenderKey = '';
+    return false;
+  }
+  const markerStates = pl.flatQuestions.map((question, index) =>
+    question.videoIndex === pl.videoIndex ? (pl.fired[index] ? '1' : '0') : ''
+  ).join('');
+  const renderKey = [pl.videoIndex, liveQuestion, domain.start, domain.end, markerStates].join(':');
+  if (!force && pl.timelineRenderKey === renderKey) return true;
+  pl.timelineRenderKey = renderKey;
   const now = (() => {
     try { return pl.player && pl.player.getCurrentTime ? pl.player.getCurrentTime() : domain.start; }
     catch (e) { return domain.start; }
@@ -2823,6 +2866,7 @@ function plRenderTimeline(force) {
     '<span class="pl-timeline-next"></span>' +
     '<span class="pl-timeline-announcement" aria-live="polite">' + announcement + '</span>';
   plUpdateTimeline(now, domain);
+  return true;
 }
 
 function plLoadVideo(index, autoplay) {
@@ -2835,7 +2879,6 @@ function plLoadVideo(index, autoplay) {
   pl.loadGeneration = (Number(pl.loadGeneration) || 0) + 1;
   pl.activePlaybackGeneration = 0;
   pl.expectedVideoId = video.videoId;
-  pl.timelineVideoReady = -1;
   pl.playerLoading = true;
   pl.playerError = null;
   pl.lastT = Math.max(0, Number(video.startSec) || 0) - 0.6;
@@ -2972,11 +3015,7 @@ function plHandlePlayerStateChange(event) {
     pl.activePlaybackGeneration = pl.loadGeneration;
     pl.playbackEnded = false;
     pl.playerError = null;
-    if (event.data === YT.PlayerState.PLAYING &&
-        pl.timelineVideoReady !== pl.videoIndex && typeof plRenderTimeline === 'function') {
-      pl.timelineVideoReady = pl.videoIndex;
-      plRenderTimeline(true);
-    }
+    if (typeof plRenderTimeline === 'function') plRenderTimeline();
   }
   if (event.data !== YT.PlayerState.ENDED) return;
   if (!matchesExpected || pl.playerLoading || pl.activePlaybackGeneration !== pl.loadGeneration) return;
@@ -3064,16 +3103,21 @@ function plTick() {
   }
 
   let opened = false;
+  let markerStateChanged = false;
   pl.flatQuestions.forEach((q, i) => {
     if (q.videoIndex !== pl.videoIndex) return;
     // 뒤로 되감으면 다시 발화할 수 있게 플래그를 푼다
-    if (now < q.t - 0.6) pl.fired[i] = false;
+    if (now < q.t - 0.6 && pl.fired[i]) {
+      pl.fired[i] = false;
+      markerStateChanged = true;
+    }
     if (!opened && !pl.fired[i] && prev < q.t && q.t <= now) {
       pl.fired[i] = true;
       opened = true;
       plOpenQuestion(i);
     }
   });
+  if (markerStateChanged && typeof plRenderTimeline === 'function') plRenderTimeline();
   if (opened || !reachedEnd) return;
 
   if (pl.videoIndex >= pl.set.videos.length - 1) {
@@ -3115,8 +3159,10 @@ function plJumpTo(i) {
   const question = pl.flatQuestions[i];
   if (!question) return;
   const t = Math.max(0, question.t - 3);
-  if (question.videoIndex !== pl.videoIndex) plLoadVideo(question.videoIndex, true);
+  const markerStateChanged = pl.fired[i] !== false;
   pl.fired[i] = false;
+  if (question.videoIndex !== pl.videoIndex) plLoadVideo(question.videoIndex, true);
+  else if (markerStateChanged && typeof plRenderTimeline === 'function') plRenderTimeline();
   pl.lastT = t;
   pl.player.seekTo(t, true);
   pl.player.playVideo();

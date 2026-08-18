@@ -2703,8 +2703,16 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
 
 test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 유지한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const ctx = loadStageFunctions(['plStagePlayerGeometry'], {});
+  const hd = ctx.plStagePlayerGeometry(1920, 1080, 176);
+  const portrait = ctx.plStagePlayerGeometry(1000, 1000, 176);
 
-  assert.match(html, /#pl-stage:fullscreen \.player-box,[\s\S]*width:\s*min\(92vw,\s*calc\(92vh \* 16 \/ 9\)\)[^}]*aspect-ratio:\s*16\s*\/\s*9[^}]*margin:\s*auto/);
+  assert.equal(Math.round(hd.height), 904);
+  assert.equal(Math.round(hd.width / hd.height * 1000), 1778);
+  assert.equal(Math.round(portrait.width), 920);
+  assert.equal(Math.round(portrait.width / portrait.height * 1000), 1778);
+  assert.match(html, /width:\s*var\(--pl-player-width,[^;]+;\s*height:\s*var\(--pl-player-height,/s);
+  assert.match(html, /#pl-stage:fullscreen \.player-box,[\s\S]*aspect-ratio:\s*16\s*\/\s*9[^}]*flex:\s*none/);
   assert.match(html, /#pl-stage\.quiz-open \.player-box\s*\{[^}]*filter:\s*brightness\(\.42\)/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*width:/s);
@@ -2915,6 +2923,11 @@ test('quiz timeline maps progress and question markers to the active video range
   assert.equal(writes, 1, 'ticks update progress and text without rebuilding markers');
   assert.equal(progress.style.width, '30%');
   assert.equal(remaining.textContent, '다음 문제 3 · 100초');
+
+  ctx.pl.fired[0] = false;
+  ctx.plRenderTimeline();
+  assert.equal(writes, 2, 'marker status changes rebuild structure once');
+  assert.match(timeline.innerHTML, /pl-timeline-marker upcoming[^>]*left:10%/);
 });
 
 test('quiz timeline uses player duration when the active video has no end time', () => {
@@ -2947,6 +2960,93 @@ test('video switch rebuilds quiz timeline markers for the new active video', () 
 
   assert.equal(renders, 1);
   assert.deepEqual(clone(loads), [{ videoId: 'second', startSeconds: 40 }]);
+});
+
+test('timeline defers null-end markers until duration is known and does not rebuild again on PLAYING', () => {
+  let duration = 0;
+  let state = 5;
+  let writes = 0;
+  const timeline = {
+    _html: '<div class="old-marker"></div>',
+    set innerHTML(value) { writes += 1; this._html = value; },
+    get innerHTML() { return this._html; },
+    querySelector() { return null; }
+  };
+  const player = {
+    getVideoData() { return { video_id: 'second' }; },
+    getPlayerState() { return state; },
+    getCurrentTime() { return 40; },
+    getDuration() { return duration; },
+    loadVideoById() {}
+  };
+  const ctx = loadStageFunctions([
+    'plTimelineDomain', 'plUpdateTimeline', 'plRenderTimeline', 'plLoadVideo',
+    'plPlayerEventVideoId', 'plPlayerEventStatus', 'plHandlePlayerStateChange'
+  ], {
+    pl: {
+      videoIndex: 0, playlistDone: false, transitionUntil: 0,
+      loadGeneration: 1, activePlaybackGeneration: 1, expectedVideoId: 'first',
+      playbackEnded: false, playerLoading: false, playerError: null,
+      live: { q: -1 }, fired: [false],
+      flatQuestions: [{ videoIndex: 1, t: 190, number: 1 }],
+      set: { videos: [{ videoId: 'first', startSec: 0 }, { videoId: 'second', startSec: 40, endSec: null }] },
+      player
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    document: { getElementById(id) { return id === 'pl-quiz-timeline' ? timeline : null; } },
+    fmtTime(value) { return Math.round(value) + 's'; },
+    YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
+    plTick() {}
+  });
+
+  ctx.plLoadVideo(1, true);
+  assert.equal(timeline.innerHTML, '');
+  assert.doesNotMatch(timeline.innerHTML, /pl-timeline-marker/);
+
+  duration = 340;
+  ctx.plHandlePlayerStateChange({ data: 5, target: player });
+  const writesAfterCued = writes;
+  assert.match(timeline.innerHTML, /pl-timeline-marker upcoming[^>]*left:50%/);
+
+  state = 1;
+  ctx.plHandlePlayerStateChange({ data: 1, target: player });
+  assert.equal(writes, writesAfterCued);
+});
+
+test('rewind and jump rebuild marker states once only when fired changes', () => {
+  let now = 10;
+  let renders = 0;
+  const player = {
+    getCurrentTime() { return now; },
+    getDuration() { return 100; },
+    seekTo() {}, playVideo() {}
+  };
+  const ctx = loadStageFunctions(['plTick', 'plJumpTo'], {
+    pl: {
+      videoIndex: 0, lastT: 50, fired: [true], playlistDone: false,
+      playerLoading: false, playerError: null, playbackEnded: false,
+      transitionUntil: 0, pendingLiveQuestion: -1, live: { q: -1 },
+      flatQuestions: [{ videoIndex: 0, t: 20, number: 1 }],
+      set: { videos: [{ videoId: 'first', startSec: 0, endSec: 100 }] },
+      player
+    },
+    $(selector) { return selector === '#pl-next' ? { textContent: '' } : null; },
+    fmtTime(value) { return String(value); },
+    plRenderTimeline() { renders += 1; },
+    plOpenQuestion() {}, plCompletePlaylist() {}, plRenderTransition() {}, Date
+  });
+
+  ctx.plTick();
+  assert.equal(ctx.pl.fired[0], false);
+  assert.equal(renders, 1);
+
+  ctx.plTick();
+  ctx.plJumpTo(0);
+  assert.equal(renders, 1);
+
+  ctx.pl.fired[0] = true;
+  ctx.plJumpTo(0);
+  assert.equal(renders, 2);
 });
 
 test('Firestore 초기화 구간은 ref 없는 Firestore 인스턴스에서도 중단되지 않는다', () => {
