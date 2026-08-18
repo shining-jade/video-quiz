@@ -115,6 +115,32 @@ service cloud.firestore {
         validNumberList(value);
     }
 
+    function validAcceptList(values) {
+      return values is list &&
+        values.size() > 0 &&
+        values.size() <= 20 &&
+        (values.size() < 1 || (values[0] is string && values[0].size() <= 100)) &&
+        (values.size() < 2 || (values[1] is string && values[1].size() <= 100)) &&
+        (values.size() < 3 || (values[2] is string && values[2].size() <= 100)) &&
+        (values.size() < 4 || (values[3] is string && values[3].size() <= 100)) &&
+        (values.size() < 5 || (values[4] is string && values[4].size() <= 100)) &&
+        (values.size() < 6 || (values[5] is string && values[5].size() <= 100)) &&
+        (values.size() < 7 || (values[6] is string && values[6].size() <= 100)) &&
+        (values.size() < 8 || (values[7] is string && values[7].size() <= 100)) &&
+        (values.size() < 9 || (values[8] is string && values[8].size() <= 100)) &&
+        (values.size() < 10 || (values[9] is string && values[9].size() <= 100)) &&
+        (values.size() < 11 || (values[10] is string && values[10].size() <= 100)) &&
+        (values.size() < 12 || (values[11] is string && values[11].size() <= 100)) &&
+        (values.size() < 13 || (values[12] is string && values[12].size() <= 100)) &&
+        (values.size() < 14 || (values[13] is string && values[13].size() <= 100)) &&
+        (values.size() < 15 || (values[14] is string && values[14].size() <= 100)) &&
+        (values.size() < 16 || (values[15] is string && values[15].size() <= 100)) &&
+        (values.size() < 17 || (values[16] is string && values[16].size() <= 100)) &&
+        (values.size() < 18 || (values[17] is string && values[17].size() <= 100)) &&
+        (values.size() < 19 || (values[18] is string && values[18].size() <= 100)) &&
+        (values.size() < 20 || (values[19] is string && values[19].size() <= 100));
+    }
+
     function validAnswer(answer) {
       return answer is map &&
         answer.keys().hasAll(['answer', 'submitted', 'revision']) &&
@@ -146,7 +172,7 @@ service cloud.firestore {
         answer.keys().hasOnly(['answer', 'answers', 'accept', 'explain']) &&
         (!('answer' in answer) || validAnswerValue(answer.answer)) &&
         (!('answers' in answer) || validNumberList(answer.answers)) &&
-        (!('accept' in answer) || answer.accept is list) &&
+        (!('accept' in answer) || validAcceptList(answer.accept)) &&
         (!('explain' in answer) || answer.explain is string);
     }
 
@@ -264,7 +290,8 @@ service cloud.firestore {
       allow read, write: if false;
 
       match /meta/live {
-        allow get: if isAdmin() || ownsSession(sessionId) || isJoinedStudent(sessionId);
+        allow get: if isAdmin() || ownsSession(sessionId) ||
+          (isJoinedStudent(sessionId) && validLiveData(resource.data));
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId) &&
           validLiveData(request.resource.data);

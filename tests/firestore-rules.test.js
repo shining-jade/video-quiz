@@ -567,6 +567,56 @@ rulesTest('fix-round: adversarial queries and ownership spoofing stay denied', a
   await assertFails(getDoc(doc(student, 'sessions/s1/students/missing-student-uid')));
 });
 
+rulesTest('fix-round-2: publicAnswer accept is bounded and string-only', async t => {
+  const cases = [
+    ['nested map', [{ answer: 'private' }]],
+    ['nested map with list', [{ variants: ['private'] }]],
+    ['too many entries', Array.from({ length: 21 }, (_, index) => `answer-${index}`)],
+    ['oversized element', ['x'.repeat(101)]]
+  ];
+
+  for (const [name, accept] of cases) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      await assertFails(setDoc(
+        doc(actorFirestore('owner'), 'sessions/s1/meta/live'),
+        liveQuestion(0, {
+          revealed: true,
+          publicAnswer: { accept, explain: '공개 해설' }
+        })
+      ));
+    });
+  }
+
+  await t.test('valid string accept list', async () => {
+    await resetFirestore();
+    const accept = Array.from({ length: 20 }, (_, index) => `answer-${index}`);
+    accept[19] = 'x'.repeat(100);
+    await assertSucceeds(setDoc(
+      doc(actorFirestore('owner'), 'sessions/s1/meta/live'),
+      liveQuestion(0, {
+        revealed: true,
+        publicAnswer: { accept, explain: '공개 해설' }
+      })
+    ));
+  });
+});
+
+rulesTest('fix-round-2: students cannot read stored malformed live projections', async () => {
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    revealed: true,
+    publicAnswer: {
+      accept: [{ answer: 'private' }],
+      explain: '공개 해설'
+    }
+  }));
+
+  const path = 'sessions/s1/meta/live';
+  await assertFails(getDoc(doc(actorFirestore('student'), path)));
+  await assertSucceeds(getDoc(doc(actorFirestore('owner'), path)));
+  await assertSucceeds(getDoc(doc(actorFirestore('admin'), path)));
+});
+
 const readMatrix = [
   {
     name: '세트',
