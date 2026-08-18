@@ -973,10 +973,11 @@ function multiCorrect(q, arr) {
 /** 응답 하나를 유형에 맞게 채점. 서술형은 null(미채점)을 돌려준다. */
 function gradeResponse(q, resp) {
   const t = qType(q);
+  const answer = resp && Object.prototype.hasOwnProperty.call(resp, 'answer') ? resp.answer : undefined;
   if (t === 'long') return null;
-  if (t === 'short') return shortCorrect(q, resp.txt);
-  if (t === 'multi') return multiCorrect(q, parseMulti(resp.cs));
-  return Number(resp.c) === Number(q.answer);
+  if (t === 'short') return shortCorrect(q, answer === undefined ? resp.txt : answer);
+  if (t === 'multi') return multiCorrect(q, Array.isArray(answer) ? answer : parseMulti(resp.cs));
+  return Number(answer === undefined ? resp.c : answer) === Number(q.answer);
 }
 /** 복수 정답은 "0,2" 문자열로 정규화해 저장한다. */
 function parseMulti(cs) {
@@ -988,9 +989,11 @@ function fmtMulti(arr) { return (arr || []).slice().sort((a, b) => a - b).join('
 function answerLabel(q, r) {
   if (!r) return '';
   const t = qType(q);
-  if (t === 'short' || t === 'long') return r.txt || '';
-  if (t === 'multi') return parseMulti(r.cs).map(j => LETTERS[j] || ('?' + j)).join(' ');
-  const c = Number(r.c);
+  const answer = Object.prototype.hasOwnProperty.call(r, 'answer') ? r.answer : undefined;
+  if (t === 'short' || t === 'long') return answer === undefined ? (r.txt || '') : String(answer);
+  if (t === 'multi') return (Array.isArray(answer) ? answer : parseMulti(r.cs))
+    .map(j => LETTERS[j] || ('?' + j)).join(' ');
+  const c = Number(answer === undefined ? r.c : answer);
   return (t === 'ox' ? ['O', 'X'][c] : LETTERS[c]) || '';
 }
 
@@ -1098,7 +1101,7 @@ function loadQuestionImage(setId, i, sessionId) {
     .catch(() => '');
 }
 /** 문항에 보여줄 그림이 있는지 (업로드 또는 주소) */
-function hasImage(q) { return !!(q && (q.imgUp || q.imgUrl)); }
+function hasImage(q) { return !!(q && (q.image || q.imgUp || q.imgUrl)); }
 
 /** 문항별 제한시간 덮어쓰기가 있으면 그것을, 없으면 세트 기본값을 쓴다 */
 function limitFor(set, i, questions) {
@@ -2424,7 +2427,7 @@ function mkPayload() {
       const o = { type: type, t: Math.max(0, Number(q.t) || 0), text: q.text.trim() };
 
       if (type === 'short') {
-        o.accept = (q.accept || []).map(s => String(s).trim().slice(0, 100)).filter(Boolean);
+        o.accept = (q.accept || []).map(s => String(s).trim().slice(0, 100)).filter(Boolean).slice(0, 20);
         o.choices = [];
         o.answer = 0;
       } else if (type === 'long') {
@@ -2738,6 +2741,40 @@ function plStartSession() {
   }).finally(() => { if (pl === state) state.startingSession = false; });
 }
 
+/** 공개가 끝난 자동 채점 문항은 학생 쓰기와 분리해 세션 소유 교사 권한으로 채점한다. */
+function plGradeRevealedResponses(state) {
+  if (pl !== state || !state.live || !state.live.revealed) return Promise.resolve([]);
+  const questionIndex = Number(state.live.q);
+  const question = state.flatQuestions && state.flatQuestions[questionIndex];
+  if (!question || !isAutoGraded(question)) return Promise.resolve([]);
+  const responses = state.responses && state.responses[String(questionIndex)] || {};
+  if (!state.gradeWrites) state.gradeWrites = {};
+  const writes = [];
+  Object.keys(responses).forEach(studentId => {
+    const response = responses[studentId];
+    if (!response || response.submitted !== true || Object.prototype.hasOwnProperty.call(response, 'ok')) return;
+    const key = studentId + ':' + questionIndex + ':' + (Number(response.revision) || 0);
+    if (state.gradeWrites[key]) return;
+    state.gradeWrites[key] = true;
+    const ok = gradeResponse(question, response);
+    writes.push(Promise.resolve().then(() => {
+      if (pl !== state) {
+        delete state.gradeWrites[key];
+        return null;
+      }
+      return store.gradeAnswer(state.sessionId, studentId, questionIndex, ok).then(() => {
+        const current = state.responses && state.responses[String(questionIndex)] || {};
+        if (pl === state && current[studentId] === response) response.ok = ok;
+      });
+    }).catch(error => {
+      delete state.gradeWrites[key];
+      if (pl === state) console.error(error);
+      return null;
+    }));
+  });
+  return Promise.all(writes);
+}
+
 function renderPlayRun() {
   const state = pl;
   if (!state) return;
@@ -2833,6 +2870,7 @@ function renderPlayRun() {
   onCleanup(store.subscribeResponses(state.sessionId, responseDocs => {
     if (pl !== state) return;
     state.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
+    plGradeRevealedResponses(state);
     plRenderQList();
     plRenderOverlayCounts();
     plRenderStudents();
@@ -2842,6 +2880,7 @@ function renderPlayRun() {
     if (pl !== state) return;
     state.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
+    plGradeRevealedResponses(state);
     plRenderOverlay();
     if (typeof plRenderTimeline === 'function') plRenderTimeline();
     plRenderStageControls();
@@ -3474,29 +3513,49 @@ function plTick() {
   plRenderTransition();
 }
 
-function plOpenQuestion(i) {
+async function plOpenQuestion(i) {
   if (!pl || !pl.sessionId) return;
   const state = pl;
+  const question = state.flatQuestions[i];
+  if (!question) return;
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
   pl.pendingLiveQuestion = i;
-  const writing = store.setLive(pl.sessionId, {
+  let image = '';
+  if (question.imgUrl) image = question.imgUrl;
+  else if (question.imgUp) image = await loadQuestionImage(
+    state.setId, question.key || i, state.sessionId
+  );
+  if (pl !== state || state.pendingLiveQuestion !== i) return false;
+  const revealed = state.set.settings.revealMode === 'instant';
+  const live = {
     q: i,
     openedAt: SV_TS,
-    revealed: pl.set.settings.revealMode === 'instant',
-    limitSec: limitFor(pl.set, i, pl.flatQuestions)
-  });
-  return writing && writing.catch ? writing.catch(e => {
+    revealed,
+    limitSec: limitFor(state.set, i, state.flatQuestions),
+    publicQuestion: FirestoreStore.publicQuestion(
+      question, question.number || i + 1, state.flatQuestions.length, image
+    )
+  };
+  if (revealed) live.publicAnswer = FirestoreStore.publicAnswer(question);
+  try {
+    await store.setLive(state.sessionId, live);
+    return true;
+  } catch (e) {
     if (pl === state && state.pendingLiveQuestion === i) state.pendingLiveQuestion = -1;
     throw e;
-  }) : writing;
+  }
 }
 function plReveal() {
   if (!pl || pl.live.q < 0) return;
-  return store.revealLive(pl.sessionId);
+  const question = pl.flatQuestions[pl.live.q];
+  if (!question) return;
+  return store.revealLive(pl.sessionId, FirestoreStore.publicAnswer(question));
 }
 async function plCloseQuestion() {
   const state = pl;
   if (!state) return;
+  await plGradeRevealedResponses(state);
+  if (pl !== state) return;
   await plPushBoard();
   if (pl !== state) return;
   await store.setLive(state.sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
@@ -3825,7 +3884,16 @@ function plTimerTick() {
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
 
-  // timer 모드는 시간이 차면 자동 공개되므로, 그 순간 화면을 갱신해 준다
+  // timer 모드는 시간이 차면 정답 projection도 Firestore에 함께 공개한다.
+  if (pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
+      !pl.live.revealed && !pl.revealPending &&
+      plRevealed()) {
+    const state = pl;
+    state.revealPending = true;
+    Promise.resolve(plReveal()).catch(e => console.error(e)).finally(() => {
+      if (pl === state) state.revealPending = false;
+    });
+  }
   if (plRevealed() !== pl.uiRevealed) plRenderOverlayCounts();
 
   const el = ov.querySelector('#ov-timer'), num = ov.querySelector('#ov-timer-n');
@@ -3844,10 +3912,13 @@ function plTimerTick() {
 let st = null;
 
 function screenJoin(codeArg) {
+  const request = { cancelled: false };
+  onCleanup(() => { request.cancelled = true; });
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">학생 참여를 준비하는 중…</div></div>';
   ensureAnonymousStudent()
-    .then(() => screenStudent(codeArg))
+    .then(user => { if (!request.cancelled) screenStudent(codeArg, user); })
     .catch(error => {
+      if (request.cancelled) return;
       console.error(error);
       APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
         '<h2>학생 참여를 시작할 수 없습니다</h2>' +
@@ -3857,11 +3928,14 @@ function screenJoin(codeArg) {
     });
 }
 
-function screenStudent(codeArg) {
+function screenStudent(codeArg, authUser) {
+  const currentUser = authUser || (typeof firebase !== 'undefined' && firebase.auth
+    ? firebase.auth().currentUser : null);
   st = {
     code: (codeArg || '').toUpperCase(),
-    sessionId: null, session: null, set: null, flatQuestions: [],
-    sid: null, me: null,
+    sessionId: null, session: null,
+    authUid: currentUser && currentUser.isAnonymous ? currentUser.uid : null,
+    sid: null, me: null, currentQuestion: null, totalQuestions: 0,
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     myAnswers: {},          // { 문항index: {c, ok, ms} }
     sel: null, multiSel: [], draft: '', submitted: false, board: {},
@@ -3922,13 +3996,6 @@ async function stLookupCode(code) {
     if (st !== state) return;
     if (!sess) { stRenderCodeForm('반 정보를 불러오지 못했습니다.'); return; }
     state.session = sess;
-    const savedSet = store.getSessionQuizSet
-      ? await store.getSessionQuizSet(v.sessionId, sess.setId)
-      : await store.getQuizSet(sess.setId);
-    if (st !== state) return;
-    state.set = normSet(savedSet);
-    if (!state.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
-    state.flatQuestions = PlaylistCore.flattenQuestions(state.set.videos);
     stRenderIdentityForm('');
   } catch (e) {
     if (st !== state) return;
@@ -3944,7 +4011,7 @@ function stRenderIdentityForm(err) {
     '<div class="card">' +
       '<div style="font-size:13px;color:var(--ink-2);margin-bottom:2px">' + esc(st.code) +
         (st.session.label ? ' · ' + esc(st.session.label) : '') + '</div>' +
-      '<h2 style="font-size:19px;margin-bottom:14px">' + esc(st.set.title) + '</h2>' +
+      '<h2 style="font-size:19px;margin-bottom:14px">학생 정보</h2>' +
       '<div class="row">' +
         '<div class="col" style="flex:1 1 80px"><label class="f">학년</label>' +
           '<input type="number" id="st-grade" inputmode="numeric" min="1" max="6" value="' + esc(saved.grade || '') + '"></div>' +
@@ -3974,32 +4041,29 @@ async function stJoin() {
   if (!grade || !klass || !num) { stRenderIdentityForm('학년·반·번호를 모두 입력하세요.'); return; }
   if (!name) { stRenderIdentityForm('이름을 입력하세요.'); return; }
 
-  // 학년_반_번호를 키로 삼아, 새로고침하거나 기기를 바꿔도 같은 학생으로 이어지게 한다
-  const sid = grade + '_' + klass + '_' + num;
+  const authUid = state.authUid;
+  if (!authUid) { stRenderIdentityForm('익명 학생 로그인을 다시 확인해 주세요.'); return; }
   const me = { grade: grade, klass: klass, num: num, name: name };
   lsSet('vq_student', JSON.stringify(me));
 
   try {
-    const cur = await store.getStudent(state.sessionId, sid);
+    await store.joinStudent(state.sessionId, authUid, me);
     if (st !== state) return;
-    if (cur && cur.name && cur.name !== name) {
-      if (!confirm(grade + '학년 ' + klass + '반 ' + num + '번은 이미 "' + cur.name + '" 학생으로 등록되어 있습니다.\n\n번호를 잘못 입력한 것이 아니라면 [확인]을 눌러 "' + name + '"(으)로 바꿉니다.')) return;
-    }
-    state.sid = sid;
+    state.sid = authUid;
     state.me = me;
-    await store.saveStudent(state.sessionId, sid, Object.assign({}, me, { joinedAt: SV_TS }));
-    if (st !== state) return;
-    const answers = await store.getOwnResponses(state.sessionId, sid);
+    const answers = await store.getOwnResponses(state.sessionId, authUid);
     if (st !== state) return;
     // 새로고침 대비 — 내가 이미 낸 답만 복원한다
     Object.keys(answers).forEach(qi => {
       const r = answers[qi];
       if (!r) return;
       const record = {
-        c: r.c, cs: r.cs, txt: r.txt,
-        ok: (r.ok === undefined || r.ok === null) ? null : !!r.ok,   // null = 서술형 미채점
-        ms: r.ms || 0, submitted: r.submitted !== false, revision: Number(r.revision) || 0
+        answer: r.answer,
+        ok: (r.ok === undefined || r.ok === null) ? null : !!r.ok,
+        submitted: r.submitted !== false,
+        revision: Number(r.revision) || 0
       };
+      if (r.score !== undefined) record.score = r.score;
       state.revision = Math.max(state.revision, record.revision);
       if (record.submitted) state.myAnswers[Number(qi)] = record;
     });
@@ -4020,12 +4084,16 @@ function stStartWatching(expectedState) {
     const nl = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     const changed = nl.q !== state.live.q || nl.openedAt !== state.live.openedAt;
     state.live = nl;
+    const view = studentQuestionView(nl);
+    state.currentQuestion = view.question || null;
+    if (view.total) state.totalQuestions = view.total;
     if (nl.status === 'ended' && state.session) state.session.status = 'ended';
     if (changed) {
       const prev = state.myAnswers[nl.q];
-      state.sel = prev ? prev.c : null;
-      state.multiSel = prev ? parseMulti(prev.cs) : [];
-      state.draft = prev ? (prev.txt || '') : '';
+      state.sel = prev && !Array.isArray(prev.answer) && typeof prev.answer !== 'string'
+        ? prev.answer : null;
+      state.multiSel = prev && Array.isArray(prev.answer) ? prev.answer.slice() : [];
+      state.draft = prev && typeof prev.answer === 'string' ? prev.answer : '';
       state.submitted = !!prev;
       state.deadlineHandled = '';
     }
@@ -4045,15 +4113,7 @@ function stStartWatching(expectedState) {
 
 /** 설정된 공개 방식에 따라 지금 정답을 보여줘도 되는지 */
 function stRevealed() {
-  const mode = st.set.settings.revealMode;
-  if (mode === 'never') return false;
-  if (mode === 'instant') return st.submitted;
-  if (st.live.revealed) return true;               // 교사가 직접 공개
-  if (mode === 'timer') {
-    if (!st.live.openedAt) return false;
-    return (serverNow() - st.live.openedAt) / 1000 >= st.set.settings.revealDelaySec;
-  }
-  return false;
+  return !!(st && st.live && st.live.revealed && st.live.publicAnswer);
 }
 /** 제한 시간이 지났거나 공개됐으면 더 못 고른다 */
 function stLocked() {
@@ -4068,7 +4128,7 @@ function stLeftRatio() {
 
 /** 매 프레임 전체를 다시 그리면 조작감이 나빠지므로, 바뀐 것만 갱신한다 */
 function stTick() {
-  if (!st || !st.set || st.live.q < 0) return;
+  if (!st || !st.currentQuestion || st.live.q < 0) return;
   const bar = $('#st-timer');
   const t = stLeftRatio();
   if (bar && t) {
@@ -4083,22 +4143,23 @@ function stTick() {
   if (rev !== st.uiRevealed || lock !== st.uiLocked) stRender();
 }
 
-function studentQuestionView(flatQuestions, live) {
-  const questions = flatQuestions || [];
+function studentQuestionView(live) {
   const i = live && Number.isInteger(live.q) ? live.q : -1;
-  const question = questions[i];
+  const question = live && live.publicQuestion;
+  const revealed = !!(live && live.revealed && live.publicAnswer);
+  const visible = question ? Object.assign({}, question, revealed ? live.publicAnswer : {}) : null;
   return {
-    number: question ? (question.number || i + 1) : 0,
-    total: questions.length,
-    question: question
+    number: visible ? (visible.number || i + 1) : 0,
+    total: visible ? (visible.total || 0) : 0,
+    question: visible
   };
 }
 
 function stRender() {
-  if (!st || !st.set || !st.sid) return;
-  const set = st.set, i = st.live.q;
+  if (!st || !st.sid) return;
+  const i = st.live.q;
   const ended = st.session && st.session.status === 'ended';
-  const showScore = set.settings.revealMode !== 'never';
+  const showScore = true;
 
   const keys = Object.keys(st.myAnswers);
   const answered = keys.length;
@@ -4122,7 +4183,7 @@ function stRender() {
     stShell(header +
       '<div class="card"><div class="stu-wait">' +
         '<div class="big">🎉</div><h2>수업이 끝났습니다</h2>' +
-        '<p>' + esc(set.title) + '</p>' +
+        '<p>' + esc(st.session.label || st.code) + '</p>' +
         (showScore
           ? '<div class="result-banner ok" style="margin-top:18px">' + gradedKeys.length + '문항 중 ' + correct + '개 정답' +
               (function () {
@@ -4132,7 +4193,7 @@ function stRender() {
               (nUngraded ? '<div style="font-size:13px;font-weight:600;margin-top:6px;color:var(--ink-2)">서술형 ' + nUngraded + '문항은 선생님이 채점합니다</div>' : '') + '</div>'
           : '<div class="result-banner mute" style="margin-top:18px">' + answered + '문항 제출 완료</div>') +
       '</div>' +
-      stMyStat(st.flatQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
+      stMyStat(st.totalQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
       '</div>');
     st.uiQ = -3;
     return;
@@ -4146,13 +4207,13 @@ function stRender() {
           '<h2>선생님 화면을 보세요</h2>' +
           '<p>퀴즈가 나오면 이 화면에 자동으로 뜹니다.</p>' +
         '</div>' +
-        stMyStat(st.flatQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
+        stMyStat(st.totalQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
       '</div>');
     st.uiQ = -1;
     return;
   }
 
-  const view = studentQuestionView(st.flatQuestions, st.live);
+  const view = studentQuestionView(st.live);
   const q = view.question;
   if (!q) return;
   const revealed = stRevealed();
@@ -4195,8 +4256,8 @@ function stRank() {
 }
 
 /** 대기 화면·종료 화면에 쓰는 내 진행 현황 */
-function stMyStat(flatQuestions, answered, correct, graded, ungraded, showScore) {
-  const totalQ = (flatQuestions || []).length;
+function stMyStat(totalQuestions, answered, correct, graded, ungraded, showScore) {
+  const totalQ = Math.max(0, Number(totalQuestions) || 0);
   const left = Math.max(0, totalQ - answered);
   const rk = showScore ? stRank() : null;
 
@@ -4219,26 +4280,22 @@ function stMyStat(flatQuestions, answered, correct, graded, ungraded, showScore)
 
 /** 문항 이미지는 그 문항이 열릴 때만 내려받는다 */
 function stShowImage(q, i) {
-  const state = st;
   const el = $('#st-img');
   if (!el) return;
-  if (q.imgUrl) { el.src = q.imgUrl; return; }
-  loadQuestionImage(state.session.setId, q.key || i, state.sessionId).then(src => {
-    if (st !== state) return;
-    const now = $('#st-img');
-    if (now && src) now.src = src;
-  });
+  if (q.image) el.src = q.image;
 }
 
 function stBanner(q, my, revealed, locked) {
   const type = qType(q);
   if (type === 'long') {
+    if (my && my.ok === true) return '<div class="result-banner ok">⭕ 선생님이 정답으로 채점했습니다</div>';
+    if (my && my.ok === false) return '<div class="result-banner bad">❌ 선생님이 오답으로 채점했습니다</div>';
     if (my) return '<div class="result-banner mute">✅ 제출 완료 — 선생님이 나중에 확인합니다</div>';
     if (locked) return '<div class="result-banner mute">⏱ 시간이 끝났습니다</div>';
     return '';
   }
   if (revealed && my) {
-    return my.ok
+    return gradeResponse(q, my)
       ? '<div class="result-banner ok">⭕ 정답입니다</div>'
       : '<div class="result-banner bad">❌ 아쉽네요 — 정답은 ' + esc(correctLabel(q)) + '</div>';
   }
@@ -4263,7 +4320,7 @@ function stAnswerUI(q, i, my, revealed, locked) {
 
   if (type === 'short' || type === 'long') {
     if (my) {
-      return '<div class="stu-answer-box">' + esc(my.txt || '') + '</div>' +
+      return '<div class="stu-answer-box">' + esc(typeof my.answer === 'string' ? my.answer : '') + '</div>' +
         (revealed && type === 'short'
           ? '<div class="hint">인정 답안: ' + esc((q.accept || []).join(', ')) + '</div>' : '') +
         (!locked && !revealed ? '<button class="btn block" style="margin-top:10px" onclick="stReviseAnswer()">다시 고르기</button>' : '');
@@ -4280,7 +4337,7 @@ function stAnswerUI(q, i, my, revealed, locked) {
   }
 
   if (type === 'multi') {
-    const picked = my ? parseMulti(my.cs) : (st.multiSel || []);
+    const picked = my && Array.isArray(my.answer) ? my.answer : (st.multiSel || []);
     return q.choices.map((c, j) => {
       let cls = '';
       if (revealed) {
@@ -4301,7 +4358,7 @@ function stAnswerUI(q, i, my, revealed, locked) {
     let cls = '';
     if (revealed) {
       if (j === q.answer) cls = ' correct';
-      else if (my && Number(my.c) === j) cls = ' wrong';
+      else if (my && Number(my.answer) === j) cls = ' wrong';
     } else if (st.sel === j) cls = ' sel';
     return '<button class="stu-choice' + cls + '" ' + (locked || my ? 'disabled' : '') + ' onclick="stAnswer(' + j + ')">' +
       '<span class="lt">' + (type === 'ox' ? ['O', 'X'][j] : LETTERS[j]) + '</span><span>' + esc(c) + '</span></button>';
@@ -4333,8 +4390,9 @@ function stSend(payload, localRec) {
   state.submitted = true;
   state.myAnswers[i] = localRec;
   stRender();
-  const send = store.setAnswerState || store.mergeAnswer;
-  return stQueueWrite(state, i, () => send.call(store, state.sessionId, state.sid, i, payload))
+  return stQueueWrite(state, i, () => store.writeStudentAnswer(
+    state.sessionId, state.authUid, i, payload
+  ))
     .then(() => true)
     .catch(e => {
       console.error(e);
@@ -4352,7 +4410,7 @@ function stSend(payload, localRec) {
 
 function stAnswer(j) {
   if (!st || st.live.q < 0 || stLocked()) return;
-  const i = st.live.q, q = st.flatQuestions[i];
+  const q = st.currentQuestion;
   if (!q || !q.choices[j]) return;
   st.sel = j;
   stRender();
@@ -4379,7 +4437,7 @@ function stSubmitText() {
 
 function stHasDraftAnswer() {
   if (!st || st.live.q < 0) return false;
-  const q = st.flatQuestions[st.live.q], type = qType(q);
+  const q = st.currentQuestion, type = qType(q);
   if (type === 'multi') return !!(st.multiSel && st.multiSel.length);
   if (type === 'short' || type === 'long') return !!String(st.draft || '').trim();
   return st.sel !== null && st.sel !== undefined;
@@ -4387,22 +4445,16 @@ function stHasDraftAnswer() {
 
 function stBuildAnswer() {
   if (!stHasDraftAnswer()) return null;
-  const i = st.live.q, q = st.flatQuestions[i], type = qType(q);
-  const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
-  let payload, local;
+  const q = st.currentQuestion, type = qType(q);
+  let answer;
   if (type === 'multi') {
-    const cs = fmtMulti(st.multiSel);
-    payload = { cs, ok: multiCorrect(q, st.multiSel) };
-    local = { cs, ok: payload.ok, ms };
+    answer = (st.multiSel || []).slice();
   } else if (type === 'short' || type === 'long') {
-    const txt = String(st.draft || '').trim().slice(0, type === 'short' ? 100 : 1000);
-    payload = type === 'short' ? { txt, ok: shortCorrect(q, txt) } : { txt };
-    local = { txt, ok: type === 'short' ? payload.ok : null, ms };
+    answer = String(st.draft || '').trim().slice(0, type === 'short' ? 100 : 1000);
   } else {
-    payload = { c: st.sel, ok: Number(st.sel) === Number(q.answer) };
-    local = { c: st.sel, ok: payload.ok, ms };
+    answer = st.sel;
   }
-  return { payload: Object.assign(payload, { at: SV_TS, ms }), local };
+  return { payload: { answer }, local: { answer } };
 }
 
 function stSubmitCurrent(source) {
@@ -4414,7 +4466,7 @@ function stSubmitCurrent(source) {
   }
   st.revision = (Number(st.revision) || 0) + 1;
   const payload = Object.assign({}, built.payload, {
-    submitted: true, revision: st.revision, source: source || 'button'
+    submitted: true, revision: st.revision, submittedAt: SV_TS
   });
   built.local.submitted = true;
   built.local.revision = st.revision;
@@ -4428,12 +4480,18 @@ function stReviseAnswer() {
   if (!current) return Promise.resolve(false);
   state.revision = Math.max(Number(state.revision) || 0, Number(current.revision) || 0) + 1;
   const revision = state.revision;
-  const payload = Object.assign({}, current, { submitted: false, revision: revision, at: SV_TS });
+  const payload = {
+    answer: current.answer,
+    submitted: false,
+    revision: revision,
+    submittedAt: SV_TS
+  };
   delete state.myAnswers[i];
   state.submitted = false;
   stRender();
-  const send = store.setAnswerState || store.mergeAnswer;
-  return stQueueWrite(state, i, () => send.call(store, state.sessionId, state.sid, i, payload)).then(() => true).catch(e => {
+  return stQueueWrite(state, i, () => store.writeStudentAnswer(
+    state.sessionId, state.authUid, i, payload
+  )).then(() => true).catch(e => {
     console.error(e);
     if (st === state && state.live.q === i && Number(state.revision) === revision &&
         !state.myAnswers[i] && !state.submitted) {

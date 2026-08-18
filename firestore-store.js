@@ -8,6 +8,47 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
 
+  function publicQuestion(flatQuestion, number, total, image) {
+    const question = flatQuestion || {};
+    const choices = question.choices == null ? [] : question.choices;
+    if (!Array.isArray(choices) || choices.length > 6 || choices.some(choice => typeof choice !== 'string')) {
+      throw new Error('공개 문항 보기는 문자열 6개 이하이어야 합니다.');
+    }
+    const value = {
+      number,
+      total,
+      type: String(question.type || 'choice'),
+      text: String(question.text || ''),
+      choices: choices.slice()
+    };
+    if (typeof image === 'string' && image) value.image = image;
+    return value;
+  }
+
+  function publicAnswer(flatQuestion) {
+    const question = flatQuestion || {};
+    const type = String(question.type || 'choice');
+    const value = {};
+    if (type === 'multi') {
+      value.answers = Array.isArray(question.answers) ? question.answers.slice() : [];
+    } else if (type === 'short') {
+      const accepted = question.accept;
+      if (!Array.isArray(accepted) || accepted.length < 1) {
+        throw new Error('단답형 인정 답안은 1개 이상이어야 합니다.');
+      }
+      if (accepted.some(answer => typeof answer !== 'string')) {
+        throw new Error('단답형 인정 답안은 모두 문자열이어야 합니다.');
+      }
+      value.accept = accepted.slice(0, 20).map(answer => answer.slice(0, 100));
+    } else if (type === 'long') {
+      value.explain = typeof question.explain === 'string' ? question.explain : '';
+    } else {
+      value.answer = question.answer;
+    }
+    if (type !== 'long' && typeof question.explain === 'string') value.explain = question.explain;
+    return value;
+  }
+
   function createFirestoreStore(db, fieldValue, nowFn) {
     let serverOffset = 0;
 
@@ -16,6 +57,23 @@
       : null;
     const collectionValue = snapshot => Object.fromEntries(
       snapshot.docs.map(document => [document.id, document.data()])
+    );
+    const responseRecordValue = record => {
+      if (!record || !Object.prototype.hasOwnProperty.call(record, 'answer')) return record;
+      const value = { ...record };
+      if (Array.isArray(record.answer)) value.cs = record.answer.join(',');
+      else if (typeof record.answer === 'string') value.txt = record.answer;
+      else value.c = record.answer;
+      return value;
+    };
+    const responseDocumentValue = document => ({
+      ...document,
+      answers: Object.fromEntries(Object.entries(document && document.answers || {}).map(
+        ([questionIndex, answer]) => [questionIndex, responseRecordValue(answer)]
+      ))
+    });
+    const responseCollectionValue = snapshot => Object.fromEntries(
+      snapshot.docs.map(document => [document.id, responseDocumentValue(document.data())])
     );
     const quizSetValue = snapshot => {
       const value = snapshotValue(snapshot);
@@ -301,7 +359,7 @@
 
     function subscribeResponses(sessionId, next, error) {
       return db.collection('sessions/' + sessionId + '/responses')
-        .onSnapshot(snapshot => next(collectionValue(snapshot)), error);
+        .onSnapshot(snapshot => next(responseCollectionValue(snapshot)), error);
     }
 
     function subscribeLive(sessionId, next, error) {
@@ -347,20 +405,45 @@
       return db.doc('sessions/' + sessionId + '/students/' + studentId).set(student);
     }
 
+    async function joinStudent(sessionId, authUid, profile) {
+      const reference = db.doc('sessions/' + sessionId + '/students/' + authUid);
+      const current = await reference.get().then(snapshotValue);
+      const student = {
+        ...(profile || {}),
+        uid: authUid,
+        joinedAt: current && current.joinedAt || fieldValue.serverTimestamp()
+      };
+      await reference.set(student);
+      return student;
+    }
+
     async function getOwnResponses(sessionId, studentId) {
       const value = await db.doc('sessions/' + sessionId + '/responses/' + studentId)
         .get().then(snapshotValue);
       return value && value.answers ? value.answers : {};
     }
 
-    function mergeAnswer(sessionId, studentId, questionIndex, answer) {
-      return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
+    function writeStudentAnswer(sessionId, authUid, questionIndex, patch) {
+      const source = patch || {};
+      const answer = {
+        answer: source.answer,
+        submitted: source.submitted,
+        revision: source.revision
+      };
+      if (Object.prototype.hasOwnProperty.call(source, 'submittedAt')) {
+        answer.submittedAt = source.submittedAt;
+      }
+      return db.doc('sessions/' + sessionId + '/responses/' + authUid).set({
         answers: { [String(questionIndex)]: answer }
       }, { merge: true });
     }
 
-    function setAnswerState(sessionId, studentId, questionIndex, answer) {
-      return mergeAnswer(sessionId, studentId, questionIndex, answer);
+    function mergeAnswer(sessionId, authUid, questionIndex, answer) {
+      return writeStudentAnswer(sessionId, authUid, questionIndex, answer);
+    }
+
+    function setAnswerState(sessionId, authUid, questionIndex, answer) {
+      return writeStudentAnswer(sessionId, authUid, questionIndex, answer);
     }
 
     function gradeAnswer(sessionId, studentId, questionIndex, ok) {
@@ -408,9 +491,9 @@
       return db.doc('sessions/' + sessionId + '/meta/live').set(live);
     }
 
-    function revealLive(sessionId) {
+    function revealLive(sessionId, answer) {
       return db.doc('sessions/' + sessionId + '/meta/live')
-        .set({ revealed: true }, { merge: true });
+        .set({ revealed: true, publicAnswer: answer }, { merge: true });
     }
 
     async function endSession(sessionId) {
@@ -454,7 +537,9 @@
       getSessionQuestionImage,
       getStudent,
       saveStudent,
+      joinStudent,
       getOwnResponses,
+      writeStudentAnswer,
       mergeAnswer,
       setAnswerState,
       gradeAnswer,
@@ -483,7 +568,9 @@
       },
 
       getCollection(path) {
-        return db.collection(path).get().then(collectionValue);
+        return db.collection(path).get().then(snapshot =>
+          /\/responses$/.test(path) ? responseCollectionValue(snapshot) : collectionValue(snapshot)
+        );
       },
 
       subscribeDoc(path, next, error) {
@@ -519,5 +606,5 @@
     };
   }
 
-  return { createFirestoreStore };
+  return { createFirestoreStore, publicQuestion, publicAnswer };
 });

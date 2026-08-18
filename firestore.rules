@@ -163,7 +163,7 @@ service cloud.firestore {
         question.type is string &&
         question.text is string &&
         validChoiceList(question.choices) &&
-        (!('image' in question) || question.image is string || question.image is path);
+        (!('image' in question) || question.image is string);
     }
 
     function validPublicAnswer(answer) {

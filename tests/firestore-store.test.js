@@ -364,6 +364,98 @@ function createStore(fake) {
   return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
 }
 
+test('공개 전 문항에는 정답과 해설과 비공개 이미지 경로가 없다', () => {
+  const { publicQuestion } = loadStoreModule();
+
+  const value = publicQuestion({
+    type: 'mc', text: 'Q', choices: ['A', 'B'], answer: 1, explain: 'E',
+    answers: [1], accept: ['secret'], imgUp: true, imgUrl: 'private-url', key: 'v1q2'
+  }, 3, 8, 'data:image/jpeg;base64,public');
+
+  assert.deepEqual(value, {
+    number: 3,
+    total: 8,
+    type: 'mc',
+    text: 'Q',
+    choices: ['A', 'B'],
+    image: 'data:image/jpeg;base64,public'
+  });
+  for (const field of ['answer', 'answers', 'accept', 'explain', 'imgUp', 'imgUrl', 'key']) {
+    assert.equal(field in value, false);
+  }
+});
+
+test('공개 답은 필요한 정답 필드만 복사하고 legacy accept를 안전한 경계로 제한한다', () => {
+  const { publicAnswer } = loadStoreModule();
+
+  assert.deepEqual(publicAnswer({
+    type: 'short', accept: ['서울', 'Seoul'], explain: '대한민국의 수도'
+  }), {
+    accept: ['서울', 'Seoul'],
+    explain: '대한민국의 수도'
+  });
+  const capped = publicAnswer({
+    type: 'short',
+    accept: ['가'.repeat(101)].concat(Array.from({ length: 20 }, (_, i) => String(i)))
+  });
+  assert.equal(capped.accept.length, 20);
+  assert.equal(capped.accept[0].length, 100);
+  assert.throws(
+    () => publicAnswer({ type: 'short', accept: ['정답', { private: true }] }),
+    /문자열/
+  );
+});
+
+test('학생 참여는 자기 UID 문서를 먼저 읽고 프로필 필드로 저장한다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  const student = await store.joinStudent('session-a', 'anonymous-uid', {
+    grade: 3, klass: 2, num: 7, name: '홍길동'
+  });
+
+  assert.deepEqual(fake.calls().filter(call => ['get', 'set'].includes(call.operation)).map(call => [
+    call.operation, call.path
+  ]), [
+    ['get', 'sessions/session-a/students/anonymous-uid'],
+    ['set', 'sessions/session-a/students/anonymous-uid']
+  ]);
+  const stored = fake.value('sessions/session-a/students/anonymous-uid');
+  assert.deepEqual({ ...stored, joinedAt: stored.joinedAt.toMillis() }, {
+    uid: 'anonymous-uid', grade: 3, klass: 2, num: 7, name: '홍길동', joinedAt: 50_000
+  });
+  assert.equal(student.uid, 'anonymous-uid');
+});
+
+test('학생 응답은 자기 UID 경로에 Task 2 허용 필드만 기록한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/session-a/responses/anonymous-uid': {
+      answers: { '0': { answer: 0, submitted: true, revision: 1, ok: true } }
+    }
+  });
+  const store = createStore(fake);
+
+  await store.writeStudentAnswer('session-a', 'anonymous-uid', 4, {
+    answer: [1, 3], submitted: true, revision: 2, submittedAt: SERVER_TIMESTAMP,
+    ok: true, score: 10, source: 'button', ms: 200
+  });
+
+  const stored = fake.value('sessions/session-a/responses/anonymous-uid');
+  assert.deepEqual({
+    ...stored,
+    answers: {
+      ...stored.answers,
+      '4': { ...stored.answers['4'], submittedAt: stored.answers['4'].submittedAt.toMillis() }
+    }
+  }, {
+    answers: {
+      '0': { answer: 0, submitted: true, revision: 1, ok: true },
+      '4': { answer: [1, 3], submitted: true, revision: 2, submittedAt: 50_000 }
+    }
+  });
+  assert.equal(fake.has('sessions/session-a/responses/3_2_7'), false);
+});
+
 test('교사 승인 프로브는 정규화 이메일의 보호 문서를 서버에서만 읽고 역할을 판정한다', async () => {
   const reads = [];
   const denied = Object.assign(new Error('permission denied'), { code: 'permission-denied' });
@@ -2018,20 +2110,21 @@ test('live 갱신은 meta/live 문서를 통째로 교체한다', async () => {
   assert.deepEqual(fake.value('sessions/a/meta/live'), waiting);
 });
 
-test('정답 공개는 revealed만 병합해 openedAt Timestamp를 그대로 보존한다', async () => {
+test('정답 공개는 publicAnswer를 병합해 openedAt Timestamp를 그대로 보존한다', async () => {
   const openedAt = { toMillis: () => 12_345 };
   const fake = makeFirestoreFake({
     'sessions/a/meta/live': { q: 2, openedAt, revealed: false, limitSec: 30 }
   });
   const store = createStore(fake);
 
-  await store.revealLive('a');
+  await store.revealLive('a', { answer: 1, explain: '해설' });
 
   const live = fake.value('sessions/a/meta/live');
   assert.equal(live.q, 2);
   assert.equal(live.openedAt.toMillis(), 12_345);
   assert.equal(live.revealed, true);
   assert.equal(live.limitSec, 30);
+  assert.deepEqual(live.publicAnswer, { answer: 1, explain: '해설' });
 });
 
 test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린다', async () => {
@@ -2125,7 +2218,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
     plTimerTick() {},
     console
   };
-  loadStageFunctions(['plLoadVideo', 'renderPlayRun'], context);
+  loadStageFunctions(['plLoadVideo', 'plGradeRevealedResponses', 'renderPlayRun'], context);
 
   context.renderPlayRun();
   subscriptions.students({ s1: { name: '가' } });
@@ -2152,6 +2245,48 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   assert.deepEqual(subscriptionCounts, { students: 1, responses: 1, live: 1 });
   assert.equal(context.pl.students, studentsBefore);
   assert.equal(context.pl.responses, responsesBefore);
+});
+
+test('teacher grades only submitted auto-graded responses after reveal with a separate write', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const state = {
+    sessionId: 'session-a',
+    live: { q: 0, revealed: true },
+    flatQuestions: [
+      { type: 'choice', answer: 1 },
+      { type: 'long' }
+    ],
+    responses: {
+      '0': {
+        submitted: { answer: 1, submitted: true, revision: 2 },
+        draft: { answer: 1, submitted: false, revision: 3 },
+        graded: { answer: 0, submitted: true, revision: 1, ok: false }
+      },
+      '1': {
+        essay: { answer: 'reason', submitted: true, revision: 1 }
+      }
+    }
+  };
+  const context = {
+    pl: state,
+    qType(q) { return q.type || 'choice'; },
+    isAutoGraded(q) { return q.type !== 'long'; },
+    gradeResponse(q, response) { return Number(response.answer) === Number(q.answer); },
+    store: {
+      async gradeAnswer(...args) { calls.push(args); }
+    },
+    console
+  };
+  loadStageFunctions(['plGradeRevealedResponses'], context);
+
+  await context.plGradeRevealedResponses(state);
+  assert.equal(state.responses['0'].submitted.ok, true);
+  await context.plGradeRevealedResponses(state);
+  state.live = { q: 1, revealed: true };
+  await context.plGradeRevealedResponses(state);
+
+  assert.deepEqual(calls, [['session-a', 'submitted', 0, true]]);
 });
 
 test('교사 재생 초기화는 videos를 평탄화해 전역 문항 상태를 만든다', async () => {
@@ -2427,7 +2562,10 @@ test('종료 시각 문항의 live 반영이 늦어도 영상 전환을 시작�
     pl: {
       sessionId: 'session-a', videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false], live: { q: -1 }, pendingLiveQuestion: -1,
-      flatQuestions: [{ t: 40, videoIndex: 0, limitSec: null }],
+      flatQuestions: [{
+        t: 40, videoIndex: 0, limitSec: null, number: 1,
+        type: 'choice', text: '끝 문항', choices: ['A', 'B']
+      }],
       set: {
         settings: { autoPause: false, revealMode: 'manual', limitSec: 20 },
         videos: [{ startSec: 0, endSec: 40 }, { startSec: 0, endSec: 60 }]
@@ -2438,6 +2576,7 @@ test('종료 시각 문항의 live 반영이 늦어도 영상 전환을 시작�
     $() { return null; }, fmtTime() { return ''; },
     SV_TS: 1234,
     limitFor() { return 20; },
+    FirestoreStore: loadStoreModule(),
     store: { setLive() { return new Promise(() => {}); } },
     plRenderTransition() {}
   });
@@ -2792,8 +2931,8 @@ test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시
     pl: {
       sessionId: 'session-a',
       flatQuestions: [
-        { videoIndex: 0, limitSec: null },
-        { videoIndex: 1, limitSec: 7 }
+        { videoIndex: 0, limitSec: null, type: 'choice', text: 'A', choices: [] },
+        { videoIndex: 1, limitSec: 7, number: 2, type: 'choice', text: 'B', choices: ['가', '나'] }
       ],
       set: {
         questions: [{ limitSec: 99 }],
@@ -2802,13 +2941,17 @@ test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시
       player: {}
     },
     SV_TS: 1234,
+    FirestoreStore: loadStoreModule(),
     store: { setLive(id, value) { written = [id, value]; return Promise.resolve(); } }
   });
 
   await ctx.plOpenQuestion(1);
 
   assert.deepEqual(clone(written), ['session-a', {
-    q: 1, openedAt: 1234, revealed: false, limitSec: 7
+    q: 1, openedAt: 1234, revealed: false, limitSec: 7,
+    publicQuestion: {
+      number: 2, total: 2, type: 'choice', text: 'B', choices: ['가', '나']
+    }
   }]);
 });
 
@@ -2971,7 +3114,7 @@ test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지�
   assert.equal(message, '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.');
 });
 
-test('문항 열기는 live 전체 상태를 쓰고 정답 공개는 revealed만 병합한다', async () => {
+test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공개 때만 정답을 병합한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const serverTimestamp = Symbol('server timestamp');
   const writes = [];
@@ -2980,24 +3123,47 @@ test('문항 열기는 live 전체 상태를 쓰고 정답 공개는 revealed만
       sessionId: 'session-a',
       live: { q: 2, openedAt: 123, revealed: false, limitSec: 20 },
       player: { pauseVideo() {} },
+      flatQuestions: [{}, {}, {}, {
+        number: 4, key: 'v1q1', type: 'choice', text: '공개 질문', choices: ['A', 'B'],
+        answer: 1, explain: '정답 해설', imgUp: true
+      }],
       set: { settings: { autoPause: true, revealMode: 'manual' } }
     },
     SV_TS: serverTimestamp,
     limitFor() { return 20; },
+    loadQuestionImage(setId, key, sessionId) {
+      assert.deepEqual([setId, key, sessionId], [undefined, 'v1q1', 'session-a']);
+      return Promise.resolve('data:image/jpeg;base64,current');
+    },
+    FirestoreStore: loadStoreModule(),
     store: {
       setLive(id, value) { writes.push(['setLive', id, value]); return Promise.resolve(); },
-      revealLive(id) { writes.push(['revealLive', id]); return Promise.resolve(); }
+      revealLive(id, answer) { writes.push(['revealLive', id, answer]); return Promise.resolve(); }
     }
   };
   vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
   vm.runInNewContext(extractFunction(html, 'plReveal'), context);
 
   await context.plOpenQuestion(3);
+  context.pl.live = { q: 3, openedAt: 456, revealed: false, limitSec: 20 };
   await context.plReveal();
 
   assert.deepEqual(clone(writes), [
-    ['setLive', 'session-a', { q: 3, openedAt: serverTimestamp, revealed: false, limitSec: 20 }],
-    ['revealLive', 'session-a']
+    ['setLive', 'session-a', {
+      q: 3,
+      openedAt: serverTimestamp,
+      revealed: false,
+      limitSec: 20,
+      publicQuestion: {
+        number: 4,
+        total: 4,
+        type: 'choice',
+        text: '공개 질문',
+        choices: ['A', 'B'],
+        image: 'data:image/jpeg;base64,current'
+      }
+    }],
+    ['revealLive', 'session-a', { answer: 1, explain: '정답 해설' }]
   ]);
 });
 
@@ -3577,6 +3743,7 @@ test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재�
   const player = { playVideo() { played++; } };
   const ctx = loadStageFunctions(['plOpenNextDueQuestion', 'plCloseQuestion'], {
     pl: { sessionId: 'session1', player },
+    plGradeRevealedResponses() { return Promise.resolve(); },
     plPushBoard() { return Promise.resolve(); },
     document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
     store: { setLive() { writes++; return Promise.resolve(); } }
@@ -3595,6 +3762,7 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   const calls = [];
   const context = {
     pl: { sessionId: 'session-a', player: { playVideo() { calls.push('play'); } } },
+    plGradeRevealedResponses() { return Promise.resolve(); },
     plPushBoard() { calls.push('board'); return Promise.resolve(); },
     store: {
       setLive(id, value) {
@@ -3905,11 +4073,17 @@ test('새 답은 같은 학생 문서의 다른 문항 답을 보존한다', asy
   });
   const store = createStore(fake);
 
-  await store.mergeAnswer('a', 's1', 2, { txt: '서술', at: 123, ms: 456 });
+  await store.mergeAnswer('a', 's1', 2, {
+    answer: '서술', submitted: true, revision: 2, submittedAt: SERVER_TIMESTAMP
+  });
 
-  assert.deepEqual(await store.getOwnResponses('a', 's1'), {
+  const answers = await store.getOwnResponses('a', 's1');
+  assert.deepEqual({
+    ...answers,
+    '2': { ...answers['2'], submittedAt: answers['2'].submittedAt.toMillis() }
+  }, {
     '0': { c: 1, ok: true },
-    '2': { txt: '서술', at: 123, ms: 456 }
+    '2': { answer: '서술', submitted: true, revision: 2, submittedAt: 50_000 }
   });
 });
 
@@ -3920,12 +4094,12 @@ test('응답 제출 상태는 현재 문항만 병합하고 다시 고르는 답
   const store = createStore(fake);
 
   await store.setAnswerState('a', 's1', 2, {
-    c: 1, submitted: false, revision: 2
+    answer: 1, submitted: false, revision: 2
   });
 
   assert.deepEqual(await store.getOwnResponses('a', 's1'), {
     '0': { c: 0, submitted: true },
-    '2': { c: 1, submitted: false, revision: 2 }
+    '2': { answer: 1, submitted: false, revision: 2 }
   });
 });
 
@@ -4014,42 +4188,64 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   assert.equal(timerNumber.textContent, '10초');
 });
 
-test('학생은 두 번째 영상 문항을 전체 번호로 표시한다', () => {
+test('학생은 세트 원본 대신 live 공개 문항의 전체 번호와 내용을 표시한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  const PlaylistCore = require('../playlist-core.js');
-  const flat = PlaylistCore.flattenQuestions([
-    { questions: [{ text: '1' }, { text: '2' }] },
-    { questions: [{ text: '3' }] }
-  ]);
   const context = {};
   vm.runInNewContext(extractFunction(html, 'studentQuestionView'), context);
 
-  assert.deepEqual(clone(context.studentQuestionView(flat, { q: 2 })), {
+  assert.deepEqual(clone(context.studentQuestionView({
+    q: 2,
+    publicQuestion: { number: 3, total: 7, type: 'choice', text: '공개 문항', choices: ['A', 'B'] }
+  })), {
     number: 3,
-    total: 3,
-    question: flat[2]
+    total: 7,
+    question: { number: 3, total: 7, type: 'choice', text: '공개 문항', choices: ['A', 'B'] }
   });
 });
 
-test('학생의 두 번째 영상 이미지는 canonical 문항 키로 읽는다', async () => {
+test('학생 문항 이미지는 live 공개 projection만 사용하고 비공개 경로를 읽지 않는다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  const requested = [];
   const image = {};
   const context = {
-    st: { session: { setId: 'set-a' } },
+    st: {},
     $(selector) { return selector === '#st-img' ? image : null; },
-    loadQuestionImage(setId, key) {
-      requested.push([setId, key]);
-      return Promise.resolve('data:image/jpeg;base64,second');
+    loadQuestionImage() {
+      throw new Error('학생은 비공개 이미지 경로를 읽으면 안 된다');
     }
   };
   vm.runInNewContext(extractFunction(html, 'stShowImage'), context);
 
-  context.stShowImage({ key: 'v1q0' }, 2);
+  context.stShowImage({ image: 'data:image/jpeg;base64,current' }, 2);
   await Promise.resolve();
 
-  assert.deepEqual(requested, [['set-a', 'v1q0']]);
-  assert.equal(image.src, 'data:image/jpeg;base64,second');
+  assert.equal(image.src, 'data:image/jpeg;base64,current');
+});
+
+test('학생 코드 조회는 원본 세트와 snapshot 이미지 경로를 읽지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    st: { code: '', sessionId: null, session: null },
+    store: {
+      getCode(code) { calls.push(['code', code]); return Promise.resolve({ sessionId: 'session-a' }); },
+      getSession(id) { calls.push(['session', id]); return Promise.resolve({ id, label: '3-2', status: 'live' }); },
+      getSessionQuizSet() { throw new Error('학생은 snapshot 세트를 읽으면 안 된다'); },
+      getQuizSet() { throw new Error('학생은 원본 세트를 읽으면 안 된다'); },
+      getSessionQuestionImage() { throw new Error('학생은 snapshot 이미지를 읽으면 안 된다'); }
+    },
+    stShell() {}, stRenderCodeForm() {}, stRenderIdentityForm() { calls.push(['identity']); },
+    lsSet() {}, console
+  };
+  vm.runInNewContext(extractFunction(html, 'stLookupCode'), context);
+
+  await context.stLookupCode('ABC123');
+
+  assert.deepEqual(calls, [
+    ['code', 'ABC123'],
+    ['session', 'session-a'],
+    ['identity']
+  ]);
+  assert.equal(context.st.set, undefined);
 });
 
 test('학생의 이전 코드 조회와 cleanup은 새 참여 화면을 바꾸지 않는다', async () => {
@@ -4089,6 +4285,31 @@ test('학생의 이전 코드 조회와 cleanup은 새 참여 화면을 바꾸�
   assert.deepEqual(calls, ['shell']);
 });
 
+test('이전 학생 익명 인증 완료는 cleanup 뒤 새 화면을 열지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let resolveAuth;
+  const authReady = new Promise(resolve => { resolveAuth = resolve; });
+  let cleanup;
+  let studentScreens = 0;
+  const app = { innerHTML: '' };
+  const context = {
+    APP() { return app; }, topbar() { return ''; },
+    ensureAnonymousStudent() { return authReady; },
+    onCleanup(fn) { cleanup = fn; },
+    screenStudent() { studentScreens += 1; },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'screenJoin'), context);
+
+  context.screenJoin('ABC123');
+  cleanup();
+  resolveAuth({ uid: 'late-uid', isAnonymous: true });
+  await authReady;
+  await Promise.resolve();
+
+  assert.equal(studentScreens, 0);
+});
+
 test('대시보드와 CSV는 모든 영상 문항을 합산한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {
@@ -4112,7 +4333,7 @@ test('대시보드와 CSV는 모든 영상 문항을 합산한다', () => {
   assert.match(rows[0].join(','), /영상 2 · 문항 3/);
 });
 
-test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 복원한다', async () => {
+test('학생 입장 흐름은 익명 Auth UID 문서로 참여하고 본인 답만 복원한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const fields = {
@@ -4122,24 +4343,20 @@ test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 �
     '#st-name': { value: ' 홍길동 ' }
   };
   const context = {
-    st: { sessionId: 'a', myAnswers: {} },
+    st: { sessionId: 'a', authUid: 'anonymous-uid', myAnswers: {}, revision: 0 },
     $(selector) { return fields[selector]; },
     lsSet() {},
     SV_TS: Symbol('server timestamp'),
     store: {
-      async getStudent(sessionId, studentId) {
-        calls.push(['getStudent', sessionId, studentId]);
-        return null;
-      },
-      async saveStudent(sessionId, studentId, value) {
-        calls.push(['saveStudent', sessionId, studentId, value]);
+      async joinStudent(sessionId, authUid, value) {
+        calls.push(['joinStudent', sessionId, authUid, value]);
+        return { ...value, uid: authUid };
       },
       async getOwnResponses(sessionId, studentId) {
         calls.push(['getOwnResponses', sessionId, studentId]);
-        return { '0': { c: 1, ok: true, ms: 500 } };
+        return { '0': { answer: 1, ok: true, submitted: true, revision: 4 } };
       }
     },
-    confirm() { return true; },
     stRenderIdentityForm() {},
     stStartWatching() { calls.push(['watch']); },
     console
@@ -4149,13 +4366,12 @@ test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 �
   await context.stJoin();
 
   assert.deepEqual(calls.map(call => call.slice(0, 3)), [
-    ['getStudent', 'a', '3_2_7'],
-    ['saveStudent', 'a', '3_2_7'],
-    ['getOwnResponses', 'a', '3_2_7'],
+    ['joinStudent', 'a', 'anonymous-uid'],
+    ['getOwnResponses', 'a', 'anonymous-uid'],
     ['watch']
   ]);
   assert.deepEqual(clone(context.st.myAnswers), {
-    '0': { c: 1, cs: undefined, txt: undefined, ok: true, ms: 500, submitted: true, revision: 0 }
+    '0': { answer: 1, ok: true, submitted: true, revision: 4 }
   });
 });
 
@@ -4168,17 +4384,16 @@ test('학생 입장 조회가 늦게 끝나도 새 참여 화면에 저장하거
     '#st-num': { value: '7' }, '#st-name': { value: '홍길동' }
   };
   const calls = [];
-  const oldState = { sessionId: 'old-session', myAnswers: {} };
+  const oldState = { sessionId: 'old-session', authUid: 'old-uid', myAnswers: {} };
   const newState = { sessionId: 'new-session', myAnswers: {} };
   const context = {
     st: oldState,
     $(selector) { return fields[selector]; }, lsSet() {}, SV_TS: 1,
     store: {
-      getStudent() { return studentReady; },
-      saveStudent() { calls.push('saveStudent'); return Promise.resolve(); },
+      joinStudent() { return studentReady; },
       getOwnResponses() { calls.push('getOwnResponses'); return Promise.resolve({}); }
     },
-    confirm() { return true; }, stRenderIdentityForm() {},
+    stRenderIdentityForm() {},
     stStartWatching() { calls.push('watch'); }, console
   };
   vm.runInNewContext(extractFunction(html, 'stJoin'), context);
@@ -4221,6 +4436,7 @@ test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수�
     stTick() {},
     stRender() {},
     parseMulti() { return []; },
+    studentQuestionView(live) { return { number: 0, total: 0, question: live.publicQuestion || null }; },
     console
   };
   vm.runInNewContext(extractFunction(html, 'stStartWatching'), context);
@@ -4257,6 +4473,7 @@ test('이전 학생 live 콜백과 오류는 새 참여 화면을 바꾸거나 �
     },
     onCleanup() {}, every() {}, stTick() {},
     stRender() { renders += 1; }, parseMulti() { return []; },
+    studentQuestionView(live) { return { number: 0, total: 0, question: live.publicQuestion || null }; },
     console: { error() { errors += 1; } }
   };
   vm.runInNewContext(extractFunction(html, 'stStartWatching'), context);
@@ -4281,7 +4498,7 @@ test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮
     st: {
       sessionId: 'a', session: { status: 'live' },
       live: { q: 2, openedAt: 10, revealed: false, limitSec: 20 },
-      myAnswers: { '3': { c: 1 } }, board: {}
+      myAnswers: { '3': { answer: 1 } }, board: {}
     },
     store: {
       subscribeLive(id, next) { liveNext = next; return () => {}; },
@@ -4292,6 +4509,7 @@ test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮
     stTick() {},
     stRender() {},
     parseMulti() { return []; },
+    studentQuestionView(live) { return { number: 4, total: 4, question: live.publicQuestion || null }; },
     console
   };
   vm.runInNewContext(extractFunction(html, 'stStartWatching'), context);
@@ -4299,7 +4517,10 @@ test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮
 
   const closeRun = liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
   await Promise.resolve();
-  await liveNext({ q: 3, openedAt: 30, revealed: false, limitSec: 20 });
+  await liveNext({
+    q: 3, openedAt: 30, revealed: false, limitSec: 20,
+    publicQuestion: { number: 4, total: 4, type: 'choice', text: 'Q', choices: ['A', 'B'] }
+  });
   resolveBoard();
   await closeRun;
 
@@ -4308,13 +4529,13 @@ test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮
   assert.equal(context.st.submitted, true);
 });
 
-test('학생 답 전송은 본인 응답 문서의 현재 문항만 병합한다', async () => {
+test('학생 답 전송은 Auth UID 문서에 Task 2 payload만 기록한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const writes = [];
   const context = {
-    st: { sessionId: 'a', sid: 's1', live: { q: 2 }, myAnswers: {} },
+    st: { sessionId: 'a', authUid: 'anonymous-uid', live: { q: 2 }, myAnswers: {} },
     store: {
-      mergeAnswer(...args) {
+      writeStudentAnswer(...args) {
         writes.push(args);
         return Promise.resolve();
       }
@@ -4326,10 +4547,15 @@ test('학생 답 전송은 본인 응답 문서의 현재 문항만 병합한다
   vm.runInNewContext(extractFunction(html, 'stQueueWrite'), context);
   vm.runInNewContext(extractFunction(html, 'stSend'), context);
 
-  context.stSend({ txt: '서술', at: 123, ms: 456 }, { txt: '서술', ms: 456 });
+  context.stSend({ answer: '서술', submitted: true, revision: 3, submittedAt: 123 }, {
+    answer: '서술', submitted: true, revision: 3
+  });
   await new Promise(resolve => setImmediate(resolve));
 
-  assert.deepEqual(writes, [['a', 's1', 2, { txt: '서술', at: 123, ms: 456 }]]);
+  assert.deepEqual(writes, [[
+    'a', 'anonymous-uid', 2,
+    { answer: '서술', submitted: true, revision: 3, submittedAt: 123 }
+  ]]);
 });
 
 test('두 번째 영상 객관식은 전체 문항 키로 제출하고 다시 고르기만 서버 상태를 바꾼다', async () => {
@@ -4337,15 +4563,12 @@ test('두 번째 영상 객관식은 전체 문항 키로 제출하고 다시 �
   const writes = [];
   const context = {
     st: {
-      sessionId: 'a', sid: 's1', live: { q: 2, openedAt: 1000, limitSec: 15 },
-      flatQuestions: [
-        { type: 'choice', choices: ['앞', '문항'], answer: 0 },
-        { type: 'choice', choices: ['앞', '문항'], answer: 0 },
-        { type: 'choice', choices: ['가', '나'], answer: 1, videoIndex: 1, number: 3 }
-      ],
+      sessionId: 'a', authUid: 'anonymous-uid', sid: 'anonymous-uid',
+      live: { q: 2, openedAt: 1000, limitSec: 15 },
+      currentQuestion: { type: 'choice', choices: ['가', '나'], number: 3 },
       myAnswers: {}, sel: null, multiSel: [], draft: '', submitted: false, revision: 0
     },
-    store: { setAnswerState(...args) { writes.push(args); return Promise.resolve(); } },
+    store: { writeStudentAnswer(...args) { writes.push(args); return Promise.resolve(); } },
     qType(q) { return q.type; }, serverNow() { return 2000; }, SV_TS: 999,
     multiCorrect() { return false; }, fmtMulti(v) { return v.join(','); }, shortCorrect() { return false; },
     stLocked() { return false; }, stRender() {}, toast() {}, console
@@ -4359,7 +4582,9 @@ test('두 번째 영상 객관식은 전체 문항 키로 제출하고 다시 �
   await context.stSubmitCurrent('button');
   assert.equal(writes[0][2], 2);
   assert.equal(writes[0][3].submitted, true);
-  assert.equal(writes[0][3].c, 1);
+  assert.equal(writes[0][3].answer, 1);
+  assert.equal('ok' in writes[0][3], false);
+  assert.equal('score' in writes[0][3], false);
   await context.stReviseAnswer();
   assert.equal(writes[1][3].submitted, false);
   assert.equal(context.st.submitted, false);
@@ -4394,8 +4619,13 @@ test('타이머 자동 제출은 마감 잠금이 시작된 순간에도 선택 
   const context = {
     st: { live: { q: 0 }, submitted: false, revision: 0 },
     stLocked() { return true; },
-    stBuildAnswer() { return { payload: { c: 0 }, local: { c: 0 } }; },
-    stSend(payload) { sent += 1; assert.equal(payload.source, 'timer'); return Promise.resolve(); },
+    SV_TS: 999,
+    stBuildAnswer() { return { payload: { answer: 0 }, local: { answer: 0 } }; },
+    stSend(payload) {
+      sent += 1;
+      assert.deepEqual(clone(payload), { answer: 0, submitted: true, revision: 1, submittedAt: 999 });
+      return Promise.resolve();
+    },
     toast() {}
   };
   vm.runInNewContext(extractFunction(html, 'stSubmitCurrent'), context);
@@ -4790,18 +5020,22 @@ test('startup routes after auth state without syncing a student clock', async ()
 
 test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', async () => {
   const fake = makeFirestoreFake({
-    'sessions/a/responses/s1': { answers: { '3': { txt: '학생 글', at: 10, ms: 20 } } }
+    'sessions/a/responses/s1': {
+      answers: { '3': { answer: '학생 글', submitted: true, revision: 2, submittedAt: 10 } }
+    }
   });
   const store = createStore(fake);
 
   await store.gradeAnswer('a', 's1', 3, true);
   assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
-    txt: '학생 글', at: 10, ms: 20, ok: true
+    answer: '학생 글', submitted: true, revision: 2, submittedAt: 10, ok: true
   });
 
   await store.gradeAnswer('a', 's1', 3, null);
   const ungraded = (await store.getOwnResponses('a', 's1'))['3'];
-  assert.deepEqual(ungraded, { txt: '학생 글', at: 10, ms: 20 });
+  assert.deepEqual(ungraded, {
+    answer: '학생 글', submitted: true, revision: 2, submittedAt: 10
+  });
   assert.equal(Object.hasOwn(ungraded, 'ok'), false);
 });
 
@@ -5334,11 +5568,11 @@ test('세션 시작은 세트와 이미지 revision을 고정하고 이후 편�
   assert.equal(fake.value('sessions/session1/snapshot/set').title, '시작 전');
 });
 
-test('학생은 세션 snapshot을 현재 편집본보다 우선한다', async () => {
+test('학생은 세션 snapshot과 현재 편집본을 읽지 않고 공개 live만 기다린다', async () => {
   const calls = [];
   const context = {
     st: {
-      code: 'ABC234', sessionId: null, session: null, set: null, flatQuestions: []
+      code: 'ABC234', sessionId: null, session: null
     },
     store: {
       async getCode() { return { sessionId: 'session1' }; },
@@ -5357,11 +5591,8 @@ test('학생은 세션 snapshot을 현재 편집본보다 우선한다', async (
 
   await context.stLookupCode('ABC234');
 
-  assert.deepEqual(calls, [
-    ['snapshot', 'session1', 'set1'],
-    ['identity']
-  ]);
-  assert.equal(context.st.flatQuestions[0].text, '원래 문항');
+  assert.deepEqual(calls, [['identity']]);
+  assert.equal(context.st.set, undefined);
 });
 
 test('대시보드는 세션 snapshot을 현재 편집본보다 우선한다', async () => {
@@ -5577,6 +5808,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
       flatQuestions: [{ videoIndex: 0, t: 5 }, { videoIndex: 0, t: 15 }],
       fired: [true, false], playbackEnded: false, transitionUntil: 0
     },
+    async plGradeRevealedResponses() {},
     async plPushBoard() {},
     store: { async setLive() {} },
     plOpenQuestion(i) { opened.push(i); context.pl.pendingLiveQuestion = i; },
@@ -5695,12 +5927,13 @@ test('학생의 제출 다시고르기 재제출은 문항별 revision 순서로
   const resolvers = [];
   const context = {
     st: {
-      sessionId: 'session1', sid: 'student1', live: { q: 0, openedAt: 1000, limitSec: 30 },
-      flatQuestions: [{ type: 'choice', choices: ['A', 'B'], answer: 1 }],
+      sessionId: 'session1', authUid: 'student1', sid: 'student1',
+      live: { q: 0, openedAt: 1000, limitSec: 30 },
+      currentQuestion: { type: 'choice', choices: ['A', 'B'] },
       myAnswers: {}, sel: 0, multiSel: [], draft: '', submitted: false, revision: 0, writeQueues: {}
     },
     store: {
-      setAnswerState(...args) {
+      writeStudentAnswer(...args) {
         writes.push(clone(args));
         return new Promise((resolve, reject) => resolvers.push({ resolve, reject }));
       }
@@ -5731,7 +5964,7 @@ test('학생의 제출 다시고르기 재제출은 문항별 revision 순서로
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(writes.length, 3);
   assert.equal(writes[2][3].revision, 3);
-  assert.equal(writes[2][3].c, 1);
+  assert.equal(writes[2][3].answer, 1);
   resolvers[2].resolve();
   await Promise.all([first, revise, second]);
 });
@@ -5741,11 +5974,11 @@ test('이전 revision 실패는 뒤이은 학생 답의 낙관 상태를 rollbac
   let rejectFirst;
   const context = {
     st: {
-      sessionId: 'session1', sid: 'student1', live: { q: 0 }, myAnswers: {},
+      sessionId: 'session1', authUid: 'student1', sid: 'student1', live: { q: 0 }, myAnswers: {},
       submitted: false, revision: 1, writeQueues: {}
     },
     store: {
-      setAnswerState(...args) {
+      writeStudentAnswer(...args) {
         writes.push(clone(args));
         if (writes.length === 1) return new Promise((resolve, reject) => { rejectFirst = reject; });
         return Promise.resolve();
@@ -5755,10 +5988,15 @@ test('이전 revision 실패는 뒤이은 학생 답의 낙관 상태를 rollbac
   };
   loadStageFunctions(['stQueueWrite', 'stSend'], context);
 
-  const first = context.stSend({ c: 0, revision: 1, submitted: true }, { c: 0, revision: 1, submitted: true });
+  const first = context.stSend(
+    { answer: 0, revision: 1, submitted: true, submittedAt: 999 },
+    { answer: 0, revision: 1, submitted: true }
+  );
   context.st.revision = 2;
-  const secondLocal = { c: 1, revision: 2, submitted: true };
-  const second = context.stSend({ c: 1, revision: 2, submitted: true }, secondLocal);
+  const secondLocal = { answer: 1, revision: 2, submitted: true };
+  const second = context.stSend(
+    { answer: 1, revision: 2, submitted: true, submittedAt: 999 }, secondLocal
+  );
   await new Promise(resolve => setImmediate(resolve));
   rejectFirst(new Error('late failure'));
   await Promise.all([first, second]);

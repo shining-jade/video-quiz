@@ -681,6 +681,24 @@ rulesTest('fix-round-2: students cannot read stored malformed live projections',
   await assertSucceeds(getDoc(doc(actorFirestore('admin'), path)));
 });
 
+rulesTest('공개 문항 이미지는 비공개 문서 참조가 아닌 문자열 projection만 허용한다', async () => {
+  const owner = actorFirestore('owner');
+  const live = doc(owner, 'sessions/s1/meta/live');
+
+  await assertFails(setDoc(live, liveQuestion(0, {
+    publicQuestion: {
+      ...publicQuestion(),
+      image: doc(owner, 'sessions/s1/snapshot_images/v0q0')
+    }
+  })));
+  await assertSucceeds(setDoc(live, liveQuestion(0, {
+    publicQuestion: {
+      ...publicQuestion(),
+      image: 'data:image/jpeg;base64,current-question'
+    }
+  })));
+});
+
 const readMatrix = [
   {
     name: '세트',
