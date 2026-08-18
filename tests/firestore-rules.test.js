@@ -167,8 +167,46 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess) {
         set(ref, value, options) {
           transaction.set(ref.modularReference, value, options);
           return this;
+        },
+        update(ref, value) {
+          transaction.update(ref.modularReference, value);
+          return this;
+        },
+        delete(ref) {
+          transaction.delete(ref.modularReference);
+          return this;
         }
       }));
+    },
+    collection(path) {
+      const modularCollection = collection(modularDb, path);
+      return {
+        path,
+        async get() {
+          const snapshot = await getDocs(modularCollection);
+          return {
+            docs: snapshot.docs.map(document => ({
+              id: document.id,
+              ref: reference(`${path}/${document.id}`),
+              data: () => document.data()
+            }))
+          };
+        }
+      };
+    },
+    batch() {
+      const batch = writeBatch(modularDb);
+      return {
+        set(ref, value, options) {
+          batch.set(ref.modularReference, value, options);
+          return this;
+        },
+        delete(ref) {
+          batch.delete(ref.modularReference);
+          return this;
+        },
+        commit() { return batch.commit(); }
+      };
     }
   };
 }
@@ -369,7 +407,8 @@ rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 �
       ...current.data(),
       ownerUid: actors.otherTeacher.uid,
       ownerEmail: actors.otherTeacher.email,
-      title: '공유 사본'
+      title: '공유 사본',
+      contentRevision: serverTimestamp()
     });
     images.forEach(image => {
       transaction.set(doc(teacher, `images/copied-by-other/q/${image.id}`), image.data());
@@ -399,6 +438,112 @@ rulesTest('이미지 교체 batch의 부모 revision 갱신은 소유 교사에�
   assert.ok(source.data().contentRevision instanceof Timestamp);
   const image = await assertSucceeds(getDoc(doc(owner, 'images/set1/q/0')));
   assert.equal(image.data().data, 'owner-image');
+});
+
+rulesTest('소유 교사의 standalone 이미지 create·update·delete는 모두 거부된다', async () => {
+  const owner = actorFirestore('owner');
+
+  await assertFails(setDoc(doc(owner, 'images/set1/q/new'), { data: 'standalone-create' }));
+  await assertFails(setDoc(doc(owner, 'images/set1/q/0'), { data: 'standalone-update' }));
+  await assertFails(deleteDoc(doc(owner, 'images/set1/q/0')));
+
+  const existing = await assertSucceeds(getDoc(doc(owner, 'images/set1/q/0')));
+  assert.equal(existing.data().data, 'owner-image');
+});
+
+rulesTest('부모 contentRevision을 바꾸는 공식 batch는 이미지 create·update·delete를 함께 허용한다', async () => {
+  await adminWrite('images/set1/q/delete-me', { data: 'old-delete' });
+  const owner = actorFirestore('owner');
+  const batch = writeBatch(owner);
+  batch.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
+  batch.set(doc(owner, 'images/set1/q/new'), { data: 'batch-create' });
+  batch.set(doc(owner, 'images/set1/q/0'), { data: 'batch-update' });
+  batch.delete(doc(owner, 'images/set1/q/delete-me'));
+
+  await assertSucceeds(batch.commit());
+  assert.equal((await getDoc(doc(owner, 'images/set1/q/new'))).data().data, 'batch-create');
+  assert.equal((await getDoc(doc(owner, 'images/set1/q/0'))).data().data, 'batch-update');
+  assert.equal((await getDoc(doc(owner, 'images/set1/q/delete-me'))).exists(), false);
+});
+
+rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code 재할당에서 fail closed다', async t => {
+  const allocation = (store, sessionId, code) => store.startSession(sessionId, {
+    setId: 'set1', setTitle: '세트', teacherUid: actors.owner.uid,
+    teacherEmail: actors.owner.email, status: 'live', createdAt: serverTimestamp(),
+    setSnapshot: { title: '세트', videos: [{ questions: [] }] },
+    snapshotImages: { v0q0: 'image' }
+  }, () => code);
+
+  await t.test('auth replacement cannot mutate owner allocation and owner retry removes it', async () => {
+    await resetFirestore();
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    const replacementStore = emulatorStore(actorFirestore('otherTeacher'));
+    await allocation(ownerStore, 'auth-replaced', 'AUTH23');
+
+    await assert.rejects(() => replacementStore.abortSessionAllocation(
+      'auth-replaced', 'AUTH23', actors.owner.uid
+    ), /정리.*실패/);
+    await assertFails(getDoc(doc(actorFirestore('student'), 'sessions/auth-replaced')));
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/auth-replaced'))).data().status, 'allocating');
+
+    assert.equal(await ownerStore.abortSessionAllocation(
+      'auth-replaced', 'AUTH23', actors.owner.uid
+    ), true);
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/auth-replaced'))).exists(), false);
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'codes/AUTH23'))).exists(), false);
+  });
+
+  await t.test('route-away cleanup is idempotent', async () => {
+    await resetFirestore();
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    await allocation(ownerStore, 'route-away', 'ROUTE2');
+
+    assert.equal(await ownerStore.abortSessionAllocation(
+      'route-away', 'ROUTE2', actors.owner.uid
+    ), true);
+    assert.equal(await ownerStore.abortSessionAllocation(
+      'route-away', 'ROUTE2', actors.owner.uid
+    ), true);
+  });
+
+  await t.test('partial cleanup with aborted parent and missing code resumes safely', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/partial', {
+      code: 'PART23', setId: 'set1', teacherUid: actors.owner.uid,
+      teacherEmail: actors.owner.email, status: 'aborted'
+    });
+    await adminWrite('sessions/partial/meta/live', { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+    await adminWrite('sessions/partial/meta/board', { scores: {} });
+    await adminWrite('sessions/partial/snapshot/set', { title: '세트', videos: [{ questions: [] }] });
+
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    assert.equal(await ownerStore.abortSessionAllocation(
+      'partial', 'PART23', actors.owner.uid
+    ), true);
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/partial'))).exists(), false);
+    assert.equal((await getDoc(doc(actorFirestore('admin'), 'sessions/partial/meta/live'))).exists(), false);
+  });
+
+  await t.test('reassigned code and newer session are preserved', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/old-allocation', {
+      code: 'REASN2', setId: 'set1', teacherUid: actors.owner.uid,
+      teacherEmail: actors.owner.email, status: 'allocating'
+    });
+    await adminWrite('sessions/new-allocation', {
+      code: 'REASN2', setId: 'set1', teacherUid: actors.owner.uid,
+      teacherEmail: actors.owner.email, status: 'live'
+    });
+    await adminWrite('codes/REASN2', { sessionId: 'new-allocation' });
+
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    assert.equal(await ownerStore.abortSessionAllocation(
+      'old-allocation', 'REASN2', actors.owner.uid
+    ), true);
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/old-allocation'))).exists(), false);
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/new-allocation'))).exists(), true);
+    assert.equal((await getDoc(doc(actorFirestore('owner'), 'codes/REASN2'))).data().sessionId, 'new-allocation');
+  });
 });
 
 rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
@@ -1324,7 +1469,7 @@ const writeMatrix = [
     createTarget: actorName => `images/set1/q/create-${actorName}`,
     createValue: () => ({ data: 'new-image' }),
     updateValue: () => ({ data: 'changed-image' }),
-    allowed: { create: ['owner'], update: ['owner'], delete: ['owner'] }
+    allowed: { create: [], update: [], delete: [] }
   },
   {
     name: '코드',

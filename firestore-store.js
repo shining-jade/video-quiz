@@ -8,22 +8,55 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
+  const SAFE_REQUEST_BYTES = 8_000_000;
 
-  function estimateBatchRequest(set, images) {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(JSON.stringify(set || {})).length +
-      Object.entries(images || {}).reduce((count, [key, data]) =>
-        count + encoder.encode(key).length + encoder.encode(data).length + 64, 0
+  const utf8Bytes = value => new TextEncoder().encode(String(value == null ? '' : value)).length;
+  const jsonBytes = value => utf8Bytes(JSON.stringify(value == null ? {} : value));
+  function indexByteEstimate(value, fieldPath, documentPath) {
+    if (value === null || value === undefined) return 0;
+    if (Array.isArray(value)) {
+      return value.reduce((count, item, index) =>
+        count + indexByteEstimate(item, (fieldPath || '') + '.' + index, documentPath), 0
       );
-    const imageWrites = Object.keys(images || {}).length;
-    const transformWrites = 2;
-    const writes = 1 + imageWrites + transformWrites;
+    }
+    if (value && typeof value === 'object') {
+      return Object.entries(value).reduce((count, [key, item]) =>
+        count + indexByteEstimate(item, fieldPath ? fieldPath + '.' + key : key, documentPath), 0
+      );
+    }
+    return 2 * (
+      Math.min(utf8Bytes(value), 1_500) + utf8Bytes(fieldPath) + utf8Bytes(documentPath) + 48
+    );
+  }
+
+  function operationByteEstimate(operation) {
+    const value = operation && operation.value;
+    return utf8Bytes(operation && operation.path) + 256 + jsonBytes(value) +
+      indexByteEstimate(value, '', operation && operation.path);
+  }
+
+  function estimateResult(writes, bytes) {
     return {
       writes,
       bytes,
-      allowed: writes <= 500 && bytes <= 9_500_000,
-      reason: writes > 500 ? 'writes' : bytes > 9_500_000 ? 'bytes' : ''
+      allowed: writes <= 500 && bytes <= SAFE_REQUEST_BYTES,
+      reason: writes > 500 ? 'writes' : bytes > SAFE_REQUEST_BYTES ? 'bytes' : ''
     };
+  }
+
+  function estimateBatchRequest(set, images) {
+    const operations = [{ path: 'quiz_sets/estimated-set', value: set || {} }]
+      .concat(Object.entries(images || {}).map(([key, data]) => ({
+        path: 'images/estimated-set/q/' + key,
+        value: { data }
+      })));
+    const imageWrites = Object.keys(images || {}).length;
+    const transformWrites = 2;
+    const writes = 1 + imageWrites + transformWrites;
+    return estimateResult(
+      writes,
+      operations.reduce((count, operation) => count + operationByteEstimate(operation), 0)
+    );
   }
 
   function createLiveToken() {
@@ -207,15 +240,29 @@
       }
       return 0;
     };
-    const requestEstimate = (set, images, extraWrites) => {
-      const estimate = estimateBatchRequest(set, images);
-      estimate.writes = 1 + Object.keys(images || {}).length +
-        transformCount(set) + (Number(extraWrites) || 0);
-      estimate.allowed = estimate.writes <= 500 && estimate.bytes <= 9_500_000;
-      estimate.reason = estimate.writes > 500
-        ? 'writes'
-        : estimate.bytes > 9_500_000 ? 'bytes' : '';
-      return estimate;
+    const operationsEstimate = operations => {
+      const writes = operations.length + operations.reduce(
+        (count, operation) => count + transformCount(operation.value), 0
+      );
+      const bytes = operations.reduce(
+        (count, operation) => count + operationByteEstimate(operation), 0
+      );
+      return estimateResult(writes, bytes);
+    };
+    const requestEstimate = (set, images, options) => {
+      const config = options || {};
+      const setPath = config.setPath || 'quiz_sets/estimated-set';
+      const imagePath = config.imagePath || 'images/estimated-set/q';
+      const operations = [{ path: setPath, value: set }]
+        .concat(Object.entries(images || {}).map(([key, data]) => ({
+          path: imagePath + '/' + key,
+          value: { data }
+        })))
+        .concat(Object.entries(config.deleteDocuments || {}).map(([key, value]) => ({
+          path: imagePath + '/' + key,
+          value
+        })));
+      return operationsEstimate(operations);
     };
     const assertRequestAllowed = estimate => {
       if (estimate.allowed) return;
@@ -225,7 +272,7 @@
         );
       }
       throw new Error(
-        '세트와 이미지 저장 요청이 Firestore 10 MiB 한도에 가까워 저장할 수 없습니다. ' +
+        '세트와 이미지 저장 요청이 Firestore 10 MiB 한도를 안전하게 지키는 8 MB 사전 제한을 넘었습니다. ' +
         '이미지 크기나 개수를 줄여 주세요.'
       );
     };
@@ -291,13 +338,20 @@
       const path = 'images/' + setId + '/q';
       const next = normalizedImages(images);
       const storedSet = withContentRevision(value);
-      assertRequestAllowed(requestEstimate(storedSet, next));
+      const estimateOptions = {
+        setPath: 'quiz_sets/' + setId,
+        imagePath: path
+      };
+      assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
       const current = await db.collection(path).get().then(collectionValue);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
       );
-      assertRequestAllowed(requestEstimate(storedSet, next, deletes.length));
+      estimateOptions.deleteDocuments = Object.fromEntries(
+        deletes.map(questionIndex => [questionIndex, current[questionIndex]])
+      );
+      assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
       const batch = db.batch();
       batch.set(db.doc('quiz_sets/' + setId), storedSet);
       deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
@@ -354,13 +408,20 @@
       const path = 'images/' + setId + '/q';
       const next = normalizedImages(images);
       const revisionPatch = { contentRevision: fieldValue.serverTimestamp() };
-      assertRequestAllowed(requestEstimate(revisionPatch, next));
+      const estimateOptions = {
+        setPath: 'quiz_sets/' + setId,
+        imagePath: path
+      };
+      assertRequestAllowed(requestEstimate(revisionPatch, next, estimateOptions));
       const current = await db.collection(path).get().then(collectionValue);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
       );
-      assertRequestAllowed(requestEstimate(revisionPatch, next, deletes.length));
+      estimateOptions.deleteDocuments = Object.fromEntries(
+        deletes.map(questionIndex => [questionIndex, current[questionIndex]])
+      );
+      assertRequestAllowed(requestEstimate(revisionPatch, next, estimateOptions));
       const batch = db.batch();
       batch.set(db.doc('quiz_sets/' + setId), revisionPatch, { merge: true });
       deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
@@ -395,7 +456,12 @@
         if (!before) return null;
         const images = await getImages(sourceId);
         const entries = Object.entries(normalizedImages(images));
-        assertRequestAllowed(requestEstimate(copyValue(before), Object.fromEntries(entries)));
+        assertRequestAllowed(requestEstimate(
+          copyValue(before), Object.fromEntries(entries), {
+            setPath: 'quiz_sets/' + newId,
+            imagePath: 'images/' + newId + '/q'
+          }
+        ));
         const result = await db.runTransaction(async transaction => {
           const currentSnapshot = await transaction.get(sourceReference);
           const current = quizSetValue(currentSnapshot);
@@ -420,16 +486,31 @@
       const storedSession = { ...(session || {}) };
       delete storedSession.setSnapshot;
       delete storedSession.snapshotImages;
+      storedSession.status = 'allocating';
       if (setSnapshot) storedSession.snapshotVersion = 1;
-      const snapshotRequest = estimateBatchRequest(setSnapshot || {}, snapshotImages);
-      snapshotRequest.writes = 4 + (setSnapshot ? 1 : 0) +
-        Object.keys(snapshotImages).length + transformCount(storedSession) + 1 +
-        transformCount(setSnapshot || {});
-      snapshotRequest.bytes += estimateBatchRequest(storedSession, {}).bytes + 512;
-      snapshotRequest.allowed = snapshotRequest.writes <= 500 && snapshotRequest.bytes <= 9_500_000;
-      snapshotRequest.reason = snapshotRequest.writes > 500
-        ? 'writes'
-        : snapshotRequest.bytes > 9_500_000 ? 'bytes' : '';
+      const snapshotOperations = [
+        {
+          path: 'codes/' + code,
+          value: { sessionId, createdAt: fieldValue.serverTimestamp() }
+        },
+        { path: 'sessions/' + sessionId, value: storedSession },
+        {
+          path: 'sessions/' + sessionId + '/meta/live',
+          value: { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+        },
+        { path: 'sessions/' + sessionId + '/meta/board', value: { scores: {} } }
+      ];
+      if (setSnapshot) snapshotOperations.push({
+        path: 'sessions/' + sessionId + '/snapshot/set',
+        value: withoutDocumentId(setSnapshot)
+      });
+      Object.entries(snapshotImages).forEach(([questionIndex, data]) => {
+        snapshotOperations.push({
+          path: 'sessions/' + sessionId + '/snapshot_images/' + questionIndex,
+          value: { data }
+        });
+      });
+      const snapshotRequest = operationsEstimate(snapshotOperations);
       try {
         assertRequestAllowed(snapshotRequest);
       } catch (error) {
@@ -738,6 +819,92 @@
       );
     }
 
+    function activateSessionAllocation(sessionId, code, teacherUid) {
+      const sessionReference = db.doc('sessions/' + sessionId);
+      const codeReference = db.doc('codes/' + code);
+      return db.runTransaction(async transaction => {
+        const sessionSnapshot = await transaction.get(sessionReference);
+        const codeSnapshot = await transaction.get(codeReference);
+        if (!sessionSnapshot.exists || !codeSnapshot.exists) return false;
+        const session = sessionSnapshot.data() || {};
+        const mapping = codeSnapshot.data() || {};
+        if (session.teacherUid !== teacherUid || session.code !== code ||
+            mapping.sessionId !== sessionId) return false;
+        if (session.status === 'live') return true;
+        if (session.status !== 'allocating') return false;
+        transaction.set(sessionReference, { status: 'live' }, { merge: true });
+        return true;
+      });
+    }
+
+    async function abortSessionAllocation(sessionId, code, teacherUid) {
+      const sessionReference = db.doc('sessions/' + sessionId);
+      const codeReference = db.doc('codes/' + code);
+      const collectionNames = [
+        'meta', 'students', 'responses', 'grades', 'student_scores', 'snapshot', 'snapshot_images'
+      ];
+      let lastError = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const prepared = await db.runTransaction(async transaction => {
+            const sessionSnapshot = await transaction.get(sessionReference);
+            const codeSnapshot = await transaction.get(codeReference);
+            const mapping = codeSnapshot.exists ? codeSnapshot.data() || {} : null;
+            if (!sessionSnapshot.exists) {
+              const complete = !mapping || mapping.sessionId !== sessionId;
+              return { allowed: complete, complete };
+            }
+            const session = sessionSnapshot.data() || {};
+            if (session.teacherUid !== teacherUid || session.code !== code) {
+              return { allowed: false, complete: false };
+            }
+            transaction.set(sessionReference, {
+              status: 'aborted',
+              abortedAt: fieldValue.serverTimestamp()
+            }, { merge: true });
+            if (mapping && mapping.sessionId === sessionId) transaction.delete(codeReference);
+            return { allowed: true, complete: false };
+          });
+          if (!prepared.allowed) return false;
+          if (prepared.complete) return true;
+
+          const childReferences = [];
+          for (const collectionName of collectionNames) {
+            const snapshot = await db.collection(
+              'sessions/' + sessionId + '/' + collectionName
+            ).get();
+            snapshot.docs.forEach(document => childReferences.push(document.ref));
+          }
+          for (const group of chunk(childReferences, 400)) {
+            const batch = db.batch();
+            group.forEach(reference => batch.delete(reference));
+            await batch.commit();
+          }
+
+          return db.runTransaction(async transaction => {
+            const sessionSnapshot = await transaction.get(sessionReference);
+            const codeSnapshot = await transaction.get(codeReference);
+            const mapping = codeSnapshot.exists ? codeSnapshot.data() || {} : null;
+            if (!sessionSnapshot.exists) {
+              return !mapping || mapping.sessionId !== sessionId;
+            }
+            const session = sessionSnapshot.data() || {};
+            if (session.teacherUid !== teacherUid || session.code !== code ||
+                session.status !== 'aborted') return false;
+            if (mapping && mapping.sessionId === sessionId) transaction.delete(codeReference);
+            transaction.delete(sessionReference);
+            return true;
+          });
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw new Error(
+        '할당된 반 세션 정리에 실패했습니다. 원래 교사 계정으로 다시 시도해 주세요: ' +
+        (lastError && lastError.message ? lastError.message : String(lastError || 'unknown'))
+      );
+    }
+
     function freezeLive(sessionId, expectedLive) {
       return updateCurrentLive(
         sessionId,
@@ -799,6 +966,8 @@
       copyQuizSet,
       copyOwnedQuizSet,
       startSession,
+      activateSessionAllocation,
+      abortSessionAllocation,
       subscribeStudents,
       subscribeResponses,
       subscribeGrades,

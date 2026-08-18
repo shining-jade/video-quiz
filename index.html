@@ -2716,7 +2716,11 @@ function plStartSession() {
   const state = pl;
   if (!state || state.startingSession) return Promise.resolve();
   const authState = teacherState;
+  const authGeneration = typeof teacherAuthVersion === 'number' ? teacherAuthVersion : null;
   if (!AuthCore.isTeacher(authState)) return Promise.resolve(null);
+  const sameOwnerGeneration = () => AuthCore.isTeacher(teacherState) &&
+    teacherState.uid === authState.uid && teacherState.email === authState.email &&
+    (authGeneration === null || teacherAuthVersion === authGeneration);
   state.startingSession = true;
   const label = ($('#pl-label') && $('#pl-label').value.trim()) || '';
   lsSet('vq_last_label', label);
@@ -2726,13 +2730,35 @@ function plStartSession() {
     ? store.getQuizSetSnapshot(state.setId)
     : (store.getImages ? store.getImages(state.setId) : Promise.resolve({}))
       .then(snapshotImages => ({ setSnapshot: state.set, snapshotImages: snapshotImages }));
+  let captured = null;
+  const abortAllocated = async code => {
+    try {
+      if (store.abortSessionAllocation) {
+        const cleaned = await store.abortSessionAllocation(sessionId, code, authState.uid);
+        if (cleaned !== true) throw new Error('allocation identity가 일치하지 않습니다.');
+      } else if (sameOwnerGeneration()) {
+        await store.endSession(sessionId);
+      } else {
+        throw new Error('원래 교사 인증이 없어 정리를 실행할 수 없습니다.');
+      }
+      return true;
+    } catch (cleanupError) {
+      console.error(cleanupError);
+      toast('할당된 반 세션 정리 실패 — 원래 교사 계정으로 다시 시도해 주세요: ' +
+        (cleanupError && cleanupError.message ? cleanupError.message : String(cleanupError)));
+      return false;
+    }
+  };
   return loadSnapshot.then(snapshot => {
-    if (pl !== state || !AuthCore.isTeacher(teacherState) ||
-        teacherState.uid !== authState.uid || teacherState.email !== authState.email) return null;
+    if (pl !== state || !sameOwnerGeneration()) return null;
     const setSnapshot = typeof normSet === 'function'
       ? normSet(snapshot && snapshot.setSnapshot)
       : snapshot && snapshot.setSnapshot;
     if (!setSnapshot) throw new Error('세션 스냅샷을 만들 퀴즈 세트를 찾을 수 없습니다.');
+    captured = {
+      setSnapshot,
+      snapshotImages: snapshot && snapshot.snapshotImages || {}
+    };
     return store.startSession(sessionId, {
       setId: state.setId,
       setTitle: setSnapshot.title,
@@ -2743,19 +2769,64 @@ function plStartSession() {
       createdAt: SV_TS,
       status: 'live',
       setSnapshot: setSnapshot,
-      snapshotImages: snapshot && snapshot.snapshotImages || {}
+      snapshotImages: captured.snapshotImages
     }, () => rid(6));
   }).then(async code => {
     if (!code) return;
-    const stillOwner = AuthCore.isTeacher(teacherState) &&
-      teacherState.uid === authState.uid && teacherState.email === authState.email;
+    const stillOwner = sameOwnerGeneration();
     if (pl !== state || !stillOwner) {
-      if (stillOwner) await store.endSession(sessionId);
+      await abortAllocated(code);
       return;
     }
-    state.sessionId = sessionId;
-    state.code = code;
-    state.snapshotVersion = 1;
+    const runtimeSet = captured && captured.setSnapshot;
+    const runtimeVideos = runtimeSet && Array.isArray(runtimeSet.videos)
+      ? runtimeSet.videos : [];
+    const runtimeQuestions = typeof PlaylistCore === 'object' && PlaylistCore.flattenQuestions
+      ? PlaylistCore.flattenQuestions(runtimeVideos)
+      : (state.flatQuestions || []);
+    const firstStart = runtimeVideos.length
+      ? Math.max(0, Number(runtimeVideos[0].startSec) || 0) : 0;
+    Object.assign(state, {
+      set: runtimeSet,
+      videos: runtimeVideos,
+      flatQuestions: runtimeQuestions,
+      videoIndex: 0,
+      playlistDone: false,
+      transitionUntil: 0,
+      playbackEnded: false,
+      lastT: firstStart - 0.6,
+      fired: runtimeQuestions.map(() => false),
+      dueQuestions: [],
+      pendingLiveQuestion: -1,
+      openError: '',
+      closeFlight: null,
+      closeError: '',
+      sessionId: sessionId,
+      code: code,
+      snapshotVersion: 1
+    });
+    if (typeof imgCache === 'object' && captured && captured.snapshotImages) {
+      Object.entries(captured.snapshotImages).forEach(([key, data]) => {
+        imgCache[sessionId + '/' + key] = data;
+      });
+    }
+    if (store.activateSessionAllocation) {
+      let activated = false;
+      try {
+        activated = await store.activateSessionAllocation(sessionId, code, authState.uid);
+      } catch (activationError) {
+        await abortAllocated(code);
+        throw activationError;
+      }
+      if (activated !== true) {
+        await abortAllocated(code);
+        throw new Error('생성된 반 세션을 활성화하지 못했습니다.');
+      }
+    }
+    if (pl !== state || !sameOwnerGeneration()) {
+      await abortAllocated(code);
+      return;
+    }
     renderPlayRun();
   }).catch(e => {
     if (pl !== state) return;
@@ -5108,7 +5179,7 @@ function screenAdmin() {
     sessions: {}, resp: {}, sets: {},
     from: '', to: '', setFilter: '', gradeFilter: '', klassFilter: '',
     tab: 'sessions', loading: false, detail: null,
-    loadGeneration: 0, displayedSessionIds: [], purgeSessionIds: [], displayedRange: null,
+    loadGeneration: 0, displayedSessionIds: [], purgeSessionIds: [], purgeFilterSnapshot: null, displayedRange: null,
     rangeRejected: false, rejectedSessionCount: 0
   };
   onCleanup(() => { adm = null; });
@@ -5193,7 +5264,12 @@ function admLoad() {
   if (!state) return Promise.resolve();
   const generation = (Number(state.loadGeneration) || 0) + 1;
   state.loadGeneration = generation;
-  const filter = { from: state.from, to: state.to };
+  const filter = {
+    from: state.from, to: state.to,
+    setFilter: state.setFilter || '',
+    gradeFilter: state.gradeFilter || '',
+    klassFilter: state.klassFilter || ''
+  };
   const isCurrent = () => adm === state && state.loadGeneration === generation;
   const body = $('#adm-body');
   body.innerHTML = '<div class="empty">불러오는 중…</div>';
@@ -5201,6 +5277,7 @@ function admLoad() {
   state.detail = null;
   state.displayedSessionIds = [];
   state.purgeSessionIds = [];
+  state.purgeFilterSnapshot = null;
   state.rangeRejected = false;
   state.rejectedSessionCount = 0;
 
@@ -5223,6 +5300,7 @@ function admLoad() {
       state.resp = {};
       state.displayedSessionIds = [];
       state.purgeSessionIds = [];
+      state.purgeFilterSnapshot = Object.freeze(Object.assign({}, filter));
       state.displayedRange = { from: filter.from, to: filter.to };
       state.rangeRejected = true;
       state.rejectedSessionCount = ids.length;
@@ -5277,7 +5355,10 @@ function admLoad() {
         state.sets = nextSets;
         state.resp = nextResp;
         state.displayedSessionIds = ids.slice();
-        state.purgeSessionIds = ids.slice();
+        state.purgeSessionIds = Object.freeze(ids.filter(id =>
+          !filter.setFilter || picked[id].setId === filter.setFilter
+        ));
+        state.purgeFilterSnapshot = Object.freeze(Object.assign({}, filter));
         state.displayedRange = { from: filter.from, to: filter.to };
         state.rangeRejected = false;
         state.rejectedSessionCount = 0;
@@ -5292,6 +5373,7 @@ function admLoad() {
     state.resp = {};
     state.displayedSessionIds = [];
     state.purgeSessionIds = [];
+    state.purgeFilterSnapshot = null;
     state.rangeRejected = false;
     state.rejectedSessionCount = 0;
     console.error(e);
@@ -5380,7 +5462,6 @@ function admRenderBody() {
   if (!body || adm.loading) return;
   if (adm.rangeRejected) {
     adm.displayedSessionIds = [];
-    adm.purgeSessionIds = [];
     body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' +
       (Number(adm.rejectedSessionCount) || 0) +
       '건입니다. 기간을 좁혀서 조회해 주세요.</div></div>';
@@ -5388,7 +5469,6 @@ function admRenderBody() {
   }
   const data = admCompute();
   adm.displayedSessionIds = data.sessions.map(session => session.id);
-  adm.purgeSessionIds = adm.displayedSessionIds.slice();
 
   if (adm.detail) { body.innerHTML = admStudentDetail(data, adm.detail); return; }
   if (adm.tab === 'manage')  { body.innerHTML = admManage(data); return; }
@@ -5533,9 +5613,18 @@ function admClassesView(d) {
     '</tbody></table></div></div>';
 }
 
+function admPurgeFilterChanged() {
+  const accepted = adm && adm.purgeFilterSnapshot;
+  if (!accepted) return true;
+  return ['from', 'to', 'setFilter', 'gradeFilter', 'klassFilter'].some(key =>
+    String(adm[key] || '') !== String(accepted[key] || '')
+  );
+}
+
 function admManage(d) {
   const displayedIds = (adm.purgeSessionIds || []).slice();
   const displayedRange = adm.displayedRange || { from: adm.from, to: adm.to };
+  const purgeDisabled = admPurgeFilterChanged();
   return '<div class="card">' +
       '<h2>비밀번호 변경</h2>' +
       '<div class="sub">변경하면 모든 기기에서 새 비밀번호로 로그인합니다.</div>' +
@@ -5553,7 +5642,8 @@ function admManage(d) {
       '<div class="notice">현재 게시된 조회 결과(' + esc(displayedRange.from) + ' ~ ' + esc(displayedRange.to) + ')의 <b>' +
         displayedIds.length + '개 진행 기록</b>과 그 안의 모든 학생 응답이 함께 삭제됩니다. ' +
         '퀴즈 세트 자체는 지워지지 않습니다.</div>' +
-      '<button class="btn danger" onclick="admPurge()">이 기간 기록 삭제</button>' +
+      (purgeDisabled ? '<div class="notice">필터가 변경되었습니다. 다시 조회하여 삭제 대상을 확정해 주세요.</div>' : '') +
+      '<button class="btn danger" onclick="admPurge()"' + (purgeDisabled ? ' disabled' : '') + '>이 기간 기록 삭제</button>' +
     '</div>' +
     '<div class="card">' +
       '<h2>안내</h2>' +
@@ -5576,6 +5666,10 @@ function admChangePw() {
 }
 
 function admPurge() {
+  if (admPurgeFilterChanged()) {
+    alert('필터가 변경되었습니다. 다시 조회하여 삭제 대상을 확정해 주세요.');
+    return;
+  }
   const sessionIds = Array.isArray(adm.purgeSessionIds)
     ? adm.purgeSessionIds.slice()
     : [];

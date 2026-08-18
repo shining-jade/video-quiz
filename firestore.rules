@@ -48,6 +48,15 @@ service cloud.firestore {
         getAfter(/databases/$(database)/documents/quiz_sets/$(setId)).data.ownerUid == request.auth.uid;
     }
 
+    function changesSetContentRevisionAfter(setId) {
+      let setPath = /databases/$(database)/documents/quiz_sets/$(setId);
+      return ownsSetAfter(setId) &&
+        getAfter(setPath).data.get('contentRevision', null) != null &&
+        (!exists(setPath) ||
+          getAfter(setPath).data.get('contentRevision', null) !=
+            get(setPath).data.get('contentRevision', null));
+    }
+
     function ownsSession(sessionId) {
       return isApprovedTeacher() &&
         exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
@@ -345,8 +354,7 @@ service cloud.firestore {
 
     match /images/{setId}/q/{questionIndex} {
       allow get, list: if isApprovedTeacher();
-      allow create, update: if ownsSetAfter(setId);
-      allow delete: if ownsSet(setId);
+      allow create, update, delete: if changesSetContentRevisionAfter(setId);
       allow read, write: if false;
     }
 
@@ -362,6 +370,7 @@ service cloud.firestore {
 
     match /sessions/{sessionId} {
       allow get: if isAdmin() || ownsSession(sessionId) ||
+        (isApprovedTeacher() && !sessionExists(sessionId)) ||
         (anonymousStudent() && sessionIsJoinable(sessionId));
       allow list: if isAdmin() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid);

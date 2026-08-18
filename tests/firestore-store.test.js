@@ -66,6 +66,32 @@ function requestBytes(value) {
   ) || '').length;
 }
 
+function fakeIndexBytes(value, fieldPath = '', documentPath = '') {
+  if (value === SERVER_TIMESTAMP || value === null || value === undefined) return 0;
+  if (Array.isArray(value)) {
+    return value.reduce((count, item, index) =>
+      count + fakeIndexBytes(item, fieldPath + '.' + index, documentPath), 0
+    );
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value).reduce((count, [key, item]) =>
+      count + fakeIndexBytes(item, fieldPath ? fieldPath + '.' + key : key, documentPath), 0
+    );
+  }
+  const encodedValue = new TextEncoder().encode(String(value)).length;
+  const encodedPath = new TextEncoder().encode(fieldPath).length;
+  const encodedDocument = new TextEncoder().encode(documentPath).length;
+  return 2 * (Math.min(encodedValue, 1_500) + encodedPath + encodedDocument + 48);
+}
+
+function fakeOperationBytes(operation, existingDocuments) {
+  const value = operation.operation === 'delete'
+    ? existingDocuments.get(operation.ref.path)
+    : operation.value;
+  return requestBytes(operation.ref.path) + 256 + requestBytes(value) +
+    fakeIndexBytes(value, '', operation.ref.path);
+}
+
 function makeFirestoreFake(initial = {}, options = {}) {
   const committedServerMillis = options.committedServerMillis ?? 50_000;
   const documents = new Map(Object.entries(initial).map(([path, value]) => [path, clone(value)]));
@@ -241,7 +267,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
             (count, operation) => count + requestTransformCount(operation.value), 0
           );
           const batchBytes = operations.reduce((count, operation) =>
-            count + requestBytes(operation.ref.path) + requestBytes(operation.value) + 64, 0
+            count + fakeOperationBytes(operation, documents), 0
           );
           if (options.maxRequestWrites && requestWrites > options.maxRequestWrites) {
             throw new Error('fake Firestore request exceeds write limit');
@@ -309,7 +335,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
         (count, operation) => count + requestTransformCount(operation.value), 0
       );
       const transactionBytes = requestOperations.reduce((count, operation) =>
-        count + requestBytes(operation.ref.path) + requestBytes(operation.value) + 64, 0
+        count + fakeOperationBytes(operation, documents), 0
       );
       if (options.maxRequestWrites && requestWrites > options.maxRequestWrites) {
         throw new Error('fake Firestore transaction exceeds write limit');
@@ -2146,7 +2172,7 @@ test('빈 반 코드는 소유 교사 정보와 함께 한 트랜잭션에서 �
   const codeDocument = fake.value('codes/ABC234');
   assert.equal(codeDocument.sessionId, 'new');
   assert.equal(codeDocument.createdAt.toMillis(), 20_000);
-  assert.deepEqual(fake.value('sessions/new'), session);
+  assert.deepEqual(fake.value('sessions/new'), { ...session, status: 'allocating' });
   assert.deepEqual(fake.value('sessions/new/meta/live'), {
     q: -1, openedAt: 0, revealed: false, limitSec: 0
   });
@@ -2163,8 +2189,92 @@ test('세션 시작은 충돌한 후보를 건너뛰고 열 개 안에서 선점
   const code = await store.startSession('new', session, () => candidates.shift());
 
   assert.equal(code, 'NEW234');
-  assert.deepEqual(fake.value('sessions/new'), { ...session, code: 'NEW234' });
+  assert.deepEqual(fake.value('sessions/new'), {
+    ...session, status: 'allocating', code: 'NEW234'
+  });
   assert.equal(fake.value('codes/NEW234').sessionId, 'new');
+});
+
+test('세션 allocation은 처음에는 입장 불가이며 exact code·owner CAS 뒤에만 live가 된다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  const code = await store.startSession('session-a', {
+    setId: 'set1', status: 'live', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr'
+  }, () => 'ABC234');
+
+  assert.equal(code, 'ABC234');
+  assert.equal(fake.value('sessions/session-a').status, 'allocating');
+  assert.equal(await store.activateSessionAllocation(
+    'session-a', 'ABC234', 'owner-uid'
+  ), true);
+  assert.equal(fake.value('sessions/session-a').status, 'live');
+  assert.equal(await store.activateSessionAllocation(
+    'session-a', 'WRONG1', 'owner-uid'
+  ), false);
+});
+
+test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지우며 부분 실패를 재시도한다', async () => {
+  const fake = makeFirestoreFake({
+    'codes/ABC234': { sessionId: 'session-a' },
+    'sessions/session-a': {
+      code: 'ABC234', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'live'
+    },
+    'sessions/session-a/meta/live': { q: -1 },
+    'sessions/session-a/meta/board': { scores: {} },
+    'sessions/session-a/snapshot/set': { videos: [{ questions: [] }] },
+    'sessions/session-a/snapshot_images/v0q0': { data: 'image' },
+    'sessions/session-a/students/student-a': { uid: 'student-a' },
+    'sessions/session-a/responses/student-a': { uid: 'student-a', answers: {} },
+    'sessions/session-a/grades/student-a__0': {
+      uid: 'student-a', questionIndex: 0, revision: 1, ok: true
+    },
+    'sessions/session-a/student_scores/student-a': { correct: 1 }
+  }, { failBatchCommitAt: 1 });
+  const store = createStore(fake);
+
+  assert.equal(await store.abortSessionAllocation(
+    'session-a', 'ABC234', 'owner-uid'
+  ), true);
+
+  assert.equal(fake.has('codes/ABC234'), false);
+  assert.equal(fake.has('sessions/session-a'), false);
+  for (const path of [
+    'sessions/session-a/meta/live',
+    'sessions/session-a/meta/board',
+    'sessions/session-a/snapshot/set',
+    'sessions/session-a/snapshot_images/v0q0',
+    'sessions/session-a/students/student-a',
+    'sessions/session-a/responses/student-a',
+    'sessions/session-a/grades/student-a__0',
+    'sessions/session-a/student_scores/student-a'
+  ]) assert.equal(fake.has(path), false, path);
+  assert.ok(fake.calls().filter(call => call.operation === 'batchCommit').length >= 2);
+});
+
+test('allocation abort는 reassigned code와 newer session을 보존하고 반복 호출은 idempotent하다', async () => {
+  const fake = makeFirestoreFake({
+    'codes/ABC234': { sessionId: 'newer-session' },
+    'sessions/session-a': {
+      code: 'ABC234', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'allocating'
+    },
+    'sessions/session-a/meta/live': { q: -1 },
+    'sessions/newer-session': {
+      code: 'ABC234', teacherUid: 'other-owner', teacherEmail: 'other@school.kr', status: 'live'
+    }
+  });
+  const store = createStore(fake);
+
+  assert.equal(await store.abortSessionAllocation(
+    'session-a', 'ABC234', 'owner-uid'
+  ), true);
+  assert.equal(await store.abortSessionAllocation(
+    'session-a', 'ABC234', 'owner-uid'
+  ), true);
+
+  assert.deepEqual(fake.value('codes/ABC234'), { sessionId: 'newer-session' });
+  assert.equal(fake.has('sessions/session-a'), false);
+  assert.equal(fake.value('sessions/newer-session').status, 'live');
 });
 
 test('세션 시작은 열 후보가 모두 충돌하면 더 만들지 않고 실패한다', async () => {
@@ -3736,6 +3846,75 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
   assert.equal(rendered, 1);
 });
 
+test('세션 할당 성공은 캡처 B를 runtime에 한 번에 재바인딩해 공개·타이밍·채점에만 사용한다', async () => {
+  const setA = {
+    title: 'A', author: '이전 교사',
+    settings: { autoPause: false, revealMode: 'manual', limitSec: 10, revealDelaySec: 0 },
+    videos: [{ videoId: 'video-a', startSec: 0, endSec: 20,
+      questions: [{ t: 5, type: 'choice', text: 'A 문항', choices: ['A0', 'A1'], answer: 0 }] }]
+  };
+  const setB = {
+    title: 'B', author: '현재 교사',
+    settings: { autoPause: false, revealMode: 'manual', limitSec: 25, revealDelaySec: 0 },
+    videos: [{ videoId: 'video-b', startSec: 30, endSec: 90,
+      questions: [{ t: 45, type: 'choice', text: 'B 문항', choices: ['B0', 'B1'], answer: 1 }] }]
+  };
+  const liveWrites = [], gradeWrites = [], events = [];
+  const context = {
+    pl: {
+      setId: 'set1', set: setA, videos: setA.videos,
+      flatQuestions: require('../playlist-core.js').flattenQuestions(setA.videos),
+      fired: [true], dueQuestions: [0], live: { q: -1 }, pendingLiveQuestion: -1,
+      player: { pauseVideo() {} }
+    },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    teacherAuthVersion: 7,
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    FirestoreStore: loadStoreModule(), imgCache: {},
+    $() { return { value: '' }; }, lsSet() {},
+    rid(valueLength) { return valueLength === 12 ? 'SESSION12345' : 'NEW234'; },
+    SV_TS: SERVER_TIMESTAMP,
+    normSet(value) { return value; },
+    limitFor(set) { return set.settings.limitSec; }, serverNow() { return 1_000; },
+    isAutoGraded() { return true; },
+    gradeResponse(question, response) { return Number(question.answer) === Number(response.c); },
+    store: {
+      async getQuizSetSnapshot() {
+        return { setSnapshot: setB, snapshotImages: { v0q0: 'image-b' } };
+      },
+      async startSession() { events.push('allocated'); return 'NEW234'; },
+      async activateSessionAllocation() { events.push('activated'); return true; },
+      async setLive(sessionId, live) { liveWrites.push([sessionId, live]); },
+      async gradeAnswer(...args) { gradeWrites.push(args); return true; }
+    },
+    renderPlayRun() { events.push('rendered'); },
+    plRenderQList() {}, plRenderTimeline() {}, toast() {}, alert() {}, console
+  };
+  loadStageFunctions(['plStartSession', 'plOpenQuestion', 'plGradeCurrentResponses'], context);
+
+  await context.plStartSession();
+
+  assert.equal(context.pl.set.title, 'B');
+  assert.equal(context.pl.videos[0].videoId, 'video-b');
+  assert.equal(context.pl.flatQuestions[0].text, 'B 문항');
+  assert.equal(context.pl.lastT, 29.4);
+  assert.deepEqual(Array.from(context.pl.fired), [false]);
+  assert.deepEqual(Array.from(context.pl.dueQuestions), []);
+  assert.equal(context.imgCache['SESSION12345/v0q0'], 'image-b');
+  assert.deepEqual(events, ['allocated', 'activated', 'rendered']);
+
+  await context.plOpenQuestion(0);
+  assert.equal(liveWrites[0][1].publicQuestion.text, 'B 문항');
+  assert.equal(liveWrites[0][1].limitSec, 25);
+
+  context.pl.live = { q: 0 };
+  context.pl.responses = { '0': { studentB: { c: 1, submitted: true, revision: 4 } } };
+  await context.plGradeCurrentResponses(context.pl, 0);
+  assert.deepEqual(gradeWrites, [['SESSION12345', 'studentB', 0, 4, true]]);
+});
+
 test('이미지 스냅샷을 읽는 동안 승인이 취소되면 세션을 만들지 않는다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let finishImages;
@@ -3768,9 +3947,9 @@ test('이미지 스냅샷을 읽는 동안 승인이 취소되면 세션을 만�
   assert.equal(context.pl.startingSession, false);
 });
 
-test('세션 할당 뒤 화면을 떠나면 소유 교사 권한으로 고아 세션을 즉시 종료한다', async () => {
+test('세션 할당 뒤 화면을 떠나면 exact allocation을 CAS abort한다', async () => {
   let finishStart;
-  const ended = [];
+  const aborted = [];
   const oldState = { setId: 'set1', set: { title: '첫 세트', author: '교사' } };
   const context = {
     pl: oldState,
@@ -3783,7 +3962,7 @@ test('세션 할당 뒤 화면을 떠나면 소유 교사 권한으로 고아 �
     store: {
       async getImages() { return {}; },
       startSession() { return new Promise(resolve => { finishStart = resolve; }); },
-      async endSession(sessionId) { ended.push(sessionId); }
+      async abortSessionAllocation(...args) { aborted.push(args); return true; }
     },
     renderPlayRun() { throw new Error('떠난 화면을 렌더하면 안 된다'); },
     alert() {}, console
@@ -3798,9 +3977,51 @@ test('세션 할당 뒤 화면을 떠나면 소유 교사 권한으로 고아 �
   finishStart('NEW234');
   await starting;
 
-  assert.deepEqual(ended, ['SESSION12345']);
+  assert.deepEqual(aborted, [['SESSION12345', 'NEW234', 'teacher-1']]);
   assert.equal(oldState.sessionId, undefined);
   assert.equal(oldState.code, undefined);
+});
+
+test('allocation 뒤 인증 교체도 abort를 시도하고 실패를 사용자에게 알린다', async () => {
+  let finishStart;
+  const aborted = [], notices = [];
+  const context = {
+    pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    teacherAuthVersion: 3,
+    AuthCore: require('../auth-core.js'),
+    $() { return { value: '' }; }, lsSet() {}, rid() { return 'SESSION12345'; },
+    SV_TS: SERVER_TIMESTAMP,
+    store: {
+      async getImages() { return {}; },
+      startSession() { return new Promise(resolve => { finishStart = resolve; }); },
+      async abortSessionAllocation(...args) {
+        aborted.push(args);
+        throw new Error('permission-denied');
+      }
+    },
+    renderPlayRun() { throw new Error('교체된 인증으로 렌더하면 안 된다'); },
+    toast(message) { notices.push(message); }, alert(message) { notices.push(message); },
+    console: { error() {} }
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'plStartSession'
+  ), context);
+
+  const starting = context.plStartSession();
+  await new Promise(resolve => setImmediate(resolve));
+  context.teacherState = {
+    status: 'teacher', uid: 'teacher-2', email: 'other@school.kr', role: 'teacher'
+  };
+  context.teacherAuthVersion = 4;
+  finishStart('NEW234');
+  await starting;
+
+  assert.deepEqual(aborted, [['SESSION12345', 'NEW234', 'teacher-1']]);
+  assert.equal(notices.some(message => /정리.*실패|permission-denied/.test(message)), true);
+  assert.equal(context.pl.sessionId, undefined);
 });
 
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
@@ -6313,7 +6534,11 @@ test('관리자 기간 삭제는 화면에서 경로를 만들지 않고 저장�
   const calls = [];
   const context = {
     adm: {
-      from: '2024-01-01', to: '2024-01-31', purgeSessionIds: ['a', 'b']
+      from: '2024-01-01', to: '2024-01-31', setFilter: '', gradeFilter: '', klassFilter: '',
+      purgeSessionIds: ['a', 'b'],
+      purgeFilterSnapshot: {
+        from: '2024-01-01', to: '2024-01-31', setFilter: '', gradeFilter: '', klassFilter: ''
+      }
     },
     prompt() { return '삭제'; },
     store: {
@@ -6323,7 +6548,7 @@ test('관리자 기간 삭제는 화면에서 경로를 만들지 않고 저장�
     admLoad() { calls.push(['load']); },
     alert(message) { throw new Error(message); }
   };
-  vm.runInNewContext(extractFunction(html, 'admPurge'), context);
+  loadStageFunctions(['admPurgeFilterChanged', 'admPurge'], context);
 
   await context.admPurge();
 
@@ -6405,7 +6630,7 @@ test('estimateBatchRequest는 transform 포함 500 쓰기와 10 MiB 안전 경�
   const overWrites = Object.assign({}, atLimit, { v0q497: 'x' });
 
   assert.deepEqual(estimateBatchRequest({ title: '세트' }, atLimit), {
-    writes: 500, bytes: 35195, allowed: true, reason: ''
+    writes: 500, bytes: 229248, allowed: true, reason: ''
   });
   assert.equal(estimateBatchRequest({ title: '세트' }, overWrites).writes, 501);
   assert.equal(estimateBatchRequest({ title: '세트' }, overWrites).reason, 'writes');
@@ -6484,6 +6709,67 @@ test('사본과 세션 snapshot 트랜잭션도 transform 수와 10 MiB를 쓰�
     /10 MiB/
   );
   assert.equal(sessionFake.calls().some(call => call.operation === 'runTransaction'), false);
+});
+
+test('8 MB 안전 ceiling은 Unicode·base64 save/copy/session 요청을 backend 전에 거부한다', async () => {
+  const unicodePayload = '가'.repeat(2_700_000);
+  const base64Payload = 'data:image/jpeg;base64,' + 'A'.repeat(8_100_000);
+
+  const saveFake = makeFirestoreFake({}, { maxRequestBytes: 10_000_000 });
+  await assert.rejects(
+    () => createStore(saveFake).saveQuizSetWithImages(
+      '세트-한글', { title: '세트' }, { v0q0: unicodePayload }
+    ),
+    /10 MiB/
+  );
+  assert.deepEqual(saveFake.calls(), []);
+
+  const copyFake = makeFirestoreFake({
+    'quiz_sets/source': {
+      title: '원본', videos: [{ questions: [] }], ownerUid: 'owner', contentRevision: 1
+    },
+    'images/source/q/v0q0': { data: base64Payload }
+  }, { maxRequestBytes: 10_000_000 });
+  await assert.rejects(
+    () => createStore(copyFake).copyOwnedQuizSet('source', 'copy', {
+      uid: 'teacher-1', email: 'teacher@school.kr'
+    }),
+    /10 MiB/
+  );
+  assert.equal(copyFake.calls().some(call => call.operation === 'runTransaction'), false);
+
+  const sessionFake = makeFirestoreFake({}, { maxRequestBytes: 10_000_000 });
+  await assert.rejects(
+    () => createStore(sessionFake).startSession('session1', {
+      setId: 'set1', teacherUid: 'teacher-1', createdAt: SERVER_TIMESTAMP,
+      setSnapshot: { title: '세트', videos: [{ questions: [] }] },
+      snapshotImages: { v0q0: unicodePayload }
+    }, () => 'ABC234'),
+    /10 MiB/
+  );
+  assert.equal(sessionFake.calls().some(call => call.operation === 'runTransaction'), false);
+});
+
+test('delete-heavy 이미지 교체는 기존 문서·index 비용을 읽은 뒤 batch 전에 거부한다', async () => {
+  const existingData = '가'.repeat(10_500);
+  const initial = {
+    'quiz_sets/set1': {
+      title: '세트', ownerUid: 'teacher-1', contentRevision: 1
+    }
+  };
+  for (let index = 0; index < 300; index += 1) {
+    initial['images/set1/q/v0q' + index] = { data: existingData };
+  }
+  const fake = makeFirestoreFake(initial, { maxRequestBytes: 10_000_000 });
+  const store = createStore(fake);
+
+  await assert.rejects(
+    () => store.saveQuizSetWithImages('set1', { title: '모두 삭제' }, {}),
+    /10 MiB/
+  );
+
+  assert.equal(fake.calls().some(call => call.operation === 'getCollection'), true);
+  assert.equal(fake.calls().some(call => call.operation === 'batchCommit'), false);
 });
 
 test('이미지 batch가 실패하면 새 세트 구조도 공개되지 않는다', async () => {
@@ -6803,6 +7089,37 @@ test('live 공개 실패는 due 문항을 제거하거나 fired 처리하지 않
   assert.equal(pauses, 1);
   assert.match(context.pl.openError, /permission-denied/);
   assert.equal(notices.length, 1);
+});
+
+test('live 공개 실패 뒤 수동 재시도 성공은 같은 due를 제거하고 재생 가능 상태를 복원한다', async () => {
+  let writes = 0;
+  const context = {
+    pl: {
+      sessionId: 'session1', setId: 'set1', live: { q: -1 }, pendingLiveQuestion: -1,
+      dueQuestions: [0], fired: [false],
+      flatQuestions: [{ number: 1, type: 'choice', text: '재시도 문항', choices: [] }],
+      set: { settings: { autoPause: true, revealMode: 'manual', limitSec: 20 } },
+      player: { pauseVideo() {} }
+    },
+    SV_TS: 999, limitFor() { return 20; }, FirestoreStore: loadStoreModule(),
+    store: {
+      async setLive() {
+        writes += 1;
+        if (writes === 1) throw new Error('permission-denied');
+      }
+    },
+    plRenderQList() {}, plRenderTimeline() {}, toast() {}, console: { error() {} }
+  };
+  loadStageFunctions(['plOpenQuestion', 'plOpenNextDueQuestion'], context);
+
+  await assert.rejects(() => context.plOpenNextDueQuestion(), /permission-denied/);
+  assert.equal(await context.plOpenQuestion(0), true);
+
+  assert.equal(writes, 2);
+  assert.deepEqual(Array.from(context.pl.dueQuestions), []);
+  assert.equal(context.pl.fired[0], true);
+  assert.equal(context.pl.openError, '');
+  assert.equal(context.pl.pendingLiveQuestion, 0);
 });
 
 test('수동 문항 공개 성공은 같은 due 항목을 제거하고 fired를 완료 처리한다', async () => {
@@ -7207,25 +7524,30 @@ test('300건 초과 결과는 sessions를 게시하지 않고 탭 전환 뒤에�
   assert.deepEqual(Array.from(context.adm.purgeSessionIds), []);
 });
 
-test('관리자 삭제는 입력 변경과 무관하게 게시된 immutable 결과만 지운다', async () => {
-  let purged;
+test('관리자 filter 입력이 accepted snapshot과 달라지면 purge를 막고 재조회를 요구한다', async () => {
+  let purged, warning = '';
   const context = {
     adm: {
       from: '2024-02-01', to: '2024-02-29', displayedRange: { from: '2024-01-01', to: '2024-01-31' },
+      setFilter: '', gradeFilter: '', klassFilter: '',
+      purgeFilterSnapshot: {
+        from: '2024-01-01', to: '2024-01-31', setFilter: '', gradeFilter: '', klassFilter: ''
+      },
       displayedSessionIds: ['changed-session'], purgeSessionIds: ['shown-session']
     },
     admCompute() { return { sessions: [{ id: 'changed-session' }] }; },
-    prompt() { return '삭제'; }, alert() {}, toast() {}, admLoad() {},
+    prompt() { return '삭제'; }, alert(message) { warning = message; }, toast() {}, admLoad() {},
     store: { async purgeSessions(ids) { purged = ids; } }
   };
-  loadStageFunctions(['admPurge'], context);
+  loadStageFunctions(['admPurgeFilterChanged', 'admPurge'], context);
 
   await context.admPurge();
 
-  assert.deepEqual(purged, ['shown-session']);
+  assert.equal(purged, undefined);
+  assert.match(warning, /다시 조회/);
 });
 
-test('관리자 렌더는 세트 filter가 적용된 표시 결과 ID를 삭제 대상으로 고정한다', () => {
+test('관리자 filter·tab 렌더는 accepted purge ID snapshot을 다시 쓰지 않는다', () => {
   const body = { innerHTML: '' };
   const context = {
     adm: {
@@ -7235,7 +7557,11 @@ test('관리자 렌더는 세트 filter가 적용된 표시 결과 ID를 삭제 
         two: { setId: 'set-b', students: {} }
       },
       resp: {}, sets: {}, gradeFilter: '', klassFilter: '',
-      displayedSessionIds: [], purgeSessionIds: []
+      displayedSessionIds: [], purgeSessionIds: Object.freeze(['one', 'two']),
+      purgeFilterSnapshot: {
+        from: '2024-01-01', to: '2024-01-31', setFilter: '', gradeFilter: '', klassFilter: ''
+      },
+      from: '2024-01-01', to: '2024-01-31'
     },
     $(selector) { return selector === '#adm-body' ? body : null; },
     admCompute() {
@@ -7245,15 +7571,18 @@ test('관리자 렌더는 세트 filter가 적용된 표시 결과 ID를 삭제 
         }
       };
     },
-    admSessionsView() { return 'rendered'; }, admManage() {}, admStudentsView() {}, admClassesView() {}
+    admSessionsView() { return 'rendered'; }, admManage() { return 'manage'; },
+    admStudentsView() {}, admClassesView() {}
   };
   loadStageFunctions(['admRenderBody'], context);
 
   context.admRenderBody();
+  context.adm.tab = 'manage';
+  context.admRenderBody();
 
   assert.deepEqual(Array.from(context.adm.displayedSessionIds), ['two']);
-  assert.deepEqual(Array.from(context.adm.purgeSessionIds), ['two']);
-  assert.equal(body.innerHTML, 'rendered');
+  assert.deepEqual(Array.from(context.adm.purgeSessionIds), ['one', 'two']);
+  assert.equal(body.innerHTML, 'manage');
 });
 
 test('CSV 셀은 수식으로 해석되는 선행 문자를 quoting 전에 중화한다', () => {
