@@ -133,12 +133,18 @@ async function adminWrite(path, value) {
   });
 }
 
-function compatStoreDb(modularDb, pauseFirstLiveAccess) {
+function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
   let paused = false;
+  let pathPaused = false;
   async function pause(path) {
-    if (paused || !pauseFirstLiveAccess || !path.endsWith('/meta/live')) return;
-    paused = true;
-    await pauseFirstLiveAccess();
+    if (!paused && pauseFirstLiveAccess && path.endsWith('/meta/live')) {
+      paused = true;
+      await pauseFirstLiveAccess();
+    }
+    if (!pathPaused && pauseAccess && pauseAccess.path === path) {
+      pathPaused = true;
+      await pauseAccess.wait();
+    }
   }
   function reference(path) {
     const modularReference = doc(modularDb, path);
@@ -211,9 +217,9 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess) {
   };
 }
 
-function emulatorStore(modularDb, pauseFirstLiveAccess) {
+function emulatorStore(modularDb, pauseFirstLiveAccess, pauseAccess) {
   return createFirestoreStore(
-    compatStoreDb(modularDb, pauseFirstLiveAccess),
+    compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess),
     { serverTimestamp, delete() { throw new Error('not used'); } },
     Date.now
   );
@@ -256,12 +262,14 @@ async function seedFirestore() {
       setDoc(doc(db, 'sessions/s1'), {
         teacherUid: 'owner-uid',
         teacherEmail: 'owner@school.kr',
-        status: 'live'
+        status: 'live',
+        activationHeartbeatAt: serverTimestamp()
       }),
       setDoc(doc(db, 'sessions/s2'), {
         teacherUid: 'other-teacher-uid',
         teacherEmail: 'other@school.kr',
-        status: 'live'
+        status: 'live',
+        activationHeartbeatAt: serverTimestamp()
       }),
       setDoc(doc(db, 'sessions/s1/meta/live'), {
         q: 0,
@@ -544,6 +552,63 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
     assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/new-allocation'))).exists(), true);
     assert.equal((await getDoc(doc(actorFirestore('owner'), 'codes/REASN2'))).data().sessionId, 'new-allocation');
   });
+});
+
+rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 접근을 자동 차단한다', async () => {
+  const token = 'lease-token-1234567890';
+  let reachedRead;
+  let releaseRead;
+  const atRead = new Promise(resolve => { reachedRead = resolve; });
+  const release = new Promise(resolve => { releaseRead = resolve; });
+  const ownerStore = emulatorStore(actorFirestore('owner'), null, {
+    path: 'sessions/lease-race',
+    async wait() {
+      reachedRead();
+      await release;
+    }
+  });
+  const replacementStore = emulatorStore(actorFirestore('otherTeacher'));
+
+  await ownerStore.startSession('lease-race', {
+    setId: 'set1', setTitle: '세트', teacherUid: actors.owner.uid,
+    teacherEmail: actors.owner.email, status: 'live', createdAt: serverTimestamp(),
+    allocationToken: token,
+    setSnapshot: { title: '세트', videos: [{ questions: [] }] }
+  }, () => 'LEASE2');
+
+  const activating = ownerStore.activateSessionAllocation(
+    'lease-race', 'LEASE2', actors.owner.uid, token
+  );
+  await atRead;
+  releaseRead();
+  assert.equal(await activating, true);
+  await assert.rejects(() => replacementStore.abortSessionAllocation(
+    'lease-race', 'LEASE2', actors.owner.uid, token
+  ), /정리.*실패/);
+
+  const owner = actorFirestore('owner');
+  const student = actorFirestore('student');
+  const active = await getDoc(doc(owner, 'sessions/lease-race'));
+  assert.equal(active.data().status, 'live');
+  assert.ok(active.data().activationHeartbeatAt instanceof Timestamp);
+  await assertSucceeds(getDoc(doc(student, 'sessions/lease-race')));
+
+  await adminWrite('sessions/lease-race', {
+    ...active.data(),
+    activationHeartbeatAt: Timestamp.fromMillis(Date.now() - 20_000)
+  });
+  await assertFails(getDoc(doc(student, 'sessions/lease-race')));
+  await assertFails(setDoc(doc(student, 'sessions/lease-race/students/student-uid'), {
+    uid: 'student-uid', grade: 1, klass: 1, num: 1, name: '학생'
+  }));
+
+  await assertFails(updateDoc(doc(owner, 'sessions/lease-race'), {
+    activationHeartbeatAt: Timestamp.fromMillis(Date.now() + 60_000)
+  }));
+  assert.equal(await ownerStore.renewSessionActivationLease(
+    'lease-race', 'LEASE2', actors.owner.uid, token
+  ), true);
+  await assertSucceeds(getDoc(doc(student, 'sessions/lease-race')));
 });
 
 rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
@@ -1022,7 +1087,8 @@ rulesTest('fix-round: teacher code allocation reads unused and foreign collision
     transaction.set(doc(owner, 'sessions/created-session'), {
       teacherUid: 'owner-uid',
       teacherEmail: 'owner@school.kr',
-      status: 'live'
+      status: 'live',
+      activationHeartbeatAt: serverTimestamp()
     });
     transaction.set(doc(owner, 'sessions/created-session/meta/live'), {
       q: -1,
@@ -1486,7 +1552,8 @@ const writeMatrix = [
     createValue: actorName => ({
       teacherUid: actors[actorName].uid,
       teacherEmail: actors[actorName].email || '',
-      status: 'live'
+      status: 'live',
+      activationHeartbeatAt: serverTimestamp()
     }),
     updateValue: () => ({ status: 'ended' }),
     allowed: {

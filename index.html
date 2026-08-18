@@ -664,6 +664,62 @@ function ssGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return
 function ssSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
 function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
 
+const PENDING_ALLOCATION_KEY = 'vq_pending_allocations_v1';
+const PENDING_ALLOCATION_RECOVERY_DELAY_MS = 30000;
+let pendingAllocationRecoveryTimer = null;
+
+function pendingAllocationRead() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PENDING_ALLOCATION_KEY) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(record => record &&
+      typeof record.sessionId === 'string' && record.sessionId &&
+      typeof record.ownerUid === 'string' && record.ownerUid &&
+      typeof record.ownerEmail === 'string' &&
+      typeof record.token === 'string' && record.token.length >= 16
+    ).map(record => Object.assign({}, record));
+  } catch (e) { return []; }
+}
+
+function pendingAllocationWrite(records) {
+  try {
+    const serialized = JSON.stringify(Array.isArray(records) ? records : []);
+    localStorage.setItem(PENDING_ALLOCATION_KEY, serialized);
+    return localStorage.getItem(PENDING_ALLOCATION_KEY) === serialized;
+  } catch (e) { return false; }
+}
+
+function pendingAllocationsForOwner(owner) {
+  if (!owner || !owner.uid) return [];
+  const email = String(owner.email || '').trim().toLowerCase();
+  return pendingAllocationRead().filter(record =>
+    record.ownerUid === owner.uid &&
+    String(record.ownerEmail || '').trim().toLowerCase() === email
+  );
+}
+
+function pendingAllocationRemember(record) {
+  const records = pendingAllocationRead().filter(item => item.sessionId !== record.sessionId);
+  records.push(Object.assign({}, record));
+  return pendingAllocationWrite(records);
+}
+
+function pendingAllocationPatch(sessionId, patch) {
+  const records = pendingAllocationRead();
+  const index = records.findIndex(record => record.sessionId === sessionId);
+  if (index < 0) return false;
+  records[index] = Object.assign({}, records[index], patch || {});
+  return pendingAllocationWrite(records);
+}
+
+function pendingAllocationRemove(sessionId, token) {
+  const records = pendingAllocationRead();
+  const next = records.filter(record =>
+    record.sessionId !== sessionId || (token && record.token !== token)
+  );
+  return next.length === records.length ? true : pendingAllocationWrite(next);
+}
+
 let toastTimer = null;
 function toast(msg) {
   const el = document.getElementById('toast');
@@ -1145,13 +1201,89 @@ function teacherAuthMarkup() {
     return '<button class="btn ghost sm" onclick="signInTeacher().catch(showTeacherAuthError)">교사 Google 로그인</button>';
   }
   const identity = teacherUser.displayName || teacherState.email || 'Google 계정';
+  const pending = AuthCore.isTeacher(teacherState)
+    ? pendingAllocationsForOwner(teacherState) : [];
+  const recovery = pending.length
+    ? '<button class="btn ghost sm" onclick="retryPendingAllocations()" title="' +
+      esc(pending.some(record => record.lastError) ? pending.find(record => record.lastError).lastError :
+        '이 브라우저에 남은 세션 할당 정리를 다시 시도합니다.') + '">세션 정리 재시도 (' +
+      pending.length + ')</button>'
+    : '';
   return '<span class="auth-user" title="' + esc(teacherState.email) + '">' + esc(identity) + '</span>' +
+    recovery +
     '<button class="btn ghost sm" onclick="signOutTeacher()">로그아웃</button>';
 }
 
 function renderTeacherAuthArea() {
   const area = document.getElementById('teacher-auth-area');
   if (area) area.innerHTML = teacherAuthMarkup();
+}
+
+async function recoverPendingAllocationsForTeacher(owner) {
+  if (!AuthCore.isTeacher(owner) || !store.recoverPendingSessionAllocation) return [];
+  if (pendingAllocationRecoveryTimer !== null) {
+    clearTimeout(pendingAllocationRecoveryTimer);
+    pendingAllocationRecoveryTimer = null;
+  }
+  const version = teacherAuthVersion;
+  const isCurrent = () => AuthCore.isTeacher(teacherState) &&
+    teacherState.uid === owner.uid && teacherState.email === owner.email &&
+    teacherAuthVersion === version;
+  const now = Date.now();
+  const records = pendingAllocationsForOwner(owner);
+  const results = [];
+  let nextRetryAt = 0;
+  for (const record of records) {
+    if (!isCurrent()) break;
+    if (Number(record.recoverAfter) > now) {
+      results.push({ complete: false, waiting: true });
+      nextRetryAt = nextRetryAt
+        ? Math.min(nextRetryAt, Number(record.recoverAfter))
+        : Number(record.recoverAfter);
+      continue;
+    }
+    try {
+      const result = await store.recoverPendingSessionAllocation(record);
+      if (!isCurrent()) break;
+      results.push(result);
+      if (result && result.complete) {
+        pendingAllocationRemove(record.sessionId, record.token);
+      } else {
+        pendingAllocationPatch(record.sessionId, {
+          lastError: result && result.active
+            ? '다른 교사 화면에서 진행 중입니다. heartbeat가 끝난 뒤 다시 시도해 주세요.'
+            : '세션 할당 identity가 달라 자동 정리를 건너뛰었습니다.'
+        });
+        if (result && result.active) {
+          const activeRetryAt = Date.now() + PENDING_ALLOCATION_RECOVERY_DELAY_MS;
+          nextRetryAt = nextRetryAt ? Math.min(nextRetryAt, activeRetryAt) : activeRetryAt;
+        }
+      }
+    } catch (error) {
+      if (!isCurrent()) break;
+      const message = error && error.message ? error.message : String(error);
+      pendingAllocationPatch(record.sessionId, { lastError: message });
+      results.push({ complete: false, error: message });
+    }
+  }
+  if (isCurrent() && nextRetryAt) {
+    pendingAllocationRecoveryTimer = setTimeout(() => {
+      pendingAllocationRecoveryTimer = null;
+      return isCurrent() ? recoverPendingAllocationsForTeacher(owner) : [];
+    }, Math.max(0, nextRetryAt - Date.now()));
+  }
+  if (isCurrent()) renderTeacherAuthArea();
+  return results;
+}
+
+function retryPendingAllocations() {
+  return recoverPendingAllocationsForTeacher(teacherState).then(results => {
+    const failed = results.some(result => !result || !result.complete);
+    toast(failed
+      ? '아직 정리하지 못한 세션이 있습니다. 잠시 후 다시 시도해 주세요.'
+      : '남은 세션 할당 정리를 완료했습니다.');
+    return results;
+  });
 }
 
 async function applyTeacherUser(user) {
@@ -1184,6 +1316,11 @@ async function applyTeacherUser(user) {
   teacherUser = nextUser;
   teacherAllowance = nextAllowance;
   teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  if (AuthCore.isTeacher(teacherState) &&
+      typeof recoverPendingAllocationsForTeacher === 'function') {
+    await recoverPendingAllocationsForTeacher(teacherState);
+    if (updateVersion !== teacherAuthVersion) return false;
+  }
   renderTeacherAuthArea();
   return true;
 }
@@ -2712,6 +2849,33 @@ function renderPlayIntro() {
 }
 
 /** 새 세션(반) 생성 — 반 코드가 겹치지 않을 때까지 재시도 */
+function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) {
+  if (!store.renewSessionActivationLease) return null;
+  const isCurrent = () => pl === state && AuthCore.isTeacher(teacherState) &&
+    teacherState.uid === owner.uid && teacherState.email === owner.email &&
+    (authGeneration === null || teacherAuthVersion === authGeneration);
+  const heartbeat = async () => {
+    if (!isCurrent()) return false;
+    try {
+      const renewed = await store.renewSessionActivationLease(
+        state.sessionId, state.code, owner.uid, allocationToken
+      );
+      if (!isCurrent()) return false;
+      if (renewed !== true) throw new Error('세션 heartbeat identity가 일치하지 않습니다.');
+      state.heartbeatError = '';
+      return true;
+    } catch (error) {
+      if (isCurrent()) {
+        state.heartbeatError = error && error.message ? error.message : String(error);
+        toast('학생 접속 유지에 실패했습니다. 15초 안에 접속이 닫힙니다: ' + state.heartbeatError);
+      }
+      return false;
+    }
+  };
+  state.activationHeartbeatId = every(5000, heartbeat);
+  return state.activationHeartbeatId;
+}
+
 function plStartSession() {
   const state = pl;
   if (!state || state.startingSession) return Promise.resolve();
@@ -2725,6 +2889,18 @@ function plStartSession() {
   const label = ($('#pl-label') && $('#pl-label').value.trim()) || '';
   lsSet('vq_last_label', label);
   const sessionId = rid(12);
+  const allocationToken = rid(24);
+  const pendingCreatedAt = Date.now();
+  if (!pendingAllocationRemember({
+    sessionId, code: '', ownerUid: authState.uid, ownerEmail: authState.email,
+    token: allocationToken, createdAt: pendingCreatedAt,
+    recoverAfter: pendingCreatedAt + PENDING_ALLOCATION_RECOVERY_DELAY_MS
+  })) {
+    state.startingSession = false;
+    alert('세션 복구 정보를 이 브라우저에 안전하게 저장하지 못했습니다. 저장소 사용을 허용한 뒤 다시 시도해 주세요.');
+    return Promise.resolve(null);
+  }
+  let allocatedCode = '';
 
   const loadSnapshot = store.getQuizSetSnapshot
     ? store.getQuizSetSnapshot(state.setId)
@@ -2734,13 +2910,16 @@ function plStartSession() {
   const abortAllocated = async code => {
     try {
       if (store.abortSessionAllocation) {
-        const cleaned = await store.abortSessionAllocation(sessionId, code, authState.uid);
+        const cleaned = await store.abortSessionAllocation(
+          sessionId, code, authState.uid, allocationToken
+        );
         if (cleaned !== true) throw new Error('allocation identity가 일치하지 않습니다.');
       } else if (sameOwnerGeneration()) {
         await store.endSession(sessionId);
       } else {
         throw new Error('원래 교사 인증이 없어 정리를 실행할 수 없습니다.');
       }
+      pendingAllocationRemove(sessionId, allocationToken);
       return true;
     } catch (cleanupError) {
       console.error(cleanupError);
@@ -2769,10 +2948,16 @@ function plStartSession() {
       createdAt: SV_TS,
       status: 'live',
       setSnapshot: setSnapshot,
-      snapshotImages: captured.snapshotImages
+      snapshotImages: captured.snapshotImages,
+      allocationToken: allocationToken
     }, () => rid(6));
   }).then(async code => {
     if (!code) return;
+    allocatedCode = code;
+    if (!pendingAllocationPatch(sessionId, { code })) {
+      await abortAllocated(code);
+      throw new Error('세션 복구 정보에 반 코드를 저장하지 못했습니다.');
+    }
     const stillOwner = sameOwnerGeneration();
     if (pl !== state || !stillOwner) {
       await abortAllocated(code);
@@ -2803,6 +2988,7 @@ function plStartSession() {
       closeError: '',
       sessionId: sessionId,
       code: code,
+      allocationToken: allocationToken,
       snapshotVersion: 1
     });
     if (typeof imgCache === 'object' && captured && captured.snapshotImages) {
@@ -2813,7 +2999,9 @@ function plStartSession() {
     if (store.activateSessionAllocation) {
       let activated = false;
       try {
-        activated = await store.activateSessionAllocation(sessionId, code, authState.uid);
+        activated = await store.activateSessionAllocation(
+          sessionId, code, authState.uid, allocationToken
+        );
       } catch (activationError) {
         await abortAllocated(code);
         throw activationError;
@@ -2827,8 +3015,10 @@ function plStartSession() {
       await abortAllocated(code);
       return;
     }
+    plStartSessionHeartbeat(state, authState, authGeneration, allocationToken);
     renderPlayRun();
   }).catch(e => {
+    if (!allocatedCode) pendingAllocationRemove(sessionId, allocationToken);
     if (pl !== state) return;
     console.error(e);
     alert(e.message === '사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.'
@@ -3853,6 +4043,7 @@ async function plEndSession() {
   if (pl !== state) return;
   await store.endSession(state.sessionId);
   if (pl !== state) return;
+  pendingAllocationRemove(state.sessionId, state.allocationToken);
   toast('진행을 종료했습니다');
   go('live/' + state.sessionId);
 }

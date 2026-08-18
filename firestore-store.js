@@ -262,7 +262,14 @@
           path: imagePath + '/' + key,
           value
         })));
-      return operationsEstimate(operations);
+      const estimate = operationsEstimate(operations);
+      estimate.bytes += Object.entries(config.previousDocuments || {}).reduce(
+        (count, [path, value]) => count + operationByteEstimate({ path, value }), 0
+      );
+      estimate.allowed = estimate.writes <= 500 && estimate.bytes <= SAFE_REQUEST_BYTES;
+      estimate.reason = estimate.writes > 500
+        ? 'writes' : estimate.bytes > SAFE_REQUEST_BYTES ? 'bytes' : '';
+      return estimate;
     };
     const assertRequestAllowed = estimate => {
       if (estimate.allowed) return;
@@ -343,7 +350,10 @@
         imagePath: path
       };
       assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
-      const current = await db.collection(path).get().then(collectionValue);
+      const [parentSnapshot, current] = await Promise.all([
+        db.doc('quiz_sets/' + setId).get(),
+        db.collection(path).get().then(collectionValue)
+      ]);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
@@ -351,6 +361,15 @@
       estimateOptions.deleteDocuments = Object.fromEntries(
         deletes.map(questionIndex => [questionIndex, current[questionIndex]])
       );
+      estimateOptions.previousDocuments = {};
+      if (parentSnapshot.exists) {
+        estimateOptions.previousDocuments['quiz_sets/' + setId] = parentSnapshot.data();
+      }
+      Object.keys(next).forEach(questionIndex => {
+        if (Object.prototype.hasOwnProperty.call(current, questionIndex)) {
+          estimateOptions.previousDocuments[path + '/' + questionIndex] = current[questionIndex];
+        }
+      });
       assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
       const batch = db.batch();
       batch.set(db.doc('quiz_sets/' + setId), storedSet);
@@ -413,7 +432,10 @@
         imagePath: path
       };
       assertRequestAllowed(requestEstimate(revisionPatch, next, estimateOptions));
-      const current = await db.collection(path).get().then(collectionValue);
+      const [parentSnapshot, current] = await Promise.all([
+        db.doc('quiz_sets/' + setId).get(),
+        db.collection(path).get().then(collectionValue)
+      ]);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
@@ -421,6 +443,15 @@
       estimateOptions.deleteDocuments = Object.fromEntries(
         deletes.map(questionIndex => [questionIndex, current[questionIndex]])
       );
+      estimateOptions.previousDocuments = {};
+      if (parentSnapshot.exists) {
+        estimateOptions.previousDocuments['quiz_sets/' + setId] = parentSnapshot.data();
+      }
+      Object.keys(next).forEach(questionIndex => {
+        if (Object.prototype.hasOwnProperty.call(current, questionIndex)) {
+          estimateOptions.previousDocuments[path + '/' + questionIndex] = current[questionIndex];
+        }
+      });
       assertRequestAllowed(requestEstimate(revisionPatch, next, estimateOptions));
       const batch = db.batch();
       batch.set(db.doc('quiz_sets/' + setId), revisionPatch, { merge: true });
@@ -456,10 +487,26 @@
         if (!before) return null;
         const images = await getImages(sourceId);
         const entries = Object.entries(normalizedImages(images));
+        const destinationImagePath = 'images/' + newId + '/q';
+        const [destinationSnapshot, destinationImages] = await Promise.all([
+          destinationReference.get(),
+          db.collection(destinationImagePath).get().then(collectionValue)
+        ]);
+        const previousDocuments = {};
+        if (destinationSnapshot.exists) {
+          previousDocuments['quiz_sets/' + newId] = destinationSnapshot.data();
+        }
+        entries.forEach(([questionIndex]) => {
+          if (Object.prototype.hasOwnProperty.call(destinationImages, questionIndex)) {
+            previousDocuments[destinationImagePath + '/' + questionIndex] =
+              destinationImages[questionIndex];
+          }
+        });
         assertRequestAllowed(requestEstimate(
           copyValue(before), Object.fromEntries(entries), {
             setPath: 'quiz_sets/' + newId,
-            imagePath: 'images/' + newId + '/q'
+            imagePath: destinationImagePath,
+            previousDocuments
           }
         ));
         const result = await db.runTransaction(async transaction => {
@@ -484,8 +531,11 @@
       const setSnapshot = session && session.setSnapshot;
       const snapshotImages = normalizedImages(session && session.snapshotImages);
       const storedSession = { ...(session || {}) };
+      const allocationToken = typeof storedSession.allocationToken === 'string'
+        ? storedSession.allocationToken : '';
       delete storedSession.setSnapshot;
       delete storedSession.snapshotImages;
+      delete storedSession.allocationToken;
       storedSession.status = 'allocating';
       if (setSnapshot) storedSession.snapshotVersion = 1;
       const snapshotOperations = [
@@ -500,6 +550,10 @@
         },
         { path: 'sessions/' + sessionId + '/meta/board', value: { scores: {} } }
       ];
+      if (allocationToken) snapshotOperations.push({
+        path: 'sessions/' + sessionId + '/meta/allocation',
+        value: { token: allocationToken, ownerUid: storedSession.teacherUid || '' }
+      });
       if (setSnapshot) snapshotOperations.push({
         path: 'sessions/' + sessionId + '/snapshot/set',
         value: withoutDocumentId(setSnapshot)
@@ -533,6 +587,12 @@
           limitSec: 0
         });
         transaction.set(db.doc('sessions/' + sessionId + '/meta/board'), { scores: {} });
+        if (allocationToken) {
+          transaction.set(db.doc('sessions/' + sessionId + '/meta/allocation'), {
+            token: allocationToken,
+            ownerUid: storedSession.teacherUid || ''
+          });
+        }
         if (setSnapshot) {
           transaction.set(
             db.doc('sessions/' + sessionId + '/snapshot/set'),
@@ -819,27 +879,58 @@
       );
     }
 
-    function activateSessionAllocation(sessionId, code, teacherUid) {
+    function activateSessionAllocation(sessionId, code, teacherUid, allocationToken) {
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
+      const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionReference);
         const codeSnapshot = await transaction.get(codeReference);
+        const allocationSnapshot = await transaction.get(allocationReference);
         if (!sessionSnapshot.exists || !codeSnapshot.exists) return false;
         const session = sessionSnapshot.data() || {};
         const mapping = codeSnapshot.data() || {};
         if (session.teacherUid !== teacherUid || session.code !== code ||
             mapping.sessionId !== sessionId) return false;
+        if (allocationToken && (!allocationSnapshot.exists ||
+            (allocationSnapshot.data() || {}).token !== allocationToken ||
+            (allocationSnapshot.data() || {}).ownerUid !== teacherUid)) return false;
         if (session.status === 'live') return true;
         if (session.status !== 'allocating') return false;
-        transaction.set(sessionReference, { status: 'live' }, { merge: true });
+        transaction.set(sessionReference, {
+          status: 'live',
+          activationHeartbeatAt: fieldValue.serverTimestamp()
+        }, { merge: true });
         return true;
       });
     }
 
-    async function abortSessionAllocation(sessionId, code, teacherUid) {
+    function renewSessionActivationLease(sessionId, code, teacherUid, allocationToken) {
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
+      const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
+      return db.runTransaction(async transaction => {
+        const sessionSnapshot = await transaction.get(sessionReference);
+        const codeSnapshot = await transaction.get(codeReference);
+        const allocationSnapshot = await transaction.get(allocationReference);
+        if (!sessionSnapshot.exists || !codeSnapshot.exists || !allocationSnapshot.exists) return false;
+        const session = sessionSnapshot.data() || {};
+        const mapping = codeSnapshot.data() || {};
+        const allocation = allocationSnapshot.data() || {};
+        if (session.teacherUid !== teacherUid || session.code !== code ||
+            session.status !== 'live' || mapping.sessionId !== sessionId ||
+            allocation.ownerUid !== teacherUid || allocation.token !== allocationToken) return false;
+        transaction.set(sessionReference, {
+          activationHeartbeatAt: fieldValue.serverTimestamp()
+        }, { merge: true });
+        return true;
+      });
+    }
+
+    async function abortSessionAllocation(sessionId, code, teacherUid, allocationToken) {
+      const sessionReference = db.doc('sessions/' + sessionId);
+      const codeReference = db.doc('codes/' + code);
+      const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
       const collectionNames = [
         'meta', 'students', 'responses', 'grades', 'student_scores', 'snapshot', 'snapshot_images'
       ];
@@ -857,6 +948,14 @@
             const session = sessionSnapshot.data() || {};
             if (session.teacherUid !== teacherUid || session.code !== code) {
               return { allowed: false, complete: false };
+            }
+            if (allocationToken) {
+              const allocationSnapshot = await transaction.get(allocationReference);
+              const allocation = allocationSnapshot.exists ? allocationSnapshot.data() || {} : null;
+              if (!allocation || allocation.token !== allocationToken ||
+                  allocation.ownerUid !== teacherUid) {
+                return { allowed: false, complete: false };
+              }
             }
             transaction.set(sessionReference, {
               status: 'aborted',
@@ -903,6 +1002,41 @@
         '할당된 반 세션 정리에 실패했습니다. 원래 교사 계정으로 다시 시도해 주세요: ' +
         (lastError && lastError.message ? lastError.message : String(lastError || 'unknown'))
       );
+    }
+
+    async function recoverPendingSessionAllocation(record) {
+      const pending = record || {};
+      const sessionSnapshot = await db.doc('sessions/' + pending.sessionId).get();
+      if (!sessionSnapshot.exists) return { complete: true, missing: true };
+      const session = sessionSnapshot.data() || {};
+      const code = pending.code || session.code;
+      if (session.teacherUid !== pending.ownerUid || !code ||
+          (pending.code && session.code !== pending.code)) {
+        return { complete: false, ignored: true };
+      }
+      if (session.status === 'ended') return { complete: true, ended: true };
+      const allocationSnapshot = await db.doc(
+        'sessions/' + pending.sessionId + '/meta/allocation'
+      ).get();
+      const allocation = allocationSnapshot.exists ? allocationSnapshot.data() || {} : null;
+      if (!allocation || allocation.ownerUid !== pending.ownerUid ||
+          allocation.token !== pending.token) {
+        return { complete: false, ignored: true };
+      }
+      if (session.status === 'live') {
+        const heartbeat = timestampMillis(session.activationHeartbeatAt);
+        if (heartbeat && nowFn() + serverOffset <= heartbeat + 15_000) {
+          return { complete: false, active: true };
+        }
+      } else if (!['allocating', 'aborted'].includes(session.status)) {
+        return { complete: false, ignored: true };
+      }
+      const cleaned = await abortSessionAllocation(
+        pending.sessionId, code, pending.ownerUid, pending.token
+      );
+      return cleaned === true
+        ? { complete: true, cleaned: true }
+        : { complete: false, ignored: true };
     }
 
     function freezeLive(sessionId, expectedLive) {
@@ -967,7 +1101,9 @@
       copyOwnedQuizSet,
       startSession,
       activateSessionAllocation,
+      renewSessionActivationLease,
       abortSessionAllocation,
+      recoverPendingSessionAllocation,
       subscribeStudents,
       subscribeResponses,
       subscribeGrades,

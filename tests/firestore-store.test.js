@@ -31,6 +31,18 @@ function merge(current, update) {
   return result;
 }
 
+function pendingAllocationTestContext(overrides = {}) {
+  return {
+    Date,
+    PENDING_ALLOCATION_RECOVERY_DELAY_MS: 30_000,
+    pendingAllocationRemember() { return true; },
+    pendingAllocationPatch() { return true; },
+    pendingAllocationRemove() { return true; },
+    plStartSessionHeartbeat() { return null; },
+    ...overrides
+  };
+}
+
 function updateFieldPaths(current, update, resolveValue = clone) {
   const result = clone(current || {});
   Object.entries(update).forEach(([fieldPath, value]) => {
@@ -85,11 +97,13 @@ function fakeIndexBytes(value, fieldPath = '', documentPath = '') {
 }
 
 function fakeOperationBytes(operation, existingDocuments) {
-  const value = operation.operation === 'delete'
-    ? existingDocuments.get(operation.ref.path)
-    : operation.value;
-  return requestBytes(operation.ref.path) + 256 + requestBytes(value) +
+  const previous = existingDocuments.get(operation.ref.path);
+  const value = operation.operation === 'delete' ? previous : operation.value;
+  const nextBytes = requestBytes(operation.ref.path) + 256 + requestBytes(value) +
     fakeIndexBytes(value, '', operation.ref.path);
+  if (operation.operation === 'delete' || previous === undefined) return nextBytes;
+  return nextBytes + requestBytes(operation.ref.path) + 256 + requestBytes(previous) +
+    fakeIndexBytes(previous, '', operation.ref.path);
 }
 
 function makeFirestoreFake(initial = {}, options = {}) {
@@ -2214,6 +2228,36 @@ test('세션 allocation은 처음에는 입장 불가이며 exact code·owner CA
   ), false);
 });
 
+test('allocation token 활성화와 heartbeat는 server timestamp lease만 발급한다', async () => {
+  const { createFirestoreStore } = loadStoreModule();
+  const fake = makeFirestoreFake({}, { committedServerMillis: 75_000 });
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 9_999_999_999);
+  const token = 'allocation-token-123456';
+
+  assert.equal(await store.startSession('leased-session', {
+    setId: 'set1', status: 'live', teacherUid: 'teacher-1',
+    teacherEmail: 'teacher@school.kr', allocationToken: token
+  }, () => 'LEASE1'), 'LEASE1');
+  assert.equal(fake.value('sessions/leased-session').allocationToken, undefined);
+  assert.deepEqual(fake.value('sessions/leased-session/meta/allocation'), {
+    token, ownerUid: 'teacher-1'
+  });
+
+  assert.equal(await store.activateSessionAllocation(
+    'leased-session', 'LEASE1', 'teacher-1', 'wrong-token'
+  ), false);
+  assert.equal(await store.activateSessionAllocation(
+    'leased-session', 'LEASE1', 'teacher-1', token
+  ), true);
+  assert.equal(fake.value('sessions/leased-session').status, 'live');
+  assert.equal(fake.value('sessions/leased-session').activationHeartbeatAt.toMillis(), 75_000);
+
+  assert.equal(await store.renewSessionActivationLease(
+    'leased-session', 'LEASE1', 'teacher-1', token
+  ), true);
+  assert.equal(fake.value('sessions/leased-session').activationHeartbeatAt.toMillis(), 75_000);
+});
+
 test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지우며 부분 실패를 재시도한다', async () => {
   const fake = makeFirestoreFake({
     'codes/ABC234': { sessionId: 'session-a' },
@@ -2275,6 +2319,58 @@ test('allocation abort는 reassigned code와 newer session을 보존하고 반�
   assert.deepEqual(fake.value('codes/ABC234'), { sessionId: 'newer-session' });
   assert.equal(fake.has('sessions/session-a'), false);
   assert.equal(fake.value('sessions/newer-session').status, 'live');
+});
+
+test('pending allocation 복구는 token 소유 allocating만 지우고 fresh live·ended는 보존한다', async () => {
+  const activeHeartbeat = 99_000;
+  const fake = makeFirestoreFake({
+    'codes/PEND12': { sessionId: 'pending' },
+    'sessions/pending': {
+      code: 'PEND12', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'allocating'
+    },
+    'sessions/pending/meta/allocation': { token: 'pending-token-1234', ownerUid: 'owner-uid' },
+    'codes/BLANK1': { sessionId: 'blank-code' },
+    'sessions/blank-code': {
+      code: 'BLANK1', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'allocating'
+    },
+    'sessions/blank-code/meta/allocation': {
+      token: 'blank-token-12345', ownerUid: 'owner-uid'
+    },
+    'codes/LIVE12': { sessionId: 'active' },
+    'sessions/active': {
+      code: 'LIVE12', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr',
+      status: 'live', activationHeartbeatAt: activeHeartbeat
+    },
+    'sessions/active/meta/allocation': { token: 'active-token-12345', ownerUid: 'owner-uid' },
+    'sessions/ended': {
+      code: 'ENDED1', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'ended'
+    },
+    'sessions/ended/meta/allocation': { token: 'ended-token-12345', ownerUid: 'owner-uid' }
+  });
+  const { createFirestoreStore } = loadStoreModule();
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 100_000);
+
+  assert.deepEqual(await store.recoverPendingSessionAllocation({
+    sessionId: 'active', code: 'LIVE12', ownerUid: 'owner-uid', token: 'active-token-12345'
+  }), { complete: false, active: true });
+  assert.equal(fake.has('sessions/active'), true);
+
+  assert.deepEqual(await store.recoverPendingSessionAllocation({
+    sessionId: 'ended', code: 'ENDED1', ownerUid: 'owner-uid', token: 'ended-token-12345'
+  }), { complete: true, ended: true });
+  assert.equal(fake.has('sessions/ended'), true);
+
+  assert.deepEqual(await store.recoverPendingSessionAllocation({
+    sessionId: 'pending', code: 'PEND12', ownerUid: 'owner-uid', token: 'pending-token-1234'
+  }), { complete: true, cleaned: true });
+  assert.equal(fake.has('sessions/pending'), false);
+  assert.equal(fake.has('codes/PEND12'), false);
+
+  assert.deepEqual(await store.recoverPendingSessionAllocation({
+    sessionId: 'blank-code', code: '', ownerUid: 'owner-uid', token: 'blank-token-12345'
+  }), { complete: true, cleaned: true });
+  assert.equal(fake.has('sessions/blank-code'), false);
+  assert.equal(fake.has('codes/BLANK1'), false);
 });
 
 test('세션 시작은 열 후보가 모두 충돌하면 더 만들지 않고 실패한다', async () => {
@@ -3799,8 +3895,9 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
   const serverTimestamp = Symbol('server timestamp');
   let received;
   let rendered = 0;
-  const generated = ['SESSION12345', 'OLD234', 'NEW234'];
+  const generated = ['SESSION12345', 'allocation-token-123456', 'OLD234', 'NEW234'];
   const context = {
+    ...pendingAllocationTestContext(),
     pl: { setId: 'set1', set: { title: '오래된 세트', author: '이전 교사' } },
     teacherState: {
       status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
@@ -3837,13 +3934,44 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
       teacher: '교사', createdAt: serverTimestamp, status: 'live',
       teacherUid: 'teacher-1', teacherEmail: 'teacher@school.kr',
       setSnapshot: { title: '첫 세트', author: '교사' },
-      snapshotImages: { v0q0: 'exact-image' }
+      snapshotImages: { v0q0: 'exact-image' },
+      allocationToken: 'allocation-token-123456'
     },
     codes: ['OLD234', 'NEW234']
   });
   assert.equal(context.pl.code, 'NEW234');
   assert.equal(context.pl.sessionId, 'SESSION12345');
   assert.equal(rendered, 1);
+});
+
+test('pending allocation 저장 검증 실패는 Firestore allocation 전에 시작을 중단한다', async () => {
+  let backendCalls = 0;
+  let message = '';
+  const context = {
+    ...pendingAllocationTestContext({
+      pendingAllocationRemember() { return false; }
+    }),
+    pl: { setId: 'set1', set: { title: 'set' } },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'),
+    $() { return { value: '' }; },
+    lsSet() {}, rid(length) { return length === 12 ? 'SESSION12345' : 'allocation-token-123456'; },
+    store: {
+      async getQuizSetSnapshot() { backendCalls += 1; throw new Error('must not read'); },
+      async startSession() { backendCalls += 1; throw new Error('must not allocate'); }
+    },
+    alert(value) { message = value; }
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'plStartSession'
+  ), context);
+
+  assert.equal(await context.plStartSession(), null);
+  assert.equal(backendCalls, 0);
+  assert.match(message, /복구 정보|로컬 저장소/);
+  assert.equal(context.pl.startingSession, false);
 });
 
 test('세션 할당 성공은 캡처 B를 runtime에 한 번에 재바인딩해 공개·타이밍·채점에만 사용한다', async () => {
@@ -3861,6 +3989,7 @@ test('세션 할당 성공은 캡처 B를 runtime에 한 번에 재바인딩해 
   };
   const liveWrites = [], gradeWrites = [], events = [];
   const context = {
+    ...pendingAllocationTestContext(),
     pl: {
       setId: 'set1', set: setA, videos: setA.videos,
       flatQuestions: require('../playlist-core.js').flattenQuestions(setA.videos),
@@ -3920,6 +4049,7 @@ test('이미지 스냅샷을 읽는 동안 승인이 취소되면 세션을 만�
   let finishImages;
   let starts = 0;
   const context = {
+    ...pendingAllocationTestContext(),
     pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
     teacherState: {
       status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
@@ -3952,6 +4082,7 @@ test('세션 할당 뒤 화면을 떠나면 exact allocation을 CAS abort한다'
   const aborted = [];
   const oldState = { setId: 'set1', set: { title: '첫 세트', author: '교사' } };
   const context = {
+    ...pendingAllocationTestContext(),
     pl: oldState,
     teacherState: {
       status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
@@ -3977,7 +4108,9 @@ test('세션 할당 뒤 화면을 떠나면 exact allocation을 CAS abort한다'
   finishStart('NEW234');
   await starting;
 
-  assert.deepEqual(aborted, [['SESSION12345', 'NEW234', 'teacher-1']]);
+  assert.deepEqual(aborted, [[
+    'SESSION12345', 'NEW234', 'teacher-1', 'SESSION12345'
+  ]]);
   assert.equal(oldState.sessionId, undefined);
   assert.equal(oldState.code, undefined);
 });
@@ -3986,6 +4119,7 @@ test('allocation 뒤 인증 교체도 abort를 시도하고 실패를 사용자�
   let finishStart;
   const aborted = [], notices = [];
   const context = {
+    ...pendingAllocationTestContext(),
     pl: { setId: 'set1', set: { title: '첫 세트', author: '교사' } },
     teacherState: {
       status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
@@ -4019,15 +4153,124 @@ test('allocation 뒤 인증 교체도 abort를 시도하고 실패를 사용자�
   finishStart('NEW234');
   await starting;
 
-  assert.deepEqual(aborted, [['SESSION12345', 'NEW234', 'teacher-1']]);
+  assert.deepEqual(aborted, [[
+    'SESSION12345', 'NEW234', 'teacher-1', 'SESSION12345'
+  ]]);
   assert.equal(notices.some(message => /정리.*실패|permission-denied/.test(message)), true);
   assert.equal(context.pl.sessionId, undefined);
+});
+
+test('activation resolve 전 auth 교체는 heartbeat·render를 막고 recovery identity를 유지한다', async () => {
+  let finishActivation;
+  const records = new Map();
+  const aborts = [];
+  let intervals = 0;
+  let rendered = 0;
+  const context = {
+    pl: { setId: 'set1', set: { title: '세트', videos: [{ startSec: 0, questions: [] }] } },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    teacherAuthVersion: 8,
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    imgCache: {}, Date,
+    $() { return { value: '' }; }, lsSet() {},
+    rid(length) {
+      if (length === 12) return 'SESSION12345';
+      if (length === 24) return 'allocation-token-123456';
+      return 'CODE12';
+    },
+    pendingAllocationRemember(record) { records.set(record.sessionId, clone(record)); return true; },
+    pendingAllocationPatch(sessionId, patch) {
+      records.set(sessionId, { ...records.get(sessionId), ...clone(patch) }); return true;
+    },
+    pendingAllocationRemove(sessionId) { records.delete(sessionId); return true; },
+    PENDING_ALLOCATION_RECOVERY_DELAY_MS: 30_000,
+    every() { intervals += 1; },
+    SV_TS: SERVER_TIMESTAMP,
+    normSet(value) { return value; },
+    store: {
+      async getQuizSetSnapshot() {
+        return { setSnapshot: context.pl.set, snapshotImages: {} };
+      },
+      async startSession() { return 'CODE12'; },
+      activateSessionAllocation() {
+        return new Promise(resolve => { finishActivation = resolve; });
+      },
+      async abortSessionAllocation(...args) {
+        aborts.push(args);
+        throw new Error('permission-denied');
+      },
+      async renewSessionActivationLease() { throw new Error('heartbeat must not start'); }
+    },
+    renderPlayRun() { rendered += 1; }, toast() {}, alert() {}, console: { error() {} }
+  };
+  loadStageFunctions(['plStartSessionHeartbeat', 'plStartSession'], context);
+
+  const starting = context.plStartSession();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(records.get('SESSION12345').code, 'CODE12');
+  context.teacherState = {
+    status: 'teacher', uid: 'teacher-2', email: 'other@school.kr', role: 'teacher'
+  };
+  context.teacherAuthVersion = 9;
+  finishActivation(true);
+  await starting;
+
+  assert.equal(intervals, 0);
+  assert.equal(rendered, 0);
+  assert.equal(records.has('SESSION12345'), true);
+  assert.deepEqual(aborts, [[
+    'SESSION12345', 'CODE12', 'teacher-1', 'allocation-token-123456'
+  ]]);
+});
+
+test('current owner heartbeat만 갱신하고 in-flight 뒤 stale generation은 추가 lease를 쓰지 않는다', async () => {
+  let heartbeat;
+  let finishRenew;
+  let renews = 0;
+  const state = { sessionId: 'session-a', code: 'CODE12' };
+  const context = {
+    pl: state,
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    teacherAuthVersion: 12,
+    AuthCore: require('../auth-core.js'),
+    every(ms, callback) { assert.equal(ms, 5000); heartbeat = callback; return 7; },
+    store: {
+      renewSessionActivationLease(...args) {
+        renews += 1;
+        assert.deepEqual(args, [
+          'session-a', 'CODE12', 'teacher-1', 'allocation-token-123456'
+        ]);
+        return new Promise(resolve => { finishRenew = resolve; });
+      }
+    },
+    toast() {}
+  };
+  loadStageFunctions(['plStartSessionHeartbeat'], context);
+  context.plStartSessionHeartbeat(
+    state, clone(context.teacherState), 12, 'allocation-token-123456'
+  );
+
+  const inFlight = heartbeat();
+  context.teacherState = {
+    status: 'teacher', uid: 'teacher-2', email: 'other@school.kr', role: 'teacher'
+  };
+  context.teacherAuthVersion = 13;
+  finishRenew(true);
+  assert.equal(await inFlight, false);
+  assert.equal(await heartbeat(), false);
+  assert.equal(renews, 1);
+  assert.equal(state.heartbeatError, undefined);
 });
 
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let message = '';
   const context = {
+    ...pendingAllocationTestContext(),
     pl: { setId: 'set1', set: { title: '첫 세트', author: '' } },
     teacherState: {
       status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
@@ -4119,6 +4362,7 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
 test('교사 수업 종료는 저장소 종료가 끝난 뒤 안내 화면으로 이동한다', async () => {
   const events = [];
   const context = {
+    pendingAllocationRemove() { return true; },
     pl: { sessionId: 'session-a' },
     confirm() { return true; },
     document: {
@@ -4314,6 +4558,7 @@ test('진행 종료는 전체화면 UI를 정리한 뒤 기존 순서로 세션�
   const ctx = loadStageFunctions([
     'plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'
   ], {
+    pendingAllocationRemove() { return true; },
     pl: { sessionId: 'session-a', isStageFullscreen: true, stageFallback: true },
     confirm() { return true; },
     document: {
@@ -4345,6 +4590,7 @@ test('브라우저 전체화면 해제가 실패해도 Firestore 세션 종료�
   const ctx = loadStageFunctions([
     'plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'
   ], {
+    pendingAllocationRemove() { return true; },
     pl: { sessionId: 'session-a', isStageFullscreen: true, stageFallback: true },
     confirm() { return true; },
     document: {
@@ -5665,6 +5911,126 @@ test('a persisted Google session remains in the teacher UI state', async () => {
   assert.equal(context.teacherState.status, 'teacher');
 });
 
+test('pending allocation queue는 auth 교체를 무시하고 원 소유자 재로그인·reload·retry로 복구한다', async () => {
+  const values = new Map();
+  const localStorage = {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, String(value)); },
+    removeItem(key) { values.delete(key); }
+  };
+  const key = 'vq_pending_allocations_v1';
+  values.set(key, JSON.stringify([{
+    sessionId: 'pending-session', code: 'PEND12', ownerUid: 'owner-user',
+    ownerEmail: 'owner@school.kr', token: 'pending-token-1234', createdAt: 1,
+    recoverAfter: 2
+  }]));
+  let failRecovery = true;
+  const calls = [];
+  const context = {
+    PENDING_ALLOCATION_KEY: key,
+    PENDING_ALLOCATION_RECOVERY_DELAY_MS: 30_000,
+    localStorage,
+    teacherUser: null, teacherAllowance: null, teacherState: null,
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 0,
+    pendingAllocationRecoveryTimer: null,
+    AuthCore: require('../auth-core.js'), Date,
+    renderTeacherAuthArea() {}, esc(value) { return String(value); }, toast() {},
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; },
+      async recoverPendingSessionAllocation(record) {
+        calls.push(record.ownerUid);
+        if (failRecovery) throw new Error('planned cleanup failure');
+        return { complete: true, cleaned: true };
+      }
+    }
+  };
+  loadStageFunctions([
+    'pendingAllocationRead', 'pendingAllocationWrite', 'pendingAllocationPatch',
+    'pendingAllocationRemove', 'pendingAllocationsForOwner',
+    'recoverPendingAllocationsForTeacher', 'retryPendingAllocations',
+    'teacherAuthMarkup', 'applyTeacherUser'
+  ], context);
+  const googleUser = (uid, email) => ({
+    uid, email, emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+    }
+  });
+
+  await context.applyTeacherUser(googleUser('other-user', 'other@school.kr'));
+  assert.deepEqual(calls, []);
+  assert.equal(context.pendingAllocationRead().length, 1);
+
+  await context.applyTeacherUser(googleUser('owner-user', 'owner@school.kr'));
+  assert.deepEqual(calls, ['owner-user']);
+  assert.match(context.pendingAllocationRead()[0].lastError, /planned cleanup failure/);
+  assert.match(context.teacherAuthMarkup(), /정리 재시도/);
+
+  const reloadContext = { PENDING_ALLOCATION_KEY: key, localStorage };
+  loadStageFunctions(['pendingAllocationRead'], reloadContext);
+  assert.match(reloadContext.pendingAllocationRead()[0].lastError, /planned cleanup failure/);
+
+  failRecovery = false;
+  await context.retryPendingAllocations();
+  assert.deepEqual(calls, ['owner-user', 'owner-user']);
+  assert.deepEqual(Array.from(context.pendingAllocationRead()), []);
+});
+
+test('원 소유자가 복구 유예 중 재로그인하면 유예 종료 뒤 자동 cleanup을 다시 시도한다', async () => {
+  const values = new Map();
+  const localStorage = {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, String(value)); }
+  };
+  const key = 'vq_pending_allocations_v1';
+  values.set(key, JSON.stringify([{
+    sessionId: 'pending-session', code: 'PEND12', ownerUid: 'owner-user',
+    ownerEmail: 'owner@school.kr', token: 'pending-token-1234', createdAt: 1_000,
+    recoverAfter: 31_000
+  }]));
+  let now = 1_000;
+  let scheduled = null;
+  let recoveries = 0;
+  const context = {
+    PENDING_ALLOCATION_KEY: key,
+    PENDING_ALLOCATION_RECOVERY_DELAY_MS: 30_000,
+    pendingAllocationRecoveryTimer: null,
+    localStorage,
+    teacherUser: null, teacherAllowance: null, teacherState: null,
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 0,
+    AuthCore: require('../auth-core.js'), Date: { now() { return now; } },
+    setTimeout(callback, delay) { scheduled = { callback, delay }; return 7; },
+    clearTimeout() {},
+    renderTeacherAuthArea() {},
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; },
+      async recoverPendingSessionAllocation() {
+        recoveries += 1;
+        return { complete: true, cleaned: true };
+      }
+    }
+  };
+  loadStageFunctions([
+    'pendingAllocationRead', 'pendingAllocationWrite', 'pendingAllocationRemove',
+    'pendingAllocationsForOwner', 'recoverPendingAllocationsForTeacher', 'applyTeacherUser'
+  ], context);
+  const owner = {
+    uid: 'owner-user', email: 'owner@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+    }
+  };
+
+  await context.applyTeacherUser(owner);
+  assert.equal(recoveries, 0);
+  assert.equal(scheduled.delay, 30_000);
+
+  now = 31_001;
+  await scheduled.callback();
+  assert.equal(recoveries, 1);
+  assert.deepEqual(Array.from(context.pendingAllocationRead()), []);
+});
+
 test('a verified Google session hydrates teacher allowance through the normalized protected probe', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const probed = [];
@@ -6770,6 +7136,59 @@ test('delete-heavy 이미지 교체는 기존 문서·index 비용을 읽은 뒤
 
   assert.equal(fake.calls().some(call => call.operation === 'getCollection'), true);
   assert.equal(fake.calls().some(call => call.operation === 'batchCommit'), false);
+});
+
+test('작은 overwrite도 기존 Unicode 부모와 same-key 이미지의 제거 비용까지 8 MB 전에 거부한다', async () => {
+  const oldParent = {
+    title: '가'.repeat(1_400_000),
+    ...Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [
+      '색인필드' + index, '값' + index
+    ]))
+  };
+  const initial = {
+    'quiz_sets/set1': oldParent,
+    'images/set1/q/v0q0': { data: 'data:image/jpeg;base64,' + 'A'.repeat(4_000_000) }
+  };
+  const fake = makeFirestoreFake(initial, {
+    maxRequestBytes: 10_000_000,
+    maxRequestWrites: 500
+  });
+  const store = createStore(fake);
+
+  await assert.rejects(
+    () => store.saveQuizSetWithImages('set1', {
+      title: '작은 교체', videos: [{ questions: [{ text: '교체' }] }]
+    }, { v0q0: 'small' }),
+    /8 MB.*사전 제한/
+  );
+
+  assert.equal(fake.calls().some(call => call.operation === 'get'), true);
+  assert.equal(fake.calls().some(call => call.operation === 'getCollection'), true);
+  assert.equal(fake.calls().some(call => call.operation === 'batchCommit'), false);
+});
+
+test('사본 목적지 overwrite도 기존 부모와 same-key image 비용을 transaction 전에 거부한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/source': {
+      title: '원본', videos: [{ questions: [{ text: '문항' }] }],
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', contentRevision: 1
+    },
+    'images/source/q/v0q0': { data: 'small-source' },
+    'quiz_sets/destination': { title: '가'.repeat(1_400_000) },
+    'images/destination/q/v0q0': {
+      data: 'data:image/jpeg;base64,' + 'B'.repeat(4_000_000)
+    }
+  }, { maxRequestBytes: 10_000_000, maxRequestWrites: 500 });
+  const store = createStore(fake);
+
+  await assert.rejects(
+    () => store.copyOwnedQuizSet('source', 'destination', {
+      uid: 'owner', email: 'owner@school.kr'
+    }),
+    /8 MB.*사전 제한/
+  );
+
+  assert.equal(fake.calls().some(call => call.operation === 'runTransaction'), false);
 });
 
 test('이미지 batch가 실패하면 새 세트 구조도 공개되지 않는다', async () => {
