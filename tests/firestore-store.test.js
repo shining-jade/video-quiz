@@ -3705,6 +3705,60 @@ test('타이머 자동 제출은 마감 잠금이 시작된 순간에도 선택 
   assert.equal(sent, 1);
 });
 
+test('non-Google Firebase sessions are removed from the teacher UI state', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const priorClock = {};
+  const context = {
+    teacherUser: null,
+    teacherAllowance: null,
+    teacherState: null,
+    clockUserId: 'prior-user',
+    clockPromise: priorClock,
+    clockPromiseUid: 'prior-user',
+    AuthCore: require('../auth-core.js'),
+    renderTeacherAuthArea() {}
+  };
+  vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
+
+  context.applyTeacherUser({
+    uid: 'password-user', email: 'teacher@school.kr', emailVerified: true, isAnonymous: false,
+    providerData: [{ providerId: 'password' }]
+  });
+
+  assert.equal(context.teacherUser, null);
+  assert.equal(context.clockUserId, '');
+  assert.equal(context.clockPromise, null);
+  assert.equal(context.clockPromiseUid, '');
+});
+
+test('clock synchronization does not share pending work across authenticated users', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const resolves = {};
+  const context = {
+    clockUserId: '',
+    clockPromise: null,
+    clockPromiseUid: '',
+    store: {
+      syncClock(pathValue) {
+        calls.push(pathValue);
+        return new Promise(resolve => { resolves[pathValue] = resolve; });
+      }
+    },
+    rid(size) { assert.equal(size, 8); return 'SAMPLE12'; }
+  };
+  vm.runInNewContext(extractFunction(html, 'ensureClock'), context);
+
+  const first = context.ensureClock({ uid: 'user-a' });
+  const second = context.ensureClock({ uid: 'user-b' });
+
+  assert.deepEqual(calls, ['clock/user-a-SAMPLE12', 'clock/user-b-SAMPLE12']);
+  resolves['clock/user-a-SAMPLE12']();
+  resolves['clock/user-b-SAMPLE12']();
+  await Promise.all([first, second]);
+  assert.equal(context.clockUserId, 'user-b');
+});
+
 test('startup does not create an anonymous student session or sync its clock', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let authListener;

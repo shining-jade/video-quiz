@@ -36,12 +36,14 @@ function extractFunction(source, name) {
 test('a verified Google account with an enabled allowance is a teacher', () => {
   assert.equal(core.teacherState(null, null).status, 'signed-out');
   assert.equal(
-    core.teacherState({ uid: 'u1', email: 'a@school.kr', emailVerified: true, isAnonymous: false }, null).status,
+    core.teacherState({ uid: 'u1', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+      providerData: [{ providerId: 'google.com' }] }, null).status,
     'unapproved'
   );
   assert.deepEqual(
     core.teacherState(
-      { uid: 'u1', email: 'a@school.kr', emailVerified: true, isAnonymous: false },
+      { uid: 'u1', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+        providerData: [{ providerId: 'google.com' }] },
       { enabled: true, role: 'teacher' }
     ),
     { status: 'teacher', uid: 'u1', email: 'a@school.kr', role: 'teacher' }
@@ -54,7 +56,8 @@ test('anonymous and unverified accounts are not teachers', () => {
     false
   );
   assert.equal(
-    core.isTeacher(core.teacherState({ uid: 'u', email: 'x@y', emailVerified: false }, { enabled: true, role: 'teacher' })),
+    core.isTeacher(core.teacherState({ uid: 'u', email: 'x@y', emailVerified: false,
+      providerData: [{ providerId: 'google.com' }] }, { enabled: true, role: 'teacher' })),
     false
   );
 });
@@ -64,4 +67,20 @@ test('student join does not require the Google teacher sign-in', () => {
   assert.match(html, /function ensureAnonymousStudent/);
   assert.match(html, /function requireTeacher/);
   assert.doesNotMatch(extractFunction(html, 'screenJoin'), /signInWithPopup/);
+});
+
+test('a verified non-Google provider cannot receive a teacher role', () => {
+  const state = core.teacherState({
+    uid: 'password-user', email: 'teacher@school.kr', emailVerified: true, isAnonymous: false,
+    providerData: [{ providerId: 'password' }]
+  }, { enabled: true, role: 'admin' });
+
+  assert.equal(state.status, 'signed-out');
+  assert.equal(core.isTeacher(state), false);
+  assert.equal(core.isAdmin(state), false);
+});
+
+test('the admin route uses the admin-only access gate', () => {
+  const router = extractFunction(readIndex(), 'router');
+  assert.match(router, /case 'admin':\s*requireAdmin\(screenAdmin\)/);
 });
