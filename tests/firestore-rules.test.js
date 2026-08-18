@@ -317,6 +317,64 @@ rulesTest('보호된 비존재 문서 프로브는 allowlist를 공개하지 않
   await assertFails(getDoc(doc(owner, 'teacher_allowlist/owner@school.kr')));
 });
 
+rulesTest('only the approved matching legacy owner can use the private migration probe', async () => {
+  await adminWrite('config/legacy_owner', { email: 'owner@school.kr' });
+  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'config/__legacy_owner_probe__access')));
+  for (const actorName of ['otherTeacher', 'admin', 'student', 'unapproved']) {
+    await assertFails(getDoc(doc(actorFirestore(actorName), 'config/__legacy_owner_probe__access')));
+  }
+  await assertFails(getDoc(doc(actorFirestore('owner'), 'config/legacy_owner')));
+  await assertFails(getDocs(collection(actorFirestore('owner'), 'config')));
+});
+
+rulesTest('legacy owner claims only ownerless parents without changing their data', async () => {
+  await adminWrite('config/legacy_owner', { email: 'owner@school.kr' });
+  await adminWrite('quiz_sets/legacy-set', { title: 'Legacy' });
+  await adminWrite('sessions/legacy-session', { setId: 'legacy-set', status: 'ended' });
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+
+  await assertFails(updateDoc(doc(other, 'quiz_sets/legacy-set'), {
+    ownerUid: 'other-teacher-uid', ownerEmail: 'other@school.kr'
+  }));
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/legacy-set'), {
+    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', title: 'Changed during claim'
+  }));
+  await assertSucceeds(updateDoc(doc(owner, 'quiz_sets/legacy-set'), {
+    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr'
+  }));
+
+  await assertFails(updateDoc(doc(other, 'sessions/legacy-session'), {
+    teacherUid: 'other-teacher-uid', teacherEmail: 'other@school.kr'
+  }));
+  await assertSucceeds(updateDoc(doc(owner, 'sessions/legacy-session'), {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr'
+  }));
+  await assertFails(updateDoc(doc(owner, 'sessions/legacy-session'), {
+    teacherUid: 'other-teacher-uid', teacherEmail: 'other@school.kr'
+  }));
+});
+
+rulesTest('staged migration lets only legacy owner sanitize owned responses until the gate is removed', async () => {
+  await adminWrite('config/legacy_owner', { email: 'owner@school.kr' });
+  await adminWrite('sessions/s1/responses/legacy-student', {
+    answers: { 0: { answer: 1, submitted: true, revision: 2, ok: true, score: 1 } }
+  });
+  const path = 'sessions/s1/responses/legacy-student';
+  const sanitized = {
+    uid: 'legacy-student',
+    answers: { 0: { answer: 1, submitted: true, revision: 2 } }
+  };
+
+  await assertFails(setDoc(doc(actorFirestore('otherTeacher'), path), sanitized));
+  await assertSucceeds(setDoc(doc(actorFirestore('owner'), path), sanitized));
+  await adminWrite(path, {
+    answers: { 0: { answer: 1, submitted: true, revision: 2, ok: true } }
+  });
+  await adminWrite('config/legacy_owner', undefined);
+  await assertFails(setDoc(doc(actorFirestore('owner'), path), sanitized));
+});
+
 rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 사본을 트랜잭션으로 만든다', async () => {
   const teacher = actorFirestore('otherTeacher');
   const sourceReference = doc(teacher, 'quiz_sets/set1');

@@ -36,6 +36,44 @@ service cloud.firestore {
       return isApprovedTeacher() && allowance().data.role == 'admin';
     }
 
+    function legacyOwnerPath() {
+      return /databases/$(database)/documents/config/legacy_owner;
+    }
+
+    function isLegacyOwner() {
+      return isApprovedTeacher() &&
+        exists(legacyOwnerPath()) &&
+        get(legacyOwnerPath()).data.email == request.auth.token.email;
+    }
+
+    function validLegacySetClaim() {
+      return isLegacyOwner() &&
+        (!('ownerUid' in resource.data) || resource.data.ownerUid == '') &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.ownerEmail == request.auth.token.email &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['ownerUid', 'ownerEmail']);
+    }
+
+    function validLegacySessionClaim() {
+      return isLegacyOwner() &&
+        (!('teacherUid' in resource.data) || resource.data.teacherUid == '') &&
+        request.resource.data.teacherUid == request.auth.uid &&
+        request.resource.data.teacherEmail == request.auth.token.email &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['teacherUid', 'teacherEmail']);
+    }
+
+    function validLegacyResponseMigration(sessionId, studentId) {
+      return isLegacyOwner() &&
+        ownsSession(sessionId) &&
+        request.resource.data is map &&
+        request.resource.data.keys().hasAll(['uid', 'answers']) &&
+        request.resource.data.keys().hasOnly(['uid', 'answers']) &&
+        request.resource.data.uid == studentId &&
+        request.resource.data.answers is map;
+    }
+
     function ownsSet(setId) {
       return isApprovedTeacher() &&
         exists(/databases/$(database)/documents/quiz_sets/$(setId)) &&
@@ -336,9 +374,10 @@ service cloud.firestore {
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email;
-      allow update: if ownsSet(setId) &&
+      allow update: if (ownsSet(setId) &&
         request.resource.data.ownerUid == resource.data.ownerUid &&
-        request.resource.data.ownerEmail == resource.data.ownerEmail;
+        request.resource.data.ownerEmail == resource.data.ownerEmail) ||
+        validLegacySetClaim();
       allow delete: if ownsSet(setId);
       allow read, write: if false;
     }
@@ -363,14 +402,15 @@ service cloud.firestore {
     match /sessions/{sessionId} {
       allow get: if isAdmin() || ownsSession(sessionId) ||
         (anonymousStudent() && sessionIsJoinable(sessionId));
-      allow list: if isAdmin() ||
+      allow list: if isAdmin() || isLegacyOwner() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid);
       allow create: if isApprovedTeacher() &&
         request.resource.data.teacherUid == request.auth.uid &&
         request.resource.data.teacherEmail == request.auth.token.email;
-      allow update: if ownsSession(sessionId) &&
+      allow update: if (ownsSession(sessionId) &&
         request.resource.data.teacherUid == resource.data.teacherUid &&
-        request.resource.data.teacherEmail == resource.data.teacherEmail;
+        request.resource.data.teacherEmail == resource.data.teacherEmail) ||
+        validLegacySessionClaim();
       allow delete: if isAdmin() || ownsSession(sessionId);
       allow read, write: if false;
 
@@ -400,11 +440,11 @@ service cloud.firestore {
       }
 
       match /students/{studentId} {
-        allow get: if isAdmin() || ownsSession(sessionId) ||
+        allow get: if isAdmin() || isLegacyOwner() || ownsSession(sessionId) ||
           (anonymousStudent() &&
             sessionIsJoinable(sessionId) &&
             studentId == request.auth.uid);
-        allow list: if isAdmin() || ownsSession(sessionId);
+        allow list: if isAdmin() || isLegacyOwner() || ownsSession(sessionId);
         allow create: if anonymousStudent() && sessionIsJoinable(sessionId) && validStudent(studentId);
         allow update: if isJoinedStudent(sessionId) &&
           sessionIsJoinable(sessionId) &&
@@ -415,17 +455,18 @@ service cloud.firestore {
       }
 
       match /responses/{studentId} {
-        allow get: if isAdmin() || ownsSession(sessionId) ||
+        allow get: if isAdmin() || isLegacyOwner() || ownsSession(sessionId) ||
           (isJoinedStudent(sessionId) && studentId == request.auth.uid);
-        allow list: if isAdmin() || ownsSession(sessionId);
+        allow list: if isAdmin() || isLegacyOwner() || ownsSession(sessionId);
         allow create: if isJoinedStudent(sessionId) &&
           sessionIsJoinable(sessionId) &&
           studentId == request.auth.uid &&
           validStudentResponseCreate(sessionId);
-        allow update: if isJoinedStudent(sessionId) &&
-            sessionIsJoinable(sessionId) &&
-            studentId == request.auth.uid &&
-            validStudentResponseUpdate(sessionId);
+        allow update: if (isJoinedStudent(sessionId) &&
+              sessionIsJoinable(sessionId) &&
+              studentId == request.auth.uid &&
+              validStudentResponseUpdate(sessionId)) ||
+            validLegacyResponseMigration(sessionId, studentId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
@@ -469,8 +510,16 @@ service cloud.firestore {
       }
     }
 
+    match /config/__legacy_owner_probe__access {
+      allow get: if isLegacyOwner();
+      allow list, create, update, delete: if false;
+      allow read, write: if false;
+    }
+
     match /config/{document} {
-      allow get, list, create, update, delete: if isAdmin();
+      allow list: if isAdmin();
+      allow get, create, update, delete: if isAdmin() &&
+        document != '__legacy_owner_probe__access';
       allow read, write: if false;
     }
 

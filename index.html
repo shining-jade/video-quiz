@@ -601,6 +601,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 <script src="firestore-core.js"></script>
+<script src="migration-core.js"></script>
 <script src="firestore-store.js"></script>
 <script src="editor-draft.js"></script>
 <script src="playlist-core.js"></script>
@@ -1126,6 +1127,7 @@ function go(hash) { location.hash = '#/' + hash; }
 let teacherUser = null;
 let teacherAllowance = null;
 let teacherState = AuthCore.teacherState(null, null);
+let legacyOwnerVerified = false;
 let clockUserId = '';
 let clockPromise = null;
 let clockPromiseUid = '';
@@ -1137,6 +1139,7 @@ function teacherAuthMarkup() {
   }
   const identity = teacherUser.displayName || teacherState.email || 'Google 계정';
   return '<span class="auth-user" title="' + esc(teacherState.email) + '">' + esc(identity) + '</span>' +
+    (legacyOwnerVerified ? '<a class="btn ghost sm" href="#/migration">기존 데이터 이전</a>' : '') +
     '<button class="btn ghost sm" onclick="signOutTeacher()">로그아웃</button>';
 }
 
@@ -1150,6 +1153,7 @@ async function applyTeacherUser(user) {
   teacherUser = null;
   teacherAllowance = null;
   teacherState = AuthCore.teacherState(null, null);
+  legacyOwnerVerified = false;
   clockUserId = '';
   clockPromise = null;
   clockPromiseUid = '';
@@ -1161,6 +1165,7 @@ async function applyTeacherUser(user) {
   if (updateVersion !== teacherAuthVersion) return false;
   const nextUser = AuthCore.isGoogleSignIn(tokenResult) ? user : null;
   let nextAllowance = null;
+  let nextLegacyOwnerVerified = false;
   if (nextUser && nextUser.emailVerified) {
     const normalizedEmail = String(nextUser.email || '').trim().toLowerCase();
     if (normalizedEmail) {
@@ -1169,12 +1174,21 @@ async function applyTeacherUser(user) {
       } catch (error) {
         console.error(error);
       }
+      if (AuthCore.isTeacher(AuthCore.teacherState(nextUser, nextAllowance)) &&
+          typeof store.probeLegacyOwner === 'function') {
+        try {
+          nextLegacyOwnerVerified = await store.probeLegacyOwner();
+        } catch (error) {
+          console.error(error);
+        }
+      }
     }
   }
   if (updateVersion !== teacherAuthVersion) return false;
   teacherUser = nextUser;
   teacherAllowance = nextAllowance;
   teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  legacyOwnerVerified = nextLegacyOwnerVerified;
   renderTeacherAuthArea();
   return true;
 }
@@ -1295,10 +1309,83 @@ function router() {
     case 'join':  screenJoin(arg); break;
     case 'live':  requireTeacher(() => screenDashboard(arg)); break;
     case 'admin': requireAdmin(screenAdmin); break;
+    case 'migration': requireTeacher(screenLegacyMigration); break;
     default:      screenHome();
   }
 }
 window.addEventListener('hashchange', router);
+
+function migrationReportMarkup(report) {
+  if (!report) return '<div class="empty">이전 준비가 완료되었습니다.</div>';
+  const counts = report.counts || { migrated: 0, skipped: 0, failed: 0 };
+  const collections = report.byCollection || {};
+  const rows = ['sets', 'images', 'sessions', 'students', 'responses'].map(name => {
+    const item = collections[name] || { migrated: [], skipped: [], failed: [] };
+    const ids = ['migrated', 'skipped', 'failed'].flatMap(status =>
+      (item[status] || []).map(id => status + ': ' + id)
+    );
+    return '<tr><td>' + esc(name) + '</td><td class="ctr">' + (item.migrated || []).length +
+      '</td><td class="ctr">' + (item.skipped || []).length + '</td><td class="ctr">' +
+      (item.failed || []).length + '</td><td class="mono" style="font-size:12px">' +
+      (ids.length ? ids.map(esc).join('<br>') : '-') + '</td></tr>';
+  }).join('');
+  const gate = report.safeToDeployStrictRules
+    ? '<div class="notice info"><strong>엄격한 규칙 배포 가능</strong><br>응답의 ok/score 잔여 문서가 0개입니다.</div>'
+    : '<div class="notice"><strong>엄격한 규칙 배포 금지</strong><br>응답의 ok/score 잔여 문서 ' +
+      Number(report.remainingResponseLeakCount || 0) + '개: ' +
+      (report.remainingResponseLeakIds || []).map(esc).join(', ') + '</div>';
+  return gate + '<p class="sub">성공 ' + Number(counts.migrated || 0) + ' · 건너뜀 ' +
+    Number(counts.skipped || 0) + ' · 실패 ' + Number(counts.failed || 0) + '</p>' +
+    '<div style="overflow:auto"><table class="tbl"><thead><tr><th>종류</th><th>성공</th>' +
+    '<th>건너뜀</th><th>실패</th><th>ID</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function renderMigrationReport(report) {
+  const target = document.getElementById('migration-report');
+  if (target) target.innerHTML = migrationReportMarkup(report);
+}
+
+function screenLegacyMigration() {
+  if (!legacyOwnerVerified || !AuthCore.isTeacher(teacherState)) {
+    alert('승인된 legacy_owner Google 교사만 기존 데이터를 이전할 수 있습니다.');
+    go('home');
+    return;
+  }
+  APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
+    '<h2>기존 데이터 소유권 이전</h2>' +
+    '<p class="sub">ownerUid가 없는 세트와 teacherUid가 없는 세션만 현재 교사에게 귀속합니다. ' +
+    '중간에 실패해도 같은 작업을 다시 실행할 수 있습니다.</p>' +
+    '<div class="notice">Firebase Console의 config/legacy_owner 이메일과 현재 승인된 Google 계정이 ' +
+    '일치할 때만 이 화면이 열립니다.</div>' +
+    '<button id="migration-run" class="btn primary" onclick="runLegacyMigration()">이전 실행</button>' +
+    '<div id="migration-report" style="margin-top:16px">' + migrationReportMarkup(null) + '</div>' +
+    '</div></div>';
+}
+
+async function runLegacyMigration() {
+  if (!legacyOwnerVerified || !AuthCore.isTeacher(teacherState)) {
+    alert('승인된 legacy_owner 교사만 이전할 수 있습니다.');
+    return null;
+  }
+  const button = document.getElementById('migration-run');
+  if (button) button.disabled = true;
+  try {
+    const values = await Promise.all([store.listQuizSets(), store.listSessions()]);
+    const plan = MigrationCore.planLegacyMigration(values[0], values[1], {
+      ...teacherState,
+      legacyOwnerVerified: true
+    });
+    const report = await store.migrateLegacyOwnership(plan, renderMigrationReport);
+    renderMigrationReport(report);
+    return report;
+  } catch (error) {
+    console.error(error);
+    alert('기존 데이터 이전 실패: ' + error.message);
+    return null;
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
 
 /* ══════════════════════════════════════════════════════════════════════
    4. 홈

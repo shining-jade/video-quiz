@@ -2,10 +2,13 @@
   const core = typeof module === 'object' && module.exports
     ? require('./firestore-core.js')
     : root.FirestoreCore;
-  const api = factory(core);
+  const migrationCore = typeof module === 'object' && module.exports
+    ? require('./migration-core.js')
+    : root.MigrationCore;
+  const api = factory(core, migrationCore);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, migrationCore) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
 
@@ -187,6 +190,16 @@
         return { enabled: true, role: 'admin' };
       } catch (error) {
         if (permissionDenied(error)) return { enabled: true, role: 'teacher' };
+        throw error;
+      }
+    }
+
+    async function probeLegacyOwner() {
+      try {
+        await db.doc('config/__legacy_owner_probe__access').get({ source: 'server' });
+        return true;
+      } catch (error) {
+        if (permissionDenied(error)) return false;
         throw error;
       }
     }
@@ -585,6 +598,269 @@
       return value && value.scores ? value.scores : {};
     }
 
+    function migrationReport(onProgress) {
+      const collectionNames = ['sets', 'images', 'sessions', 'students', 'responses', 'snapshots'];
+      const report = {
+        migrated: [],
+        skipped: [],
+        failed: [],
+        failedIds: [],
+        duplicated: 0,
+        counts: { migrated: 0, skipped: 0, failed: 0 },
+        byCollection: Object.fromEntries(collectionNames.map(name => [name, {
+          migrated: [], skipped: [], failed: []
+        }])),
+        remainingResponseLeakCount: 0,
+        remainingResponseLeakIds: [],
+        responseAuditFailedIds: [],
+        safeToDeployStrictRules: false
+      };
+      const seen = new Set();
+      function add(collectionName, status, id, error) {
+        const key = collectionName + ':' + status + ':' + id;
+        if (seen.has(key)) return;
+        seen.add(key);
+        const item = collectionName + ':' + id;
+        report.byCollection[collectionName][status].push(id);
+        report[status].push(item);
+        report.counts[status] += 1;
+        if (status === 'failed') report.failedIds.push(item);
+        if (error) {
+          report.errors = report.errors || {};
+          report.errors[item] = String(error && error.message || error);
+        }
+        if (typeof onProgress === 'function') onProgress(report, {
+          collection: collectionName, status, id, error: error || null
+        });
+      }
+      return { report, add };
+    }
+
+    async function migrateLegacyOwnership(plan, onProgress) {
+      const value = plan || {};
+      const teacher = value.teacher || {};
+      const email = migrationCore.normalizeEmail(teacher.email);
+      if (value.legacyOwnerVerified !== true || !teacher.uid || !email) {
+        throw new Error('A verified legacy owner migration plan is required.');
+      }
+      const { report, add } = migrationReport(onProgress);
+      (value.skippedSetIds || []).forEach(id => add('sets', 'skipped', id));
+      (value.skippedSessionIds || []).forEach(id => add('sessions', 'skipped', id));
+
+      async function claimParents(collectionName, ids, uidField, emailField) {
+        const available = new Set();
+        const claimed = new Set();
+        for (const group of chunk([...new Set(ids || [])], 400)) {
+          const candidates = [];
+          for (const id of group) {
+            try {
+              const reference = db.doc(collectionName + '/' + id);
+              const snapshot = await reference.get();
+              if (!snapshot.exists) {
+                add(collectionName === 'quiz_sets' ? 'sets' : 'sessions', 'skipped', id);
+                continue;
+              }
+              const current = snapshot.data() || {};
+              if (current[uidField]) {
+                if (current[uidField] === teacher.uid) available.add(id);
+                add(collectionName === 'quiz_sets' ? 'sets' : 'sessions', 'skipped', id);
+                continue;
+              }
+              candidates.push({ id, reference });
+            } catch (error) {
+              add(collectionName === 'quiz_sets' ? 'sets' : 'sessions', 'failed', id, error);
+            }
+          }
+          if (!candidates.length) continue;
+          const batch = db.batch();
+          candidates.forEach(candidate => batch.set(candidate.reference, {
+            [uidField]: teacher.uid,
+            [emailField]: email
+          }, { merge: true }));
+          try {
+            await batch.commit();
+            candidates.forEach(candidate => {
+              available.add(candidate.id);
+              claimed.add(candidate.id);
+              add(collectionName === 'quiz_sets' ? 'sets' : 'sessions', 'migrated', candidate.id);
+            });
+          } catch (error) {
+            candidates.forEach(candidate =>
+              add(collectionName === 'quiz_sets' ? 'sets' : 'sessions', 'failed', candidate.id, error)
+            );
+          }
+        }
+        return { available, claimed };
+      }
+
+      const sets = await claimParents('quiz_sets', value.setIds, 'ownerUid', 'ownerEmail');
+      (value.resumeSetIds || []).forEach(id => sets.available.add(id));
+      const imageSetIds = new Set([...sets.available, ...(value.skippedSetIds || [])]);
+      for (const setId of imageSetIds) {
+        try {
+          const images = await db.collection('images/' + setId + '/q').get();
+          images.docs.forEach(document => add(
+            'images', sets.claimed.has(setId) ? 'migrated' : 'skipped', setId + '/' + document.id
+          ));
+        } catch (error) {
+          add('images', 'failed', setId + '/*', error);
+        }
+      }
+
+      const sessions = await claimParents('sessions', value.sessionIds, 'teacherUid', 'teacherEmail');
+      (value.resumeSessionIds || []).forEach(id => sessions.available.add(id));
+
+      async function backfillSnapshot(sessionId, session) {
+        if (!session) return;
+        const snapshotReference = db.doc('sessions/' + sessionId + '/snapshot/set');
+        const existing = await snapshotReference.get();
+        if (existing.exists) {
+          add('snapshots', 'skipped', sessionId + '/set');
+          return;
+        }
+        const sourceSnapshot = session.setSnapshot;
+        if (!sourceSnapshot || typeof sourceSnapshot !== 'object' || Array.isArray(sourceSnapshot)) {
+          add('snapshots', 'skipped', sessionId + '/set');
+          return;
+        }
+        const sourceImages = Object.entries(normalizedImages(session.snapshotImages));
+        const existingImages = await db.collection(
+          'sessions/' + sessionId + '/snapshot_images'
+        ).get();
+        const existingIds = new Set(existingImages.docs.map(document => document.id));
+        const missingImages = sourceImages.filter(([id]) => !existingIds.has(id));
+        for (const group of chunk(missingImages, 400)) {
+          const batch = db.batch();
+          group.forEach(([id, data]) => batch.set(
+            db.doc('sessions/' + sessionId + '/snapshot_images/' + id),
+            { data }
+          ));
+          await batch.commit();
+          group.forEach(([id]) => add('snapshots', 'migrated', sessionId + '/image/' + id));
+        }
+        const sourceData = { ...sourceSnapshot };
+        delete sourceData.id;
+        const finalBatch = db.batch();
+        finalBatch.set(snapshotReference, sourceData);
+        finalBatch.set(db.doc('sessions/' + sessionId), { snapshotVersion: 1 }, { merge: true });
+        await finalBatch.commit();
+        add('snapshots', 'migrated', sessionId + '/set');
+      }
+
+      async function migrateResponse(sessionId, document) {
+        const id = sessionId + '/' + document.id;
+        const prepared = migrationCore.prepareLegacyResponse(document.id, document.data());
+        if (prepared.status === 'skip') {
+          add('responses', 'skipped', id);
+          return;
+        }
+        if (prepared.status === 'failed') {
+          add('responses', 'failed', id, new Error(prepared.reason));
+          return;
+        }
+        const gradeWrites = [];
+        for (const grade of prepared.grades) {
+          const gradeReference = db.doc('sessions/' + sessionId + '/grades/' + grade.id);
+          const current = await gradeReference.get();
+          const gradeValue = {
+            uid: grade.uid,
+            questionIndex: grade.questionIndex,
+            revision: grade.revision,
+            ok: grade.ok
+          };
+          if (current.exists) {
+            if (JSON.stringify(stableValue(current.data())) !== JSON.stringify(stableValue(gradeValue))) {
+              add('responses', 'failed', id, new Error('Existing private grade conflicts with legacy grading.'));
+              return;
+            }
+          } else gradeWrites.push({ reference: gradeReference, value: gradeValue });
+        }
+        if (gradeWrites.length + 1 > 400) {
+          add('responses', 'failed', id, new Error('Response migration exceeds the 400-write batch limit.'));
+          return;
+        }
+        const batch = db.batch();
+        gradeWrites.forEach(grade => batch.set(grade.reference, grade.value));
+        batch.set(db.doc('sessions/' + sessionId + '/responses/' + document.id), prepared.response);
+        try {
+          await batch.commit();
+          add('responses', 'migrated', id);
+        } catch (error) {
+          add('responses', 'failed', id, error);
+        }
+      }
+
+      for (const sessionId of sessions.available) {
+        let session = null;
+        try {
+          const sessionSnapshot = await db.doc('sessions/' + sessionId).get();
+          session = sessionSnapshot.exists ? sessionSnapshot.data() : null;
+          const students = await db.collection('sessions/' + sessionId + '/students').get();
+          students.docs.forEach(document => add(
+            'students', sessions.claimed.has(sessionId) ? 'migrated' : 'skipped',
+            sessionId + '/' + document.id
+          ));
+        } catch (error) {
+          add('students', 'failed', sessionId + '/*', error);
+        }
+        try {
+          await backfillSnapshot(sessionId, session);
+        } catch (error) {
+          add('snapshots', 'failed', sessionId + '/set', error);
+        }
+        try {
+          const responses = await db.collection('sessions/' + sessionId + '/responses').get();
+          for (const document of responses.docs) await migrateResponse(sessionId, document);
+        } catch (error) {
+          add('responses', 'failed', sessionId + '/*', error);
+        }
+      }
+
+      for (const sessionId of value.skippedSessionIds || []) {
+        try {
+          const students = await db.collection('sessions/' + sessionId + '/students').get();
+          students.docs.forEach(document => add('students', 'skipped', sessionId + '/' + document.id));
+        } catch (error) {
+          add('students', 'failed', sessionId + '/*', error);
+        }
+        try {
+          const responses = await db.collection('sessions/' + sessionId + '/responses').get();
+          responses.docs.forEach(document => {
+            const id = sessionId + '/' + document.id;
+            if (migrationCore.responseLeakPaths(document.data()).length) {
+              add('responses', 'failed', id, new Error('Another owner session still contains ok/score.'));
+            } else add('responses', 'skipped', id);
+          });
+        } catch (error) {
+          add('responses', 'failed', sessionId + '/*', error);
+        }
+      }
+
+      const allSessionIds = [...new Set([
+        ...(value.sessionIds || []),
+        ...(value.resumeSessionIds || []),
+        ...(value.skippedSessionIds || [])
+      ])];
+      const remainingLeakIds = [];
+      for (const sessionId of allSessionIds) {
+        try {
+          const responses = await db.collection('sessions/' + sessionId + '/responses').get();
+          responses.docs.forEach(document => {
+            if (migrationCore.responseLeakPaths(document.data()).length) {
+              remainingLeakIds.push(sessionId + '/' + document.id);
+            }
+          });
+        } catch (error) {
+          report.responseAuditFailedIds.push(sessionId);
+        }
+      }
+      report.remainingResponseLeakIds = [...new Set(remainingLeakIds)].sort();
+      report.remainingResponseLeakCount = report.remainingResponseLeakIds.length;
+      report.safeToDeployStrictRules = report.remainingResponseLeakCount === 0 &&
+        report.responseAuditFailedIds.length === 0;
+      return report;
+    }
+
     async function getOwnScore(sessionId, authUid) {
       const snapshot = await db.doc(
         'sessions/' + sessionId + '/student_scores/' + authUid
@@ -665,6 +941,8 @@
 
     return {
       probeTeacherAllowance,
+      probeLegacyOwner,
+      migrateLegacyOwnership,
       listQuizSets,
       getQuizSet,
       saveQuizSet,
