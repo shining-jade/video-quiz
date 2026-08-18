@@ -452,6 +452,17 @@ body.stage-fallback-open { overflow: hidden; }
 }
 #overlay .ov-actions { display: flex; gap: 10px; margin-top: 24px; flex-wrap: wrap; }
 #overlay .ov-actions .btn { padding: 13px 24px; font-size: 16px; }
+#pl-transition, #pl-completion, #pl-player-error {
+  position: absolute; inset: 0; z-index: 190; background: rgba(14,17,30,.94);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  color: #fff; text-align: center;
+}
+#pl-completion, #pl-player-error { z-index: 210; }
+.pl-playback-menu { width: min(680px, 100%); }
+.pl-playback-menu h2 { font-size: clamp(26px, 4vw, 44px); margin-bottom: 12px; }
+.pl-playback-menu p { color: rgba(255,255,255,.72); font-size: 17px; line-height: 1.6; }
+.pl-playback-menu .ov-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 24px; }
+.pl-playback-menu .btn { padding: 13px 22px; font-size: 16px; }
 .quiz-timer { display:flex; align-items:center; gap:12px; flex:1 1 240px; }
 .quiz-timer-track { height:12px; flex:1; border-radius:999px; overflow:hidden; background:rgba(255,255,255,.2); }
 .quiz-timer-track > i { display:block; height:100%; width:100%; border-radius:inherit; background:#34d17f; transition:width .25s linear,background .2s; }
@@ -835,12 +846,14 @@ function applyCaptions(player) {
     } catch (e) { /* 해당 모듈이 없는 플레이어면 무시 */ }
   });
 }
-function ytEvents(getPlayer) {
+function ytEvents(getPlayer, handleStateChange, handleError) {
   return {
     onReady: () => applyCaptions(getPlayer()),
     onStateChange: e => {
       if (e.data === YT.PlayerState.PLAYING || e.data === YT.PlayerState.BUFFERING) applyCaptions(getPlayer());
-    }
+      if (handleStateChange) handleStateChange(e);
+    },
+    onError: e => { if (handleError) handleError(e); }
   };
 }
 function toggleCaptions(getPlayer) {
@@ -1037,8 +1050,8 @@ function loadQuestionImage(setId, i) {
 function hasImage(q) { return !!(q && (q.imgUp || q.imgUrl)); }
 
 /** 문항별 제한시간 덮어쓰기가 있으면 그것을, 없으면 세트 기본값을 쓴다 */
-function limitFor(set, i) {
-  const q = set.questions[i];
+function limitFor(set, i, questions) {
+  const q = (questions || set.questions || [])[i];
   if (q && q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) return Math.max(0, q.limitSec);
   return set.settings.limitSec;
 }
@@ -2260,9 +2273,12 @@ function screenPlay(setId) {
   if (!setId) { go('make'); return; }
   pl = {
     setId: setId, set: null,
+    videos: [], flatQuestions: [], videoIndex: 0,
+    playlistDone: false, transitionUntil: 0, playbackEnded: false,
     sessionId: null, code: null,
     player: null, lastT: 0, fired: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    pendingLiveQuestion: -1,
     students: {}, responses: {},
     liveRef: null,
     isStageFullscreen: false,
@@ -2285,6 +2301,10 @@ function screenPlay(setId) {
     if (ov) ov.remove();
     const bo = document.getElementById('board-overlay');
     if (bo) bo.remove();
+    const transition = document.getElementById('pl-transition');
+    if (transition && transition.remove) transition.remove();
+    const completion = document.getElementById('pl-completion');
+    if (completion && completion.remove) completion.remove();
     const stage = document.getElementById('pl-stage');
     if (stage) stage.classList.remove('quiz-open');
     pl = null;
@@ -2294,14 +2314,22 @@ function screenPlay(setId) {
 
   store.getQuizSet(setId).then(savedSet => {
     const set = normSet(savedSet);
-    if (!set || !set.questions.length) {
+    const flatQuestions = set ? PlaylistCore.flattenQuestions(set.videos) : [];
+    if (!set || !flatQuestions.length) {
       APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">' +
         '세트를 찾을 수 없거나 문항이 없습니다.<br>링크가 정확한지 확인해 주세요.<br><br>' +
         '<a class="btn" href="#/make">새 세트 만들기</a></div></div></div>';
       return;
     }
     pl.set = set;
-    pl.fired = set.questions.map(() => false);
+    pl.videos = set.videos;
+    pl.flatQuestions = flatQuestions;
+    pl.videoIndex = 0;
+    pl.playlistDone = false;
+    pl.transitionUntil = 0;
+    pl.playbackEnded = false;
+    pl.lastT = Math.max(0, Number(set.videos[0].startSec) || 0) - 0.6;
+    pl.fired = flatQuestions.map(() => false);
     renderPlayIntro();
   }).catch(e => { console.error(e); APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>'; });
 }
@@ -2309,11 +2337,12 @@ function screenPlay(setId) {
 /** 반을 시작하기 전 — 세트 내용 확인 화면 */
 function renderPlayIntro() {
   const s = pl.set;
+  const questions = pl.flatQuestions;
   APP().innerHTML = topbar('<a class="btn sm ghost" href="#/make/' + esc(pl.setId) + '">세트 편집</a>') +
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">' + esc(s.title) + '</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
-        '문항 ' + s.questions.length + '개' + (s.author ? ' · 만든 사람 ' + esc(s.author) : '') +
+        '영상 ' + s.videos.length + '개 · 문항 ' + questions.length + '개' + (s.author ? ' · 만든 사람 ' + esc(s.author) : '') +
         ' · 정답 공개: ' + REVEAL_LABEL[s.settings.revealMode] +
         ' · 제한 시간 ' + (s.settings.limitSec ? s.settings.limitSec + '초' : '없음') +
       '</p>' +
@@ -2333,9 +2362,9 @@ function renderPlayIntro() {
       '<div class="card">' +
         '<h2>문항 미리보기</h2>' +
         '<div class="sub">영상의 이 시각에 퀴즈가 자동으로 뜹니다.</div>' +
-        s.questions.map((q, i) =>
+        questions.map((q, i) =>
           '<div class="qlist-item"><span class="t">' + fmtTime(q.t) + '</span>' +
-          '<span class="x">' + (i + 1) + '. ' + esc(q.text) + '</span>' +
+          '<span class="x">' + (q.number || i + 1) + '. ' + esc(q.text) + '</span>' +
           '<span class="tag mute">정답 ' + LETTERS[q.answer] + '</span></div>').join('') +
       '</div>' +
     '</div>';
@@ -2369,6 +2398,8 @@ function plStartSession() {
 
 function renderPlayRun() {
   const s = pl.set;
+  const questions = pl.flatQuestions;
+  const firstVideo = s.videos[0];
   const joinUrl = linkTo('join/' + pl.code);
 
   APP().innerHTML = topbar(
@@ -2417,7 +2448,7 @@ function renderPlayRun() {
         '<div class="card" style="margin-top:14px">' +
           '<div style="font-size:13px;color:var(--ink-2);line-height:1.8">' +
             '<b>' + esc(s.title) + '</b><br>' +
-            '문항 ' + s.questions.length + '개<br>' +
+            '영상 ' + s.videos.length + '개 · 문항 ' + questions.length + '개<br>' +
             '정답 공개 — ' + REVEAL_LABEL[s.settings.revealMode] + '<br>' +
             '제한 시간 — ' + (s.settings.limitSec ? s.settings.limitSec + '초' : '없음') +
           '</div>' +
@@ -2460,6 +2491,7 @@ function renderPlayRun() {
   }, e => console.error(e)));
   onCleanup(store.subscribeLive(pl.sessionId, live => {
     pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
+    if (pl.pendingLiveQuestion === pl.live.q) pl.pendingLiveQuestion = -1;
     plRenderOverlay();
     plRenderStageControls();
   }, e => console.error(e)));
@@ -2468,9 +2500,12 @@ function renderPlayRun() {
   whenYT(() => {
     if (!pl || !document.getElementById('pl-player')) return;
     pl.player = new YT.Player('pl-player', {
-      videoId: s.videoId,
-      playerVars: { rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0 },
-      events: ytEvents(() => pl && pl.player)
+      videoId: firstVideo.videoId,
+      playerVars: {
+        rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0,
+        start: Math.max(0, Number(firstVideo.startSec) || 0)
+      },
+      events: ytEvents(() => pl && pl.player, plHandlePlayerStateChange, plHandlePlayerError)
     });
   });
 
@@ -2700,14 +2735,161 @@ function plClampQrBubble() {
   bubble.style.right = 'auto';
 }
 
+function plLoadVideo(index, autoplay) {
+  if (!pl || !pl.player || !pl.player.loadVideoById) return;
+  const video = pl.set && pl.set.videos && pl.set.videos[index];
+  if (!video) return;
+  pl.videoIndex = index;
+  pl.playlistDone = false;
+  pl.transitionUntil = 0;
+  pl.playbackEnded = false;
+  pl.playerLoading = true;
+  pl.playerError = null;
+  pl.lastT = Math.max(0, Number(video.startSec) || 0) - 0.6;
+  if (typeof document !== 'undefined') {
+    const transition = document.getElementById('pl-transition');
+    if (transition && transition.remove) transition.remove();
+    const completion = document.getElementById('pl-completion');
+    if (completion && completion.remove) completion.remove();
+    const error = document.getElementById('pl-player-error');
+    if (error && error.remove) error.remove();
+  }
+  pl.player.loadVideoById({
+    videoId: video.videoId,
+    startSeconds: Math.max(0, Number(video.startSec) || 0)
+  });
+}
+
+function plAdvanceVideo() {
+  if (!pl || !pl.set || !pl.set.videos) return;
+  const next = PlaylistCore.nextPlaybackState(pl.set.videos, pl.videoIndex);
+  if (next.done) plCompletePlaylist();
+  else plLoadVideo(next.videoIndex, true);
+}
+
+function plCompletePlaylist() {
+  if (!pl) return;
+  pl.playlistDone = true;
+  pl.transitionUntil = 0;
+  try { if (pl.player && pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
+  plRenderCompletion();
+}
+
+function plReplayPlaylist() {
+  if (!pl) return;
+  pl.playlistDone = false;
+  pl.transitionUntil = 0;
+  pl.playbackEnded = false;
+  pl.fired = pl.fired.map(() => false);
+  plLoadVideo(0, true);
+}
+
+function plRenderTransition() {
+  if (!pl) return;
+  let box = document.getElementById('pl-transition');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'pl-transition';
+    plStageRoot().appendChild(box);
+  }
+  const seconds = Math.max(0, Math.ceil((pl.transitionUntil - Date.now()) / 1000));
+  const next = pl.set.videos[pl.videoIndex + 1] || {};
+  box.innerHTML = '<div class="pl-playback-menu">' +
+    '<h2>다음 영상으로 이동합니다</h2>' +
+    '<p>' + (next.title ? esc(next.title) + '<br>' : '') + seconds + '초 후 자동으로 시작합니다.</p>' +
+  '</div>';
+}
+
+function plRenderCompletion() {
+  if (!pl) return;
+  let box = document.getElementById('pl-completion');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'pl-completion';
+    plStageRoot().appendChild(box);
+  }
+  box.innerHTML = '<div class="pl-playback-menu">' +
+    '<h2>모든 영상 재생 완료</h2>' +
+    '<p>' + esc(pl.set.title) + '의 플레이리스트를 모두 재생했습니다.<br>학생 응답과 순위는 그대로 유지됩니다.</p>' +
+    '<div class="ov-actions">' +
+      '<button class="btn" onclick="plToggleBoard()">🏆 순위 보기</button>' +
+      '<a class="btn" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
+      '<button class="btn primary" onclick="plReplayPlaylist()">↺ 처음부터 다시 보기</button>' +
+      '<button class="btn ghost" onclick="plEndSession()">진행 종료</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function plRenderPlayerError() {
+  if (!pl) return;
+  let box = document.getElementById('pl-player-error');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'pl-player-error';
+    plStageRoot().appendChild(box);
+  }
+  const hasNext = pl.videoIndex < pl.set.videos.length - 1;
+  box.innerHTML = '<div class="pl-playback-menu">' +
+    '<h2>영상을 불러오지 못했습니다</h2>' +
+    '<p>네트워크 연결이나 영상 공개 상태를 확인한 뒤 다시 시도해 주세요.</p>' +
+    '<div class="ov-actions">' +
+      '<button class="btn primary" onclick="plRetryVideo()">다시 시도</button>' +
+      (hasNext ? '<button class="btn" onclick="plAdvanceVideo()">다음 영상</button>' : '') +
+      '<button class="btn ghost" onclick="plEndSession()">진행 종료</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function plRetryVideo() {
+  if (!pl) return;
+  plLoadVideo(pl.videoIndex, true);
+}
+
+function plHandlePlayerStateChange(event) {
+  if (!pl || !event) return;
+  if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.CUED) {
+    pl.playerLoading = false;
+  }
+  if (event.data !== YT.PlayerState.ENDED) return;
+  pl.playbackEnded = true;
+  plTick();
+}
+
+function plHandlePlayerError(event) {
+  if (!pl) return;
+  pl.playerLoading = false;
+  pl.playerError = event && event.data;
+  plRenderPlayerError();
+}
+
 function plTick() {
   if (!pl || !pl.player || !pl.player.getCurrentTime) return;
+  if (pl.playlistDone) return;
+  if (pl.playerLoading) return;
+
+  if (pl.transitionUntil) {
+    if (Date.now() >= pl.transitionUntil) {
+      pl.transitionUntil = 0;
+      plLoadVideo(pl.videoIndex + 1, true);
+    } else plRenderTransition();
+    return;
+  }
+
   let now;
   try { now = pl.player.getCurrentTime(); } catch (e) { return; }
   if (typeof now !== 'number' || isNaN(now)) return;
 
+  const video = pl.set && pl.set.videos && pl.set.videos[pl.videoIndex];
+  if (!video) return;
   const prev = pl.lastT;
   pl.lastT = now;
+
+  let end = video.endSec;
+  if (end === null || end === undefined || end === '') {
+    try { end = pl.player.getDuration ? pl.player.getDuration() : null; } catch (e) { end = null; }
+  }
+  end = Number(end);
+  const reachedEnd = pl.playbackEnded || (Number.isFinite(end) && end > 0 && now >= end);
 
   const clock = $('#pl-clock');
   if (clock) clock.textContent = fmtTime(now);
@@ -2715,32 +2897,54 @@ function plTick() {
   // 다음 문항 안내
   const nextEl = $('#pl-next');
   if (nextEl) {
-    const nx = pl.set.questions.findIndex(q => q.t > now);
+    const nx = pl.flatQuestions.findIndex(q => q.videoIndex === pl.videoIndex && q.t > now);
     nextEl.textContent = nx === -1 ? '남은 문항 없음' :
-      '다음 문항 ' + (nx + 1) + '번까지 ' + fmtTime(pl.set.questions[nx].t - now);
+      '다음 문항 ' + (pl.flatQuestions[nx].number || nx + 1) + '번까지 ' + fmtTime(pl.flatQuestions[nx].t - now);
   }
 
-  if (pl.live.q >= 0) return;   // 이미 퀴즈가 열려 있으면 새로 발화하지 않음
+  if (pl.live.q >= 0 || pl.pendingLiveQuestion >= 0) {
+    if (reachedEnd) {
+      try { if (pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
+    }
+    return;
+  }
 
-  pl.set.questions.forEach((q, i) => {
+  let opened = false;
+  pl.flatQuestions.forEach((q, i) => {
+    if (q.videoIndex !== pl.videoIndex) return;
     // 뒤로 되감으면 다시 발화할 수 있게 플래그를 푼다
     if (now < q.t - 0.6) pl.fired[i] = false;
-    if (!pl.fired[i] && prev < q.t && q.t <= now) {
+    if (!opened && !pl.fired[i] && prev < q.t && q.t <= now) {
       pl.fired[i] = true;
+      opened = true;
       plOpenQuestion(i);
     }
   });
+  if (opened || !reachedEnd) return;
+
+  if (pl.videoIndex >= pl.set.videos.length - 1) {
+    plCompletePlaylist();
+    return;
+  }
+  try { if (pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
+  pl.transitionUntil = Date.now() + 3000;
+  plRenderTransition();
 }
 
 function plOpenQuestion(i) {
   if (!pl || !pl.sessionId) return;
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
-  return store.setLive(pl.sessionId, {
+  pl.pendingLiveQuestion = i;
+  const writing = store.setLive(pl.sessionId, {
     q: i,
     openedAt: SV_TS,
     revealed: pl.set.settings.revealMode === 'instant',
-    limitSec: limitFor(pl.set, i)
+    limitSec: limitFor(pl.set, i, pl.flatQuestions)
   });
+  return writing && writing.catch ? writing.catch(e => {
+    if (pl && pl.pendingLiveQuestion === i) pl.pendingLiveQuestion = -1;
+    throw e;
+  }) : writing;
 }
 function plReveal() {
   if (!pl || pl.live.q < 0) return;
@@ -2754,9 +2958,12 @@ async function plCloseQuestion() {
 }
 function plJumpTo(i) {
   if (!pl || !pl.player || !pl.player.seekTo) return;
-  const t = Math.max(0, pl.set.questions[i].t - 3);
+  const question = pl.flatQuestions[i];
+  if (!question) return;
+  const t = Math.max(0, question.t - 3);
   pl.fired[i] = false;
   pl.lastT = t;
+  if (question.videoIndex !== pl.videoIndex) plLoadVideo(question.videoIndex, true);
   pl.player.seekTo(t, true);
   pl.player.playVideo();
 }
@@ -2771,13 +2978,13 @@ async function plEndSession() {
 function plRenderQList() {
   const box = $('#pl-qlist');
   if (!box || !pl) return;
-  box.innerHTML = pl.set.questions.map((q, i) => {
+  box.innerHTML = pl.flatQuestions.map((q, i) => {
     const resp = pl.responses[i] || {};
     const n = Object.keys(resp).length;
     const cls = pl.live.q === i ? ' active' : (n > 0 ? ' done' : '');
     return '<div class="qlist-item' + cls + '">' +
       '<span class="t" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + fmtTime(q.t) + '</span>' +
-      '<span class="x" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + (i + 1) + '. ' + esc(q.text) + '</span>' +
+      '<span class="x" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + (q.number || i + 1) + '. ' + esc(q.text) + '</span>' +
       (n ? '<span class="tag mute">' + n + '명 응답</span>' : '') +
       '<button class="btn sm ghost" onclick="plOpenQuestion(' + i + ')" title="영상과 상관없이 지금 이 문항을 엽니다">열기</button>' +
     '</div>';
@@ -2792,7 +2999,7 @@ function plScoreboard() {
   const rows = Object.keys(pl.students).map(sid => {
     const s = pl.students[sid];
     let correct = 0, answered = 0, graded = 0;
-    pl.set.questions.forEach((q, i) => {
+    pl.flatQuestions.forEach((q, i) => {
       const r = (pl.responses[i] || {})[sid];
       if (!r) return;
       answered++;
@@ -2832,7 +3039,7 @@ function plRenderStudents() {
     plRenderQrBubble();
     return;
   }
-  const total = pl.set.questions.length;
+  const total = pl.flatQuestions.length;
   list.innerHTML = rows.map(r =>
     '<div class="rank-row' + (r.rank <= 3 ? ' top' + r.rank : '') + '">' +
       '<span class="rk">' + r.rank + '</span>' +
@@ -2860,7 +3067,7 @@ function plRenderBoardOverlay() {
   const box = document.getElementById('board-overlay');
   if (!box || !pl) return;
   const rows = plScoreboard();
-  const total = pl.set.questions.length;
+  const total = pl.flatQuestions.length;
   const nUngraded = rows.reduce((a, r) => a + (r.answered - r.graded), 0);
 
   box.innerHTML = '<div class="bo-inner">' +
@@ -2893,7 +3100,7 @@ function plRenderOverlay() {
   }
   stage.classList.add('quiz-open');
 
-  const i = pl.live.q, q = pl.set.questions[i];
+  const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
   const mode = pl.set.settings.revealMode;
 
@@ -2905,7 +3112,7 @@ function plRenderOverlay() {
   const type = qType(q);
   ov.innerHTML = '<div class="ov-inner">' +
     '<div class="ov-top">' +
-      '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">문항 ' + (i + 1) + ' / ' + pl.set.questions.length + '</span>' +
+      '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">문항 ' + (q.number || i + 1) + ' / ' + pl.flatQuestions.length + '</span>' +
       (type !== 'choice' ? '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">' + QTYPES[type].split(' —')[0] + '</span>' : '') +
       '<span class="ov-count" id="ov-count">참여 0명 · 제출 0명 · 미제출 0명</span>' +
       '<div style="flex:1"></div>' +
@@ -2937,7 +3144,7 @@ function plRenderOverlay() {
   if (hasImage(q)) {
     const imgEl = ov.querySelector('#ov-img');
     if (q.imgUrl) imgEl.src = q.imgUrl;
-    else loadQuestionImage(pl.setId, i).then(src => {
+    else loadQuestionImage(pl.setId, q.key || i).then(src => {
       const now = document.querySelector('#ov-img');
       if (now && src) now.src = src;
     });
@@ -2996,7 +3203,7 @@ function plTextSummary(q, resp) {
 function plRenderOverlayCounts() {
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
-  const i = pl.live.q, q = pl.set.questions[i];
+  const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
   const resp = pl.responses[i] || {};
   const keys = Object.keys(resp);

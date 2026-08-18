@@ -1286,21 +1286,34 @@ test('점수판은 meta/board 문서에 scores 필드로 쓴다', async () => {
 test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기고 응답 문서를 화면 형태로 바꾼다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const subscriptions = {};
+  const subscriptionCounts = { students: 0, responses: 0, live: 0 };
+  const playerLoads = [];
+  const playerConfigs = [];
   let boardWrites = 0;
   const app = { innerHTML: '' };
+  const player = { loadVideoById(options) { playerLoads.push(options); } };
   const context = {
     pl: {
       sessionId: 'session-a', code: 'ABC234', students: {}, responses: {},
       live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+      videoIndex: 0,
+      flatQuestions: [
+        { number: 1, videoIndex: 0, t: 12, text: '첫 문항' },
+        { number: 2, videoIndex: 1, t: 35, text: '둘째 문항' }
+      ],
       set: {
-        title: '첫 세트', videoId: 'abcdefghijk', questions: [],
+        title: '첫 세트', questions: [],
+        videos: [
+          { videoId: 'abcdefghijk', startSec: 10, questions: [] },
+          { videoId: 'lmnopqrstuv', startSec: 30, questions: [] }
+        ],
         settings: { revealMode: 'manual', limitSec: 0 }
       }
     },
     store: {
-      subscribeStudents(id, next) { assert.equal(id, 'session-a'); subscriptions.students = next; return () => {}; },
-      subscribeResponses(id, next) { assert.equal(id, 'session-a'); subscriptions.responses = next; return () => {}; },
-      subscribeLive(id, next) { assert.equal(id, 'session-a'); subscriptions.live = next; return () => {}; }
+      subscribeStudents(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.students++; subscriptions.students = next; return () => {}; },
+      subscribeResponses(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.responses++; subscriptions.responses = next; return () => {}; },
+      subscribeLive(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.live++; subscriptions.live = next; return () => {}; }
     },
     FirestoreCore: require('../firestore-core.js'),
     onCleanup() {},
@@ -1320,18 +1333,30 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
     plRenderOverlayCounts() {},
     plRenderStageControls() {},
     plPushBoard() { boardWrites += 1; },
-    whenYT() {},
+    whenYT(next) { next(); },
+    ytEvents() { return {}; },
+    plHandlePlayerStateChange() {},
+    plHandlePlayerError() {},
+    YT: {
+      Player: function Player(id, config) {
+        playerConfigs.push({ id, config });
+        return player;
+      }
+    },
     every() {},
     plTick() {},
     plTimerTick() {},
     console
   };
-  vm.runInNewContext(extractFunction(html, 'renderPlayRun'), context);
+  loadStageFunctions(['plLoadVideo', 'renderPlayRun'], context);
 
   context.renderPlayRun();
   subscriptions.students({ s1: { name: '가' } });
   subscriptions.responses({ s1: { answers: { '0': { c: 1, ok: true } } } });
   subscriptions.live({ q: 0, openedAt: 123, revealed: false, limitSec: 20 });
+  const studentsBefore = context.pl.students;
+  const responsesBefore = context.pl.responses;
+  context.plLoadVideo(1, true);
 
   assert.deepEqual(context.pl.students, { s1: { name: '가' } });
   assert.deepEqual(context.pl.responses, { '0': { s1: { c: 1, ok: true } } });
@@ -1340,6 +1365,495 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   assert.match(app.innerHTML, /id="pl-stage" onpointerdown="plActivateStageControls\(\)"/);
   assert.doesNotMatch(app.innerHTML, /class="pl-stage-status"[^>]*aria-live/);
   assert.match(app.innerHTML, /<span aria-live="polite">참여 <b id="pl-nstu">0<\/b>명<\/span>/);
+  assert.equal(playerConfigs.length, 1);
+  assert.equal(playerConfigs[0].id, 'pl-player');
+  assert.equal(playerConfigs[0].config.videoId, 'abcdefghijk');
+  assert.equal(playerConfigs[0].config.playerVars.start, 10);
+  assert.deepEqual(clone(playerLoads), [{ videoId: 'lmnopqrstuv', startSeconds: 30 }]);
+  assert.equal(context.pl.player, player);
+  assert.deepEqual(subscriptionCounts, { students: 1, responses: 1, live: 1 });
+  assert.equal(context.pl.students, studentsBefore);
+  assert.equal(context.pl.responses, responsesBefore);
+});
+
+test('교사 재생 초기화는 videos를 평탄화해 전역 문항 상태를 만든다', async () => {
+  let introRendered = 0;
+  const savedSet = {
+    title: '플레이리스트', settings: {},
+    videos: [
+      { videoId: 'a', startSec: 10, endSec: 20, questions: [{ t: 12, text: 'A' }] },
+      { videoId: 'b', startSec: 30, endSec: 50, questions: [{ t: 35, text: 'B' }] }
+    ]
+  };
+  const context = {
+    pl: null,
+    PlaylistCore: require('../playlist-core.js'),
+    store: { getQuizSet() { return Promise.resolve(savedSet); } },
+    normSet(value) { return value; },
+    renderPlayIntro() { introRendered++; },
+    onCleanup() {},
+    APP() { return { innerHTML: '' }; },
+    topbar() { return ''; },
+    esc(value) { return String(value); },
+    go() {},
+    document: {
+      addEventListener() {}, removeEventListener() {}, getElementById() { return null; },
+      body: { classList: { remove() {} } }, fullscreenElement: null
+    },
+    window: { addEventListener() {}, removeEventListener() {} },
+    plCleanupStageFullscreen() {},
+    plHandleFullscreenChange() {}, plHandleStageKeydown() {}, plClampQrBubble() {},
+    console
+  };
+  loadStageFunctions(['screenPlay'], context);
+
+  context.screenPlay('set1');
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(introRendered, 1);
+  assert.equal(context.pl.videos, savedSet.videos);
+  assert.deepEqual(context.pl.flatQuestions.map(q => [q.number, q.videoIndex, q.text]), [
+    [1, 0, 'A'], [2, 1, 'B']
+  ]);
+  assert.deepEqual(context.pl.fired, [false, false]);
+  assert.equal(context.pl.videoIndex, 0);
+  assert.equal(context.pl.playlistDone, false);
+  assert.equal(context.pl.transitionUntil, 0);
+});
+
+test('다음 영상은 같은 플레이어에 시작 시각으로 로드된다', () => {
+  const calls = [];
+  const player = { loadVideoById(options) { calls.push(options); } };
+  const ctx = loadStageFunctions(['plLoadVideo'], {
+    pl: {
+      videoIndex: 0,
+      set: { questions: [], videos: [
+        { videoId: 'a', startSec: 10 },
+        { videoId: 'b', startSec: 30 }
+      ] },
+      player
+    }
+  });
+
+  ctx.plLoadVideo(1, true);
+
+  assert.deepEqual(clone(calls), [{ videoId: 'b', startSeconds: 30 }]);
+  assert.equal(ctx.pl.videoIndex, 1);
+  assert.equal(ctx.pl.player, player);
+  assert.equal(ctx.pl.playerLoading, true);
+});
+
+test('다음 영상 로드 중에는 이전 영상 시각으로 문항이나 전환을 실행하지 않는다', () => {
+  let reads = 0, opened = 0, transitioned = 0;
+  const ctx = loadStageFunctions(['plTick'], {
+    pl: {
+      playerLoading: true, videoIndex: 1, transitionUntil: 0, playlistDone: false,
+      lastT: 20, fired: [false], live: { q: -1 },
+      flatQuestions: [{ t: 40, videoIndex: 1 }],
+      set: { videos: [{}, { startSec: 30, endSec: 50 }] },
+      player: { getCurrentTime() { reads++; return 40; } }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; },
+    fmtTime() { return ''; },
+    plOpenQuestion() { opened++; },
+    plRenderTransition() { transitioned++; }
+  });
+
+  ctx.plTick();
+
+  assert.equal(reads, 0);
+  assert.equal(opened, 0);
+  assert.equal(transitioned, 0);
+  assert.deepEqual(ctx.pl.fired, [false]);
+});
+
+test('영상 진행 인터페이스는 다음 영상을 로드하고 마지막에서는 완료한다', () => {
+  const loaded = [];
+  let completed = 0;
+  const ctx = loadStageFunctions(['plAdvanceVideo'], {
+    pl: { videoIndex: 0, set: { videos: [{ startSec: 10 }, { startSec: 20 }] } },
+    PlaylistCore: require('../playlist-core.js'),
+    plLoadVideo(index, autoplay) { loaded.push([index, autoplay]); },
+    plCompletePlaylist() { completed++; }
+  });
+
+  ctx.plAdvanceVideo();
+  ctx.pl.videoIndex = 1;
+  ctx.plAdvanceVideo();
+
+  assert.deepEqual(loaded, [[1, true]]);
+  assert.equal(completed, 1);
+});
+
+test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다', () => {
+  const loaded = [];
+  let rendered = 0;
+  const ctx = loadStageFunctions(['plTick'], {
+    pl: {
+      videoIndex: 0, transitionUntil: 0, playlistDone: false,
+      lastT: 39, fired: [], live: { q: -1 }, flatQuestions: [],
+      set: { questions: [], videos: [
+        { startSec: 10, endSec: 40, questions: [] },
+        { startSec: 20, endSec: 50, questions: [] }
+      ] },
+      player: { getCurrentTime() { return 40; }, pauseVideo() {} }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; },
+    fmtTime() { return ''; },
+    plLoadVideo(index, autoplay) { loaded.push([index, autoplay]); },
+    plRenderTransition() { rendered++; }
+  });
+
+  ctx.plTick();
+  assert.equal(ctx.pl.transitionUntil, 4000);
+  assert.deepEqual(loaded, []);
+  assert.equal(rendered, 1);
+
+  ctx.Date.now = () => 2500;
+  ctx.plTick();
+  assert.equal(rendered, 2);
+  assert.deepEqual(loaded, []);
+
+  ctx.Date.now = () => 4000;
+  ctx.plTick();
+  assert.deepEqual(loaded, [[1, true]]);
+});
+
+test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간다', () => {
+  let completed = 0, paused = 0;
+  const ctx = loadStageFunctions(['plCompletePlaylist', 'plTick'], {
+    pl: {
+      videoIndex: 1, transitionUntil: 0, playlistDone: false,
+      lastT: 49, fired: [], live: { q: -1 }, flatQuestions: [],
+      set: { questions: [], videos: [
+        { startSec: 10, endSec: 40, questions: [] },
+        { startSec: 20, endSec: 50, questions: [] }
+      ] },
+      player: { getCurrentTime() { return 50; }, pauseVideo() { paused++; } }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; },
+    fmtTime() { return ''; },
+    plOpenQuestion() {},
+    plRenderCompletion() { completed++; }
+  });
+
+  ctx.plTick();
+
+  assert.equal(completed, 1);
+  assert.equal(paused, 1);
+  assert.equal(ctx.pl.playlistDone, true);
+  assert.equal(ctx.pl.transitionUntil, 0);
+});
+
+test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 보류한다', () => {
+  let paused = 0;
+  const ctx = loadStageFunctions(['plTick'], {
+    pl: {
+      videoIndex: 0, transitionUntil: 0, playlistDone: false,
+      lastT: 39, fired: [], live: { q: 1 }, flatQuestions: [],
+      set: { questions: [], videos: [
+        { startSec: 10, endSec: 40, questions: [] },
+        { startSec: 20, endSec: 50, questions: [] }
+      ] },
+      player: { getCurrentTime() { return 40; }, pauseVideo() { paused++; } }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; },
+    fmtTime() { return ''; },
+    plLoadVideo() { throw new Error('문항이 열린 동안 이동하면 안 됨'); },
+    plRenderTransition() {}
+  });
+
+  ctx.plTick();
+
+  assert.equal(ctx.pl.transitionUntil, 0);
+  assert.equal(ctx.pl.videoIndex, 0);
+  assert.equal(paused, 1);
+
+  ctx.pl.live.q = -1;
+  ctx.plTick();
+  assert.equal(ctx.pl.transitionUntil, 4000);
+});
+
+test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스를 쓴다', () => {
+  const opened = [];
+  const ctx = loadStageFunctions(['plTick'], {
+    pl: {
+      videoIndex: 1, transitionUntil: 0, playlistDone: false,
+      lastT: 39, fired: [false, false], live: { q: -1 },
+      flatQuestions: [
+        { t: 40, videoIndex: 0, text: '첫 영상 문항' },
+        { t: 40, videoIndex: 1, text: '둘째 영상 문항' }
+      ],
+      set: {
+        questions: [{ t: 40, text: '구형 지역 인덱스 문항' }],
+        videos: [
+          { startSec: 0, endSec: 60, questions: [] },
+          { startSec: 0, endSec: 60, questions: [] }
+        ]
+      },
+      player: { getCurrentTime() { return 40; } }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; },
+    fmtTime() { return ''; },
+    plOpenQuestion(index) { opened.push(index); },
+    plRenderTransition() {}
+  });
+
+  ctx.plTick();
+
+  assert.deepEqual(opened, [1]);
+  assert.deepEqual(ctx.pl.fired, [false, true]);
+});
+
+test('종료 시각 문항의 live 반영이 늦어도 영상 전환을 시작하지 않는다', () => {
+  let paused = 0;
+  const ctx = loadStageFunctions(['plOpenQuestion', 'plTick'], {
+    pl: {
+      sessionId: 'session-a', videoIndex: 0, transitionUntil: 0, playlistDone: false,
+      lastT: 39, fired: [false], live: { q: -1 }, pendingLiveQuestion: -1,
+      flatQuestions: [{ t: 40, videoIndex: 0, limitSec: null }],
+      set: {
+        settings: { autoPause: false, revealMode: 'manual', limitSec: 20 },
+        videos: [{ startSec: 0, endSec: 40 }, { startSec: 0, endSec: 60 }]
+      },
+      player: { getCurrentTime() { return 40; }, pauseVideo() { paused++; } }
+    },
+    Date: { now() { return 1000; } },
+    $() { return null; }, fmtTime() { return ''; },
+    SV_TS: 1234,
+    limitFor() { return 20; },
+    store: { setLive() { return new Promise(() => {}); } },
+    plRenderTransition() {}
+  });
+
+  ctx.plTick();
+  ctx.plTick();
+
+  assert.equal(ctx.pl.pendingLiveQuestion, 0);
+  assert.equal(ctx.pl.transitionUntil, 0);
+  assert.equal(paused, 1);
+});
+
+test('마지막 영상 완료는 세션을 종료하지 않는다', () => {
+  let ended = 0, paused = 0, rendered = 0;
+  const ctx = loadStageFunctions(['plCompletePlaylist'], {
+    pl: { playlistDone: false, transitionUntil: 100, player: { pauseVideo() { paused++; } } },
+    store: { endSession() { ended++; } },
+    plRenderCompletion() { rendered++; }
+  });
+
+  ctx.plCompletePlaylist();
+
+  assert.equal(ctx.pl.playlistDone, true);
+  assert.equal(ctx.pl.transitionUntil, 0);
+  assert.equal(paused, 1);
+  assert.equal(rendered, 1);
+  assert.equal(ended, 0);
+});
+
+test('전환 안내는 stage 안에 한 번만 표시되고 남은 초를 갱신한다', () => {
+  const appended = [];
+  let transition = null;
+  const stage = { appendChild(node) { appended.push(node); transition = node; } };
+  const ctx = loadStageFunctions(['plStageRoot', 'plRenderTransition'], {
+    pl: { videoIndex: 0, transitionUntil: 4000, set: { videos: [{}, { title: '둘째 영상' }] } },
+    Date: { now() { return 1000; } },
+    document: {
+      body: stage,
+      getElementById(id) {
+        if (id === 'pl-stage') return stage;
+        if (id === 'pl-transition') return transition;
+        return null;
+      },
+      createElement() { return { id: '', innerHTML: '' }; }
+    },
+    esc(value) { return String(value); }
+  });
+
+  ctx.plRenderTransition();
+  ctx.Date.now = () => 2500;
+  ctx.plRenderTransition();
+
+  assert.equal(appended.length, 1);
+  assert.equal(transition.id, 'pl-transition');
+  assert.match(transition.innerHTML, /다음 영상으로 이동합니다/);
+  assert.match(transition.innerHTML, /2초/);
+});
+
+test('완료 메뉴는 순위·대시보드·처음부터 재생·명시적 진행 종료를 제공한다', () => {
+  let completion = null;
+  const stage = { appendChild(node) { completion = node; } };
+  const ctx = loadStageFunctions(['plStageRoot', 'plRenderCompletion'], {
+    pl: { sessionId: 'session-a', set: { title: '세트' } },
+    document: {
+      body: stage,
+      getElementById(id) {
+        if (id === 'pl-stage') return stage;
+        if (id === 'pl-completion') return completion;
+        return null;
+      },
+      createElement() { return { id: '', innerHTML: '' }; }
+    },
+    esc(value) { return String(value); }
+  });
+
+  ctx.plRenderCompletion();
+
+  assert.equal(completion.id, 'pl-completion');
+  assert.match(completion.innerHTML, /모든 영상 재생 완료/);
+  assert.match(completion.innerHTML, /onclick="plToggleBoard\(\)"/);
+  assert.match(completion.innerHTML, /href="#\/live\/session-a"/);
+  assert.match(completion.innerHTML, /onclick="plReplayPlaylist\(\)"/);
+  assert.match(completion.innerHTML, /onclick="plEndSession\(\)"/);
+});
+
+test('YouTube 상태는 새 영상 로드 잠금을 풀고 종료는 tick에 위임하며 오류는 자동 건너뛰지 않는다', () => {
+  let ticks = 0, errors = 0, loads = 0;
+  const ctx = loadStageFunctions(['plHandlePlayerStateChange', 'plHandlePlayerError'], {
+    pl: { playbackEnded: false, playerError: null, playerLoading: true },
+    YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
+    plTick() { ticks++; },
+    plRenderPlayerError() { errors++; },
+    plLoadVideo() { loads++; },
+    plAdvanceVideo() { loads++; }
+  });
+
+  ctx.plHandlePlayerStateChange({ data: 1 });
+  assert.equal(ctx.pl.playerLoading, false);
+  ctx.plHandlePlayerStateChange({ data: 0 });
+  ctx.pl.playerLoading = true;
+  ctx.plHandlePlayerError({ data: 100 });
+
+  assert.equal(ctx.pl.playbackEnded, true);
+  assert.equal(ticks, 1);
+  assert.equal(ctx.pl.playerError, 100);
+  assert.equal(ctx.pl.playerLoading, false);
+  assert.equal(errors, 1);
+  assert.equal(loads, 0);
+});
+
+test('YouTube 공용 이벤트는 자막 처리 뒤 교사 종료·오류 콜백을 전달한다', () => {
+  const calls = [];
+  const player = {};
+  const ctx = loadStageFunctions(['ytEvents'], {
+    YT: { PlayerState: { PLAYING: 1, BUFFERING: 3, ENDED: 0 } },
+    applyCaptions(value) { calls.push(['captions', value]); }
+  });
+  const events = ctx.ytEvents(
+    () => player,
+    event => { calls.push(['state', event.data]); },
+    event => { calls.push(['error', event.data]); }
+  );
+
+  events.onStateChange({ data: 0 });
+  events.onStateChange({ data: 1 });
+  events.onError({ data: 100 });
+
+  assert.deepEqual(calls, [
+    ['state', 0],
+    ['captions', player], ['state', 1],
+    ['error', 100]
+  ]);
+});
+
+test('처음부터 다시 보기는 응답과 참여 상태를 유지하고 첫 영상만 다시 로드한다', () => {
+  const loads = [];
+  const students = { s1: { name: '가' } };
+  const responses = { '0': { s1: { ok: true } } };
+  const ctx = loadStageFunctions(['plReplayPlaylist'], {
+    pl: {
+      playlistDone: true, transitionUntil: 3000, playbackEnded: true,
+      fired: [true, true], students, responses
+    },
+    plLoadVideo(index, autoplay) { loads.push([index, autoplay]); }
+  });
+
+  ctx.plReplayPlaylist();
+
+  assert.equal(ctx.pl.playlistDone, false);
+  assert.equal(ctx.pl.transitionUntil, 0);
+  assert.equal(ctx.pl.playbackEnded, false);
+  assert.deepEqual(ctx.pl.fired, [false, false]);
+  assert.equal(ctx.pl.students, students);
+  assert.equal(ctx.pl.responses, responses);
+  assert.deepEqual(loads, [[0, true]]);
+});
+
+test('순위는 모든 영상의 전역 문항 응답을 합산한다', () => {
+  const ctx = loadStageFunctions(['plScoreboard'], {
+    pl: {
+      students: { s1: { name: '가', grade: 1, klass: 2, num: 3 } },
+      responses: {
+        '0': { s1: { ok: true } },
+        '1': { s1: { ok: true } }
+      },
+      flatQuestions: [
+        { videoIndex: 0, text: 'A' },
+        { videoIndex: 1, text: 'B' }
+      ],
+      set: { questions: [] }
+    }
+  });
+
+  const rows = ctx.plScoreboard();
+
+  assert.equal(rows[0].answered, 2);
+  assert.equal(rows[0].correct, 2);
+});
+
+test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시간을 쓴다', async () => {
+  let written;
+  const ctx = loadStageFunctions(['limitFor', 'plOpenQuestion'], {
+    pl: {
+      sessionId: 'session-a',
+      flatQuestions: [
+        { videoIndex: 0, limitSec: null },
+        { videoIndex: 1, limitSec: 7 }
+      ],
+      set: {
+        questions: [{ limitSec: 99 }],
+        settings: { autoPause: false, revealMode: 'manual', limitSec: 20 }
+      },
+      player: {}
+    },
+    SV_TS: 1234,
+    store: { setLive(id, value) { written = [id, value]; return Promise.resolve(); } }
+  });
+
+  await ctx.plOpenQuestion(1);
+
+  assert.deepEqual(clone(written), ['session-a', {
+    q: 1, openedAt: 1234, revealed: false, limitSec: 7
+  }]);
+});
+
+test('교사 문항 목록은 모든 영상의 전역 번호를 이어서 렌더링한다', () => {
+  const box = { innerHTML: '' };
+  const ctx = loadStageFunctions(['plRenderQList'], {
+    pl: {
+      live: { q: -1 }, responses: {},
+      flatQuestions: [
+        { number: 1, videoIndex: 0, t: 10, text: '첫 영상 문항' },
+        { number: 2, videoIndex: 1, t: 30, text: '둘째 영상 문항' }
+      ],
+      set: { questions: [{ t: 99, text: '구형 문항' }] }
+    },
+    $(selector) { return selector === '#pl-qlist' ? box : null; },
+    fmtTime(value) { return String(value); },
+    esc(value) { return String(value); }
+  });
+
+  ctx.plRenderQList();
+
+  assert.match(box.innerHTML, /1\. 첫 영상 문항/);
+  assert.match(box.innerHTML, /2\. 둘째 영상 문항/);
+  assert.doesNotMatch(box.innerHTML, /구형 문항/);
 });
 
 test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 전달한다', async () => {
@@ -1930,9 +2444,10 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
   const ctx = loadStageFunctions(['plStageRoot', 'plRenderOverlay', 'plToggleBoard'], {
     pl: {
       live: { q: 0 }, students: {}, responses: {},
+      flatQuestions: [{ type: 'choice', text: '문제', choices: ['1', '2'] }],
       set: {
         title: '세트', settings: { revealMode: 'manual' },
-        questions: [{ type: 'choice', text: '문제', choices: ['1', '2'] }]
+        questions: []
       }
     },
     document: {
@@ -2058,9 +2573,10 @@ test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답
       live: { q: 0, revealed: false },
       students: { s1: {}, s2: {} },
       responses: { '0': { s1: { c: 1 }, s2: { c: 0 } } },
+      flatQuestions: [{ type: 'choice', choices: ['오답', '정답'], answer: 1 }],
       set: {
         settings: { revealMode: 'manual' },
-        questions: [{ type: 'choice', choices: ['오답', '정답'], answer: 1 }]
+        questions: []
       }
     },
     document: { getElementById() { return overlay; } },
