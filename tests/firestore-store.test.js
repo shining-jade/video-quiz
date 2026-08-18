@@ -12,6 +12,7 @@ function clone(value) {
   if (value === undefined) return undefined;
   if (value === SERVER_TIMESTAMP) return value;
   if (value === DELETE_FIELD) return value;
+  if (value instanceof Date) return new Date(value.getTime());
   if (Array.isArray(value)) return value.map(clone);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]));
@@ -23,6 +24,7 @@ function merge(current, update) {
   const result = clone(current || {});
   Object.entries(update).forEach(([key, value]) => {
     if (value === DELETE_FIELD) delete result[key];
+    else if (value instanceof Date) result[key] = new Date(value.getTime());
     else if (value && typeof value === 'object' && !Array.isArray(value) &&
       result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])) {
       result[key] = merge(result[key], value);
@@ -129,6 +131,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
     if (value === SERVER_TIMESTAMP) {
       return { toMillis: () => committedServerMillis };
     }
+    if (value instanceof Date) return new Date(value.getTime());
     if (Array.isArray(value)) return value.map(resolveServerTimestamps);
     if (value && typeof value === 'object') {
       return Object.fromEntries(
@@ -314,6 +317,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
       const transaction = {
         async get(ref) {
           calls.push({ operation: 'transactionGet', path: ref.path });
+          if (options.beforeTransactionGet) await options.beforeTransactionGet(ref.path);
           return docSnapshot(ref.path, staged);
         },
         set(ref, value, optionsArg) {
@@ -2228,10 +2232,17 @@ test('세션 allocation은 처음에는 입장 불가이며 exact code·owner CA
   ), false);
 });
 
-test('allocation token 활성화와 heartbeat는 server timestamp lease만 발급한다', async () => {
+test('allocation과 heartbeat lease는 호출 시작의 보정 서버 시각에 고정된다', async () => {
   const { createFirestoreStore } = loadStoreModule();
-  const fake = makeFirestoreFake({}, { committedServerMillis: 75_000 });
-  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 9_999_999_999);
+  let now = 60_000;
+  let moveClockDuringRenew = false;
+  const fake = makeFirestoreFake({}, {
+    committedServerMillis: 999_999,
+    beforeTransactionGet(path) {
+      if (moveClockDuringRenew && path === 'sessions/leased-session') now = 600_000;
+    }
+  });
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => now);
   const token = 'allocation-token-123456';
 
   assert.equal(await store.startSession('leased-session', {
@@ -2250,12 +2261,14 @@ test('allocation token 활성화와 heartbeat는 server timestamp lease만 발�
     'leased-session', 'LEASE1', 'teacher-1', token
   ), true);
   assert.equal(fake.value('sessions/leased-session').status, 'live');
-  assert.equal(fake.value('sessions/leased-session').activationHeartbeatAt.toMillis(), 75_000);
+  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 75_000);
 
+  now = 70_000;
+  moveClockDuringRenew = true;
   assert.equal(await store.renewSessionActivationLease(
     'leased-session', 'LEASE1', 'teacher-1', token
   ), true);
-  assert.equal(fake.value('sessions/leased-session').activationHeartbeatAt.toMillis(), 75_000);
+  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 85_000);
 });
 
 test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지우며 부분 실패를 재시도한다', async () => {
@@ -2322,7 +2335,7 @@ test('allocation abort는 reassigned code와 newer session을 보존하고 반�
 });
 
 test('pending allocation 복구는 token 소유 allocating만 지우고 fresh live·ended는 보존한다', async () => {
-  const activeHeartbeat = 99_000;
+  const activeLeaseUntil = 114_000;
   const fake = makeFirestoreFake({
     'codes/PEND12': { sessionId: 'pending' },
     'sessions/pending': {
@@ -2339,7 +2352,7 @@ test('pending allocation 복구는 token 소유 allocating만 지우고 fresh li
     'codes/LIVE12': { sessionId: 'active' },
     'sessions/active': {
       code: 'LIVE12', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr',
-      status: 'live', activationHeartbeatAt: activeHeartbeat
+      status: 'live', activationLeaseUntil: activeLeaseUntil
     },
     'sessions/active/meta/allocation': { token: 'active-token-12345', ownerUid: 'owner-uid' },
     'sessions/ended': {
@@ -2581,6 +2594,10 @@ test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린
   assert.deepEqual(fake.value('sessions/a/meta/live'), {
     q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
   });
+  assert.deepEqual(
+    fake.calls().filter(call => call.operation === 'batchCommit'),
+    [{ operation: 'batchCommit', size: 2 }]
+  );
 });
 
 test('점수판은 meta/board 문서에 scores 필드로 쓴다', async () => {
@@ -4225,45 +4242,128 @@ test('activation resolve 전 auth 교체는 heartbeat·render를 막고 recovery
   ]]);
 });
 
-test('current owner heartbeat만 갱신하고 in-flight 뒤 stale generation은 추가 lease를 쓰지 않는다', async () => {
-  let heartbeat;
-  let finishRenew;
-  let renews = 0;
+test('heartbeat는 single-flight이고 stale 완료 뒤 재예약하지 않으며 cleanup이 timer를 멈춘다', async () => {
+  const owner = {
+    status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+  };
+  let nextTimerId = 0;
+  const timers = new Map();
+  const cleared = [];
+  const cleanups = [];
+  const renewCalls = [];
+  let finishFirstRenew;
   const state = { sessionId: 'session-a', code: 'CODE12' };
   const context = {
     pl: state,
-    teacherState: {
-      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
-    },
+    teacherState: clone(owner),
     teacherAuthVersion: 12,
     AuthCore: require('../auth-core.js'),
-    every(ms, callback) { assert.equal(ms, 5000); heartbeat = callback; return 7; },
+    setTimeout(callback, ms) {
+      assert.equal(ms, 5000);
+      const id = ++nextTimerId;
+      timers.set(id, callback);
+      return id;
+    },
+    every(ms, callback) {
+      assert.equal(ms, 5000);
+      const id = ++nextTimerId;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) { cleared.push(id); timers.delete(id); },
+    onCleanup(callback) { cleanups.push(callback); },
     store: {
       renewSessionActivationLease(...args) {
-        renews += 1;
-        assert.deepEqual(args, [
-          'session-a', 'CODE12', 'teacher-1', 'allocation-token-123456'
-        ]);
-        return new Promise(resolve => { finishRenew = resolve; });
+        renewCalls.push(args);
+        if (renewCalls.length === 1) {
+          return new Promise(resolve => { finishFirstRenew = resolve; });
+        }
+        return Promise.resolve(true);
       }
     },
     toast() {}
   };
   loadStageFunctions(['plStartSessionHeartbeat'], context);
-  context.plStartSessionHeartbeat(
-    state, clone(context.teacherState), 12, 'allocation-token-123456'
-  );
+  context.plStartSessionHeartbeat(state, clone(owner), 12, 'allocation-token-123456');
 
-  const inFlight = heartbeat();
+  const firstTick = timers.get(1);
+  const first = firstTick();
+  const overlappingSecond = firstTick();
+  const overlappingThird = firstTick();
+  assert.equal(renewCalls.length, 1);
+  assert.equal(await overlappingSecond, false);
+  assert.equal(await overlappingThird, false);
+
   context.teacherState = {
     status: 'teacher', uid: 'teacher-2', email: 'other@school.kr', role: 'teacher'
   };
   context.teacherAuthVersion = 13;
-  finishRenew(true);
-  assert.equal(await inFlight, false);
-  assert.equal(await heartbeat(), false);
-  assert.equal(renews, 1);
-  assert.equal(state.heartbeatError, undefined);
+  finishFirstRenew(true);
+  assert.equal(await first, false);
+  assert.equal(renewCalls.length, 1);
+  assert.equal(timers.size, 0);
+  assert.deepEqual(cleared, [1]);
+
+  cleanups[0]();
+  assert.deepEqual(cleared, [1]);
+
+  const currentState = { sessionId: 'session-b', code: 'CODE34' };
+  context.pl = currentState;
+  context.teacherState = clone(owner);
+  context.teacherAuthVersion = 14;
+  context.plStartSessionHeartbeat(currentState, clone(owner), 14, 'allocation-token-654321');
+  assert.equal(await timers.get(2)(), true);
+  assert.deepEqual(renewCalls[1], [
+    'session-b', 'CODE34', 'teacher-1', 'allocation-token-654321'
+  ]);
+  assert.equal(timers.has(3), true);
+
+  cleanups[1]();
+  assert.equal(timers.has(3), false);
+  assert.equal(cleared.includes(3), true);
+});
+
+test('current heartbeat failure schedules one non-overlapping retry', async () => {
+  const owner = {
+    status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+  };
+  let nextTimerId = 0;
+  const timers = new Map();
+  const cleanups = [];
+  const renewCalls = [];
+  const messages = [];
+  const state = { sessionId: 'session-a', code: 'CODE12' };
+  const context = {
+    pl: state,
+    teacherState: clone(owner),
+    teacherAuthVersion: 12,
+    AuthCore: require('../auth-core.js'),
+    setTimeout(callback, ms) {
+      assert.equal(ms, 5000);
+      const id = ++nextTimerId;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    onCleanup(callback) { cleanups.push(callback); },
+    store: {
+      async renewSessionActivationLease(...args) {
+        renewCalls.push(args);
+        throw new Error('temporary outage');
+      }
+    },
+    toast(message) { messages.push(message); }
+  };
+  loadStageFunctions(['plStartSessionHeartbeat'], context);
+  context.plStartSessionHeartbeat(state, clone(owner), 12, 'allocation-token-123456');
+
+  assert.equal(await timers.get(1)(), false);
+  assert.equal(renewCalls.length, 1);
+  assert.equal(messages.length, 1);
+  assert.equal(timers.has(2), true);
+
+  cleanups[0]();
+  assert.equal(timers.has(2), false);
 });
 
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
@@ -5878,6 +5978,84 @@ test('a password session linked to Google is removed from the teacher UI state',
   assert.equal(context.clockUserId, '');
   assert.equal(context.clockPromise, null);
   assert.equal(context.clockPromiseUid, '');
+});
+
+test('auth generation 교체는 token 확인을 기다리지 않고 현재 heartbeat timer를 즉시 중단한다', async () => {
+  let finishToken;
+  let stops = 0;
+  const context = {
+    pl: {
+      sessionId: 'session-a', code: 'CODE12', allocationToken: 'allocation-token-123456',
+      stopActivationHeartbeat() { stops += 1; }
+    },
+    teacherUser: { uid: 'teacher-1', email: 'teacher@school.kr' },
+    teacherAllowance: { enabled: true, role: 'teacher' },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 12,
+    AuthCore: require('../auth-core.js'),
+    renderTeacherAuthArea() {},
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; }
+    }
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'applyTeacherUser'
+  ), context);
+  const applying = context.applyTeacherUser({
+    uid: 'teacher-2', email: 'other@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return new Promise(resolve => { finishToken = resolve; });
+    }
+  });
+
+  assert.equal(stops, 1);
+  finishToken({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applying;
+  assert.equal(stops, 1);
+});
+
+test('같은 owner의 auth generation 갱신은 heartbeat를 새 generation으로 다시 시작한다', async () => {
+  let stops = 0;
+  const restarts = [];
+  const state = {
+    sessionId: 'session-a', code: 'CODE12', allocationToken: 'allocation-token-123456',
+    stopActivationHeartbeat() { stops += 1; }
+  };
+  const context = {
+    pl: state,
+    teacherUser: { uid: 'teacher-1', email: 'teacher@school.kr' },
+    teacherAllowance: { enabled: true, role: 'teacher' },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 20,
+    AuthCore: require('../auth-core.js'),
+    renderTeacherAuthArea() {},
+    plStartSessionHeartbeat(...args) { restarts.push(args); },
+    store: {
+      async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; }
+    }
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'applyTeacherUser'
+  ), context);
+  const user = {
+    uid: 'teacher-1', email: 'teacher@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+    }
+  };
+
+  await context.applyTeacherUser(user);
+
+  assert.equal(stops, 1);
+  assert.equal(restarts.length, 1);
+  assert.equal(restarts[0][0], state);
+  assert.equal(restarts[0][1].uid, 'teacher-1');
+  assert.equal(restarts[0][2], 21);
+  assert.equal(restarts[0][3], 'allocation-token-123456');
 });
 
 test('a persisted Google session remains in the teacher UI state', async () => {

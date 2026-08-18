@@ -12,6 +12,7 @@ const {
   doc,
   getDoc,
   getDocs,
+  onSnapshot,
   query,
   runTransaction,
   serverTimestamp,
@@ -217,11 +218,11 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
   };
 }
 
-function emulatorStore(modularDb, pauseFirstLiveAccess, pauseAccess) {
+function emulatorStore(modularDb, pauseFirstLiveAccess, pauseAccess, nowFn = Date.now) {
   return createFirestoreStore(
     compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess),
     { serverTimestamp, delete() { throw new Error('not used'); } },
-    Date.now
+    nowFn
   );
 }
 
@@ -263,13 +264,13 @@ async function seedFirestore() {
         teacherUid: 'owner-uid',
         teacherEmail: 'owner@school.kr',
         status: 'live',
-        activationHeartbeatAt: serverTimestamp()
+        activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
       }),
       setDoc(doc(db, 'sessions/s2'), {
         teacherUid: 'other-teacher-uid',
         teacherEmail: 'other@school.kr',
         status: 'live',
-        activationHeartbeatAt: serverTimestamp()
+        activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
       }),
       setDoc(doc(db, 'sessions/s1/meta/live'), {
         q: 0,
@@ -556,6 +557,8 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
 
 rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 접근을 자동 차단한다', async () => {
   const token = 'lease-token-1234567890';
+  let synchronizedNow = Date.now();
+  const activationLeaseUntil = synchronizedNow + 15_000;
   let reachedRead;
   let releaseRead;
   const atRead = new Promise(resolve => { reachedRead = resolve; });
@@ -566,8 +569,18 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
       reachedRead();
       await release;
     }
-  });
+  }, () => synchronizedNow);
   const replacementStore = emulatorStore(actorFirestore('otherTeacher'));
+
+  await assertSucceeds(setDoc(doc(actorFirestore('owner'), 'sessions/preseeded-lease'), {
+    teacherUid: actors.owner.uid,
+    teacherEmail: actors.owner.email,
+    status: 'allocating',
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+  }));
+  await assertFails(updateDoc(
+    doc(actorFirestore('owner'), 'sessions/preseeded-lease'), { status: 'live' }
+  ));
 
   await ownerStore.startSession('lease-race', {
     setId: 'set1', setTitle: '세트', teacherUid: actors.owner.uid,
@@ -580,6 +593,7 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
     'lease-race', 'LEASE2', actors.owner.uid, token
   );
   await atRead;
+  synchronizedNow += 60_000;
   releaseRead();
   assert.equal(await activating, true);
   await assert.rejects(() => replacementStore.abortSessionAllocation(
@@ -590,12 +604,12 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
   const student = actorFirestore('student');
   const active = await getDoc(doc(owner, 'sessions/lease-race'));
   assert.equal(active.data().status, 'live');
-  assert.ok(active.data().activationHeartbeatAt instanceof Timestamp);
+  assert.equal(active.data().activationLeaseUntil.toMillis(), activationLeaseUntil);
   await assertSucceeds(getDoc(doc(student, 'sessions/lease-race')));
 
   await adminWrite('sessions/lease-race', {
     ...active.data(),
-    activationHeartbeatAt: Timestamp.fromMillis(Date.now() - 20_000)
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() - 20_000)
   });
   await assertFails(getDoc(doc(student, 'sessions/lease-race')));
   await assertFails(setDoc(doc(student, 'sessions/lease-race/students/student-uid'), {
@@ -603,12 +617,135 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
   }));
 
   await assertFails(updateDoc(doc(owner, 'sessions/lease-race'), {
-    activationHeartbeatAt: Timestamp.fromMillis(Date.now() + 60_000)
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
   }));
-  assert.equal(await ownerStore.renewSessionActivationLease(
+
+  let reachedRenewRead;
+  let releaseRenewRead;
+  const atRenewRead = new Promise(resolve => { reachedRenewRead = resolve; });
+  const releaseRenew = new Promise(resolve => { releaseRenewRead = resolve; });
+  synchronizedNow = Date.now();
+  const renewedLeaseUntil = synchronizedNow + 15_000;
+  const renewStore = emulatorStore(owner, null, {
+    path: 'sessions/lease-race',
+    async wait() {
+      reachedRenewRead();
+      await releaseRenew;
+    }
+  }, () => synchronizedNow);
+  const renewing = renewStore.renewSessionActivationLease(
     'lease-race', 'LEASE2', actors.owner.uid, token
-  ), true);
+  );
+  await atRenewRead;
+  synchronizedNow += 60_000;
+  releaseRenewRead();
+  assert.equal(await renewing, true);
+  assert.equal(
+    (await getDoc(doc(owner, 'sessions/lease-race'))).data().activationLeaseUntil.toMillis(),
+    renewedLeaseUntil
+  );
   await assertSucceeds(getDoc(doc(student, 'sessions/lease-race')));
+});
+
+rulesTest('등록 학생 live listener는 atomic endSession의 ended projection을 계속 읽는다', async () => {
+  const student = actorFirestore('student');
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const liveReference = doc(student, 'sessions/s1/meta/live');
+  let initialResolve;
+  let endedResolve;
+  let initialReject;
+  let endedReject;
+  const initial = new Promise((resolve, reject) => {
+    initialResolve = resolve;
+    initialReject = reject;
+  });
+  const ended = new Promise((resolve, reject) => {
+    endedResolve = resolve;
+    endedReject = reject;
+  });
+  const unsubscribe = onSnapshot(liveReference, snapshot => {
+    const value = snapshot.data() || {};
+    initialResolve(value);
+    if (value.status === 'ended') endedResolve(value);
+  }, error => {
+    initialReject(error);
+    endedReject(error);
+  });
+
+  await initial;
+  await ownerStore.endSession('s1');
+  const endedLive = await ended;
+  unsubscribe();
+
+  assert.equal(endedLive.status, 'ended');
+  assert.equal(endedLive.q, -1);
+  assert.equal((await assertSucceeds(getDoc(doc(student, 'sessions/s1')))).data().status, 'ended');
+  assert.equal((await assertSucceeds(getDoc(liveReference))).data().status, 'ended');
+});
+
+rulesTest('expired lease에서도 등록 학생 read/reconnect는 유지되고 join과 모든 학생 write는 닫힌다', async () => {
+  const student = actorFirestore('student');
+  const unregistered = actorFirestore('anonymous');
+  const owner = actorFirestore('owner');
+  await adminWrite('sessions/s1/student_scores/student-uid', {
+    uid: 'student-uid', visible: true, score: 1
+  });
+  const currentSession = (await getDoc(doc(owner, 'sessions/s1'))).data();
+  await adminWrite('sessions/s1', {
+    ...currentSession,
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() - 20_000)
+  });
+
+  await assertSucceeds(getDoc(doc(student, 'sessions/s1')));
+  await assertSucceeds(getDoc(doc(student, 'sessions/s1/meta/live')));
+  await assertSucceeds(getDoc(doc(student, 'sessions/s1/students/student-uid')));
+  await assertSucceeds(getDoc(doc(student, 'sessions/s1/responses/student-uid')));
+  await assertSucceeds(getDoc(doc(student, 'sessions/s1/student_scores/student-uid')));
+
+  await assertFails(getDoc(doc(unregistered, 'sessions/s1')));
+  await assertFails(getDoc(doc(unregistered, 'sessions/s1/meta/live')));
+  await assertFails(setDoc(doc(unregistered, 'sessions/s1/students/new-student-uid'), {
+    uid: 'new-student-uid', name: '신규 학생'
+  }));
+  await assertFails(updateDoc(doc(student, 'sessions/s1/students/student-uid'), { number: 9 }));
+  await assertFails(updateDoc(doc(student, 'sessions/s1/responses/student-uid'), {
+    'answers.0': { answer: 2, submitted: true, revision: 2 }
+  }));
+
+  let initialResolve;
+  let resumedResolve;
+  let initialReject;
+  let resumedReject;
+  const initial = new Promise((resolve, reject) => {
+    initialResolve = resolve;
+    initialReject = reject;
+  });
+  const resumed = new Promise((resolve, reject) => {
+    resumedResolve = resolve;
+    resumedReject = reject;
+  });
+  const liveReference = doc(student, 'sessions/s1/meta/live');
+  const unsubscribe = onSnapshot(liveReference, snapshot => {
+    const value = snapshot.data() || {};
+    initialResolve(value);
+    if (value.publicQuestion && value.publicQuestion.text === '재연결 성공') {
+      resumedResolve(value);
+    }
+  }, error => {
+    initialReject(error);
+    resumedReject(error);
+  });
+  await initial;
+
+  await adminWrite('sessions/s1', {
+    ...currentSession,
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
+  });
+  await assertSucceeds(updateDoc(doc(owner, 'sessions/s1/meta/live'), {
+    'publicQuestion.text': '재연결 성공'
+  }));
+  assert.equal((await resumed).publicQuestion.text, '재연결 성공');
+  unsubscribe();
 });
 
 rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
@@ -1088,7 +1225,7 @@ rulesTest('fix-round: teacher code allocation reads unused and foreign collision
       teacherUid: 'owner-uid',
       teacherEmail: 'owner@school.kr',
       status: 'live',
-      activationHeartbeatAt: serverTimestamp()
+      activationLeaseUntil: Timestamp.fromMillis(Date.now() + 10_000)
     });
     transaction.set(doc(owner, 'sessions/created-session/meta/live'), {
       q: -1,
@@ -1553,7 +1690,7 @@ const writeMatrix = [
       teacherUid: actors[actorName].uid,
       teacherEmail: actors[actorName].email || '',
       status: 'live',
-      activationHeartbeatAt: serverTimestamp()
+      activationLeaseUntil: serverTimestamp()
     }),
     updateValue: () => ({ status: 'ended' }),
     allowed: {

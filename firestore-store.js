@@ -883,6 +883,7 @@
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
       const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
+      const activationLeaseUntil = new Date(nowFn() + serverOffset + 15_000);
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionReference);
         const codeSnapshot = await transaction.get(codeReference);
@@ -895,11 +896,10 @@
         if (allocationToken && (!allocationSnapshot.exists ||
             (allocationSnapshot.data() || {}).token !== allocationToken ||
             (allocationSnapshot.data() || {}).ownerUid !== teacherUid)) return false;
-        if (session.status === 'live') return true;
-        if (session.status !== 'allocating') return false;
+        if (!['allocating', 'live'].includes(session.status)) return false;
         transaction.set(sessionReference, {
           status: 'live',
-          activationHeartbeatAt: fieldValue.serverTimestamp()
+          activationLeaseUntil
         }, { merge: true });
         return true;
       });
@@ -909,6 +909,7 @@
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
       const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
+      const activationLeaseUntil = new Date(nowFn() + serverOffset + 15_000);
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionReference);
         const codeSnapshot = await transaction.get(codeReference);
@@ -921,7 +922,7 @@
             session.status !== 'live' || mapping.sessionId !== sessionId ||
             allocation.ownerUid !== teacherUid || allocation.token !== allocationToken) return false;
         transaction.set(sessionReference, {
-          activationHeartbeatAt: fieldValue.serverTimestamp()
+          activationLeaseUntil
         }, { merge: true });
         return true;
       });
@@ -1024,8 +1025,8 @@
         return { complete: false, ignored: true };
       }
       if (session.status === 'live') {
-        const heartbeat = timestampMillis(session.activationHeartbeatAt);
-        if (heartbeat && nowFn() + serverOffset <= heartbeat + 15_000) {
+        const leaseUntil = timestampMillis(session.activationLeaseUntil);
+        if (leaseUntil && nowFn() + serverOffset <= leaseUntil) {
           return { complete: false, active: true };
         }
       } else if (!['allocating', 'aborted'].includes(session.status)) {
@@ -1058,17 +1059,19 @@
     }
 
     async function endSession(sessionId) {
-      await db.doc('sessions/' + sessionId).set({
+      const batch = db.batch();
+      batch.set(db.doc('sessions/' + sessionId), {
         status: 'ended',
         endedAt: fieldValue.serverTimestamp()
       }, { merge: true });
-      await setLive(sessionId, {
+      batch.set(db.doc('sessions/' + sessionId + '/meta/live'), {
         q: -1,
         openedAt: 0,
         revealed: false,
         limitSec: 0,
         status: 'ended'
       });
+      await batch.commit();
     }
 
     function writeBoard(sessionId, board, studentScores) {

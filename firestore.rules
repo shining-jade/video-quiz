@@ -76,16 +76,19 @@ service cloud.firestore {
     function sessionIsJoinable(sessionId) {
       return exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
         get(/databases/$(database)/documents/sessions/$(sessionId)).data.status in ['active', 'live'] &&
-        get(/databases/$(database)/documents/sessions/$(sessionId)).data.get('activationHeartbeatAt', null) is timestamp &&
-        request.time <= get(/databases/$(database)/documents/sessions/$(sessionId)).data.get('activationHeartbeatAt', null) +
-          duration.value(15, 's');
+        get(/databases/$(database)/documents/sessions/$(sessionId)).data.get('activationLeaseUntil', null) is timestamp &&
+        request.time <= get(/databases/$(database)/documents/sessions/$(sessionId)).data.get('activationLeaseUntil', null);
+    }
+
+    function isRegisteredStudent(sessionId) {
+      return anonymousStudent() &&
+        sessionExists(sessionId) &&
+        exists(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)).data.uid == request.auth.uid;
     }
 
     function isJoinedStudent(sessionId) {
-      return anonymousStudent() &&
-        sessionIsJoinable(sessionId) &&
-        exists(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)).data.uid == request.auth.uid;
+      return isRegisteredStudent(sessionId) && sessionIsJoinable(sessionId);
     }
 
     function validStudent(studentId) {
@@ -341,18 +344,18 @@ service cloud.firestore {
 
     function validSessionLeaseWrite() {
       let changed = request.resource.data.diff(resource.data).affectedKeys();
-      return !changed.hasAny(['activationHeartbeatAt']) ||
-        (request.resource.data.status == 'live' &&
-          request.resource.data.activationHeartbeatAt is timestamp &&
-          request.resource.data.activationHeartbeatAt == request.time);
+      return !changed.hasAny(['activationHeartbeatAt']) &&
+        (request.resource.data.status != 'live' ||
+          (request.resource.data.activationLeaseUntil is timestamp &&
+            request.resource.data.activationLeaseUntil <= request.time + duration.value(15, 's')));
     }
 
     function validSessionAbortTransition() {
       return request.resource.data.status != 'aborted' ||
         resource.data.status in ['allocating', 'aborted'] ||
         (resource.data.status == 'live' &&
-          resource.data.activationHeartbeatAt is timestamp &&
-          request.time > resource.data.activationHeartbeatAt + duration.value(15, 's'));
+          resource.data.get('activationLeaseUntil', null) is timestamp &&
+          request.time > resource.data.get('activationLeaseUntil', null));
     }
 
     match /teacher_allowlist/{email} {
@@ -390,15 +393,17 @@ service cloud.firestore {
     match /sessions/{sessionId} {
       allow get: if isAdmin() || ownsSession(sessionId) ||
         (isApprovedTeacher() && !sessionExists(sessionId)) ||
-        (anonymousStudent() && sessionIsJoinable(sessionId));
+        (anonymousStudent() &&
+          (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
       allow list: if isAdmin() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid);
       allow create: if isApprovedTeacher() &&
         request.resource.data.teacherUid == request.auth.uid &&
         request.resource.data.teacherEmail == request.auth.token.email &&
         (request.resource.data.status != 'live' ||
-          (request.resource.data.get('activationHeartbeatAt', null) is timestamp &&
-            request.resource.data.get('activationHeartbeatAt', null) == request.time));
+          (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
+            request.resource.data.get('activationLeaseUntil', null) <=
+              request.time + duration.value(15, 's')));
       allow update: if ownsSession(sessionId) &&
         request.resource.data.teacherUid == resource.data.teacherUid &&
         request.resource.data.teacherEmail == resource.data.teacherEmail &&
@@ -421,7 +426,7 @@ service cloud.firestore {
 
       match /meta/live {
         allow get: if isAdmin() || ownsSession(sessionId) ||
-          (isJoinedStudent(sessionId) && validLiveData(resource.data));
+          (isRegisteredStudent(sessionId) && validLiveData(resource.data));
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data);
         allow update: if ownsSessionAfter(sessionId) &&
@@ -447,8 +452,8 @@ service cloud.firestore {
       match /students/{studentId} {
         allow get: if isAdmin() || ownsSession(sessionId) ||
           (anonymousStudent() &&
-            sessionIsJoinable(sessionId) &&
-            studentId == request.auth.uid);
+            studentId == request.auth.uid &&
+            (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if anonymousStudent() && sessionIsJoinable(sessionId) && validStudent(studentId);
         allow update: if isJoinedStudent(sessionId) &&
@@ -461,7 +466,7 @@ service cloud.firestore {
 
       match /responses/{studentId} {
         allow get: if isAdmin() || ownsSession(sessionId) ||
-          (isJoinedStudent(sessionId) && studentId == request.auth.uid);
+          (isRegisteredStudent(sessionId) && studentId == request.auth.uid);
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if isJoinedStudent(sessionId) &&
           sessionIsJoinable(sessionId) &&
@@ -488,7 +493,7 @@ service cloud.firestore {
 
       match /student_scores/{studentId} {
         allow get: if isAdmin() || ownsSession(sessionId) ||
-          (isJoinedStudent(sessionId) && studentId == request.auth.uid);
+          (isRegisteredStudent(sessionId) && studentId == request.auth.uid);
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId) && validStudentScore(studentId);
         allow delete: if isAdmin() || ownsSession(sessionId);

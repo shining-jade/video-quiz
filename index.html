@@ -1287,6 +1287,11 @@ function retryPendingAllocations() {
 }
 
 async function applyTeacherUser(user) {
+  const heartbeatState = typeof pl !== 'undefined' && pl &&
+    typeof pl.stopActivationHeartbeat === 'function' ? pl : null;
+  const heartbeatOwner = heartbeatState && AuthCore.isTeacher(teacherState)
+    ? { uid: teacherState.uid, email: teacherState.email } : null;
+  if (heartbeatState) heartbeatState.stopActivationHeartbeat();
   const updateVersion = ++teacherAuthVersion;
   teacherUser = null;
   teacherAllowance = null;
@@ -1320,6 +1325,15 @@ async function applyTeacherUser(user) {
       typeof recoverPendingAllocationsForTeacher === 'function') {
     await recoverPendingAllocationsForTeacher(teacherState);
     if (updateVersion !== teacherAuthVersion) return false;
+  }
+  if (heartbeatState && typeof pl !== 'undefined' && pl === heartbeatState &&
+      heartbeatOwner && AuthCore.isTeacher(teacherState) &&
+      heartbeatOwner.uid === teacherState.uid && heartbeatOwner.email === teacherState.email &&
+      heartbeatState.sessionId && heartbeatState.code && heartbeatState.allocationToken &&
+      typeof plStartSessionHeartbeat === 'function') {
+    plStartSessionHeartbeat(
+      heartbeatState, teacherState, updateVersion, heartbeatState.allocationToken
+    );
   }
   renderTeacherAuthArea();
   return true;
@@ -2851,29 +2865,68 @@ function renderPlayIntro() {
 /** 새 세션(반) 생성 — 반 코드가 겹치지 않을 때까지 재시도 */
 function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) {
   if (!store.renewSessionActivationLease) return null;
+  if (typeof state.stopActivationHeartbeat === 'function') {
+    state.stopActivationHeartbeat();
+  }
+  let timerId = null;
+  let inFlight = false;
+  let stopped = false;
   const isCurrent = () => pl === state && AuthCore.isTeacher(teacherState) &&
     teacherState.uid === owner.uid && teacherState.email === owner.email &&
     (authGeneration === null || teacherAuthVersion === authGeneration);
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (timerId !== null) clearTimeout(timerId);
+    timerId = null;
+    state.activationHeartbeatId = null;
+    if (state.stopActivationHeartbeat === stop) state.stopActivationHeartbeat = null;
+  };
+  const schedule = () => {
+    if (stopped || !isCurrent()) {
+      stop();
+      return false;
+    }
+    timerId = setTimeout(heartbeat, 5000);
+    state.activationHeartbeatId = timerId;
+    return true;
+  };
   const heartbeat = async () => {
-    if (!isCurrent()) return false;
+    if (stopped || !isCurrent()) {
+      stop();
+      return false;
+    }
+    if (inFlight) return false;
+    inFlight = true;
     try {
       const renewed = await store.renewSessionActivationLease(
         state.sessionId, state.code, owner.uid, allocationToken
       );
-      if (!isCurrent()) return false;
+      if (!isCurrent()) {
+        stop();
+        return false;
+      }
       if (renewed !== true) throw new Error('세션 heartbeat identity가 일치하지 않습니다.');
       state.heartbeatError = '';
+      schedule();
       return true;
     } catch (error) {
-      if (isCurrent()) {
-        state.heartbeatError = error && error.message ? error.message : String(error);
-        toast('학생 접속 유지에 실패했습니다. 15초 안에 접속이 닫힙니다: ' + state.heartbeatError);
+      if (!isCurrent()) {
+        stop();
+        return false;
       }
+      state.heartbeatError = error && error.message ? error.message : String(error);
+      toast('학생 접속 유지에 실패했습니다. 15초 안에 접속이 닫힙니다: ' + state.heartbeatError);
+      schedule();
       return false;
+    } finally {
+      inFlight = false;
     }
   };
-  state.activationHeartbeatId = every(5000, heartbeat);
-  return state.activationHeartbeatId;
+  state.stopActivationHeartbeat = stop;
+  onCleanup(stop);
+  schedule();
+  return stop;
 }
 
 function plStartSession() {
