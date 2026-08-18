@@ -3705,30 +3705,27 @@ test('타이머 자동 제출은 마감 잠금이 시작된 순간에도 선택 
   assert.equal(sent, 1);
 });
 
-test('익명 인증 뒤 고유 서버 시각 동기화가 끝나야 라우터를 시작한다', async () => {
+test('startup does not create an anonymous student session or sync its clock', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let authListener;
-  let resolveClock;
+  let anonymousSignIns = 0;
   let routed = 0;
-  const clockReady = new Promise(resolve => { resolveClock = resolve; });
   const app = { innerHTML: '' };
   const context = {
     authReady: false,
     APP() { return app; },
     topbar() { return '<nav></nav>'; },
+    applyTeacherUser() {},
     firebase: {
       auth() {
         return {
           onAuthStateChanged(listener) { authListener = listener; },
-          signInAnonymously() { return Promise.resolve(); }
+          signInAnonymously() { anonymousSignIns += 1; return Promise.resolve(); }
         };
       }
     },
     store: {
-      async syncClock(pathValue) {
-        assert.equal(pathValue, 'clock/user-a-SAMPLE12');
-        await clockReady;
-      }
+      async syncClock() { throw new Error('startup must not sync the student clock'); }
     },
     rid(size) { assert.equal(size, 8); return 'SAMPLE12'; },
     router() { routed += 1; },
@@ -3738,15 +3735,15 @@ test('익명 인증 뒤 고유 서버 시각 동기화가 끝나야 라우터를
   vm.runInNewContext(extractFunction(html, 'bootWithAuth'), context);
 
   context.bootWithAuth();
+  assert.equal(anonymousSignIns, 0);
   const authRun = authListener({ uid: 'user-a' });
   await Promise.resolve();
-  assert.equal(routed, 0);
-  resolveClock();
   await authRun;
   assert.equal(routed, 1);
+  assert.equal(anonymousSignIns, 0);
 });
 
-test('서버 시각 보정 실패는 한국어 오류를 표시하고 수업 라우팅을 차단한다', async () => {
+test('startup routes after auth state without syncing a student clock', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let authListener;
   let routed = 0;
@@ -3755,6 +3752,7 @@ test('서버 시각 보정 실패는 한국어 오류를 표시하고 수업 라
     authReady: false,
     APP() { return app; },
     topbar() { return '<nav></nav>'; },
+    applyTeacherUser() {},
     firebase: {
       auth() {
         return {
@@ -3774,8 +3772,8 @@ test('서버 시각 보정 실패는 한국어 오류를 표시하고 수업 라
   context.bootWithAuth();
   await authListener({ uid: 'user-a' });
 
-  assert.equal(routed, 0);
-  assert.match(app.innerHTML, /서버 시각을 확인하지 못했습니다\. 새로고침해 주세요\./);
+  assert.equal(routed, 1);
+  assert.match(app.innerHTML, /연결 중/);
 });
 
 test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', async () => {

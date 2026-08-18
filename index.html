@@ -59,6 +59,7 @@ a { color: var(--accent); }
 }
 .topbar .brand span { color: var(--accent); }
 .topbar .spacer { flex: 1; }
+.topbar .auth-user { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); font-size: 13px; }
 .card {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
@@ -604,6 +605,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="editor-draft.js"></script>
 <script src="playlist-core.js"></script>
 <script src="teacher-stage.js"></script>
+<script src="auth-core.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
 
@@ -1103,14 +1105,113 @@ function limitFor(set, i, questions) {
    3. 라우터
    ══════════════════════════════════════════════════════════════════════ */
 function topbar(extraHTML) {
+  const auth = typeof teacherAuthMarkup === 'function' ? teacherAuthMarkup() : '';
   return '<div class="topbar">' +
     '<a class="brand" href="#/">🎬 영상 <span>퀴즈</span></a>' +
-    '<div class="spacer"></div>' + (extraHTML || '') + '</div>';
+    '<div class="spacer"></div>' + (extraHTML || '') +
+    '<span id="teacher-auth-area">' + auth + '</span></div>';
 }
 
 function go(hash) { location.hash = '#/' + hash; }
 
-/* 익명 로그인이 끝나기 전에는 DB를 건드릴 수 없으므로 라우팅을 잠시 미뤄 둔다 */
+let teacherUser = null;
+let teacherAllowance = null;
+let teacherState = AuthCore.teacherState(null, null);
+let clockUserId = '';
+let clockPromise = null;
+
+function teacherAuthMarkup() {
+  if (!teacherUser) {
+    return '<button class="btn ghost sm" onclick="signInTeacher().catch(showTeacherAuthError)">교사 Google 로그인</button>';
+  }
+  const identity = teacherUser.displayName || teacherState.email || 'Google 계정';
+  return '<span class="auth-user" title="' + esc(teacherState.email) + '">' + esc(identity) + '</span>' +
+    '<button class="btn ghost sm" onclick="signOutTeacher()">로그아웃</button>';
+}
+
+function renderTeacherAuthArea() {
+  const area = document.getElementById('teacher-auth-area');
+  if (area) area.innerHTML = teacherAuthMarkup();
+}
+
+function applyTeacherUser(user) {
+  const nextUser = user && !user.isAnonymous ? user : null;
+  if (!teacherUser || !nextUser || teacherUser.uid !== nextUser.uid) {
+    teacherAllowance = null;
+    clockUserId = '';
+  }
+  teacherUser = nextUser;
+  teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  renderTeacherAuthArea();
+}
+
+function setTeacherAllowance(allowance) {
+  teacherAllowance = allowance || null;
+  teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  renderTeacherAuthArea();
+}
+
+function teacherAuthMessage(state) {
+  if (state.status === 'unverified') return 'Google 계정의 이메일 인증을 완료한 뒤 다시 시도해 주세요.';
+  if (state.status === 'unapproved') return '이 Google 계정은 교사 사용 승인을 받지 않았습니다.';
+  return '교사 Google 로그인이 필요합니다.';
+}
+
+function showTeacherAuthError(error) {
+  if (error && String(error.code || '').indexOf('popup-closed-by-user') >= 0) return;
+  console.error(error);
+  toast('교사 로그인에 실패했습니다. 다시 시도해 주세요.');
+}
+
+function ensureClock(user) {
+  if (!user) return Promise.reject(new Error('인증 계정을 찾을 수 없습니다.'));
+  if (clockUserId === user.uid) return Promise.resolve();
+  if (!clockPromise) {
+    clockPromise = store.syncClock('clock/' + user.uid + '-' + rid(8))
+      .then(() => { clockUserId = user.uid; })
+      .finally(() => { clockPromise = null; });
+  }
+  return clockPromise;
+}
+
+async function signInTeacher() {
+  if (teacherUser) return teacherUser;
+  const provider = new firebase.auth.GoogleAuthProvider();
+  const result = await firebase.auth().signInWithPopup(provider);
+  applyTeacherUser(result.user);
+  return result.user;
+}
+
+async function signOutTeacher() {
+  await firebase.auth().signOut();
+  applyTeacherUser(null);
+  if (location.hash !== '#/' && location.hash !== '') go('home');
+  else router();
+}
+
+async function requireTeacher(next) {
+  try {
+    if (!teacherUser) await signInTeacher();
+    if (!AuthCore.isTeacher(teacherState)) {
+      alert(teacherAuthMessage(teacherState));
+      return;
+    }
+    await ensureClock(teacherUser);
+    next();
+  } catch (error) {
+    showTeacherAuthError(error);
+  }
+}
+
+function ensureAnonymousStudent() {
+  const user = firebase.auth().currentUser;
+  const signedIn = user && user.isAnonymous
+    ? Promise.resolve(user)
+    : firebase.auth().signInAnonymously().then(result => result.user);
+  return signedIn.then(ensureClock);
+}
+
+/* Firebase 인증 상태가 처음 확인되기 전에는 라우팅을 잠시 미뤄 둔다. */
 let authReady = false;
 
 function router() {
@@ -1124,12 +1225,12 @@ function router() {
 
   switch (name) {
     case 'home':  screenHome(); break;
-    case 'sets':  screenSetList(); break;
-    case 'make':  screenMake(arg); break;
-    case 'play':  screenPlay(arg); break;
-    case 'join':  screenStudent(arg); break;
-    case 'live':  screenDashboard(arg); break;
-    case 'admin': screenAdmin(); break;
+    case 'sets':  requireTeacher(screenSetList); break;
+    case 'make':  requireTeacher(() => screenMake(arg)); break;
+    case 'play':  requireTeacher(() => screenPlay(arg)); break;
+    case 'join':  screenJoin(arg); break;
+    case 'live':  requireTeacher(() => screenDashboard(arg)); break;
+    case 'admin': requireTeacher(screenAdmin); break;
     default:      screenHome();
   }
 }
@@ -3641,6 +3742,20 @@ function plTimerTick() {
    ══════════════════════════════════════════════════════════════════════ */
 let st = null;
 
+function screenJoin(codeArg) {
+  APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">학생 참여를 준비하는 중…</div></div>';
+  ensureAnonymousStudent()
+    .then(() => screenStudent(codeArg))
+    .catch(error => {
+      console.error(error);
+      APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
+        '<h2>학생 참여를 시작할 수 없습니다</h2>' +
+        '<div class="notice" style="margin-top:12px">익명 학생 로그인을 확인한 뒤 다시 시도해 주세요.</div>' +
+        '<button class="btn primary" onclick="screenJoin()">다시 시도</button>' +
+      '</div></div>';
+    });
+}
+
 function screenStudent(codeArg) {
   st = {
     code: (codeArg || '').toUpperCase(),
@@ -5062,40 +5177,12 @@ function admExportStudents() {
    ══════════════════════════════════════════════════════════════════════ */
 function bootWithAuth() {
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">연결 중…</div></div>';
-  let clockSyncing = false;
-
-  firebase.auth().onAuthStateChanged(async user => {
-    if (!user || authReady || clockSyncing) return;
-    clockSyncing = true;
-    try {
-      await store.syncClock('clock/' + user.uid + '-' + rid(8));
+  firebase.auth().onAuthStateChanged(user => {
+    applyTeacherUser(user);
+    if (!authReady) {
       authReady = true;
       router();
-    } catch (err) {
-      console.error(err);
-      APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
-        '<h2>접속할 수 없습니다</h2>' +
-        '<div class="notice" style="margin-top:12px">서버 시각을 확인하지 못했습니다. 새로고침해 주세요.</div>' +
-        '<button class="btn primary" onclick="location.reload()">새로고침</button>' +
-      '</div></div>';
     }
-  });
-
-  firebase.auth().signInAnonymously().catch(err => {
-    console.error(err);
-    // operation-not-allowed = 익명 공급자만 꺼져 있음 / configuration-not-found = Authentication 자체가 미설정
-    const code = String(err.code || '');
-    const needsEnable = code.indexOf('operation-not-allowed') >= 0 || code.indexOf('configuration-not-found') >= 0;
-    APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
-      '<h2>접속할 수 없습니다</h2>' +
-      '<div class="notice" style="margin-top:12px">' +
-        (needsEnable
-          ? 'Firebase에서 <b>익명 로그인</b>이 아직 켜져 있지 않습니다.<br>' +
-            'Firebase 콘솔 → <b>Authentication → Sign-in method → 익명</b>을 사용 설정한 뒤 새로고침하세요.'
-          : '오류: ' + esc(err.message)) +
-      '</div>' +
-      '<button class="btn primary" onclick="location.reload()">새로고침</button>' +
-    '</div></div>';
   });
 }
 bootWithAuth();
