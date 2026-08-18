@@ -3214,6 +3214,64 @@ test('학생은 두 번째 영상 문항을 전체 번호로 표시한다', () =
   });
 });
 
+test('학생의 두 번째 영상 이미지는 canonical 문항 키로 읽는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const requested = [];
+  const image = {};
+  const context = {
+    st: { session: { setId: 'set-a' } },
+    $(selector) { return selector === '#st-img' ? image : null; },
+    loadQuestionImage(setId, key) {
+      requested.push([setId, key]);
+      return Promise.resolve('data:image/jpeg;base64,second');
+    }
+  };
+  vm.runInNewContext(extractFunction(html, 'stShowImage'), context);
+
+  context.stShowImage({ key: 'v1q0' }, 2);
+  await Promise.resolve();
+
+  assert.deepEqual(requested, [['set-a', 'v1q0']]);
+  assert.equal(image.src, 'data:image/jpeg;base64,second');
+});
+
+test('학생의 이전 코드 조회와 cleanup은 새 참여 화면을 바꾸지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let resolveCode;
+  const codeReady = new Promise(resolve => { resolveCode = resolve; });
+  const cleanups = [];
+  const calls = [];
+  const context = {
+    st: null,
+    onCleanup(fn) { cleanups.push(fn); },
+    stLookupCode() {},
+    stRenderCodeForm() {},
+    stShell() { calls.push('shell'); },
+    store: {
+      getCode() { return codeReady; },
+      getSession() { calls.push('getSession'); return Promise.resolve(null); }
+    },
+    lsSet() {},
+    normSet(value) { return value; },
+    PlaylistCore: require('../playlist-core.js'),
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'screenStudent'), context);
+  vm.runInNewContext(extractFunction(html, 'stLookupCode'), context);
+
+  context.screenStudent('');
+  const oldCleanup = cleanups[0];
+  const pending = context.stLookupCode('OLD123');
+  context.screenStudent('');
+  const newState = context.st;
+  oldCleanup();
+  resolveCode({ sessionId: 'old-session' });
+  await pending;
+
+  assert.equal(context.st, newState);
+  assert.deepEqual(calls, ['shell']);
+});
+
 test('대시보드와 CSV는 모든 영상 문항을 합산한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {
@@ -3284,6 +3342,40 @@ test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 �
   });
 });
 
+test('학생 입장 조회가 늦게 끝나도 새 참여 화면에 저장하거나 구독하지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let resolveStudent;
+  const studentReady = new Promise(resolve => { resolveStudent = resolve; });
+  const fields = {
+    '#st-grade': { value: '3' }, '#st-klass': { value: '2' },
+    '#st-num': { value: '7' }, '#st-name': { value: '홍길동' }
+  };
+  const calls = [];
+  const oldState = { sessionId: 'old-session', myAnswers: {} };
+  const newState = { sessionId: 'new-session', myAnswers: {} };
+  const context = {
+    st: oldState,
+    $(selector) { return fields[selector]; }, lsSet() {}, SV_TS: 1,
+    store: {
+      getStudent() { return studentReady; },
+      saveStudent() { calls.push('saveStudent'); return Promise.resolve(); },
+      getOwnResponses() { calls.push('getOwnResponses'); return Promise.resolve({}); }
+    },
+    confirm() { return true; }, stRenderIdentityForm() {},
+    stStartWatching() { calls.push('watch'); }, console
+  };
+  vm.runInNewContext(extractFunction(html, 'stJoin'), context);
+
+  const pending = context.stJoin();
+  context.st = newState;
+  resolveStudent(null);
+  await pending;
+
+  assert.equal(context.st, newState);
+  assert.deepEqual(calls, []);
+  assert.equal(newState.sid, undefined);
+});
+
 test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수판을 한 번 읽는다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let liveNext;
@@ -3326,6 +3418,41 @@ test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수�
   await liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended' });
   assert.equal(context.st.session.status, 'ended');
   assert.equal(boardReads, 1);
+});
+
+test('이전 학생 live 콜백과 오류는 새 참여 화면을 바꾸거나 출력하지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let liveNext, liveError;
+  let renders = 0, errors = 0;
+  const oldState = {
+    sessionId: 'old-session', session: { status: 'live' },
+    live: { q: 0, openedAt: 10 }, myAnswers: {}, board: {}
+  };
+  const newState = {
+    sessionId: 'new-session', session: { status: 'live' },
+    live: { q: 5, openedAt: 50 }, myAnswers: {}, board: {}
+  };
+  const context = {
+    st: oldState,
+    store: {
+      subscribeLive(id, next, error) { liveNext = next; liveError = error; return () => {}; },
+      getBoard() { throw new Error('stale callback must not read board'); }
+    },
+    onCleanup() {}, every() {}, stTick() {},
+    stRender() { renders += 1; }, parseMulti() { return []; },
+    console: { error() { errors += 1; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'stStartWatching'), context);
+  context.stStartWatching();
+  context.st = newState;
+
+  await liveNext({ q: 6, openedAt: 60, status: 'ended' });
+  liveError(new Error('late'));
+
+  assert.equal(context.st, newState);
+  assert.deepEqual(newState.live, { q: 5, openedAt: 50 });
+  assert.equal(renders, 1);
+  assert.equal(errors, 0);
 });
 
 test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮지 않는다', async () => {
@@ -3670,6 +3797,93 @@ test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답�
   ]);
 });
 
+test('이전 대시보드 조회와 cleanup은 새 대시보드 상태나 구독을 바꾸지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let resolveOldSession;
+  const oldSessionReady = new Promise(resolve => { resolveOldSession = resolve; });
+  const cleanups = [];
+  const subscriptions = [];
+  const app = { innerHTML: '' };
+  const context = {
+    dash: null,
+    store: {
+      getSession(id) {
+        if (id === 'old-session') return oldSessionReady;
+        return Promise.resolve({ id, setId: 'new-set', code: 'NEW123', status: 'live' });
+      },
+      getQuizSet(id) {
+        return Promise.resolve({ id, title: '새 세트', videos: [{ questions: [{ text: '새 문항' }] }] });
+      },
+      subscribeStudents(id) { subscriptions.push(['students', id]); return () => {}; },
+      subscribeResponses(id) { subscriptions.push(['responses', id]); return () => {}; }
+    },
+    FirestoreCore: require('../firestore-core.js'),
+    PlaylistCore: require('../playlist-core.js'),
+    APP() { return app; },
+    topbar() { return '<nav></nav>'; },
+    normSet(value) { return value; },
+    normSettings() { return {}; },
+    renderDash() {},
+    onCleanup(fn) { cleanups.push(fn); },
+    go() {}, esc(value) { return String(value); }, console
+  };
+  vm.runInNewContext(extractFunction(html, 'screenDashboard'), context);
+
+  const oldRun = context.screenDashboard('old-session');
+  const oldCleanup = cleanups[0];
+  await context.screenDashboard('new-session');
+  const newState = context.dash;
+  oldCleanup();
+  resolveOldSession({ id: 'old-session', setId: 'old-set', code: 'OLD123', status: 'live' });
+  await oldRun;
+
+  assert.equal(context.dash, newState);
+  assert.equal(context.dash.sessionId, 'new-session');
+  assert.deepEqual(subscriptions, [
+    ['students', 'new-session'],
+    ['responses', 'new-session']
+  ]);
+});
+
+test('이전 대시보드 구독 콜백과 오류는 새 대시보드를 바꾸거나 출력하지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let studentsNext, studentsError, responsesNext, responsesError;
+  let renders = 0, errors = 0;
+  const app = { innerHTML: '' };
+  const context = {
+    dash: null,
+    store: {
+      getSession() { return Promise.resolve({ setId: 'set1', code: 'OLD123', status: 'live' }); },
+      getQuizSet() { return Promise.resolve({ videos: [{ questions: [{ text: '문항' }] }] }); },
+      subscribeStudents(id, next, error) {
+        studentsNext = next; studentsError = error || (() => { errors += 1; }); return () => {};
+      },
+      subscribeResponses(id, next, error) {
+        responsesNext = next; responsesError = error || (() => { errors += 1; }); return () => {};
+      }
+    },
+    FirestoreCore: require('../firestore-core.js'), PlaylistCore: require('../playlist-core.js'),
+    APP() { return app; }, topbar() { return ''; }, normSet(value) { return value; }, normSettings() { return {}; },
+    renderDash() { renders += 1; }, onCleanup() {}, go() {}, esc(value) { return String(value); },
+    console: { error() { errors += 1; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'screenDashboard'), context);
+  await context.screenDashboard('old-session');
+  const newState = { sessionId: 'new-session', students: {}, answers: {} };
+  context.dash = newState;
+
+  studentsNext({ old: { name: '이전' } });
+  responsesNext({ old: { answers: { '0': { c: 1 } } } });
+  studentsError(new Error('late students'));
+  responsesError(new Error('late responses'));
+
+  assert.equal(context.dash, newState);
+  assert.deepEqual(newState.students, {});
+  assert.deepEqual(newState.answers, {});
+  assert.equal(renders, 0);
+  assert.equal(errors, 0);
+});
+
 test('대시보드는 두 번째 영상의 전체 문항 응답을 학생 합계에 포함한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {};
@@ -3723,7 +3937,7 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
   const body = { innerHTML: '' };
   const context = {
     adm: {
-      sessions: {}, resp: {}, from: '2024-01-01', to: '2024-01-31',
+      sessions: {}, resp: {}, sets: {}, from: '2024-01-01', to: '2024-01-31',
       loading: false, detail: null
     },
     store: {
@@ -3731,8 +3945,18 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
         calls.push(['listSessions']);
         return [
           { id: 'in', createdAt: new Date('2024-01-15T00:00:00').getTime(), setId: 'set1' },
+          { id: 'in-2', createdAt: new Date('2024-01-16T00:00:00').getTime(), setId: 'set1' },
           { id: 'out', createdAt: new Date('2024-02-15T00:00:00').getTime(), setId: 'set2' }
         ];
+      },
+      async getQuizSet(id) {
+        calls.push(['getQuizSet', id]);
+        return {
+          id, title: '세트', videos: [
+            { questions: [{ text: '첫 영상' }] },
+            { questions: [{ text: '두 번째 영상' }] }
+          ]
+        };
       },
       async getCollection(collectionPath) {
         calls.push(['getCollection', collectionPath]);
@@ -3744,6 +3968,8 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
       }
     },
     FirestoreCore: require('../firestore-core.js'),
+    PlaylistCore: require('../playlist-core.js'),
+    normSet(value) { return value; },
     $(selector) { return selector === '#adm-body' ? body : null; },
     admFillSetOptions() {},
     admRenderBody() {},
@@ -3757,15 +3983,55 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
 
   assert.deepEqual(calls, [
     ['listSessions'],
+    ['getQuizSet', 'set1'],
     ['getCollection', 'sessions/in/students'],
-    ['getCollection', 'sessions/in/responses']
+    ['getCollection', 'sessions/in/responses'],
+    ['getCollection', 'sessions/in-2/students'],
+    ['getCollection', 'sessions/in-2/responses']
   ]);
   assert.deepEqual(context.adm.sessions.in.students, { s1: { name: '가' } });
   assert.deepEqual(context.adm.resp.in, {
     '0': { s1: { c: 1, ok: true } },
     '2': { s1: { txt: '두 번째 영상 답', ok: null } }
   });
+  assert.deepEqual(context.adm.sets.set1.flatQuestions.map(q => [q.number, q.videoIndex, q.text]), [
+    [1, 0, '첫 영상'],
+    [2, 1, '두 번째 영상']
+  ]);
   assert.equal(context.adm.loading, false);
+});
+
+test('관리자 집계는 세트별 평탄 문항 키만 포함하고 범위 밖 응답은 제외한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {
+    adm: {
+      sessions: {
+        in: {
+          id: 'in', setId: 'set1', setTitle: '세트', createdAt: 10,
+          students: { s1: { grade: 1, klass: 2, num: 3, name: '가' } }
+        }
+      },
+      sets: {
+        set1: { flatQuestions: [{ number: 1 }, { number: 2 }, { number: 3, videoIndex: 1 }] }
+      },
+      resp: {
+        in: {
+          '0': { s1: { c: 0, ok: true } },
+          '2': { s1: { txt: '두 번째 영상 답', ok: null } },
+          '99': { s1: { c: 0, ok: true } }
+        }
+      },
+      setFilter: '', gradeFilter: '', klassFilter: ''
+    }
+  };
+  vm.runInNewContext(extractFunction(html, 'admCompute'), context);
+
+  const result = context.admCompute();
+
+  assert.equal(result.perSession.in.answered, 2);
+  assert.equal(result.perSession.in.correct, 1);
+  assert.equal(result.students.s1.answered, 2);
+  assert.equal(result.students.s1.correct, 1);
 });
 
 test('관리자 로그인과 비밀번호 변경은 config/app의 adminHash를 사용한다', async () => {

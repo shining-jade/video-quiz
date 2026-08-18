@@ -3495,9 +3495,10 @@ function screenStudent(codeArg) {
     revision: 0, deadlineHandled: '',
     uiRevealed: false, uiLocked: false, uiQ: -2
   };
-  onCleanup(() => { st = null; });
+  const state = st;
+  onCleanup(() => { if (st === state) st = null; });
 
-  if (st.code) stLookupCode(st.code);
+  if (state.code) stLookupCode(state.code);
   else stRenderCodeForm('');
 }
 
@@ -3534,21 +3535,28 @@ function stSubmitCode() {
 }
 
 async function stLookupCode(code) {
+  const state = st;
+  if (!state) return;
   stShell('<div class="empty">반을 찾는 중…</div>');
   try {
     const v = await store.getCode(code);
-    if (!v || !v.sessionId) { st.code = ''; stRenderCodeForm('그런 반 코드가 없습니다. 다시 확인해 주세요.'); return; }
-    st.code = code;
-    st.sessionId = v.sessionId;
+    if (st !== state) return;
+    if (!v || !v.sessionId) { state.code = ''; stRenderCodeForm('그런 반 코드가 없습니다. 다시 확인해 주세요.'); return; }
+    state.code = code;
+    state.sessionId = v.sessionId;
     lsSet('vq_last_code', code);
     const sess = await store.getSession(v.sessionId);
+    if (st !== state) return;
     if (!sess) { stRenderCodeForm('반 정보를 불러오지 못했습니다.'); return; }
-    st.session = sess;
-    st.set = normSet(await store.getQuizSet(sess.setId));
-    if (!st.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
-    st.flatQuestions = PlaylistCore.flattenQuestions(st.set.videos);
+    state.session = sess;
+    const savedSet = await store.getQuizSet(sess.setId);
+    if (st !== state) return;
+    state.set = normSet(savedSet);
+    if (!state.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
+    state.flatQuestions = PlaylistCore.flattenQuestions(state.set.videos);
     stRenderIdentityForm('');
   } catch (e) {
+    if (st !== state) return;
     console.error(e);
     stRenderCodeForm('접속 오류: ' + e.message);
   }
@@ -3582,6 +3590,8 @@ function stRenderIdentityForm(err) {
 }
 
 async function stJoin() {
+  const state = st;
+  if (!state) return;
   const grade = Number($('#st-grade').value);
   const klass = Number($('#st-klass').value);
   const num   = Number($('#st-num').value);
@@ -3595,14 +3605,17 @@ async function stJoin() {
   lsSet('vq_student', JSON.stringify(me));
 
   try {
-    const cur = await store.getStudent(st.sessionId, sid);
+    const cur = await store.getStudent(state.sessionId, sid);
+    if (st !== state) return;
     if (cur && cur.name && cur.name !== name) {
       if (!confirm(grade + '학년 ' + klass + '반 ' + num + '번은 이미 "' + cur.name + '" 학생으로 등록되어 있습니다.\n\n번호를 잘못 입력한 것이 아니라면 [확인]을 눌러 "' + name + '"(으)로 바꿉니다.')) return;
     }
-    st.sid = sid;
-    st.me = me;
-    await store.saveStudent(st.sessionId, sid, Object.assign({}, me, { joinedAt: SV_TS }));
-    const answers = await store.getOwnResponses(st.sessionId, sid);
+    state.sid = sid;
+    state.me = me;
+    await store.saveStudent(state.sessionId, sid, Object.assign({}, me, { joinedAt: SV_TS }));
+    if (st !== state) return;
+    const answers = await store.getOwnResponses(state.sessionId, sid);
+    if (st !== state) return;
     // 새로고침 대비 — 내가 이미 낸 답만 복원한다
     Object.keys(answers).forEach(qi => {
       const r = answers[qi];
@@ -3612,39 +3625,45 @@ async function stJoin() {
         ok: (r.ok === undefined || r.ok === null) ? null : !!r.ok,   // null = 서술형 미채점
         ms: r.ms || 0, submitted: r.submitted !== false, revision: Number(r.revision) || 0
       };
-      st.revision = Math.max(st.revision, record.revision);
-      if (record.submitted) st.myAnswers[Number(qi)] = record;
+      state.revision = Math.max(state.revision, record.revision);
+      if (record.submitted) state.myAnswers[Number(qi)] = record;
     });
-    stStartWatching();
+    stStartWatching(state);
   } catch (e) {
+    if (st !== state) return;
     console.error(e);
     stRenderIdentityForm('입장 실패: ' + e.message);
   }
 }
 
-function stStartWatching() {
-  onCleanup(store.subscribeLive(st.sessionId, async live => {
-    const previousQ = st.live.q;
+function stStartWatching(expectedState) {
+  const state = expectedState || st;
+  if (!state || st !== state) return;
+  onCleanup(store.subscribeLive(state.sessionId, async live => {
+    if (st !== state) return;
+    const previousQ = state.live.q;
     const nl = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
-    const changed = nl.q !== st.live.q || nl.openedAt !== st.live.openedAt;
-    st.live = nl;
-    if (nl.status === 'ended' && st.session) st.session.status = 'ended';
+    const changed = nl.q !== state.live.q || nl.openedAt !== state.live.openedAt;
+    state.live = nl;
+    if (nl.status === 'ended' && state.session) state.session.status = 'ended';
     if (changed) {
-      const prev = st.myAnswers[nl.q];
-      st.sel = prev ? prev.c : null;
-      st.multiSel = prev ? parseMulti(prev.cs) : [];
-      st.draft = prev ? (prev.txt || '') : '';
-      st.submitted = !!prev;
-      st.deadlineHandled = '';
+      const prev = state.myAnswers[nl.q];
+      state.sel = prev ? prev.c : null;
+      state.multiSel = prev ? parseMulti(prev.cs) : [];
+      state.draft = prev ? (prev.txt || '') : '';
+      state.submitted = !!prev;
+      state.deadlineHandled = '';
     }
     stRender();
     if (previousQ >= 0 && nl.q < 0) {
       try {
-        st.board = await store.getBoard(st.sessionId);
+        const board = await store.getBoard(state.sessionId);
+        if (st !== state) return;
+        state.board = board;
         stRender();
-      } catch (e) { console.error(e); }
+      } catch (e) { if (st === state) console.error(e); }
     }
-  }, e => console.error(e)));
+  }, e => { if (st === state) console.error(e); }));
   every(250, stTick);
   stRender();
 }
@@ -3825,10 +3844,12 @@ function stMyStat(flatQuestions, answered, correct, graded, ungraded, showScore)
 
 /** 문항 이미지는 그 문항이 열릴 때만 내려받는다 */
 function stShowImage(q, i) {
+  const state = st;
   const el = $('#st-img');
   if (!el) return;
   if (q.imgUrl) { el.src = q.imgUrl; return; }
-  loadQuestionImage(st.session.setId, i).then(src => {
+  loadQuestionImage(state.session.setId, q.key || i).then(src => {
+    if (st !== state) return;
     const now = $('#st-img');
     if (now && src) now.src = src;
   });
@@ -4046,26 +4067,35 @@ function screenDashboard(sessionId) {
     sort: { key: 'no', dir: 1 },
     open: {}
   };
-  onCleanup(() => { dash = null; });
+  const state = dash;
+  onCleanup(() => { if (dash === state) dash = null; });
 
   APP().innerHTML = topbar() + '<div class="wrap wide"><div class="empty">불러오는 중…</div></div>';
 
   return store.getSession(sessionId).then(sess => {
+    if (dash !== state) return;
     if (!sess) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">반 정보를 찾을 수 없습니다.</div></div></div>'; return; }
-    dash.session = sess;
+    state.session = sess;
     return store.getQuizSet(sess.setId).then(savedSet => {
-      dash.set = normSet(savedSet) || { title: sess.setTitle || '', videos: [], settings: normSettings(null) };
-      dash.flatQuestions = PlaylistCore.flattenQuestions(dash.set.videos);
+      if (dash !== state) return;
+      state.set = normSet(savedSet) || { title: sess.setTitle || '', videos: [], settings: normSettings(null) };
+      state.flatQuestions = PlaylistCore.flattenQuestions(state.set.videos);
       onCleanup(store.subscribeStudents(sessionId, students => {
-        dash.students = students || {};
+        if (dash !== state) return;
+        state.students = students || {};
         renderDash();
-      }));
+      }, e => { if (dash === state) console.error(e); }));
       onCleanup(store.subscribeResponses(sessionId, responseDocs => {
-        dash.answers = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
+        if (dash !== state) return;
+        state.answers = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
         renderDash();
-      }));
+      }, e => { if (dash === state) console.error(e); }));
     });
-  }).catch(e => { console.error(e); APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>'; });
+  }).catch(e => {
+    if (dash !== state) return;
+    console.error(e);
+    APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>';
+  });
 }
 
 /** 학생별 응답을 표로 쓰기 좋게 정리 */
@@ -4460,15 +4490,28 @@ function admLoad() {
       adm.loading = false;
       return;
     }
-    return Promise.all(ids.map(id => Promise.all([
+    const setIds = Array.from(new Set(ids.map(id => picked[id].setId).filter(Boolean)));
+    const setLoads = setIds.map(setId => {
+      if (adm.sets[setId]) return Promise.resolve([setId, adm.sets[setId]]);
+      return store.getQuizSet(setId).then(rawSet => {
+        const set = normSet(rawSet);
+        return [setId, {
+          set: set,
+          flatQuestions: PlaylistCore.flattenQuestions(set ? set.videos : [])
+        }];
+      });
+    });
+    const sessionLoads = ids.map(id => Promise.all([
       store.getCollection('sessions/' + id + '/students'),
       store.getCollection('sessions/' + id + '/responses')
     ]).then(([students, responseDocs]) => [
       id,
       students || {},
       FirestoreCore.responseDocsToQuestionMaps(responseDocs || {})
-    ])))
-      .then(pairs => {
+    ]));
+    return Promise.all([Promise.all(setLoads), Promise.all(sessionLoads)])
+      .then(([sets, pairs]) => {
+        sets.forEach(([setId, cached]) => { adm.sets[setId] = cached; });
         adm.resp = {};
         pairs.forEach(([id, students, responses]) => {
           adm.sessions[id].students = students;
@@ -4510,6 +4553,8 @@ function admCompute() {
   sessions.forEach(sess => {
     const studs = sess.students || {};
     const resp = adm.resp[sess.id] || {};
+    const cachedSet = adm.sets[sess.setId];
+    const flatQuestions = cachedSet ? cachedSet.flatQuestions : [];
     let sAns = 0, sCor = 0, sStu = 0, sGraded = 0;
 
     Object.keys(studs).forEach(sid => {
@@ -4519,8 +4564,8 @@ function admCompute() {
       sStu++;
 
       let answered = 0, correct = 0, graded = 0;
-      Object.keys(resp).forEach(qi => {
-        const r = resp[qi][sid];
+      flatQuestions.forEach((question, qi) => {
+        const r = (resp[qi] || {})[sid];
         if (!r) return;
         answered++;
         // 서술형 미채점(ok 없음)은 정답률 계산에서 뺀다
