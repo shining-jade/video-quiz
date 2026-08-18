@@ -837,7 +837,10 @@ window.onYouTubeIframeAPIReady = function () {
   ytReady = true;
   while (ytWaiters.length) ytWaiters.shift()();
 };
-function whenYT(cb) { ytReady ? cb() : ytWaiters.push(cb); }
+function whenYT(cb) {
+  if (!ytReady && window.YT && typeof window.YT.Player === 'function') ytReady = true;
+  ytReady ? cb() : ytWaiters.push(cb);
+}
 
 /* ── 유튜브 자막(CC) 제어 ──────────────────────────────────────────────
    자동 생성 자막이 화면 아래쪽을 가려 수업에 방해가 되는 경우가 많아 기본은 끕니다.

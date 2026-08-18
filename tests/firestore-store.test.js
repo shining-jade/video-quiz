@@ -314,6 +314,23 @@ function loadStageFunctions(names, context) {
   return context;
 }
 
+test('캐시된 YouTube API가 콜백보다 먼저 준비돼도 대기 작업을 즉시 실행한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {
+    ytReady: false,
+    ytWaiters: [],
+    window: { YT: { Player: function Player() {} } },
+    callbackRuns: 0
+  };
+  vm.runInNewContext(extractFunction(html, 'whenYT'), context);
+
+  vm.runInNewContext('whenYT(() => { callbackRuns += 1; })', context);
+
+  assert.equal(context.callbackRuns, 1);
+  assert.equal(context.ytReady, true);
+  assert.equal(context.ytWaiters.length, 0);
+});
+
 function createStore(fake) {
   const { createFirestoreStore } = loadStoreModule();
   return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
