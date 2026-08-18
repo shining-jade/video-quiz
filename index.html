@@ -3487,7 +3487,7 @@ let st = null;
 function screenStudent(codeArg) {
   st = {
     code: (codeArg || '').toUpperCase(),
-    sessionId: null, session: null, set: null,
+    sessionId: null, session: null, set: null, flatQuestions: [],
     sid: null, me: null,
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     myAnswers: {},          // { 문항index: {c, ok, ms} }
@@ -3546,6 +3546,7 @@ async function stLookupCode(code) {
     st.session = sess;
     st.set = normSet(await store.getQuizSet(sess.setId));
     if (!st.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
+    st.flatQuestions = PlaylistCore.flattenQuestions(st.set.videos);
     stRenderIdentityForm('');
   } catch (e) {
     console.error(e);
@@ -3688,6 +3689,17 @@ function stTick() {
   if (rev !== st.uiRevealed || lock !== st.uiLocked) stRender();
 }
 
+function studentQuestionView(flatQuestions, live) {
+  const questions = flatQuestions || [];
+  const i = live && Number.isInteger(live.q) ? live.q : -1;
+  const question = questions[i];
+  return {
+    number: question ? (question.number || i + 1) : 0,
+    total: questions.length,
+    question: question
+  };
+}
+
 function stRender() {
   if (!st || !st.set || !st.sid) return;
   const set = st.set, i = st.live.q;
@@ -3726,7 +3738,7 @@ function stRender() {
               (nUngraded ? '<div style="font-size:13px;font-weight:600;margin-top:6px;color:var(--ink-2)">서술형 ' + nUngraded + '문항은 선생님이 채점합니다</div>' : '') + '</div>'
           : '<div class="result-banner mute" style="margin-top:18px">' + answered + '문항 제출 완료</div>') +
       '</div>' +
-      stMyStat(set, answered, correct, gradedKeys.length, nUngraded, showScore) +
+      stMyStat(st.flatQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
       '</div>');
     st.uiQ = -3;
     return;
@@ -3740,13 +3752,14 @@ function stRender() {
           '<h2>선생님 화면을 보세요</h2>' +
           '<p>퀴즈가 나오면 이 화면에 자동으로 뜹니다.</p>' +
         '</div>' +
-        stMyStat(set, answered, correct, gradedKeys.length, nUngraded, showScore) +
+        stMyStat(st.flatQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
       '</div>');
     st.uiQ = -1;
     return;
   }
 
-  const q = set.questions[i];
+  const view = studentQuestionView(st.flatQuestions, st.live);
+  const q = view.question;
   if (!q) return;
   const revealed = stRevealed();
   const locked = stLocked();
@@ -3761,7 +3774,7 @@ function stRender() {
   stShell(header +
     '<div class="card">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
-        '<span class="tag">문항 ' + (i + 1) + ' / ' + set.questions.length + '</span>' +
+        '<span class="tag">문항 ' + view.number + ' / ' + view.total + '</span>' +
         (type !== 'choice' ? '<span class="tag qtype">' + QTYPES[type].split(' —')[0] + '</span>' : '') +
         (t ? '<span class="spacer" style="flex:1"></span>' : '') +
       '</div>' +
@@ -3788,8 +3801,8 @@ function stRank() {
 }
 
 /** 대기 화면·종료 화면에 쓰는 내 진행 현황 */
-function stMyStat(set, answered, correct, graded, ungraded, showScore) {
-  const totalQ = set.questions.length;
+function stMyStat(flatQuestions, answered, correct, graded, ungraded, showScore) {
+  const totalQ = (flatQuestions || []).length;
   const left = Math.max(0, totalQ - answered);
   const rk = showScore ? stRank() : null;
 
@@ -3921,7 +3934,7 @@ function stSend(payload, localRec) {
 
 function stAnswer(j) {
   if (!st || st.live.q < 0 || stLocked()) return;
-  const i = st.live.q, q = st.set.questions[i];
+  const i = st.live.q, q = st.flatQuestions[i];
   if (!q || !q.choices[j]) return;
   st.sel = j;
   stRender();
@@ -3948,7 +3961,7 @@ function stSubmitText() {
 
 function stHasDraftAnswer() {
   if (!st || st.live.q < 0) return false;
-  const q = st.set.questions[st.live.q], type = qType(q);
+  const q = st.flatQuestions[st.live.q], type = qType(q);
   if (type === 'multi') return !!(st.multiSel && st.multiSel.length);
   if (type === 'short' || type === 'long') return !!String(st.draft || '').trim();
   return st.sel !== null && st.sel !== undefined;
@@ -3956,7 +3969,7 @@ function stHasDraftAnswer() {
 
 function stBuildAnswer() {
   if (!stHasDraftAnswer()) return null;
-  const i = st.live.q, q = st.set.questions[i], type = qType(q);
+  const i = st.live.q, q = st.flatQuestions[i], type = qType(q);
   const ms = st.live.openedAt ? Math.max(0, serverNow() - st.live.openedAt) : 0;
   let payload, local;
   if (type === 'multi') {
@@ -4028,7 +4041,7 @@ let dash = null;
 function screenDashboard(sessionId) {
   if (!sessionId) { go('home'); return; }
   dash = {
-    sessionId: sessionId, session: null, set: null,
+    sessionId: sessionId, session: null, set: null, flatQuestions: [],
     students: {}, answers: {},
     sort: { key: 'no', dir: 1 },
     open: {}
@@ -4041,7 +4054,8 @@ function screenDashboard(sessionId) {
     if (!sess) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">반 정보를 찾을 수 없습니다.</div></div></div>'; return; }
     dash.session = sess;
     return store.getQuizSet(sess.setId).then(savedSet => {
-      dash.set = normSet(savedSet) || { title: sess.setTitle || '', questions: [], settings: normSettings(null) };
+      dash.set = normSet(savedSet) || { title: sess.setTitle || '', videos: [], settings: normSettings(null) };
+      dash.flatQuestions = PlaylistCore.flattenQuestions(dash.set.videos);
       onCleanup(store.subscribeStudents(sessionId, students => {
         dash.students = students || {};
         renderDash();
@@ -4055,14 +4069,14 @@ function screenDashboard(sessionId) {
 }
 
 /** 학생별 응답을 표로 쓰기 좋게 정리 */
-function dashBuildRows() {
-  const qn = dash.set.questions.length;
-  return Object.keys(dash.students).map(sid => {
-    const s = dash.students[sid];
+function dashBuildRowsFor(flatQuestions, students, answers) {
+  const qn = (flatQuestions || []).length;
+  return Object.keys(students || {}).map(sid => {
+    const s = students[sid];
     const cells = [];
     let correct = 0, answered = 0, msSum = 0, graded = 0, ungraded = 0;
     for (let i = 0; i < qn; i++) {
-      const r = (dash.answers[i] || {})[sid];
+      const r = ((answers || {})[i] || {})[sid];
       cells.push(r || null);
       if (r) {
         answered++;
@@ -4080,6 +4094,10 @@ function dashBuildRows() {
       avgMs: answered ? msSum / answered : 0
     };
   });
+}
+
+function dashBuildRows() {
+  return dashBuildRowsFor(dash.flatQuestions, dash.students, dash.answers);
 }
 
 function dashSortBy(key) {
@@ -4104,7 +4122,7 @@ function dashSortRows(rows) {
 
 function renderDash() {
   if (!dash || !dash.set) return;
-  const qs = dash.set.questions;
+  const qs = dash.flatQuestions;
   const rows = dashSortRows(dashBuildRows());
   const nStu = rows.length;
 
@@ -4275,30 +4293,28 @@ function dashGrade(qIdx, sid, ok) {
 
 function dashToggle(i) { dash.open[i] = !dash.open[i]; renderDash(); }
 
-function dashExportCSV() {
-  if (!dash) return;
-  const qs = dash.set.questions;
-  const rows = dashSortRows(dashBuildRows());
+function dashCsvRows(set, students, responses, studentRows) {
+  const flatQuestions = PlaylistCore.flattenQuestions((set && set.videos) || []);
+  const rows = studentRows || dashBuildRowsFor(flatQuestions, students, responses);
   const head = ['학년', '반', '번호', '이름'];
-  qs.forEach((q, i) => {
-    head.push((i + 1) + '번 답(' + QTYPES[qType(q)].split(' —')[0] + ')');
-    head.push((i + 1) + '번 정오');
-    head.push((i + 1) + '번 반응(초)');
+  flatQuestions.forEach((q, i) => {
+    const video = set.videos[q.videoIndex] || {};
+    const defaultTitle = '영상 ' + (q.videoIndex + 1);
+    const videoContext = video.title && video.title !== defaultTitle
+      ? defaultTitle + ' (' + video.title + ')'
+      : (video.title || defaultTitle);
+    const prefix = videoContext + ' · 문항 ' + (q.number || i + 1);
+    head.push(prefix + ' 답(' + QTYPES[qType(q)].split(' —')[0] + ')');
+    head.push(prefix + ' 정오');
+    head.push(prefix + ' 반응(초)');
   });
   head.push('정답 수', '채점된 수', '미채점', '응답 수', '정답률(%)', '평균 반응(초)');
 
-  const out = [
-    ['퀴즈 세트', dash.set.title || dash.session.setTitle],
-    ['반 코드', dash.session.code],
-    ['반 이름', dash.session.label || ''],
-    ['진행 일시', fmtDate(dash.session.createdAt)],
-    [],
-    head
-  ];
+  const out = [head];
   rows.forEach(r => {
     const line = [r.grade, r.klass, r.num, r.name];
     r.cells.forEach((c, i) => {
-      line.push(c ? answerLabel(qs[i], c) : '');
+      line.push(c ? answerLabel(flatQuestions[i], c) : '');
       line.push(!c ? '미응답' : c.ok === true ? 'O' : c.ok === false ? 'X' : '미채점');
       line.push(c ? (c.ms / 1000).toFixed(1) : '');
     });
@@ -4306,6 +4322,20 @@ function dashExportCSV() {
       r.graded ? Math.round(r.rate * 100) : '', r.answered ? (r.avgMs / 1000).toFixed(1) : '');
     out.push(line);
   });
+  return out;
+}
+
+function dashExportCSV() {
+  if (!dash) return;
+  const rows = dashSortRows(dashBuildRows());
+  const out = [
+    ['퀴즈 세트', dash.set.title || dash.session.setTitle],
+    ['반 코드', dash.session.code],
+    ['반 이름', dash.session.label || ''],
+    ['진행 일시', fmtDate(dash.session.createdAt)],
+    []
+  ];
+  out.push.apply(out, dashCsvRows(dash.set, dash.students, dash.answers, rows));
 
   const safe = String(dash.set.title || '퀴즈').replace(/[\\/:*?"<>|]/g, '_').slice(0, 40);
   downloadCSV(safe + '_' + dash.session.code + '_' + fmtDay(dash.session.createdAt) + '.csv', out);

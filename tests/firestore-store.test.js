@@ -428,6 +428,9 @@ test('구형·신형 세트를 영상 배열 중심의 같은 화면 모델로 �
     }]
   }]);
   assert.deepEqual(modern.videos.map(video => video.videoId), ['a', 'b']);
+  assert.deepEqual(context.PlaylistCore.flattenQuestions(legacy.videos).map(q => [q.number, q.videoIndex, q.text]), [
+    [1, 0, 'A']
+  ]);
   assert.equal(legacy.questions, undefined);
   assert.equal(legacy.videoId, undefined);
 });
@@ -3194,6 +3197,46 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   assert.equal(timerNumber.textContent, '10초');
 });
 
+test('학생은 두 번째 영상 문항을 전체 번호로 표시한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const PlaylistCore = require('../playlist-core.js');
+  const flat = PlaylistCore.flattenQuestions([
+    { questions: [{ text: '1' }, { text: '2' }] },
+    { questions: [{ text: '3' }] }
+  ]);
+  const context = {};
+  vm.runInNewContext(extractFunction(html, 'studentQuestionView'), context);
+
+  assert.deepEqual(clone(context.studentQuestionView(flat, { q: 2 })), {
+    number: 3,
+    total: 3,
+    question: flat[2]
+  });
+});
+
+test('대시보드와 CSV는 모든 영상 문항을 합산한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {
+    PlaylistCore: require('../playlist-core.js'),
+    QTYPES: { choice: '객관식 — 하나 고르기' },
+    qType() { return 'choice'; },
+    answerLabel() { return ''; }
+  };
+  vm.runInNewContext(extractFunction(html, 'dashBuildRowsFor'), context);
+  vm.runInNewContext(extractFunction(html, 'dashCsvRows'), context);
+  const set = {
+    videos: [
+      { title: '영상 1', questions: [{ text: 'A' }, { text: 'B' }] },
+      { title: '영상 2', questions: [{ text: 'C' }] }
+    ]
+  };
+
+  const rows = context.dashCsvRows(set, {}, {});
+
+  assert.match(rows[0].join(','), /영상 1 · 문항 1/);
+  assert.match(rows[0].join(','), /영상 2 · 문항 3/);
+});
+
 test('학생 입장 흐름은 단발 조회로 본인 정보와 본인 답만 복원한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
@@ -3344,13 +3387,17 @@ test('학생 답 전송은 본인 응답 문서의 현재 문항만 병합한다
   assert.deepEqual(writes, [['a', 's1', 2, { txt: '서술', at: 123, ms: 456 }]]);
 });
 
-test('객관식 번호 선택은 제출하지 않고 제출 버튼과 다시 고르기만 서버 상태를 바꾼다', async () => {
+test('두 번째 영상 객관식은 전체 문항 키로 제출하고 다시 고르기만 서버 상태를 바꾼다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const writes = [];
   const context = {
     st: {
-      sessionId: 'a', sid: 's1', live: { q: 0, openedAt: 1000, limitSec: 15 },
-      set: { questions: [{ type: 'choice', choices: ['가', '나'], answer: 1 }] },
+      sessionId: 'a', sid: 's1', live: { q: 2, openedAt: 1000, limitSec: 15 },
+      flatQuestions: [
+        { type: 'choice', choices: ['앞', '문항'], answer: 0 },
+        { type: 'choice', choices: ['앞', '문항'], answer: 0 },
+        { type: 'choice', choices: ['가', '나'], answer: 1, videoIndex: 1, number: 3 }
+      ],
       myAnswers: {}, sel: null, multiSel: [], draft: '', submitted: false, revision: 0
     },
     store: { setAnswerState(...args) { writes.push(args); return Promise.resolve(); } },
@@ -3365,6 +3412,7 @@ test('객관식 번호 선택은 제출하지 않고 제출 버튼과 다시 고
   context.stAnswer(1);
   assert.equal(writes.length, 0);
   await context.stSubmitCurrent('button');
+  assert.equal(writes[0][2], 2);
   assert.equal(writes[0][3].submitted, true);
   assert.equal(writes[0][3].c, 1);
   await context.stReviseAnswer();
@@ -3573,7 +3621,14 @@ test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답�
       },
       async getQuizSet(id) {
         calls.push(['getQuizSet', id]);
-        return { id, title: '첫 세트', questions: [] };
+        return {
+          id,
+          title: '첫 세트',
+          videos: [
+            { title: '영상 1', questions: [{ text: 'A' }] },
+            { title: '영상 2', questions: [{ text: 'B' }] }
+          ]
+        };
       },
       subscribeStudents(id, next) {
         calls.push(['subscribeStudents', id]); subscriptions.students = next; return () => {};
@@ -3583,6 +3638,7 @@ test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답�
       }
     },
     FirestoreCore: require('../firestore-core.js'),
+    PlaylistCore: require('../playlist-core.js'),
     APP() { return app; },
     topbar() { return '<nav></nav>'; },
     normSet(value) { return value; },
@@ -3608,6 +3664,39 @@ test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답�
   ]);
   assert.deepEqual(context.dash.students, { s1: { name: '가' } });
   assert.deepEqual(context.dash.answers, { '2': { s1: { txt: '학생 글', ok: null } } });
+  assert.deepEqual(context.dash.flatQuestions.map(q => [q.number, q.videoIndex, q.text]), [
+    [1, 0, 'A'],
+    [2, 1, 'B']
+  ]);
+});
+
+test('대시보드는 두 번째 영상의 전체 문항 응답을 학생 합계에 포함한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {};
+  vm.runInNewContext(extractFunction(html, 'dashBuildRowsFor'), context);
+  const flatQuestions = require('../playlist-core.js').flattenQuestions([
+    { questions: [{ text: 'A' }, { text: 'B' }] },
+    { questions: [{ text: 'C' }] }
+  ]);
+
+  const rows = context.dashBuildRowsFor(
+    flatQuestions,
+    { s1: { grade: 1, klass: 2, num: 3, name: '가' } },
+    {
+      '0': { s1: { c: 0, ok: true, ms: 1000 } },
+      '2': { s1: { txt: '둘째 영상 답', ok: null, ms: 3000 } }
+    }
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(rows[0])), {
+    sid: 's1', grade: 1, klass: 2, num: 3, name: '가',
+    cells: [
+      { c: 0, ok: true, ms: 1000 },
+      null,
+      { txt: '둘째 영상 답', ok: null, ms: 3000 }
+    ],
+    correct: 1, answered: 2, graded: 1, ungraded: 1, rate: 1, avgMs: 2000
+  });
 });
 
 test('대시보드 서술형 채점은 저장소에 ok만 전달한다', async () => {
@@ -3648,7 +3737,10 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
       async getCollection(collectionPath) {
         calls.push(['getCollection', collectionPath]);
         if (collectionPath.endsWith('/students')) return { s1: { name: '가' } };
-        return { s1: { answers: { '0': { c: 1, ok: true } } } };
+        return { s1: { answers: {
+          '0': { c: 1, ok: true },
+          '2': { txt: '두 번째 영상 답', ok: null }
+        } } };
       }
     },
     FirestoreCore: require('../firestore-core.js'),
@@ -3669,7 +3761,10 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
     ['getCollection', 'sessions/in/responses']
   ]);
   assert.deepEqual(context.adm.sessions.in.students, { s1: { name: '가' } });
-  assert.deepEqual(context.adm.resp.in, { '0': { s1: { c: 1, ok: true } } });
+  assert.deepEqual(context.adm.resp.in, {
+    '0': { s1: { c: 1, ok: true } },
+    '2': { s1: { txt: '두 번째 영상 답', ok: null } }
+  });
   assert.equal(context.adm.loading, false);
 });
 
@@ -3747,29 +3842,39 @@ test('대시보드 CSV는 서술형 텍스트와 미채점 표시를 유지한�
   const context = {
     dash: {
       session: { code: 'ABC234', createdAt: 1, setTitle: '세트' },
-      set: { title: '세트', questions: [{ type: 'long', text: '설명' }] },
+      set: {
+        title: '세트',
+        videos: [
+          { title: '도입', questions: [{ type: 'choice', text: '앞 문항' }] },
+          { title: '정리', questions: [{ type: 'long', text: '설명' }] }
+        ]
+      },
+      students: {}, answers: {},
       sort: { key: 'no', dir: 1 }
     },
     dashBuildRows() {
       return [{
         grade: 1, klass: 2, num: 3, name: '가',
-        cells: [{ txt: '학생 글', ok: null, ms: 1200 }],
+        cells: [null, { txt: '학생 글', ok: null, ms: 1200 }],
         correct: 0, graded: 0, ungraded: 1, answered: 1, rate: 0, avgMs: 1200
       }];
     },
     dashSortRows(rows) { return rows; },
-    qType() { return 'long'; },
-    QTYPES: { long: '서술형 — 직접 채점' },
+    PlaylistCore: require('../playlist-core.js'),
+    qType(question) { return question.type || 'choice'; },
+    QTYPES: { choice: '객관식 — 하나 고르기', long: '서술형 — 직접 채점' },
     answerLabel(question, answer) { return answer.txt; },
     fmtDate() { return '날짜'; },
     fmtDay() { return '날짜'; },
     downloadCSV(name, rows) { downloaded = { name, rows }; },
     toast() {}
   };
+  vm.runInNewContext(extractFunction(html, 'dashCsvRows'), context);
   vm.runInNewContext(extractFunction(html, 'dashExportCSV'), context);
 
   context.dashExportCSV();
 
-  assert.equal(downloaded.rows[6][4], '학생 글');
-  assert.equal(downloaded.rows[6][5], '미채점');
+  assert.match(downloaded.rows[5].join(','), /영상 2 \(정리\) · 문항 2 답\(서술형\)/);
+  assert.equal(downloaded.rows[6][7], '학생 글');
+  assert.equal(downloaded.rows[6][8], '미채점');
 });
