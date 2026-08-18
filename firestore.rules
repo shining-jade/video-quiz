@@ -5,33 +5,243 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function anonymousStudent() {
+      return signedIn() &&
+        request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    function verifiedEmail() {
+      return signedIn() &&
+        request.auth.token.email is string &&
+        request.auth.token.email_verified == true &&
+        request.auth.token.firebase.sign_in_provider == 'google.com';
+    }
+
+    function allowancePath() {
+      return /databases/$(database)/documents/teacher_allowlist/$(request.auth.token.email);
+    }
+
+    function allowance() {
+      return get(allowancePath());
+    }
+
+    function isApprovedTeacher() {
+      return verifiedEmail() &&
+        exists(allowancePath()) &&
+        allowance().data.enabled == true &&
+        allowance().data.role in ['teacher', 'admin'];
+    }
+
+    function isAdmin() {
+      return isApprovedTeacher() && allowance().data.role == 'admin';
+    }
+
+    function ownsSet(setId) {
+      return isApprovedTeacher() &&
+        exists(/databases/$(database)/documents/quiz_sets/$(setId)) &&
+        get(/databases/$(database)/documents/quiz_sets/$(setId)).data.ownerUid == request.auth.uid;
+    }
+
+    function ownsSetAfter(setId) {
+      return isApprovedTeacher() &&
+        existsAfter(/databases/$(database)/documents/quiz_sets/$(setId)) &&
+        getAfter(/databases/$(database)/documents/quiz_sets/$(setId)).data.ownerUid == request.auth.uid;
+    }
+
+    function ownsSession(sessionId) {
+      return isApprovedTeacher() &&
+        exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
+    }
+
+    function ownsSessionAfter(sessionId) {
+      return isApprovedTeacher() &&
+        existsAfter(/databases/$(database)/documents/sessions/$(sessionId)) &&
+        getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
+    }
+
+    function sessionIsActive(sessionId) {
+      return exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)).data.status == 'active';
+    }
+
+    function isJoinedStudent(sessionId) {
+      return anonymousStudent() &&
+        exists(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid)).data.uid == request.auth.uid;
+    }
+
+    function validStudent(studentId) {
+      return studentId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['uid', 'name']) &&
+        request.resource.data.keys().hasOnly([
+          'uid', 'grade', 'class', 'klass', 'number', 'num', 'name', 'joinedAt'
+        ]) &&
+        request.resource.data.uid == request.auth.uid;
+    }
+
+    function validAnswer(answer) {
+      return answer is map &&
+        answer.keys().hasAll(['answer', 'submitted', 'revision']) &&
+        answer.keys().hasOnly(['answer', 'submitted', 'revision', 'submittedAt']) &&
+        answer.submitted is bool &&
+        answer.revision is int &&
+        answer.revision > 0;
+    }
+
+    function currentQuestionKey(sessionId) {
+      return string(get(
+        /databases/$(database)/documents/sessions/$(sessionId)/meta/live
+      ).data.q);
+    }
+
+    function validStudentResponseCreate(sessionId) {
+      let questionKey = currentQuestionKey(sessionId);
+      return request.resource.data.keys().hasOnly(['answers']) &&
+        request.resource.data.answers is map &&
+        request.resource.data.answers.keys().hasAll([questionKey]) &&
+        request.resource.data.answers.keys().hasOnly([questionKey]) &&
+        validAnswer(request.resource.data.answers[questionKey]);
+    }
+
+    function validStudentResponseUpdate(sessionId) {
+      let questionKey = currentQuestionKey(sessionId);
+      let previousAnswer = resource.data.answers.get(questionKey, { 'revision': 0 });
+      return request.resource.data.keys().hasOnly(['answers']) &&
+        resource.data.keys().hasOnly(['answers']) &&
+        request.resource.data.answers is map &&
+        resource.data.answers is map &&
+        request.resource.data.answers.diff(resource.data.answers).affectedKeys().hasOnly([questionKey]) &&
+        validAnswer(request.resource.data.answers[questionKey]) &&
+        previousAnswer is map &&
+        request.resource.data.answers[questionKey].revision > previousAnswer.get('revision', 0);
+    }
+
+    match /teacher_allowlist/{email} {
+      allow read, write: if false;
+    }
+
     match /quiz_sets/{setId} {
-      allow read, create, update: if signedIn();
-      allow delete: if false;
+      allow get, list: if isApprovedTeacher();
+      allow create: if isApprovedTeacher() &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.ownerEmail == request.auth.token.email;
+      allow update: if ownsSet(setId) &&
+        request.resource.data.ownerUid == resource.data.ownerUid &&
+        request.resource.data.ownerEmail == resource.data.ownerEmail;
+      allow delete: if ownsSet(setId);
+      allow read, write: if false;
     }
 
     match /images/{setId}/q/{questionIndex} {
-      allow read, write: if signedIn();
+      allow get, list: if isApprovedTeacher();
+      allow create, update: if ownsSetAfter(setId);
+      allow delete: if ownsSet(setId);
+      allow read, write: if false;
     }
 
     match /codes/{code} {
-      allow read, write: if signedIn();
+      allow get: if anonymousStudent() || isAdmin() || ownsSession(resource.data.sessionId);
+      allow list: if isAdmin() || ownsSession(resource.data.sessionId);
+      allow create, update: if ownsSessionAfter(request.resource.data.sessionId);
+      allow delete: if isAdmin() || ownsSession(resource.data.sessionId);
+      allow read, write: if false;
     }
 
     match /sessions/{sessionId} {
-      allow read, write: if signedIn();
+      allow get: if isAdmin() || ownsSession(sessionId) ||
+        (anonymousStudent() && sessionIsActive(sessionId));
+      allow list: if isAdmin() ||
+        (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid);
+      allow create: if isApprovedTeacher() &&
+        request.resource.data.teacherUid == request.auth.uid &&
+        request.resource.data.teacherEmail == request.auth.token.email;
+      allow update: if ownsSession(sessionId) &&
+        request.resource.data.teacherUid == resource.data.teacherUid &&
+        request.resource.data.teacherEmail == resource.data.teacherEmail;
+      allow delete: if isAdmin() || ownsSession(sessionId);
+      allow read, write: if false;
+
+      match /meta/live {
+        allow get: if isAdmin() || ownsSession(sessionId) || isJoinedStudent(sessionId);
+        allow list: if isAdmin() || ownsSession(sessionId);
+        allow create, update: if ownsSessionAfter(sessionId);
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /meta/board {
+        allow get: if isAdmin() || ownsSession(sessionId) || isJoinedStudent(sessionId);
+        allow list: if isAdmin() || ownsSession(sessionId);
+        allow create, update: if ownsSessionAfter(sessionId);
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /meta/{document} {
+        allow list: if isAdmin() || ownsSession(sessionId);
+        allow get, write: if false;
+      }
+
+      match /students/{studentId} {
+        allow get: if isAdmin() || ownsSession(sessionId) ||
+          (isJoinedStudent(sessionId) && studentId == request.auth.uid);
+        allow list: if isAdmin() || ownsSession(sessionId);
+        allow create: if anonymousStudent() && sessionIsActive(sessionId) && validStudent(studentId);
+        allow update: if isJoinedStudent(sessionId) && validStudent(studentId) &&
+          request.resource.data.uid == resource.data.uid;
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /responses/{studentId} {
+        allow get: if isAdmin() || ownsSession(sessionId) ||
+          (isJoinedStudent(sessionId) && studentId == request.auth.uid);
+        allow list: if isAdmin() || ownsSession(sessionId);
+        allow create: if isJoinedStudent(sessionId) &&
+          studentId == request.auth.uid &&
+          validStudentResponseCreate(sessionId);
+        allow update: if isAdmin() || ownsSession(sessionId) ||
+          (isJoinedStudent(sessionId) &&
+            studentId == request.auth.uid &&
+            validStudentResponseUpdate(sessionId));
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /snapshot/{document} {
+        allow get, list: if isAdmin() || ownsSession(sessionId);
+        allow create, update: if ownsSessionAfter(sessionId);
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /snapshot_images/{questionKey} {
+        allow get, list: if isAdmin() || ownsSession(sessionId);
+        allow create, update: if ownsSessionAfter(sessionId);
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
 
       match /{document=**} {
-        allow read, write: if signedIn();
+        allow read, write: if false;
       }
     }
 
     match /config/{document} {
-      allow read, write: if signedIn();
+      allow get, list, create, update, delete: if isAdmin();
+      allow read, write: if false;
     }
 
     match /clock/{sampleId} {
-      allow read, write: if signedIn();
+      allow get, create, update, delete: if signedIn() &&
+        sampleId.matches('^' + request.auth.uid + '-[A-Za-z0-9]+$');
+      allow list: if false;
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
