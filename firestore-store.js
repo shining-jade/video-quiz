@@ -75,13 +75,13 @@
       if (!normalizedEmail) return null;
       const key = encodeURIComponent(normalizedEmail);
       try {
-        await db.doc('quiz_sets/__teacher_allowance_probe__' + key).get();
+        await db.doc('quiz_sets/__teacher_allowance_probe__' + key).get({ source: 'server' });
       } catch (error) {
         if (permissionDenied(error)) return null;
         throw error;
       }
       try {
-        await db.doc('config/__admin_allowance_probe__' + key).get();
+        await db.doc('config/__admin_allowance_probe__' + key).get({ source: 'server' });
         return { enabled: true, role: 'admin' };
       } catch (error) {
         if (permissionDenied(error)) return { enabled: true, role: 'teacher' };
@@ -106,6 +106,10 @@
       ...withoutDocumentId(value),
       ownerUid: teacher && teacher.uid || '',
       ownerEmail: teacher && teacher.email || ''
+    });
+    const withContentRevision = value => ({
+      ...withoutDocumentId(value),
+      contentRevision: fieldValue.serverTimestamp()
     });
 
     function stableValue(value) {
@@ -133,7 +137,7 @@
         throw new Error('세트와 이미지를 한 번에 저장할 수 있는 500개 작업 한도를 넘었습니다.');
       }
       const batch = db.batch();
-      batch.set(db.doc('quiz_sets/' + setId), withoutDocumentId(value));
+      batch.set(db.doc('quiz_sets/' + setId), withContentRevision(value));
       deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
       Object.entries(next).forEach(([questionIndex, data]) => {
         batch.set(db.doc(path + '/' + questionIndex), { data });
@@ -174,13 +178,19 @@
       const path = 'images/' + setId + '/q';
       const current = await db.collection(path).get().then(collectionValue);
       const next = normalizedImages(images);
+      const deletes = Object.keys(current).filter(questionIndex =>
+        questionIndex !== imageKey(questionIndex) ||
+        !Object.prototype.hasOwnProperty.call(next, questionIndex)
+      );
+      const operationCount = 1 + deletes.length + Object.keys(next).length;
+      if (operationCount > 500) {
+        throw new Error('세트와 이미지를 한 번에 저장할 수 있는 500개 작업 한도를 넘었습니다.');
+      }
       const batch = db.batch();
-      Object.keys(current).forEach(questionIndex => {
-        if (questionIndex !== imageKey(questionIndex) ||
-            !Object.prototype.hasOwnProperty.call(next, questionIndex)) {
-          batch.delete(db.doc(path + '/' + questionIndex));
-        }
-      });
+      batch.set(db.doc('quiz_sets/' + setId), {
+        contentRevision: fieldValue.serverTimestamp()
+      }, { merge: true });
+      deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
       Object.entries(next).forEach(([questionIndex, data]) => {
         batch.set(db.doc(path + '/' + questionIndex), { data });
       });
@@ -217,7 +227,8 @@
             id: newId,
             title: ((current.title || '제목 없음') + ' (사본)').slice(0, 200),
             createdAt: fieldValue.serverTimestamp(),
-            updatedAt: fieldValue.serverTimestamp()
+            updatedAt: fieldValue.serverTimestamp(),
+            contentRevision: fieldValue.serverTimestamp()
           }, teacher);
           transaction.set(destinationReference, withoutDocumentId(copy));
           entries.forEach(([questionIndex, data]) => {

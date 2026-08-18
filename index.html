@@ -1719,9 +1719,23 @@ function screenMake(setId) {
     saved: false,
     player: null,
     draftTimer: null,
-    ytCancels: []
+    ytCancels: [],
+    ownerUid: teacherState && teacherState.uid || ''
   };
   const state = mk;
+  const showReadOnly = set => {
+    state.readOnly = true;
+    APP().innerHTML = topbar('<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>') +
+      '<div class="wrap"><h1 style="font-size:22px;margin-bottom:12px">' + esc(set.title) + '</h1>' +
+        '<div class="card"><div class="notice info" style="margin:0 0 16px"><b>읽기 전용</b> — ' +
+          (set.ownerUid
+            ? '다른 교사가 소유한 공유 세트입니다. 사본을 만들면 내 세트로 편집할 수 있습니다.'
+            : '소유자 정보가 없는 이전 세트입니다. 이전 작업이 완료될 때까지 원본을 편집할 수 없습니다.') +
+        '</div><div class="row">' +
+          '<a class="btn primary" href="#/play/' + esc(setId) + '">🚀 우리 반 시작하기</a>' +
+          '<button class="btn" onclick="setDuplicate(\'' + esc(setId) + '\')">⧉ 사본 만들기</button>' +
+        '</div></div></div>';
+  };
   mkPlayer = null;
   mkPlayerVid = '';
   const saveShortcut = event => { if (mk === state) mkHandleSaveShortcut(event); };
@@ -1763,19 +1777,10 @@ function screenMake(setId) {
       const set = normSet(savedSet);
       if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
       if (!canEditSet(set, teacherState)) {
-        state.readOnly = true;
-        APP().innerHTML = topbar('<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>') +
-          '<div class="wrap"><h1 style="font-size:22px;margin-bottom:12px">' + esc(set.title) + '</h1>' +
-            '<div class="card"><div class="notice info" style="margin:0 0 16px"><b>읽기 전용</b> — ' +
-              (set.ownerUid
-                ? '다른 교사가 소유한 공유 세트입니다. 사본을 만들면 내 세트로 편집할 수 있습니다.'
-                : '소유자 정보가 없는 이전 세트입니다. 이전 작업이 완료될 때까지 원본을 편집할 수 없습니다.') +
-            '</div><div class="row">' +
-              '<a class="btn primary" href="#/play/' + esc(setId) + '">🚀 우리 반 시작하기</a>' +
-              '<button class="btn" onclick="setDuplicate(\'' + esc(setId) + '\')">⧉ 사본 만들기</button>' +
-            '</div></div></div>';
+        showReadOnly(set);
         return;
       }
+      state.ownerUid = set.ownerUid;
       state.title = set.title;
       state.author = set.author || state.author;
       state.settings = set.settings;
@@ -1788,6 +1793,10 @@ function screenMake(setId) {
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
         if (mk !== state) return;
+        if (!canEditSet(set, teacherState) || state.ownerUid !== teacherState.uid) {
+          showReadOnly(set);
+          return;
+        }
         state.videos.forEach((video, videoIndex) => {
           video.questions.forEach((q, questionIndex) => {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
@@ -2473,7 +2482,10 @@ function mkPayload() {
 function mkSave(forceNew) {
   const state = mk;
   if (!state) return;
-  if (state.readOnly) {
+  const ownerState = teacherState;
+  if (state.readOnly || !AuthCore.isTeacher(ownerState) ||
+      !state.ownerUid || state.ownerUid !== ownerState.uid) {
+    state.readOnly = true;
     toast('읽기 전용 세트는 원본을 저장할 수 없습니다. 사본을 만들어 주세요.');
     return;
   }
@@ -2490,7 +2502,7 @@ function mkSave(forceNew) {
   if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
   mkSetSaveStatus('saving');
 
-  const saving = store.saveOwnedQuizSet(id, data, built.images, teacherState);
+  const saving = store.saveOwnedQuizSet(id, data, built.images, ownerState);
   return saving
     .then(() => {
       if (mk !== state) return;

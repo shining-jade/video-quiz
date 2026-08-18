@@ -14,11 +14,13 @@ const {
   getDocs,
   query,
   runTransaction,
+  serverTimestamp,
   setDoc,
   setLogLevel,
   Timestamp,
   updateDoc,
-  where
+  where,
+  writeBatch
 } = require('firebase/firestore');
 
 const projectId = 'demo-video-quiz';
@@ -288,6 +290,25 @@ rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 �
   assert.equal(copied.data().ownerUid, actors.otherTeacher.uid);
   const copiedImages = await assertSucceeds(getDocs(collection(teacher, 'images/copied-by-other/q')));
   assert.equal(copiedImages.size, 1);
+});
+
+rulesTest('이미지 교체 batch의 부모 revision 갱신은 소유 교사에게만 허용된다', async () => {
+  const replace = actorName => {
+    const db = actorFirestore(actorName);
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
+    batch.set(doc(db, 'images/set1/q/0'), { data: `${actorName}-image` });
+    return batch.commit();
+  };
+
+  await assertFails(replace('otherTeacher'));
+  await assertSucceeds(replace('owner'));
+
+  const owner = actorFirestore('owner');
+  const source = await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
+  assert.ok(source.data().contentRevision instanceof Timestamp);
+  const image = await assertSucceeds(getDoc(doc(owner, 'images/set1/q/0')));
+  assert.equal(image.data().data, 'owner-image');
 });
 
 rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
