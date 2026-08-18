@@ -200,6 +200,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
         },
         async commit() {
           calls.push({ operation: 'batchCommit', size: operations.length });
+          if (options.failBatchCommit) throw new Error(options.failBatchCommit);
           const touched = [];
           operations.forEach(operation => {
             if (operation.operation === 'set') {
@@ -858,7 +859,7 @@ test('늦게 확인한 영상 길이는 종료 입력·손잡이 max·문항 점
 
   context.mkApplyDuration(0, 120);
 
-  assert.equal(elements.get('[data-range-input="0-end"]').value, '2:00');
+  assert.equal(elements.get('[data-range-input="0-end"]').value, '');
   assert.equal(elements.get('[data-range-slider="0-start"]').max, 120);
   assert.equal(elements.get('[data-range-slider="0-end"]').max, 120);
   assert.equal(elements.get('[data-range-slider="0-end"]').value, 120);
@@ -1526,7 +1527,7 @@ test('교사 재생 초기화는 videos를 평탄화해 전역 문항 상태를 
   loadStageFunctions(['screenPlay'], context);
 
   context.screenPlay('set1');
-  await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
   await Promise.resolve();
 
   assert.equal(introRendered, 1);
@@ -1564,7 +1565,7 @@ test('다음 영상은 같은 플레이어에 시작 시각으로 로드된다',
 
 test('다음 영상 로드 중에는 이전 영상 시각으로 문항이나 전환을 실행하지 않는다', () => {
   let reads = 0, opened = 0, transitioned = 0;
-  const ctx = loadStageFunctions(['plTick'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       playerLoading: true, videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 20, fired: [false], live: { q: -1 },
@@ -1608,7 +1609,7 @@ test('영상 진행 인터페이스는 다음 영상을 로드하고 마지막�
 test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다', () => {
   const loaded = [];
   let rendered = 0;
-  const ctx = loadStageFunctions(['plTick'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [], live: { q: -1 }, flatQuestions: [],
@@ -1642,7 +1643,7 @@ test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다',
 
 test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문항 종료 뒤 다시 센다', () => {
   const loaded = [];
-  const ctx = loadStageFunctions(['plTick'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 4000, playlistDone: false,
       playerLoading: false, pendingLiveQuestion: -1,
@@ -1674,7 +1675,7 @@ test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문�
 
 test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간다', () => {
   let completed = 0, paused = 0;
-  const ctx = loadStageFunctions(['plCompletePlaylist', 'plTick'], {
+  const ctx = loadStageFunctions(['plCompletePlaylist', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 49, fired: [], live: { q: -1 }, flatQuestions: [],
@@ -1701,7 +1702,7 @@ test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간�
 
 test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 보류한다', () => {
   let paused = 0;
-  const ctx = loadStageFunctions(['plTick'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [], live: { q: 1 }, flatQuestions: [],
@@ -1731,7 +1732,7 @@ test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 
 
 test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스를 쓴다', () => {
   const opened = [];
-  const ctx = loadStageFunctions(['plTick'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false, false], live: { q: -1 },
@@ -1763,7 +1764,7 @@ test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스
 
 test('종료 시각 문항의 live 반영이 늦어도 영상 전환을 시작하지 않는다', () => {
   let paused = 0;
-  const ctx = loadStageFunctions(['plOpenQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plOpenQuestion', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       sessionId: 'session-a', videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false], live: { q: -1 }, pendingLiveQuestion: -1,
@@ -2235,7 +2236,8 @@ test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 
     sessionId: 'SESSION12345',
     session: {
       setId: 'set1', setTitle: '첫 세트', label: '2학년 3반',
-      teacher: '교사', createdAt: serverTimestamp, status: 'live'
+      teacher: '교사', createdAt: serverTimestamp, status: 'live',
+      setSnapshot: { title: '첫 세트', author: '교사' }, snapshotImages: {}
     },
     codes: ['OLD234', 'NEW234']
   });
@@ -2873,7 +2875,7 @@ test('중앙 문제·순위 카드 위에서 교사 도구와 QR을 조작하고
 test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재생한다', async () => {
   let writes = 0, played = 0, exits = 0;
   const player = { playVideo() { played++; } };
-  const ctx = loadStageFunctions(['plCloseQuestion'], {
+  const ctx = loadStageFunctions(['plOpenNextDueQuestion', 'plCloseQuestion'], {
     pl: { sessionId: 'session1', player },
     plPushBoard() { return Promise.resolve(); },
     document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
@@ -2901,6 +2903,7 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
       }
     }
   };
+  vm.runInNewContext(extractFunction(html, 'plOpenNextDueQuestion'), context);
   vm.runInNewContext(extractFunction(html, 'plCloseQuestion'), context);
 
   await context.plCloseQuestion();
@@ -3006,7 +3009,7 @@ test('quiz timeline maps progress and question markers to the active video range
       return null;
     }
   };
-  const ctx = loadStageFunctions(['plTimelineDomain', 'plUpdateTimeline', 'plRenderTimeline'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plTimelineDomain', 'plUpdateTimeline', 'plRenderTimeline'], {
     pl: {
       videoIndex: 0,
       set: { videos: [{ startSec: 120, endSec: 620 }] },
@@ -3048,7 +3051,7 @@ test('quiz timeline maps progress and question markers to the active video range
 });
 
 test('quiz timeline uses player duration when the active video has no end time', () => {
-  const ctx = loadStageFunctions(['plTimelineDomain'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plTimelineDomain'], {
     pl: {
       videoIndex: 0,
       set: { videos: [{ startSec: 30, endSec: null }] },
@@ -3097,7 +3100,7 @@ test('timeline defers null-end markers until duration is known and does not rebu
     loadVideoById() {}
   };
   const ctx = loadStageFunctions([
-    'plTimelineDomain', 'plUpdateTimeline', 'plRenderTimeline', 'plLoadVideo',
+    'plEffectiveEnd', 'plTimelineDomain', 'plUpdateTimeline', 'plRenderTimeline', 'plLoadVideo',
     'plPlayerEventVideoId', 'plPlayerEventStatus', 'plHandlePlayerStateChange'
   ], {
     pl: {
@@ -3138,7 +3141,7 @@ test('rewind and jump rebuild marker states once only when fired changes', () =>
     getDuration() { return 100; },
     seekTo() {}, playVideo() {}
   };
-  const ctx = loadStageFunctions(['plTick', 'plJumpTo'], {
+  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plJumpTo'], {
     pl: {
       videoIndex: 0, lastT: 50, fired: [true], playlistDone: false,
       playerLoading: false, playerError: null, playbackEnded: false,
@@ -3620,10 +3623,11 @@ test('학생 답 전송은 본인 응답 문서의 현재 문항만 병합한다
     toast() {},
     console
   };
+  vm.runInNewContext(extractFunction(html, 'stQueueWrite'), context);
   vm.runInNewContext(extractFunction(html, 'stSend'), context);
 
   context.stSend({ txt: '서술', at: 123, ms: 456 }, { txt: '서술', ms: 456 });
-  await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(writes, [['a', 's1', 2, { txt: '서술', at: 123, ms: 456 }]]);
 });
@@ -3646,7 +3650,7 @@ test('두 번째 영상 객관식은 전체 문항 키로 제출하고 다시 �
     multiCorrect() { return false; }, fmtMulti(v) { return v.join(','); }, shortCorrect() { return false; },
     stLocked() { return false; }, stRender() {}, toast() {}, console
   };
-  for (const name of ['stAnswer', 'stHasDraftAnswer', 'stBuildAnswer', 'stSend', 'stSubmitCurrent', 'stReviseAnswer']) {
+  for (const name of ['stAnswer', 'stHasDraftAnswer', 'stBuildAnswer', 'stQueueWrite', 'stSend', 'stSubmitCurrent', 'stReviseAnswer']) {
     vm.runInNewContext(extractFunction(html, name), context);
   }
 
@@ -4257,4 +4261,591 @@ test('대시보드 CSV는 서술형 텍스트와 미채점 표시를 유지한�
   assert.match(downloaded.rows[5].join(','), /영상 2 \(정리\) · 문항 2 답\(서술형\)/);
   assert.equal(downloaded.rows[6][7], '학생 글');
   assert.equal(downloaded.rows[6][8], '미채점');
+});
+
+test('세트 구조와 이미지는 하나의 batch에서 함께 교체된다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }] },
+    'images/set1/q/v0q0': { data: 'old-image' }
+  });
+  const store = createStore(fake);
+
+  await store.saveQuizSetWithImages('set1', {
+    title: '새 값', videos: [{ questions: [{ text: '새 문항' }] }]
+  }, { v0q0: 'new-image', v0q1: 'second-image' });
+
+  assert.equal(fake.value('quiz_sets/set1').title, '새 값');
+  assert.equal(fake.value('images/set1/q/v0q0').data, 'new-image');
+  assert.equal(fake.value('images/set1/q/v0q1').data, 'second-image');
+  assert.deepEqual(
+    fake.calls().filter(call => call.operation === 'batchCommit').map(call => call.size),
+    [3]
+  );
+});
+
+test('이미지 batch가 실패하면 새 세트 구조도 공개되지 않는다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }] },
+    'images/set1/q/v0q0': { data: 'old-image' }
+  }, { failBatchCommit: 'image write failed' });
+  const store = createStore(fake);
+
+  await assert.rejects(store.saveQuizSetWithImages('set1', {
+    title: '새 값', videos: [{ questions: [{ text: '새 문항' }, { text: '추가 문항' }] }]
+  }, { v0q0: 'new-image', v0q1: 'second-image' }), /image write failed/);
+
+  assert.equal(fake.value('quiz_sets/set1').title, '이전');
+  assert.equal(fake.value('images/set1/q/v0q0').data, 'old-image');
+  assert.equal(fake.value('images/set1/q/v0q1'), undefined);
+});
+
+test('세션 시작은 세트와 이미지 revision을 고정하고 이후 편집과 분리한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { title: '시작 전', videos: [{ questions: [{ text: '원래 문항', imgUp: true }] }] },
+    'images/set1/q/v0q0': { data: 'original-image' }
+  });
+  const store = createStore(fake);
+  const setSnapshot = await store.getQuizSet('set1');
+  const snapshotImages = await store.getImages('set1');
+
+  await store.startSession('session1', {
+    setId: 'set1', setTitle: '시작 전', setSnapshot, snapshotImages,
+    createdAt: SERVER_TIMESTAMP, status: 'live'
+  }, () => 'ABC234');
+  await store.saveQuizSetWithImages('set1', {
+    title: '수정 후', videos: [{ questions: [{ text: '바뀐 문항', imgUp: true }] }]
+  }, { v0q0: 'changed-image' });
+
+  assert.equal((await store.getSessionQuizSet('session1', 'set1')).title, '시작 전');
+  assert.equal((await store.getSessionQuizSet('session1', 'set1')).videos[0].questions[0].text, '원래 문항');
+  assert.equal(await store.getSessionQuestionImage('session1', 'set1', 'v0q0'), 'original-image');
+  assert.equal(fake.value('sessions/session1').setSnapshot, undefined);
+  assert.equal(fake.value('sessions/session1').snapshotImages, undefined);
+  assert.equal(fake.value('sessions/session1/snapshot/set').title, '시작 전');
+});
+
+test('학생은 세션 snapshot을 현재 편집본보다 우선한다', async () => {
+  const calls = [];
+  const context = {
+    st: {
+      code: 'ABC234', sessionId: null, session: null, set: null, flatQuestions: []
+    },
+    store: {
+      async getCode() { return { sessionId: 'session1' }; },
+      async getSession() { return { id: 'session1', setId: 'set1', setTitle: '원래 세트' }; },
+      async getSessionQuizSet(sessionId, setId) {
+        calls.push(['snapshot', sessionId, setId]);
+        return { title: '원래 세트', videos: [{ questions: [{ text: '원래 문항' }] }] };
+      },
+      async getQuizSet() { calls.push(['mutable']); return { title: '수정본', videos: [] }; }
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    stShell() {}, stRenderCodeForm() {}, stRenderIdentityForm() { calls.push(['identity']); },
+    lsSet() {}, normSet(value) { return value; }, console
+  };
+  loadStageFunctions(['stLookupCode'], context);
+
+  await context.stLookupCode('ABC234');
+
+  assert.deepEqual(calls, [
+    ['snapshot', 'session1', 'set1'],
+    ['identity']
+  ]);
+  assert.equal(context.st.flatQuestions[0].text, '원래 문항');
+});
+
+test('대시보드는 세션 snapshot을 현재 편집본보다 우선한다', async () => {
+  const calls = [];
+  const context = {
+    dash: null,
+    store: {
+      async getSession() { return { id: 'session1', setId: 'set1', setTitle: '원래 세트' }; },
+      async getSessionQuizSet(sessionId, setId) {
+        calls.push(['snapshot', sessionId, setId]);
+        return { title: '원래 세트', videos: [{ questions: [{ text: '원래 문항' }] }] };
+      },
+      async getQuizSet() { calls.push(['mutable']); return null; },
+      subscribeStudents() { return () => {}; }, subscribeResponses() { return () => {}; }
+    },
+    FirestoreCore: require('../firestore-core.js'), PlaylistCore: require('../playlist-core.js'),
+    APP() { return { innerHTML: '' }; }, topbar() { return ''; }, normSet(value) { return value; },
+    normSettings() { return {}; }, renderDash() {}, onCleanup() {}, go() {}, esc(value) { return value; }, console
+  };
+  loadStageFunctions(['screenDashboard'], context);
+
+  await context.screenDashboard('session1');
+
+  assert.deepEqual(calls, [['snapshot', 'session1', 'set1']]);
+  assert.equal(context.dash.flatQuestions[0].text, '원래 문항');
+});
+
+test('이전 편집 화면 cleanup과 조회 결과는 새 편집 상태와 player를 건드리지 않는다', async () => {
+  let resolveOld;
+  const oldLoad = new Promise(resolve => { resolveOld = resolve; });
+  const cleanups = [];
+  let renders = 0;
+  let oldDestroyed = 0;
+  let newDestroyed = 0;
+  const context = {
+    mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    lsGet() { return ''; }, DEFAULT_SETTINGS: {}, blankQuestion(t) { return { t }; },
+    document: { addEventListener() {}, removeEventListener() {} }, mkHandleSaveShortcut() {},
+    onCleanup(fn) { cleanups.push(fn); }, clearTimeout() {}, every() {}, $() { return null; },
+    APP() { return { innerHTML: '' }; }, topbar() { return ''; },
+    store: {
+      getQuizSet(id) { return id === 'old' ? oldLoad : Promise.resolve(null); },
+      async getImages() { return {}; }
+    },
+    normSet(value) { return value; }, mkRestoreDraft() {}, renderMake() { renders += 1; },
+    console, toast() {}
+  };
+  loadStageFunctions(['screenMake'], context);
+
+  context.screenMake('old');
+  const oldCleanup = cleanups[0];
+  context.mkPlayer = { destroy() { oldDestroyed += 1; } };
+  context.mk.player = context.mkPlayer;
+  context.screenMake();
+  const newState = context.mk;
+  const newPlayer = { destroy() { newDestroyed += 1; } };
+  context.mkPlayer = newPlayer;
+  newState.player = newPlayer;
+  oldCleanup();
+  resolveOld({ title: '늦은 세트', settings: {}, videos: [{ questions: [{ text: '늦은 문항' }] }] });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(context.mk, newState);
+  assert.equal(context.mkPlayer, newPlayer);
+  assert.equal(oldDestroyed, 1);
+  assert.equal(newDestroyed, 0);
+  assert.equal(renders, 1);
+});
+
+test('이전 재생 화면 cleanup과 조회 결과는 새 재생 상태와 player를 건드리지 않는다', async () => {
+  let resolveOld;
+  const oldLoad = new Promise(resolve => { resolveOld = resolve; });
+  const cleanups = [];
+  let intros = 0;
+  let oldDestroyed = 0;
+  let newDestroyed = 0;
+  const context = {
+    pl: null, PlaylistCore: require('../playlist-core.js'),
+    store: {
+      getQuizSet(id) {
+        if (id === 'old') return oldLoad;
+        return Promise.resolve({ title: '새 세트', videos: [{ questions: [{ text: '새 문항' }] }] });
+      }
+    },
+    normSet(value) { return value; }, renderPlayIntro() { intros += 1; }, onCleanup(fn) { cleanups.push(fn); },
+    APP() { return { innerHTML: '' }; }, topbar() { return ''; }, esc(value) { return value; }, go() {},
+    document: {
+      addEventListener() {}, removeEventListener() {}, getElementById() { return null; },
+      body: { classList: { remove() {} } }, fullscreenElement: null
+    },
+    window: { addEventListener() {}, removeEventListener() {} },
+    plCleanupStageFullscreen() {}, plHandleFullscreenChange() {}, plHandleStageKeydown() {}, plClampQrBubble() {}, console
+  };
+  loadStageFunctions(['screenPlay'], context);
+
+  context.screenPlay('old');
+  const oldCleanup = cleanups[0];
+  context.pl.player = { destroy() { oldDestroyed += 1; } };
+  await context.screenPlay('new');
+  const newState = context.pl;
+  const newPlayer = { destroy() { newDestroyed += 1; } };
+  newState.player = newPlayer;
+  oldCleanup();
+  resolveOld({ title: '늦은 세트', videos: [{ questions: [{ text: '늦은 문항' }] }] });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(context.pl, newState);
+  assert.equal(newState.player, newPlayer);
+  assert.equal(oldDestroyed, 1);
+  assert.equal(newDestroyed, 0);
+  assert.equal(intros, 1);
+});
+
+test('화면 cleanup은 아직 준비되지 않은 YouTube waiter를 취소한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const blockStart = html.indexOf('let ytReady = false;');
+  const blockEnd = html.indexOf('/* ── 유튜브 자막', blockStart);
+  const context = { window: {} };
+  vm.runInNewContext(html.slice(blockStart, blockEnd), context);
+  vm.runInNewContext(`
+    var runs = 0;
+    var cancel = whenYT(() => { runs += 1; });
+    cancel();
+    markYTReady();
+  `, context);
+
+  assert.equal(context.runs, 0);
+});
+
+test('이전 편집 화면의 지연 focus는 새 화면에서 실행되지 않는다', () => {
+  let delayed;
+  let focused = 0;
+  const textarea = { focus() { focused += 1; } };
+  const card = {
+    scrollIntoView() {}, offsetWidth: 10,
+    classList: { remove() {}, add() {} }, querySelector() { return textarea; }
+  };
+  const oldState = { videos: [] };
+  const context = {
+    mk: oldState,
+    document: { getElementById() { return card; } },
+    setTimeout(callback) { delayed = callback; }
+  };
+  loadStageFunctions(['mkFocusQuestion'], context);
+
+  context.mkFocusQuestion(0, 0);
+  context.mk = { videos: [] };
+  delayed();
+
+  assert.equal(focused, 0);
+});
+
+test('이전 편집 화면의 지연 초안 저장은 새 화면 내용을 저장하지 않는다', () => {
+  let delayed;
+  let writes = 0;
+  const oldState = { id: 'old', saved: true };
+  const context = {
+    mk: oldState, mkDraftTimer: null,
+    mkSetSaveStatus() {}, clearTimeout() {},
+    setTimeout(callback) { delayed = callback; return 1; },
+    mkPersistDraft() { writes += 1; }
+  };
+  loadStageFunctions(['mkMarkDirty'], context);
+
+  context.mkMarkDirty();
+  context.mk = { id: 'new', saved: true };
+  delayed();
+
+  assert.equal(writes, 0);
+});
+
+test('같은 tick에 지난 문항은 모두 queue에 남고 첫 문항만 연다', () => {
+  const opened = [];
+  const context = {
+    pl: {
+      player: { getCurrentTime() { return 10; }, getDuration() { return 100; } },
+      playlistDone: false, playerLoading: false, playerError: null,
+      set: { videos: [{ startSec: 0, endSec: 100 }], settings: { autoPause: false } },
+      videoIndex: 0, lastT: 9, live: { q: -1 }, pendingLiveQuestion: -1,
+      flatQuestions: [{ videoIndex: 0, t: 10 }, { videoIndex: 0, t: 10 }],
+      fired: [false, false], dueQuestions: [], playbackEnded: false, transitionUntil: 0
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    plOpenQuestion(i) { opened.push(i); context.pl.pendingLiveQuestion = i; },
+    plRenderTimeline() {}, plUpdateTimeline() {}, plTimelineDomain() { return { start: 0, end: 100 }; },
+    plRenderTransition() {}, plCompletePlaylist() {}, plEffectiveEnd() { return 100; },
+    $() { return null; }, document: { getElementById() { return null; } }, Date, fmtTime() { return ''; }
+  };
+  loadStageFunctions(['plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], context);
+
+  context.plTick();
+
+  assert.deepEqual(opened, [0]);
+  assert.deepEqual(context.pl.dueQuestions, [1]);
+  assert.deepEqual(context.pl.fired, [true, true]);
+});
+
+test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 먼저 연다', async () => {
+  const opened = [];
+  let plays = 0;
+  const context = {
+    pl: {
+      sessionId: 'session1', live: { q: 0 }, pendingLiveQuestion: -1,
+      dueQuestions: [],
+      player: {
+        getCurrentTime() { return 20; }, getDuration() { return 100; },
+        playVideo() { plays += 1; }
+      },
+      playlistDone: false, playerLoading: false, playerError: null,
+      set: { videos: [{ startSec: 0, endSec: 100 }], settings: { autoPause: false } },
+      videoIndex: 0, lastT: 10,
+      flatQuestions: [{ videoIndex: 0, t: 5 }, { videoIndex: 0, t: 15 }],
+      fired: [true, false], playbackEnded: false, transitionUntil: 0
+    },
+    async plPushBoard() {},
+    store: { async setLive() {} },
+    plOpenQuestion(i) { opened.push(i); context.pl.pendingLiveQuestion = i; },
+    PlaylistCore: require('../playlist-core.js'),
+    plRenderTimeline() {}, plUpdateTimeline() {}, plTimelineDomain() { return { start: 0, end: 100 }; },
+    plRenderTransition() {}, plCompletePlaylist() {}, plEffectiveEnd() { return 100; },
+    $() { return null; }, document: { getElementById() { return null; } }, Date, fmtTime() { return ''; }
+  };
+  loadStageFunctions(['plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plCloseQuestion'], context);
+
+  context.plTick();
+  assert.deepEqual(context.pl.dueQuestions, [1]);
+
+  await context.plCloseQuestion();
+
+  assert.deepEqual(opened, [1]);
+  assert.equal(plays, 0);
+  assert.equal(context.pl.live.q, -1);
+});
+
+test('물리 영상 길이는 설정 종료보다 우선하고 ENDED는 terminal 신호다', () => {
+  let ticks = 0;
+  const context = {
+    pl: {
+      expectedVideoId: 'video', playerLoading: false, activePlaybackGeneration: 1, loadGeneration: 1,
+      videoIndex: 0, set: { videos: [{ endSec: 200 }] }, playbackEnded: false
+    },
+    YT: { PlayerState: { PLAYING: 1, CUED: 5, ENDED: 0 } },
+    plPlayerEventVideoId() { return 'video'; },
+    plPlayerEventStatus() { return { state: 0, currentTime: 120, duration: 120 }; },
+    plTick() { ticks += 1; }, plRenderTimeline() {}
+  };
+  loadStageFunctions(['plEffectiveEnd', 'plHandlePlayerStateChange'], context);
+
+  assert.equal(context.plEffectiveEnd({ endSec: 200 }, null, 120), 120);
+
+  context.plHandlePlayerStateChange({ data: 0, target: {} });
+
+  assert.equal(context.pl.playbackEnded, true);
+  assert.equal(ticks, 1);
+});
+
+test('이전 재생 화면의 늦은 이미지 조회는 새 문항 overlay를 바꾸지 않는다', async () => {
+  let resolveImage;
+  const oldImage = new Promise(resolve => { resolveImage = resolve; });
+  const oldElement = { src: '' };
+  const newElement = { src: '' };
+  const stage = { appendChild() {}, classList: { add() {} } };
+  const context = {
+    pl: {
+      setId: 'set1', sessionId: 'session1', live: { q: 0, revealed: false },
+      set: { settings: { revealMode: 'manual' } },
+      flatQuestions: [{ type: 'choice', choices: ['A'], answer: 0, imgUp: true, key: 'v0q0' }],
+      students: {}, responses: {}
+    },
+    document: {
+      getElementById(id) {
+        if (id === 'pl-stage') return stage;
+        return null;
+      },
+      createElement() {
+        return {
+          id: '', className: '', innerHTML: '',
+          querySelector() { return oldElement; }
+        };
+      },
+      querySelector() { return newElement; }
+    },
+    loadQuestionImage() { return oldImage; },
+    qType() { return 'choice'; }, hasImage() { return true; }, esc(value) { return value; },
+    plStageRoot() { return stage; }, isTextType() { return false; },
+    LETTERS: ['A'], plRenderOverlayCounts() {}, plRenderQList() {},
+    plRevealed() { return false; }
+  };
+  loadStageFunctions(['plRenderOverlay'], context);
+
+  context.plRenderOverlay();
+  context.pl = {
+    setId: 'set2', sessionId: 'session2', live: { q: 0 },
+    set: { settings: { revealMode: 'manual' } }, flatQuestions: []
+  };
+  resolveImage('stale-image');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(newElement.src, '');
+});
+
+test('영상 길이를 알면 종료를 clamp하고 빈 종료 입력은 null을 복원한다', () => {
+  const endInput = { value: '' };
+  const endSlider = { max: 0, value: 0 };
+  const context = {
+    mk: { videos: [{ startSec: 10, endSec: 200, durationSec: null, questions: [] }] },
+    document: {
+      querySelector(selector) {
+        if (selector === '[data-range-input="0-end"]') return endInput;
+        if (selector === '[data-range-slider="0-end"]') return endSlider;
+        return null;
+      }
+    },
+    PlaylistCore: require('../playlist-core.js'), fmtTime(value) { return value + 's'; },
+    mkMarkDirty() {}
+  };
+  loadStageFunctions(['mkTimelineDomain', 'mkRefreshVideoTiming', 'mkApplyDuration', 'mkSetRange'], context);
+
+  context.mkApplyDuration(0, 120);
+  assert.equal(context.mk.videos[0].endSec, 120);
+  context.mkSetRange(0, 'end', '');
+
+  assert.equal(context.mk.videos[0].endSec, null);
+  assert.equal(endInput.value, '');
+  assert.equal(endSlider.value, 120);
+});
+
+test('학생의 제출 다시고르기 재제출은 문항별 revision 순서로 직렬화된다', async () => {
+  const writes = [];
+  const resolvers = [];
+  const context = {
+    st: {
+      sessionId: 'session1', sid: 'student1', live: { q: 0, openedAt: 1000, limitSec: 30 },
+      flatQuestions: [{ type: 'choice', choices: ['A', 'B'], answer: 1 }],
+      myAnswers: {}, sel: 0, multiSel: [], draft: '', submitted: false, revision: 0, writeQueues: {}
+    },
+    store: {
+      setAnswerState(...args) {
+        writes.push(clone(args));
+        return new Promise((resolve, reject) => resolvers.push({ resolve, reject }));
+      }
+    },
+    qType(q) { return q.type; }, serverNow() { return 1500; }, SV_TS: 999,
+    multiCorrect() { return false; }, fmtMulti(value) { return value.join(','); }, shortCorrect() { return false; },
+    stLocked() { return false; }, stRender() {}, toast() {}, console
+  };
+  for (const name of ['stHasDraftAnswer', 'stBuildAnswer', 'stQueueWrite', 'stSend', 'stSubmitCurrent', 'stReviseAnswer']) {
+    vm.runInNewContext(extractFunction(fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), name), context);
+  }
+
+  const first = context.stSubmitCurrent('button');
+  const revise = context.stReviseAnswer();
+  context.st.sel = 1;
+  const second = context.stSubmitCurrent('button');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][3].revision, 1);
+
+  resolvers[0].resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1][3].revision, 2);
+  assert.equal(writes[1][3].submitted, false);
+
+  resolvers[1].resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 3);
+  assert.equal(writes[2][3].revision, 3);
+  assert.equal(writes[2][3].c, 1);
+  resolvers[2].resolve();
+  await Promise.all([first, revise, second]);
+});
+
+test('이전 revision 실패는 뒤이은 학생 답의 낙관 상태를 rollback하지 않는다', async () => {
+  const writes = [];
+  let rejectFirst;
+  const context = {
+    st: {
+      sessionId: 'session1', sid: 'student1', live: { q: 0 }, myAnswers: {},
+      submitted: false, revision: 1, writeQueues: {}
+    },
+    store: {
+      setAnswerState(...args) {
+        writes.push(clone(args));
+        if (writes.length === 1) return new Promise((resolve, reject) => { rejectFirst = reject; });
+        return Promise.resolve();
+      }
+    },
+    stRender() {}, toast() {}, console: { error() {} }
+  };
+  loadStageFunctions(['stQueueWrite', 'stSend'], context);
+
+  const first = context.stSend({ c: 0, revision: 1, submitted: true }, { c: 0, revision: 1, submitted: true });
+  context.st.revision = 2;
+  const secondLocal = { c: 1, revision: 2, submitted: true };
+  const second = context.stSend({ c: 1, revision: 2, submitted: true }, secondLocal);
+  await new Promise(resolve => setImmediate(resolve));
+  rejectFirst(new Error('late failure'));
+  await Promise.all([first, second]);
+
+  assert.equal(context.st.submitted, true);
+  assert.equal(context.st.myAnswers[0], secondLocal);
+});
+
+test('겹친 관리자 조회는 최신 filter snapshot만 게시한다', async () => {
+  const pending = [];
+  const body = { innerHTML: '' };
+  const context = {
+    adm: {
+      sessions: {}, resp: {}, sets: {}, from: '2024-01-01', to: '2024-01-31',
+      setFilter: '', gradeFilter: '', klassFilter: '', loading: false, detail: null,
+      loadGeneration: 0, displayedSessionIds: []
+    },
+    store: {
+      listSessions() { return new Promise(resolve => pending.push(resolve)); },
+      async getSessionQuizSet(id) { return { title: id, videos: [{ questions: [{ text: id }] }] }; },
+      async getCollection() { return {}; }
+    },
+    FirestoreCore: require('../firestore-core.js'), PlaylistCore: require('../playlist-core.js'),
+    normSet(value) { return value; }, $(selector) { return selector === '#adm-body' ? body : null; },
+    admFillSetOptions() {}, admRenderBody() {}, esc(value) { return value; }, Date, console
+  };
+  loadStageFunctions(['admLoad'], context);
+
+  const first = context.admLoad();
+  context.adm.from = '2024-02-01'; context.adm.to = '2024-02-29';
+  const second = context.admLoad();
+  pending[1]([{ id: 'new', createdAt: new Date('2024-02-10T00:00:00').getTime(), setId: 'set1' }]);
+  await second;
+  pending[0]([{ id: 'old', createdAt: new Date('2024-01-10T00:00:00').getTime(), setId: 'set1' }]);
+  await first;
+
+  assert.deepEqual(Object.keys(context.adm.sessions), ['new']);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.adm.displayedSessionIds)), ['new']);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.adm.displayedRange)), { from: '2024-02-01', to: '2024-02-29' });
+});
+
+test('관리자 삭제는 입력 변경과 무관하게 게시된 immutable 결과만 지운다', async () => {
+  let purged;
+  const context = {
+    adm: {
+      from: '2024-02-01', to: '2024-02-29', displayedRange: { from: '2024-01-01', to: '2024-01-31' },
+      displayedSessionIds: ['shown-session']
+    },
+    admCompute() { return { sessions: [{ id: 'changed-session' }] }; },
+    prompt() { return '삭제'; }, alert() {}, toast() {}, admLoad() {},
+    store: { async purgeSessions(ids) { purged = ids; } }
+  };
+  loadStageFunctions(['admPurge'], context);
+
+  await context.admPurge();
+
+  assert.deepEqual(purged, ['shown-session']);
+});
+
+test('관리자 렌더는 세트 filter가 적용된 표시 결과 ID를 삭제 대상으로 고정한다', () => {
+  const body = { innerHTML: '' };
+  const context = {
+    adm: {
+      loading: false, detail: null, tab: 'sessions', setFilter: 'set-b',
+      sessions: {
+        one: { setId: 'set-a', students: {} },
+        two: { setId: 'set-b', students: {} }
+      },
+      resp: {}, sets: {}, gradeFilter: '', klassFilter: '', displayedSessionIds: []
+    },
+    $(selector) { return selector === '#adm-body' ? body : null; },
+    admCompute() {
+      return {
+        sessions: [{ id: 'two', setId: 'set-b' }], students: {}, perSession: {
+          two: { students: 0, answered: 0, correct: 0, graded: 0 }
+        }
+      };
+    },
+    admSessionsView() { return 'rendered'; }, admManage() {}, admStudentsView() {}, admClassesView() {}
+  };
+  loadStageFunctions(['admRenderBody'], context);
+
+  context.admRenderBody();
+
+  assert.deepEqual(Array.from(context.adm.displayedSessionIds), ['two']);
+  assert.equal(body.innerHTML, 'rendered');
+});
+
+test('CSV 셀은 수식으로 해석되는 선행 문자를 quoting 전에 중화한다', () => {
+  const context = {};
+  loadStageFunctions(['csvSafeCell'], context);
+
+  assert.equal(context.csvSafeCell('=HYPERLINK("https://bad")'), '\'=HYPERLINK("https://bad")');
+  assert.equal(context.csvSafeCell('+1+1'), "'+1+1");
+  assert.equal(context.csvSafeCell('-2+3'), "'-2+3");
+  assert.equal(context.csvSafeCell('@SUM(A1:A2)'), "'@SUM(A1:A2)");
+  assert.equal(context.csvSafeCell('\tformula'), "'\tformula");
+  assert.equal(context.csvSafeCell('\rformula'), "'\rformula");
+  assert.equal(context.csvSafeCell('안전한 값'), '안전한 값');
+  assert.equal(context.csvSafeCell(-2), '-2');
 });

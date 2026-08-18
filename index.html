@@ -797,9 +797,15 @@ function safeFileName(s) {
 }
 
 /** UTF-8 BOM 포함 — 엑셀에서 한글이 깨지지 않게 */
+function csvSafeCell(value) {
+  if (value == null) return '';
+  const text = String(value);
+  return typeof value === 'string' && /^[=+\-@\t\r]/.test(text) ? "'" + text : text;
+}
+
 function downloadCSV(filename, rows) {
   const csv = rows.map(r => r.map(c => {
-    const v = c == null ? '' : String(c);
+    const v = csvSafeCell(c);
     return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   }).join(',')).join('\r\n');
   const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -835,12 +841,22 @@ let ytReady = false;
 const ytWaiters = [];
 function markYTReady() {
   ytReady = true;
-  while (ytWaiters.length) ytWaiters.shift()();
+  while (ytWaiters.length) {
+    const waiter = ytWaiters.shift();
+    if (typeof waiter === 'function') waiter();
+    else if (waiter && !waiter.cancelled) waiter.callback();
+  }
 }
 window.onYouTubeIframeAPIReady = markYTReady;
 function whenYT(cb) {
   if (!ytReady && window.YT && typeof window.YT.Player === 'function') markYTReady();
-  ytReady ? cb() : ytWaiters.push(cb);
+  if (ytReady) {
+    cb();
+    return () => {};
+  }
+  const waiter = { callback: cb, cancelled: false };
+  ytWaiters.push(waiter);
+  return () => { waiter.cancelled = true; };
 }
 
 /* ── 유튜브 자막(CC) 제어 ──────────────────────────────────────────────
@@ -1063,10 +1079,13 @@ async function prepareImage(file) {
 
 /** 문항 이미지를 그때그때 받아 캐시한다 (교사 재생 화면과 학생 화면 공용) */
 const imgCache = {};
-function loadQuestionImage(setId, i) {
-  const key = setId + '/' + i;
+function loadQuestionImage(setId, i, sessionId) {
+  const key = (sessionId || setId) + '/' + i;
   if (imgCache[key] !== undefined) return Promise.resolve(imgCache[key]);
-  return store.getQuestionImage(setId, i)
+  const loading = sessionId && store.getSessionQuestionImage
+    ? store.getSessionQuestionImage(sessionId, setId, i)
+    : store.getQuestionImage(setId, i);
+  return loading
     .then(src => { imgCache[key] = src || ''; return imgCache[key]; })
     .catch(() => '');
 }
@@ -1376,8 +1395,10 @@ function setImportOne(p) {
     settings: set.settings, videos: videos,
     createdAt: SV_TS, updatedAt: SV_TS
   };
-  return store.saveQuizSet(newId, data)
-    .then(() => store.replaceImages(newId, p.images || {}))
+  const saving = store.saveQuizSetWithImages
+    ? store.saveQuizSetWithImages(newId, data, p.images || {})
+    : store.saveQuizSet(newId, data).then(() => store.replaceImages(newId, p.images || {}));
+  return saving
     .then(() => newId);
 }
 
@@ -1429,11 +1450,14 @@ function mkClearDraft(setId) {
 }
 
 function mkMarkDirty() {
-  if (!mk) return;
-  mk.saved = false;
+  const state = mk;
+  if (!state) return;
+  state.saved = false;
   mkSetSaveStatus('dirty');
-  clearTimeout(mkDraftTimer);
-  mkDraftTimer = setTimeout(mkPersistDraft, 350);
+  clearTimeout(state.draftTimer);
+  const timer = setTimeout(() => { if (mk === state) mkPersistDraft(); }, 350);
+  state.draftTimer = timer;
+  mkDraftTimer = timer;
 }
 
 function mkHandleSaveShortcut(event) {
@@ -1487,7 +1511,7 @@ function mkRefreshVideoTiming(videoIndex) {
   const startSlider = document.querySelector('[data-range-slider="' + videoIndex + '-start"]');
   const endSlider = document.querySelector('[data-range-slider="' + videoIndex + '-end"]');
   if (startInput) startInput.value = fmtTime(domain.start);
-  if (endInput) endInput.value = fmtTime(domain.end);
+  if (endInput) endInput.value = video.endSec == null || video.endSec === '' ? '' : fmtTime(domain.end);
   if (startSlider) { startSlider.max = domain.max; startSlider.value = domain.start; }
   if (endSlider) { endSlider.max = domain.max; endSlider.value = domain.end; }
   const timeline = document.querySelector('[data-timeline-video="' + videoIndex + '"]');
@@ -1501,6 +1525,16 @@ function mkApplyDuration(videoIndex, value) {
   const video = mk.videos[videoIndex], duration = Math.floor(Number(value) || 0);
   if (!video || duration <= 0 || duration === video.durationSec) return;
   video.durationSec = duration;
+  let clamped = false;
+  if (Number(video.startSec) >= duration) {
+    video.startSec = Math.max(0, duration - 1);
+    clamped = true;
+  }
+  if (video.endSec != null && video.endSec !== '' && Number(video.endSec) > duration) {
+    video.endSec = duration;
+    clamped = true;
+  }
+  if (clamped) mkMarkDirty();
   mkRefreshVideoTiming(videoIndex);
 }
 
@@ -1516,20 +1550,34 @@ function screenMake(setId) {
     createdAt: 0,
     archived: false,
     settingsOpen: false,
-    saved: false
+    saved: false,
+    player: null,
+    draftTimer: null,
+    ytCancels: []
   };
+  const state = mk;
   mkPlayer = null;
   mkPlayerVid = '';
-  document.addEventListener('keydown', mkHandleSaveShortcut);
+  const saveShortcut = event => { if (mk === state) mkHandleSaveShortcut(event); };
+  document.addEventListener('keydown', saveShortcut);
   onCleanup(() => {
-    document.removeEventListener('keydown', mkHandleSaveShortcut);
-    clearTimeout(mkDraftTimer);
-    try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
-    mkPlayer = null;
+    document.removeEventListener('keydown', saveShortcut);
+    (state.ytCancels || []).forEach(cancel => { try { cancel(); } catch (e) {} });
+    state.ytCancels = [];
+    const ownPlayer = state.player;
+    try { ownPlayer && ownPlayer.destroy(); } catch (e) {}
+    state.player = null;
+    if (mkPlayer === ownPlayer) mkPlayer = null;
+    clearTimeout(state.draftTimer);
+    if (mkDraftTimer === state.draftTimer) mkDraftTimer = null;
+    state.draftTimer = null;
+    if (mk !== state) return;
+    mk = null;
   });
 
   // 재생 위치 표시 — 화면당 한 번만 등록한다 (URL을 고칠 때마다 쌓이지 않도록)
   every(500, () => {
+    if (mk !== state) return;
     const el = $('#mk-cur');
     if (el && mkPlayer && mkPlayer.getCurrentTime) {
       try { el.textContent = '현재 재생 위치: ' + fmtTime(mkPlayer.getCurrentTime()); } catch (e) {}
@@ -1545,27 +1593,32 @@ function screenMake(setId) {
   if (setId) {
     APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
     store.getQuizSet(setId).then(savedSet => {
+      if (mk !== state) return;
       const set = normSet(savedSet);
       if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
-      mk.title = set.title;
-      mk.author = set.author || mk.author;
-      mk.settings = set.settings;
-      mk.videos = set.videos;
-      mk.activeVideo = 0;
-      mk.createdAt = set.createdAt;
-      mk.archived = set.archived;
-      mk.saved = true;
+      state.title = set.title;
+      state.author = set.author || state.author;
+      state.settings = set.settings;
+      state.videos = set.videos;
+      state.activeVideo = 0;
+      state.createdAt = set.createdAt;
+      state.archived = set.archived;
+      state.saved = true;
       mkRestoreDraft(set.updatedAt || set.createdAt || 0);
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
-        mk.videos.forEach((video, videoIndex) => {
+        if (mk !== state) return;
+        state.videos.forEach((video, videoIndex) => {
           video.questions.forEach((q, questionIndex) => {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
           });
         });
         renderMake();
       });
-    }).catch(e => { console.error(e); toast('불러오기 실패: ' + e.message); });
+    }).catch(e => {
+      if (mk !== state) return;
+      console.error(e); toast('불러오기 실패: ' + e.message);
+    });
   } else {
     mkRestoreDraft(0);
     renderMake();
@@ -1630,7 +1683,7 @@ function renderMake() {
       '<div class="mk-video-body"><div class="mk-video-preview">' +
         (active ? '<div id="mk-player-wrap"></div>' : '<div class="empty">미리보기를 선택하면 이 영상의 플레이어가 열립니다.</div>') +
         '<div class="mk-range-fields"><div class="field"><label class="f">시작 시각</label><input class="mono" data-range-input="' + videoIndex + '-start" value="' + esc(fmtTime(domain.start)) + '" onchange="mkSetRange(' + videoIndex + ',\'start\',this.value)"></div>' +
-        '<div class="field"><label class="f">종료 시각</label><input class="mono" data-range-input="' + videoIndex + '-end" value="' + esc(fmtTime(domain.end)) + '" onchange="mkSetRange(' + videoIndex + ',\'end\',this.value)"></div></div>' +
+        '<div class="field"><label class="f">종료 시각 <span class="hint">(비우면 영상 끝)</span></label><input class="mono" data-range-input="' + videoIndex + '-end" value="' + esc(video.endSec == null || video.endSec === '' ? '' : fmtTime(domain.end)) + '" placeholder="영상 끝" onchange="mkSetRange(' + videoIndex + ',\'end\',this.value)"></div></div>' +
         '<div class="mk-range-track"><input data-range-slider="' + videoIndex + '-start" aria-label="영상 ' + (videoIndex + 1) + ' 시작" type="range" min="0" max="' + domain.max + '" value="' + domain.start + '" oninput="mkSetRange(' + videoIndex + ',\'start\',Number(this.value))">' +
         '<input data-range-slider="' + videoIndex + '-end" aria-label="영상 ' + (videoIndex + 1) + ' 종료" type="range" min="0" max="' + domain.max + '" value="' + domain.end + '" oninput="mkSetRange(' + videoIndex + ',\'end\',Number(this.value))"></div>' +
         '<div class="mk-timeline" data-timeline-video="' + videoIndex + '">' + dots + '</div></div>' +
@@ -1813,6 +1866,12 @@ function mkSetVideoUrl(i, value) {
 function mkSetRange(i, edge, value) {
   const video = mk.videos[i];
   if (!video || (edge !== 'start' && edge !== 'end')) return;
+  if (edge === 'end' && String(value == null ? '' : value).trim() === '') {
+    video.endSec = null;
+    mkMarkDirty();
+    mkRefreshVideoTiming(i);
+    return;
+  }
   let seconds = typeof value === 'number' ? value : parseTime(value);
   if (!Number.isFinite(seconds)) return;
   const domain = mkTimelineDomain(video);
@@ -1887,15 +1946,19 @@ function mkSyncVideo(i) {
       '<span class="hint" id="mk-cur" style="margin:0">—</span>' +
     '</div>';
 
-  whenYT(() => {
-    if (mkPlayerVid !== vid || !document.getElementById('mk-player')) return;
-    try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
-    mkPlayer = new YT.Player('mk-player', {
+  const state = mk;
+  const cancelYT = whenYT(() => {
+    if (mk !== state || mkPlayerVid !== vid || !document.getElementById('mk-player')) return;
+    try { state.player && state.player.destroy(); } catch (e) {}
+    const player = new YT.Player('mk-player', {
       videoId: vid,
       playerVars: { rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0 },
-      events: ytEvents(() => mkPlayer)
+      events: ytEvents(() => mk === state ? state.player : null)
     });
+    state.player = player;
+    mkPlayer = player;
   });
+  if (state && state.ytCancels) state.ytCancels.push(cancelYT);
 }
 
 function mkCurrentTime() {
@@ -1967,14 +2030,16 @@ function mkImageField(q, videoIndex, i) {
 }
 
 function mkUploadImage(videoIndex, i, input) {
+  const state = mk;
   const file = input.files && input.files[0];
   if (!file) return;
-  const question = mk.videos[videoIndex] && mk.videos[videoIndex].questions[i];
+  const question = state && state.videos[videoIndex] && state.videos[videoIndex].questions[i];
   if (!question) return;
   toast('이미지를 줄이는 중…');
   input.value = '';
   return prepareImage(file).then(dataUri => {
-    const stillOwned = mk.videos.some(video => video.questions.indexOf(question) >= 0);
+    if (mk !== state) return;
+    const stillOwned = state.videos.some(video => video.questions.indexOf(question) >= 0);
     if (!stillOwned) return;
     question._img = dataUri;
     question.imgUp = true;
@@ -1982,7 +2047,7 @@ function mkUploadImage(videoIndex, i, input) {
     mkMarkDirty();
     renderMake();
     toast('이미지를 넣었습니다 (' + Math.round(dataUri.length / 1024) + 'KB)');
-  }).catch(e => { console.error(e); alert(e.message); });
+  }).catch(e => { if (mk === state) { console.error(e); alert(e.message); } });
 }
 function mkSetImageUrl(videoIndex, i, v) {
   const url = String(v || '').trim();
@@ -2050,6 +2115,7 @@ function mkStampNew() {
 /** 새로 만든 문항으로 옮겨 가면서 질문 칸에 커서까지 넣어 준다.
     영상은 왼쪽에 고정되어 있으므로 다시 위로 올라갈 필요가 없다. */
 function mkFocusQuestion(videoIndex, i) {
+  const state = mk;
   const card = document.getElementById('mk-q-' + videoIndex + '-' + i);
   if (!card) return;
   card.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -2057,7 +2123,10 @@ function mkFocusQuestion(videoIndex, i) {
   void card.offsetWidth;
   card.classList.add('flash');
   const ta = card.querySelector('textarea');
-  if (ta) setTimeout(() => { try { ta.focus({ preventScroll: true }); } catch (e) { ta.focus(); } }, 320);
+  if (ta) setTimeout(() => {
+    if (mk !== state) return;
+    try { ta.focus({ preventScroll: true }); } catch (e) { ta.focus(); }
+  }, 320);
 }
 function mkSeek(videoIndex, i) {
   if (videoIndex !== mk.activeVideo || !mkPlayer || !mkPlayer.seekTo) { toast('먼저 이 영상의 미리보기를 선택하세요'); return; }
@@ -2222,6 +2291,8 @@ function mkPayload() {
 }
 
 function mkSave(forceNew) {
+  const state = mk;
+  if (!state) return;
   const err = mkValidate();
   if (err) { toast(err); return; }
   const id = (forceNew || !mk.id) ? rid(8) : mk.id;
@@ -2235,22 +2306,25 @@ function mkSave(forceNew) {
   if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
   mkSetSaveStatus('saving');
 
-  return store.saveQuizSet(id, data)
-    .then(() => store.replaceImages(id, built.images))
+  const saving = store.saveQuizSetWithImages
+    ? store.saveQuizSetWithImages(id, data, built.images)
+    : store.saveQuizSet(id, data).then(() => store.replaceImages(id, built.images));
+  return saving
     .then(() => {
-      mk.id = id;
-      mk.saved = true;
+      if (mk !== state) return;
+      state.id = id;
+      state.saved = true;
       mkClearDraft(draftId);
       if (draftId !== id) mkClearDraft(id);
       // 저장 결과를 그대로 다시 읽어들여, 정렬·인덱스 재계산이 화면에도 반영되게 한다
       if (Array.isArray(data.videos)) {
-        mk.videos = data.videos.map((video, videoIndex) => Object.assign({}, video, {
+        state.videos = data.videos.map((video, videoIndex) => Object.assign({}, video, {
           questions: normQuestions(video.questions).map((q, questionIndex) => {
             if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
             return q;
           })
         }));
-        mk.activeVideo = Math.max(0, Math.min(mk.activeVideo, mk.videos.length - 1));
+        state.activeVideo = Math.max(0, Math.min(state.activeVideo, state.videos.length - 1));
       }
       Object.keys(built.images).forEach(i => { imgCache[id + '/' + i] = built.images[i]; });
       if (location.hash !== '#/make/' + id) {
@@ -2263,6 +2337,7 @@ function mkSave(forceNew) {
       if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     })
     .catch(e => {
+      if (mk !== state) return;
       console.error(e);
       mkSetSaveStatus('failed');
       mkPersistDraft();
@@ -2303,7 +2378,7 @@ function screenPlay(setId) {
     playlistDone: false, transitionUntil: 0, playbackEnded: false,
     loadGeneration: 0, activePlaybackGeneration: 0, expectedVideoId: '',
     sessionId: null, code: null,
-    player: null, lastT: 0, fired: [],
+    player: null, lastT: 0, fired: [], dueQuestions: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     pendingLiveQuestion: -1,
     students: {}, responses: {},
@@ -2313,23 +2388,35 @@ function screenPlay(setId) {
     qrOpen: false,
     qrPosition: null,
     qrDrag: null,
-    previousVolume: 100
+    previousVolume: 100,
+    ytCancels: []
   };
-  document.addEventListener('fullscreenchange', plHandleFullscreenChange);
-  document.addEventListener('keydown', plHandleStageKeydown);
-  window.addEventListener('resize', plClampQrBubble);
+  const state = pl;
+  const fullscreenChange = () => { if (pl === state) plHandleFullscreenChange(); };
+  const stageKeydown = event => { if (pl === state) plHandleStageKeydown(event); };
+  const clampQr = () => { if (pl === state) plClampQrBubble(); };
+  const applyGeometry = () => {
+    if (pl === state && typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
+  };
+  document.addEventListener('fullscreenchange', fullscreenChange);
+  document.addEventListener('keydown', stageKeydown);
+  window.addEventListener('resize', clampQr);
   if (typeof plApplyStagePlayerGeometry === 'function') {
-    window.addEventListener('resize', plApplyStagePlayerGeometry);
+    window.addEventListener('resize', applyGeometry);
   }
   onCleanup(() => {
-    document.removeEventListener('fullscreenchange', plHandleFullscreenChange);
-    document.removeEventListener('keydown', plHandleStageKeydown);
-    window.removeEventListener('resize', plClampQrBubble);
+    document.removeEventListener('fullscreenchange', fullscreenChange);
+    document.removeEventListener('keydown', stageKeydown);
+    window.removeEventListener('resize', clampQr);
     if (typeof plApplyStagePlayerGeometry === 'function') {
-      window.removeEventListener('resize', plApplyStagePlayerGeometry);
+      window.removeEventListener('resize', applyGeometry);
     }
+    (state.ytCancels || []).forEach(cancel => { try { cancel(); } catch (e) {} });
+    state.ytCancels = [];
+    try { state.player && state.player.destroy(); } catch (e) {}
+    state.player = null;
+    if (pl !== state) return;
     plCleanupStageFullscreen();
-    try { pl && pl.player && pl.player.destroy(); } catch (e) {}
     const ov = document.getElementById('overlay');
     if (ov) ov.remove();
     const bo = document.getElementById('board-overlay');
@@ -2343,12 +2430,13 @@ function screenPlay(setId) {
       stage.classList.remove('quiz-open');
       stage.classList.remove('rank-open');
     }
-    pl = null;
+    if (pl === state) pl = null;
   });
 
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">퀴즈 세트를 불러오는 중…</div></div>';
 
   store.getQuizSet(setId).then(savedSet => {
+    if (pl !== state) return;
     const set = normSet(savedSet);
     const flatQuestions = set ? PlaylistCore.flattenQuestions(set.videos) : [];
     if (!set || !flatQuestions.length) {
@@ -2357,17 +2445,22 @@ function screenPlay(setId) {
         '<a class="btn" href="#/make">새 세트 만들기</a></div></div></div>';
       return;
     }
-    pl.set = set;
-    pl.videos = set.videos;
-    pl.flatQuestions = flatQuestions;
-    pl.videoIndex = 0;
-    pl.playlistDone = false;
-    pl.transitionUntil = 0;
-    pl.playbackEnded = false;
-    pl.lastT = Math.max(0, Number(set.videos[0].startSec) || 0) - 0.6;
-    pl.fired = flatQuestions.map(() => false);
+    state.set = set;
+    state.videos = set.videos;
+    state.flatQuestions = flatQuestions;
+    state.videoIndex = 0;
+    state.playlistDone = false;
+    state.transitionUntil = 0;
+    state.playbackEnded = false;
+    state.lastT = Math.max(0, Number(set.videos[0].startSec) || 0) - 0.6;
+    state.fired = flatQuestions.map(() => false);
+    state.dueQuestions = [];
     renderPlayIntro();
-  }).catch(e => { console.error(e); APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>'; });
+  }).catch(e => {
+    if (pl !== state) return;
+    console.error(e);
+    APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>';
+  });
 }
 
 /** 반을 시작하기 전 — 세트 내용 확인 화면 */
@@ -2408,33 +2501,46 @@ function renderPlayIntro() {
 
 /** 새 세션(반) 생성 — 반 코드가 겹치지 않을 때까지 재시도 */
 function plStartSession() {
+  const state = pl;
+  if (!state || state.startingSession) return Promise.resolve();
+  state.startingSession = true;
   const label = ($('#pl-label') && $('#pl-label').value.trim()) || '';
   lsSet('vq_last_label', label);
   const sessionId = rid(12);
-  const teacher = pl.set.author || '';
+  const teacher = state.set.author || '';
 
-  return store.startSession(sessionId, {
-    setId: pl.setId,
-    setTitle: pl.set.title,
-    label: label,
-    teacher: teacher,
-    createdAt: SV_TS,
-    status: 'live'
-  }, () => rid(6)).then(code => {
-    pl.sessionId = sessionId;
-    pl.code = code;
+  const loadImages = store.getImages ? store.getImages(state.setId) : Promise.resolve({});
+  return loadImages.then(snapshotImages => {
+    if (pl !== state) return null;
+    return store.startSession(sessionId, {
+      setId: state.setId,
+      setTitle: state.set.title,
+      label: label,
+      teacher: teacher,
+      createdAt: SV_TS,
+      status: 'live',
+      setSnapshot: state.set,
+      snapshotImages: snapshotImages
+    }, () => rid(6));
+  }).then(code => {
+    if (pl !== state || !code) return;
+    state.sessionId = sessionId;
+    state.code = code;
     renderPlayRun();
   }).catch(e => {
+    if (pl !== state) return;
     console.error(e);
     alert(e.message === '사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.'
       ? '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.'
       : '반 시작 실패: ' + e.message);
-  });
+  }).finally(() => { if (pl === state) state.startingSession = false; });
 }
 
 function renderPlayRun() {
-  const s = pl.set;
-  const questions = pl.flatQuestions;
+  const state = pl;
+  if (!state) return;
+  const s = state.set;
+  const questions = state.flatQuestions;
   const firstVideo = s.videos[0];
   const joinUrl = linkTo('join/' + pl.code);
 
@@ -2515,74 +2621,86 @@ function renderPlayRun() {
   plRenderStageControls();
 
   // 실시간 구독 — 참여자, 응답, live 상태
-  onCleanup(store.subscribeStudents(pl.sessionId, students => {
-    pl.students = students || {};
+  onCleanup(store.subscribeStudents(state.sessionId, students => {
+    if (pl !== state) return;
+    state.students = students || {};
     plRenderStudents();
     plRenderBoardOverlay();
     plRenderStageControls();
-  }, e => console.error(e)));
-  onCleanup(store.subscribeResponses(pl.sessionId, responseDocs => {
-    pl.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
+  }, e => { if (pl === state) console.error(e); }));
+  onCleanup(store.subscribeResponses(state.sessionId, responseDocs => {
+    if (pl !== state) return;
+    state.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
     plRenderQList();
     plRenderOverlayCounts();
     plRenderStudents();
     plRenderBoardOverlay();
-  }, e => console.error(e)));
-  onCleanup(store.subscribeLive(pl.sessionId, live => {
-    pl.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
-    if (pl.pendingLiveQuestion === pl.live.q) pl.pendingLiveQuestion = -1;
+  }, e => { if (pl === state) console.error(e); }));
+  onCleanup(store.subscribeLive(state.sessionId, live => {
+    if (pl !== state) return;
+    state.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
+    if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
     plRenderOverlay();
     if (typeof plRenderTimeline === 'function') plRenderTimeline();
     plRenderStageControls();
-  }, e => console.error(e)));
+  }, e => { if (pl === state) console.error(e); }));
 
   // 플레이어
-  whenYT(() => {
-    if (!pl || !document.getElementById('pl-player')) return;
-    pl.loadGeneration++;
-    pl.activePlaybackGeneration = 0;
-    pl.expectedVideoId = firstVideo.videoId;
-    pl.playerLoading = true;
-    pl.player = new YT.Player('pl-player', {
+  const cancelYT = whenYT(() => {
+    if (pl !== state || !document.getElementById('pl-player')) return;
+    state.loadGeneration++;
+    state.activePlaybackGeneration = 0;
+    state.expectedVideoId = firstVideo.videoId;
+    state.playerLoading = true;
+    state.player = new YT.Player('pl-player', {
       videoId: firstVideo.videoId,
       playerVars: {
         rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0,
         start: Math.max(0, Number(firstVideo.startSec) || 0)
       },
-      events: ytEvents(() => pl && pl.player, plHandlePlayerStateChange, plHandlePlayerError)
+      events: ytEvents(() => pl === state && state.player, event => {
+        if (pl === state) plHandlePlayerStateChange(event);
+      }, event => { if (pl === state) plHandlePlayerError(event); })
     });
   });
+  if (!state.ytCancels) state.ytCancels = [];
+  state.ytCancels.push(cancelYT);
 
   // 타임코드 감시 루프
-  every(200, plTick);
-  every(250, plTimerTick);
+  every(200, () => { if (pl === state) plTick(); });
+  every(250, () => { if (pl === state) plTimerTick(); });
 }
 
 async function plEnterStageFullscreen() {
+  const state = pl;
   const stage = document.getElementById('pl-stage');
-  if (!pl || !stage) return;
+  if (!state || !stage) return;
   try {
     if (stage.requestFullscreen) await stage.requestFullscreen();
     else throw new Error('unsupported');
-    pl.stageFallback = false;
+    if (pl !== state) return;
+    state.stageFallback = false;
   } catch (e) {
-    pl.stageFallback = true;
+    if (pl !== state) return;
+    state.stageFallback = true;
     stage.classList.add('fullscreen-fallback');
     document.body.classList.add('stage-fallback-open');
     toast('브라우저 전체화면을 사용할 수 없어 화면 확장 모드로 열었습니다');
   }
-  pl.isStageFullscreen = true;
+  if (pl !== state) return;
+  state.isStageFullscreen = true;
   if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
   plClampQrBubble();
 }
 
 async function plExitStageFullscreen() {
+  const state = pl;
   try {
     if (document.fullscreenElement && document.exitFullscreen) await document.exitFullscreen();
   } catch (e) {
     console.warn('fullscreen exit', e);
   } finally {
-    plResetStageFullscreenUI();
+    if (pl === state) plResetStageFullscreenUI();
   }
 }
 
@@ -2610,8 +2728,10 @@ function plCleanupStageFullscreen() {
 }
 
 async function plGoHomeFromStage() {
+  const state = pl;
   if (!confirm('전체화면 진행 화면을 나가시겠습니까?\n수업 세션과 학생 응답은 유지됩니다.')) return;
   await plExitStageFullscreen();
+  if (pl !== state) return;
 }
 
 function plHandleFullscreenChange() {
@@ -2804,13 +2924,24 @@ function plTimelineDomain() {
   const video = pl && pl.set && pl.set.videos && pl.set.videos[pl.videoIndex];
   if (!video) return { start: 0, end: 1 };
   const start = Math.max(0, Number(video.startSec) || 0);
-  let end = video.endSec;
-  if (end === null || end === undefined || end === '') {
-    try { end = pl.player && pl.player.getDuration ? pl.player.getDuration() : null; } catch (e) { end = null; }
-  }
-  end = Number(end);
+  const end = plEffectiveEnd(video, pl.player);
   if (!Number.isFinite(end) || end <= start) return null;
   return { start: start, end: end };
+}
+
+function plEffectiveEnd(video, player, knownDuration) {
+  let duration = Number(knownDuration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    try { duration = player && player.getDuration ? Number(player.getDuration()) : NaN; }
+    catch (e) { duration = NaN; }
+  }
+  const configured = video && video.endSec !== null && video.endSec !== undefined && video.endSec !== ''
+    ? Number(video.endSec) : NaN;
+  if (Number.isFinite(configured) && configured > 0 && Number.isFinite(duration) && duration > 0) {
+    return Math.min(configured, duration);
+  }
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return Number.isFinite(duration) && duration > 0 ? duration : null;
 }
 
 function plUpdateTimeline(now, domain) {
@@ -2887,6 +3018,7 @@ function plLoadVideo(index, autoplay) {
   pl.expectedVideoId = video.videoId;
   pl.playerLoading = true;
   pl.playerError = null;
+  pl.dueQuestions = [];
   pl.lastT = Math.max(0, Number(video.startSec) || 0) - 0.6;
   if (typeof document !== 'undefined') {
     const transition = document.getElementById('pl-transition');
@@ -3026,12 +3158,6 @@ function plHandlePlayerStateChange(event) {
   if (event.data !== YT.PlayerState.ENDED) return;
   if (!matchesExpected || pl.playerLoading || pl.activePlaybackGeneration !== pl.loadGeneration) return;
   if (status.state !== null && status.state !== YT.PlayerState.ENDED) return;
-  const video = pl.set && pl.set.videos && pl.set.videos[pl.videoIndex];
-  let end = video && video.endSec;
-  if (end === null || end === undefined || end === '') end = status.duration;
-  end = Number(end);
-  if (Number.isFinite(end) && end > 0 &&
-      (!Number.isFinite(status.currentTime) || status.currentTime < end - 1)) return;
   pl.playbackEnded = true;
   plTick();
 }
@@ -3047,6 +3173,34 @@ function plHandlePlayerError(event) {
   pl.playbackEnded = false;
   pl.playerError = event && event.data;
   plRenderPlayerError();
+}
+
+function plQueueDueQuestions(prev, now) {
+  if (!pl) return false;
+  if (!Array.isArray(pl.dueQuestions)) pl.dueQuestions = [];
+  let markerStateChanged = false;
+  pl.flatQuestions.forEach((q, i) => {
+    if (q.videoIndex !== pl.videoIndex) return;
+    if (now < q.t - 0.6 && pl.fired[i]) {
+      pl.fired[i] = false;
+      pl.dueQuestions = pl.dueQuestions.filter(index => index !== i);
+      markerStateChanged = true;
+    }
+    if (!pl.fired[i] && prev < q.t && q.t <= now) {
+      pl.fired[i] = true;
+      if (pl.dueQuestions.indexOf(i) < 0) pl.dueQuestions.push(i);
+      markerStateChanged = true;
+    }
+  });
+  return markerStateChanged;
+}
+
+function plOpenNextDueQuestion() {
+  if (!pl || (pl.live && pl.live.q >= 0) || pl.pendingLiveQuestion >= 0 ||
+      !Array.isArray(pl.dueQuestions) || !pl.dueQuestions.length) return false;
+  const next = pl.dueQuestions.shift();
+  plOpenQuestion(next);
+  return true;
 }
 
 function plTick() {
@@ -3080,11 +3234,7 @@ function plTick() {
   const prev = pl.lastT;
   pl.lastT = now;
 
-  let end = video.endSec;
-  if (end === null || end === undefined || end === '') {
-    try { end = pl.player.getDuration ? pl.player.getDuration() : null; } catch (e) { end = null; }
-  }
-  end = Number(end);
+  const end = plEffectiveEnd(video, pl.player);
   const reachedEnd = pl.playbackEnded || (Number.isFinite(end) && end > 0 && now >= end);
 
   const clock = $('#pl-clock');
@@ -3101,6 +3251,9 @@ function plTick() {
       '다음 문항 ' + (pl.flatQuestions[nx].number || nx + 1) + '번까지 ' + fmtTime(pl.flatQuestions[nx].t - now);
   }
 
+  const markerStateChanged = plQueueDueQuestions(prev, now);
+  if (markerStateChanged && typeof plRenderTimeline === 'function') plRenderTimeline();
+
   if (pl.live.q >= 0 || pl.pendingLiveQuestion >= 0) {
     if (reachedEnd) {
       try { if (pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
@@ -3108,23 +3261,7 @@ function plTick() {
     return;
   }
 
-  let opened = false;
-  let markerStateChanged = false;
-  pl.flatQuestions.forEach((q, i) => {
-    if (q.videoIndex !== pl.videoIndex) return;
-    // 뒤로 되감으면 다시 발화할 수 있게 플래그를 푼다
-    if (now < q.t - 0.6 && pl.fired[i]) {
-      pl.fired[i] = false;
-      markerStateChanged = true;
-    }
-    if (!opened && !pl.fired[i] && prev < q.t && q.t <= now) {
-      pl.fired[i] = true;
-      opened = true;
-      plOpenQuestion(i);
-    }
-  });
-  if (markerStateChanged && typeof plRenderTimeline === 'function') plRenderTimeline();
-  if (opened || !reachedEnd) return;
+  if (plOpenNextDueQuestion() || !reachedEnd) return;
 
   if (pl.videoIndex >= pl.set.videos.length - 1) {
     plCompletePlaylist();
@@ -3137,6 +3274,7 @@ function plTick() {
 
 function plOpenQuestion(i) {
   if (!pl || !pl.sessionId) return;
+  const state = pl;
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
   pl.pendingLiveQuestion = i;
   const writing = store.setLive(pl.sessionId, {
@@ -3146,7 +3284,7 @@ function plOpenQuestion(i) {
     limitSec: limitFor(pl.set, i, pl.flatQuestions)
   });
   return writing && writing.catch ? writing.catch(e => {
-    if (pl && pl.pendingLiveQuestion === i) pl.pendingLiveQuestion = -1;
+    if (pl === state && state.pendingLiveQuestion === i) state.pendingLiveQuestion = -1;
     throw e;
   }) : writing;
 }
@@ -3155,10 +3293,18 @@ function plReveal() {
   return store.revealLive(pl.sessionId);
 }
 async function plCloseQuestion() {
-  if (!pl) return;
+  const state = pl;
+  if (!state) return;
   await plPushBoard();
-  await store.setLive(pl.sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
-  try { pl.player.playVideo(); } catch (e) {}
+  if (pl !== state) return;
+  await store.setLive(state.sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  if (pl !== state) return;
+  state.live = Object.assign({}, state.live, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
+  state.pendingLiveQuestion = -1;
+  if (plOpenNextDueQuestion()) return;
+  if (typeof plTick === 'function') plTick();
+  if (state.transitionUntil || state.playlistDone) return;
+  try { state.player.playVideo(); } catch (e) {}
 }
 function plJumpTo(i) {
   if (!pl || !pl.player || !pl.player.seekTo) return;
@@ -3174,11 +3320,15 @@ function plJumpTo(i) {
   pl.player.playVideo();
 }
 async function plEndSession() {
+  const state = pl;
+  if (!state) return;
   if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
   await plExitStageFullscreen();
-  await store.endSession(pl.sessionId);
+  if (pl !== state) return;
+  await store.endSession(state.sessionId);
+  if (pl !== state) return;
   toast('진행을 종료했습니다');
-  go('live/' + pl.sessionId);
+  go('live/' + state.sessionId);
 }
 
 function plRenderQList() {
@@ -3360,11 +3510,12 @@ function plRenderOverlay() {
   '</div>';
 
   if (hasImage(q)) {
+    const state = pl;
     const imgEl = ov.querySelector('#ov-img');
     if (q.imgUrl) imgEl.src = q.imgUrl;
-    else loadQuestionImage(pl.setId, q.key || i).then(src => {
+    else loadQuestionImage(pl.setId, q.key || i, pl.sessionId).then(src => {
       const now = document.querySelector('#ov-img');
-      if (now && src) now.src = src;
+      if (pl === state && state.live.q === i && now === imgEl && src) now.src = src;
     });
   }
 
@@ -3498,7 +3649,7 @@ function screenStudent(codeArg) {
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     myAnswers: {},          // { 문항index: {c, ok, ms} }
     sel: null, multiSel: [], draft: '', submitted: false, board: {},
-    revision: 0, deadlineHandled: '',
+    revision: 0, deadlineHandled: '', writeQueues: {},
     uiRevealed: false, uiLocked: false, uiQ: -2
   };
   const state = st;
@@ -3555,7 +3706,9 @@ async function stLookupCode(code) {
     if (st !== state) return;
     if (!sess) { stRenderCodeForm('반 정보를 불러오지 못했습니다.'); return; }
     state.session = sess;
-    const savedSet = await store.getQuizSet(sess.setId);
+    const savedSet = store.getSessionQuizSet
+      ? await store.getSessionQuizSet(v.sessionId, sess.setId)
+      : await store.getQuizSet(sess.setId);
     if (st !== state) return;
     state.set = normSet(savedSet);
     if (!state.set) { stRenderCodeForm('퀴즈 세트를 불러오지 못했습니다.'); return; }
@@ -3854,7 +4007,7 @@ function stShowImage(q, i) {
   const el = $('#st-img');
   if (!el) return;
   if (q.imgUrl) { el.src = q.imgUrl; return; }
-  loadQuestionImage(state.session.setId, q.key || i).then(src => {
+  loadQuestionImage(state.session.setId, q.key || i, state.sessionId).then(src => {
     if (st !== state) return;
     const now = $('#st-img');
     if (now && src) now.src = src;
@@ -3943,19 +4096,41 @@ function stAnswerUI(q, i, my, revealed, locked) {
 }
 
 /** 응답을 서버에 보내고 화면을 갱신하는 공통 경로 */
+function stQueueWrite(state, questionIndex, task) {
+  if (!state.writeQueues) state.writeQueues = {};
+  const previous = state.writeQueues[questionIndex] || Promise.resolve();
+  const queued = previous.catch(() => {}).then(task);
+  state.writeQueues[questionIndex] = queued;
+  return queued.finally(() => {
+    if (state.writeQueues && state.writeQueues[questionIndex] === queued) {
+      delete state.writeQueues[questionIndex];
+    }
+  });
+}
+
 function stSend(payload, localRec) {
-  const i = st.live.q;
-  st.submitted = true;
-  st.myAnswers[i] = localRec;
+  const state = st;
+  if (!state) return Promise.resolve(false);
+  const i = state.live.q;
+  const revision = Number(payload && payload.revision) || 0;
+  const previous = state.myAnswers[i];
+  state.submitted = true;
+  state.myAnswers[i] = localRec;
   stRender();
   const send = store.setAnswerState || store.mergeAnswer;
-  return send.call(store, st.sessionId, st.sid, i, payload)
+  return stQueueWrite(state, i, () => send.call(store, state.sessionId, state.sid, i, payload))
+    .then(() => true)
     .catch(e => {
       console.error(e);
-      toast('전송 실패 — 다시 시도해 주세요');
-      st.submitted = false;
-      delete st.myAnswers[i];
-      stRender();
+      if (st === state && state.live.q === i && Number(state.revision) === revision &&
+          state.myAnswers[i] === localRec) {
+        toast('전송 실패 — 다시 시도해 주세요');
+        state.submitted = !!previous;
+        if (previous) state.myAnswers[i] = previous;
+        else delete state.myAnswers[i];
+        stRender();
+      }
+      return false;
     });
 }
 
@@ -4032,20 +4207,25 @@ function stSubmitCurrent(source) {
 
 function stReviseAnswer() {
   if (!st || st.live.q < 0 || !st.submitted || stLocked()) return Promise.resolve(false);
-  const i = st.live.q, current = st.myAnswers[i];
+  const state = st;
+  const i = state.live.q, current = state.myAnswers[i];
   if (!current) return Promise.resolve(false);
-  st.revision = Math.max(Number(st.revision) || 0, Number(current.revision) || 0) + 1;
-  const payload = Object.assign({}, current, { submitted: false, revision: st.revision, at: SV_TS });
-  delete st.myAnswers[i];
-  st.submitted = false;
+  state.revision = Math.max(Number(state.revision) || 0, Number(current.revision) || 0) + 1;
+  const revision = state.revision;
+  const payload = Object.assign({}, current, { submitted: false, revision: revision, at: SV_TS });
+  delete state.myAnswers[i];
+  state.submitted = false;
   stRender();
   const send = store.setAnswerState || store.mergeAnswer;
-  return send.call(store, st.sessionId, st.sid, i, payload).then(() => true).catch(e => {
+  return stQueueWrite(state, i, () => send.call(store, state.sessionId, state.sid, i, payload)).then(() => true).catch(e => {
     console.error(e);
-    st.myAnswers[i] = current;
-    st.submitted = true;
-    stRender();
-    toast('다시 고르기 실패 — 다시 시도해 주세요');
+    if (st === state && state.live.q === i && Number(state.revision) === revision &&
+        !state.myAnswers[i] && !state.submitted) {
+      state.myAnswers[i] = current;
+      state.submitted = true;
+      stRender();
+      toast('다시 고르기 실패 — 다시 시도해 주세요');
+    }
     return false;
   });
 }
@@ -4082,7 +4262,10 @@ function screenDashboard(sessionId) {
     if (dash !== state) return;
     if (!sess) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">반 정보를 찾을 수 없습니다.</div></div></div>'; return; }
     state.session = sess;
-    return store.getQuizSet(sess.setId).then(savedSet => {
+    const setLoad = store.getSessionQuizSet
+      ? store.getSessionQuizSet(sessionId, sess.setId)
+      : store.getQuizSet(sess.setId);
+    return setLoad.then(savedSet => {
       if (dash !== state) return;
       state.set = normSet(savedSet) || { title: sess.setTitle || '', videos: [], settings: normSettings(null) };
       state.flatQuestions = PlaylistCore.flattenQuestions(state.set.videos);
@@ -4391,7 +4574,8 @@ function screenAdmin() {
   adm = {
     sessions: {}, resp: {}, sets: {},
     from: '', to: '', setFilter: '', gradeFilter: '', klassFilter: '',
-    tab: 'sessions', loading: false, detail: null
+    tab: 'sessions', loading: false, detail: null,
+    loadGeneration: 0, displayedSessionIds: [], displayedRange: null
   };
   onCleanup(() => { adm = null; });
 
@@ -4471,15 +4655,22 @@ function admTab(t) { adm.tab = t; admRenderBody(); }
 
 /** 기간에 걸린 세션만 골라 응답을 불러온다 — 전체를 매번 읽지 않기 위해 */
 function admLoad() {
+  const state = adm;
+  if (!state) return Promise.resolve();
+  const generation = (Number(state.loadGeneration) || 0) + 1;
+  state.loadGeneration = generation;
+  const filter = { from: state.from, to: state.to };
+  const isCurrent = () => adm === state && state.loadGeneration === generation;
   const body = $('#adm-body');
   body.innerHTML = '<div class="empty">불러오는 중…</div>';
-  adm.loading = true;
-  adm.detail = null;
+  state.loading = true;
+  state.detail = null;
 
-  const fromTs = adm.from ? new Date(adm.from + 'T00:00:00').getTime() : 0;
-  const toTs = adm.to ? new Date(adm.to + 'T23:59:59').getTime() : Infinity;
+  const fromTs = filter.from ? new Date(filter.from + 'T00:00:00').getTime() : 0;
+  const toTs = filter.to ? new Date(filter.to + 'T23:59:59').getTime() : Infinity;
 
   return store.listSessions().then(sessions => {
+    if (!isCurrent()) return;
     const all = sessions || [];
     const picked = {};
     all.forEach(s => {
@@ -4487,26 +4678,38 @@ function admLoad() {
       const ts = s.createdAt || 0;
       if (ts >= fromTs && ts <= toTs) picked[id] = s;
     });
-    adm.sessions = picked;
-
     const ids = Object.keys(picked);
     if (ids.length > 300) {
+      if (!isCurrent()) return;
+      state.sessions = picked;
+      state.resp = {};
+      state.displayedSessionIds = [];
+      state.displayedRange = { from: filter.from, to: filter.to };
       body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' + ids.length +
         '건입니다. 기간을 좁혀서 조회해 주세요.</div></div>';
-      adm.loading = false;
+      state.loading = false;
       return;
     }
-    const setIds = Array.from(new Set(ids.map(id => picked[id].setId).filter(Boolean)));
-    const setLoads = setIds.map(setId => {
-      if (adm.sets[setId]) return Promise.resolve([setId, adm.sets[setId]]);
-      return store.getQuizSet(setId).then(rawSet => {
+    const nextSets = Object.assign({}, state.sets);
+    const legacyLoads = {};
+    const setLoads = ids.map(id => {
+      const session = picked[id];
+      const setId = session.setId;
+      if (!setId) return Promise.resolve([id, null, false]);
+      const hasSnapshot = session.snapshotVersion && store.getSessionQuizSet;
+      if (hasSnapshot || (!store.getQuizSet && store.getSessionQuizSet)) {
+        return store.getSessionQuizSet(id, setId).then(rawSet => [id, rawSet, true]);
+      }
+      if (nextSets[setId]) return Promise.resolve([id, nextSets[setId].set, false]);
+      if (!legacyLoads[setId]) legacyLoads[setId] = store.getQuizSet(setId);
+      return legacyLoads[setId].then(rawSet => [id, rawSet, false]);
+    }).map(load => load.then(([id, rawSet, snapshot]) => {
         const set = normSet(rawSet);
-        return [setId, {
+        return [id, {
           set: set,
           flatQuestions: PlaylistCore.flattenQuestions(set ? set.videos : [])
-        }];
-      });
-    });
+        }, snapshot];
+      }));
     const sessionLoads = ids.map(id => Promise.all([
       store.getCollection('sessions/' + id + '/students'),
       store.getCollection('sessions/' + id + '/responses')
@@ -4517,17 +4720,31 @@ function admLoad() {
     ]));
     return Promise.all([Promise.all(setLoads), Promise.all(sessionLoads)])
       .then(([sets, pairs]) => {
-        sets.forEach(([setId, cached]) => { adm.sets[setId] = cached; });
-        adm.resp = {};
-        pairs.forEach(([id, students, responses]) => {
-          adm.sessions[id].students = students;
-          adm.resp[id] = responses;
+        if (!isCurrent()) return;
+        sets.forEach(([id, cached, snapshot]) => {
+          picked[id].flatQuestions = cached.flatQuestions;
+          if (!snapshot && picked[id].setId) nextSets[picked[id].setId] = cached;
         });
-        adm.loading = false;
+        const nextResp = {};
+        pairs.forEach(([id, students, responses]) => {
+          picked[id].students = students;
+          nextResp[id] = responses;
+        });
+        state.sessions = picked;
+        state.sets = nextSets;
+        state.resp = nextResp;
+        state.displayedSessionIds = ids.slice();
+        state.displayedRange = { from: filter.from, to: filter.to };
+        state.loading = false;
         admFillSetOptions();
         admRenderBody();
       });
-  }).catch(e => { console.error(e); body.innerHTML = '<div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div>'; });
+  }).catch(e => {
+    if (!isCurrent()) return;
+    state.loading = false;
+    console.error(e);
+    body.innerHTML = '<div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div>';
+  });
 }
 
 function admFillSetOptions() {
@@ -4560,7 +4777,7 @@ function admCompute() {
     const studs = sess.students || {};
     const resp = adm.resp[sess.id] || {};
     const cachedSet = adm.sets[sess.setId];
-    const flatQuestions = cachedSet ? cachedSet.flatQuestions : [];
+    const flatQuestions = sess.flatQuestions || (cachedSet ? cachedSet.flatQuestions : []);
     let sAns = 0, sCor = 0, sStu = 0, sGraded = 0;
 
     Object.keys(studs).forEach(sid => {
@@ -4610,6 +4827,7 @@ function admRenderBody() {
   const body = $('#adm-body');
   if (!body || adm.loading) return;
   const data = admCompute();
+  adm.displayedSessionIds = data.sessions.map(session => session.id);
 
   if (adm.detail) { body.innerHTML = admStudentDetail(data, adm.detail); return; }
   if (adm.tab === 'manage')  { body.innerHTML = admManage(data); return; }
@@ -4755,6 +4973,8 @@ function admClassesView(d) {
 }
 
 function admManage(d) {
+  const displayedIds = (adm.displayedSessionIds || []).slice();
+  const displayedRange = adm.displayedRange || { from: adm.from, to: adm.to };
   return '<div class="card">' +
       '<h2>비밀번호 변경</h2>' +
       '<div class="sub">변경하면 모든 기기에서 새 비밀번호로 로그인합니다.</div>' +
@@ -4769,8 +4989,8 @@ function admManage(d) {
     '<div class="card">' +
       '<h2>기간 지정 삭제</h2>' +
       '<div class="sub">학교 개인정보 보관 기준에 따라 오래된 기록을 지웁니다. 되돌릴 수 없습니다.</div>' +
-      '<div class="notice">현재 조회 조건(' + esc(adm.from) + ' ~ ' + esc(adm.to) + ')에 해당하는 <b>' +
-        d.sessions.length + '개 진행 기록</b>과 그 안의 모든 학생 응답이 함께 삭제됩니다. ' +
+      '<div class="notice">현재 게시된 조회 결과(' + esc(displayedRange.from) + ' ~ ' + esc(displayedRange.to) + ')의 <b>' +
+        displayedIds.length + '개 진행 기록</b>과 그 안의 모든 학생 응답이 함께 삭제됩니다. ' +
         '퀴즈 세트 자체는 지워지지 않습니다.</div>' +
       '<button class="btn danger" onclick="admPurge()">이 기간 기록 삭제</button>' +
     '</div>' +
@@ -4795,15 +5015,18 @@ function admChangePw() {
 }
 
 function admPurge() {
-  const d = admCompute();
-  if (!d.sessions.length) { alert('삭제할 기록이 없습니다.'); return; }
-  const msg = adm.from + ' ~ ' + adm.to + ' 기간의 진행 기록 ' + d.sessions.length + '건과 모든 학생 응답을 영구 삭제합니다.\n되돌릴 수 없습니다. 계속하려면 아래에 삭제 를 입력하세요.';
+  const sessionIds = Array.isArray(adm.displayedSessionIds)
+    ? adm.displayedSessionIds.slice()
+    : admCompute().sessions.map(session => session.id);
+  const range = adm.displayedRange || { from: adm.from, to: adm.to };
+  if (!sessionIds.length) { alert('삭제할 기록이 없습니다.'); return; }
+  const msg = range.from + ' ~ ' + range.to + ' 기간의 진행 기록 ' + sessionIds.length + '건과 모든 학생 응답을 영구 삭제합니다.\n되돌릴 수 없습니다. 계속하려면 아래에 삭제 를 입력하세요.';
   const typed = prompt(msg, '');
   if (typed === null) return;
   if (typed.trim() !== '삭제') { alert('취소되었습니다.'); return; }
 
-  return store.purgeSessions(d.sessions.map(s => s.id)).then(() => {
-    toast(d.sessions.length + '건을 삭제했습니다');
+  return store.purgeSessions(sessionIds).then(() => {
+    toast(sessionIds.length + '건을 삭제했습니다');
     admLoad();
   }).catch(e => alert('삭제 실패: ' + e.message));
 }
