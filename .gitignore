@@ -13,3 +13,6 @@ database.rules.BACKUP.json
 
 # 격리된 기능 개발 작업공간
 .worktrees/
+
+# Superpowers 설계 목업 및 검토용 임시 작업공간
+.superpowers/
