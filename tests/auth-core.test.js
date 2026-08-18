@@ -69,15 +69,10 @@ test('student join does not require the Google teacher sign-in', () => {
   assert.doesNotMatch(extractFunction(html, 'screenJoin'), /signInWithPopup/);
 });
 
-test('a verified non-Google provider cannot receive a teacher role', () => {
-  const state = core.teacherState({
-    uid: 'password-user', email: 'teacher@school.kr', emailVerified: true, isAnonymous: false,
-    providerData: [{ providerId: 'password' }]
-  }, { enabled: true, role: 'admin' });
-
-  assert.equal(state.status, 'signed-out');
-  assert.equal(core.isTeacher(state), false);
-  assert.equal(core.isAdmin(state), false);
+test('a non-Google Firebase session token is not a Google sign-in', () => {
+  assert.equal(core.isGoogleSignIn({
+    claims: { firebase: { sign_in_provider: 'password' } }
+  }), false);
 });
 
 test('the admin route uses the admin-only access gate', () => {

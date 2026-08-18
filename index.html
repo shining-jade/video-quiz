@@ -1135,8 +1135,12 @@ function renderTeacherAuthArea() {
   if (area) area.innerHTML = teacherAuthMarkup();
 }
 
-function applyTeacherUser(user) {
-  const nextUser = AuthCore.isGoogleUser(user) ? user : null;
+async function applyTeacherUser(user) {
+  let tokenResult = null;
+  if (user && !user.isAnonymous && typeof user.getIdTokenResult === 'function') {
+    try { tokenResult = await user.getIdTokenResult(); } catch (error) { console.error(error); }
+  }
+  const nextUser = AuthCore.isGoogleSignIn(tokenResult) ? user : null;
   if (!teacherUser || !nextUser || teacherUser.uid !== nextUser.uid) {
     teacherAllowance = null;
     clockUserId = '';
@@ -1189,8 +1193,8 @@ async function signInTeacher() {
   if (teacherUser) return teacherUser;
   const provider = new firebase.auth.GoogleAuthProvider();
   const result = await firebase.auth().signInWithPopup(provider);
-  applyTeacherUser(result.user);
-  return result.user;
+  await applyTeacherUser(result.user);
+  return teacherUser;
 }
 
 async function signOutTeacher() {
@@ -1207,7 +1211,11 @@ async function requireTeacher(next) {
       alert(teacherAuthMessage(teacherState));
       return;
     }
-    await ensureClock(teacherUser);
+    const user = teacherUser;
+    await ensureClock(user);
+    if (!teacherUser || teacherUser.uid !== user.uid || !AuthCore.isTeacher(teacherState)) {
+      return requireTeacher(next);
+    }
     next();
   } catch (error) {
     showTeacherAuthError(error);
@@ -1221,7 +1229,11 @@ async function requireAdmin(next) {
       alert('관리자 권한이 필요합니다.');
       return;
     }
-    await ensureClock(teacherUser);
+    const user = teacherUser;
+    await ensureClock(user);
+    if (!teacherUser || teacherUser.uid !== user.uid || !AuthCore.isAdmin(teacherState)) {
+      return requireAdmin(next);
+    }
     next();
   } catch (error) {
     showTeacherAuthError(error);
@@ -5202,8 +5214,8 @@ function admExportStudents() {
    ══════════════════════════════════════════════════════════════════════ */
 function bootWithAuth() {
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">연결 중…</div></div>';
-  firebase.auth().onAuthStateChanged(user => {
-    applyTeacherUser(user);
+  firebase.auth().onAuthStateChanged(async user => {
+    await applyTeacherUser(user);
     if (!authReady) {
       authReady = true;
       router();

@@ -3705,7 +3705,7 @@ test('타이머 자동 제출은 마감 잠금이 시작된 순간에도 선택 
   assert.equal(sent, 1);
 });
 
-test('non-Google Firebase sessions are removed from the teacher UI state', () => {
+test('a password session linked to Google is removed from the teacher UI state', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const priorClock = {};
   const context = {
@@ -3720,15 +3720,44 @@ test('non-Google Firebase sessions are removed from the teacher UI state', () =>
   };
   vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
 
-  context.applyTeacherUser({
+  await context.applyTeacherUser({
     uid: 'password-user', email: 'teacher@school.kr', emailVerified: true, isAnonymous: false,
-    providerData: [{ providerId: 'password' }]
+    providerData: [{ providerId: 'google.com' }, { providerId: 'password' }],
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'password' } } });
+    }
   });
 
   assert.equal(context.teacherUser, null);
   assert.equal(context.clockUserId, '');
   assert.equal(context.clockPromise, null);
   assert.equal(context.clockPromiseUid, '');
+});
+
+test('a persisted Google session remains in the teacher UI state', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const user = {
+    uid: 'google-user', email: 'teacher@school.kr', emailVerified: true, isAnonymous: false,
+    providerData: [{ providerId: 'google.com' }],
+    getIdTokenResult() {
+      return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+    }
+  };
+  const context = {
+    teacherUser: null,
+    teacherAllowance: null,
+    teacherState: null,
+    clockUserId: '',
+    clockPromise: null,
+    clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'),
+    renderTeacherAuthArea() {}
+  };
+  vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
+
+  await context.applyTeacherUser(user);
+
+  assert.equal(context.teacherUser, user);
 });
 
 test('clock synchronization does not share pending work across authenticated users', async () => {
@@ -3757,6 +3786,75 @@ test('clock synchronization does not share pending work across authenticated use
   resolves['clock/user-b-SAMPLE12']();
   await Promise.all([first, second]);
   assert.equal(context.clockUserId, 'user-b');
+});
+
+test('teacher route waits for the replacement account clock before opening its screen', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const resolves = {};
+  let opened = 0;
+  const context = {
+    teacherUser: { uid: 'user-a' },
+    teacherState: { role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
+    ensureClock(user) {
+      calls.push(user.uid);
+      return new Promise(resolve => { resolves[user.uid] = resolve; });
+    },
+    signInTeacher() { throw new Error('existing account should not sign in again'); },
+    teacherAuthMessage() { return 'not used'; },
+    alert() {},
+    showTeacherAuthError(error) { throw error; }
+  };
+  vm.runInNewContext(extractFunction(html, 'requireTeacher'), context);
+
+  const gate = context.requireTeacher(() => { opened += 1; });
+  await Promise.resolve();
+  assert.deepEqual(calls, ['user-a']);
+  context.teacherUser = { uid: 'user-b' };
+  context.teacherState = { role: 'teacher' };
+  resolves['user-a']();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['user-a', 'user-b']);
+  assert.equal(opened, 0);
+  resolves['user-b']();
+  await gate;
+  assert.equal(opened, 1);
+});
+
+test('admin route waits for the replacement account clock before opening its screen', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const resolves = {};
+  let opened = 0;
+  const context = {
+    teacherUser: { uid: 'admin-a' },
+    teacherState: { role: 'admin' },
+    AuthCore: require('../auth-core.js'),
+    ensureClock(user) {
+      calls.push(user.uid);
+      return new Promise(resolve => { resolves[user.uid] = resolve; });
+    },
+    signInTeacher() { throw new Error('existing account should not sign in again'); },
+    alert() {},
+    showTeacherAuthError(error) { throw error; }
+  };
+  vm.runInNewContext(extractFunction(html, 'requireAdmin'), context);
+
+  const gate = context.requireAdmin(() => { opened += 1; });
+  await Promise.resolve();
+  assert.deepEqual(calls, ['admin-a']);
+  context.teacherUser = { uid: 'admin-b' };
+  context.teacherState = { role: 'admin' };
+  resolves['admin-a']();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, ['admin-a', 'admin-b']);
+  assert.equal(opened, 0);
+  resolves['admin-b']();
+  await gate;
+  assert.equal(opened, 1);
 });
 
 test('startup does not create an anonymous student session or sync its clock', async () => {
