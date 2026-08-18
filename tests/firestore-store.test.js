@@ -1748,7 +1748,7 @@ test('완료 메뉴는 순위·대시보드·처음부터 재생·명시적 진�
 
 test('YouTube 상태는 새 영상 로드 잠금을 풀고 종료는 tick에 위임하며 오류는 자동 건너뛰지 않는다', () => {
   let ticks = 0, errors = 0, loads = 0;
-  const ctx = loadStageFunctions(['plPlayerEventVideoId', 'plHandlePlayerStateChange', 'plHandlePlayerError'], {
+  const ctx = loadStageFunctions(['plPlayerEventVideoId', 'plPlayerEventStatus', 'plHandlePlayerStateChange', 'plHandlePlayerError'], {
     pl: { playbackEnded: false, playerError: null, playerLoading: true },
     YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
     plTick() { ticks++; },
@@ -1763,7 +1763,7 @@ test('YouTube 상태는 새 영상 로드 잠금을 풀고 종료는 tick에 위
   ctx.pl.playerLoading = true;
   ctx.plHandlePlayerError({ data: 100 });
 
-  assert.equal(ctx.pl.playbackEnded, true);
+  assert.equal(ctx.pl.playbackEnded, false);
   assert.equal(ticks, 1);
   assert.equal(ctx.pl.playerError, 100);
   assert.equal(ctx.pl.playerLoading, false);
@@ -1778,7 +1778,7 @@ test('이전 영상의 지연 ENDED와 오류는 다음 영상 및 다시 보기
     loadVideoById() {}
   };
   const ctx = loadStageFunctions([
-    'plLoadVideo', 'plReplayPlaylist', 'plPlayerEventVideoId',
+    'plLoadVideo', 'plReplayPlaylist', 'plPlayerEventVideoId', 'plPlayerEventStatus',
     'plHandlePlayerStateChange', 'plHandlePlayerError'
   ], {
     pl: {
@@ -1819,6 +1819,124 @@ test('이전 영상의 지연 ENDED와 오류는 다음 영상 및 다시 보기
   ctx.plHandlePlayerStateChange({ data: 0, target: player });
   assert.equal(ticks, 1);
   assert.equal(ctx.pl.playbackEnded, true);
+});
+
+test('새 영상이 PLAYING인 뒤 도착한 이전 ENDED와 오류는 실제 플레이어 상태로 무시한다', () => {
+  let currentVideoId = 'a', actualState = 1, currentTime = 10, ticks = 0, errors = 0;
+  const loads = [];
+  const player = {
+    getVideoData() { return { video_id: currentVideoId }; },
+    getPlayerState() { return actualState; },
+    getCurrentTime() { return currentTime; },
+    getDuration() { return currentVideoId === 'a' ? 20 : 50; },
+    loadVideoById(options) { loads.push(options); }
+  };
+  const ctx = loadStageFunctions([
+    'plLoadVideo', 'plReplayPlaylist', 'plPlayerEventVideoId', 'plPlayerEventStatus',
+    'plHandlePlayerStateChange', 'plHandlePlayerError'
+  ], {
+    pl: {
+      videoIndex: 0, loadGeneration: 1, activePlaybackGeneration: 1,
+      expectedVideoId: 'a', playbackEnded: false, playerLoading: false,
+      playerError: null, fired: [false, false], transitionUntil: 0,
+      set: { videos: [
+        { videoId: 'a', startSec: 0, endSec: 20 },
+        { videoId: 'b', startSec: 20, endSec: 50 }
+      ] },
+      player
+    },
+    YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
+    plTick() { ticks++; },
+    plRenderPlayerError() { errors++; }
+  });
+
+  ctx.plLoadVideo(1, true);
+  currentVideoId = 'b';
+  currentTime = 25;
+  ctx.plHandlePlayerStateChange({ data: 1, target: player });
+  ctx.plHandlePlayerStateChange({ data: 0, target: player });
+  ctx.plHandlePlayerError({ data: 100, target: player });
+
+  assert.equal(ctx.pl.playbackEnded, false);
+  assert.equal(ctx.pl.playerError, null);
+  assert.equal(ticks, 0);
+  assert.equal(errors, 0);
+
+  actualState = 0;
+  currentTime = 50;
+  ctx.plHandlePlayerStateChange({ data: 0, target: player });
+
+  assert.equal(ctx.pl.playbackEnded, true);
+  assert.equal(ticks, 1);
+
+  ctx.plReplayPlaylist();
+  currentVideoId = 'a';
+  actualState = 1;
+  currentTime = 10;
+  ctx.plHandlePlayerStateChange({ data: 1, target: player });
+  ctx.plHandlePlayerStateChange({ data: 0, target: player });
+  ctx.plHandlePlayerError({ data: 101, target: player });
+
+  assert.equal(ctx.pl.playbackEnded, false);
+  assert.equal(ctx.pl.playerError, null);
+  assert.equal(ticks, 1);
+  assert.equal(errors, 0);
+  assert.deepEqual(loads.map(load => load.videoId), ['b', 'a']);
+
+  actualState = 0;
+  currentTime = 20;
+  ctx.plHandlePlayerStateChange({ data: 0, target: player });
+
+  assert.equal(ctx.pl.playbackEnded, true);
+  assert.equal(ticks, 2);
+});
+
+test('현재 영상 로드 오류는 남은 종료 신호를 지우고 자동 전환을 보류한다', () => {
+  let errors = 0, transitions = 0, pauses = 0, loads = 0, completions = 0;
+  const player = {
+    getVideoData() { return { video_id: 'a' }; },
+    getPlayerState() { return -1; },
+    getCurrentTime() { return 30; },
+    getDuration() { return 30; },
+    pauseVideo() { pauses++; }
+  };
+  const ctx = loadStageFunctions([
+    'plPlayerEventVideoId', 'plPlayerEventStatus', 'plHandlePlayerError', 'plTick'
+  ], {
+    pl: {
+      videoIndex: 0, loadGeneration: 2, activePlaybackGeneration: 0,
+      expectedVideoId: 'a', playbackEnded: true, playerLoading: true,
+      playerError: null, playlistDone: false, transitionUntil: 0,
+      live: { q: -1 }, pendingLiveQuestion: -1, lastT: 29,
+      flatQuestions: [], fired: [],
+      set: { videos: [
+        { videoId: 'a', startSec: 0, endSec: 30 },
+        { videoId: 'b', startSec: 0, endSec: 30 }
+      ] },
+      player
+    },
+    YT: { PlayerState: { ENDED: 0, PLAYING: 1, CUED: 5 } },
+    Date: { now() { return 1000; } },
+    $() { return null; },
+    fmtTime(value) { return String(value); },
+    plRenderPlayerError() { errors++; },
+    plRenderTransition() { transitions++; },
+    plLoadVideo() { loads++; },
+    plCompletePlaylist() { completions++; },
+    plOpenQuestion() {}
+  });
+
+  ctx.plHandlePlayerError({ data: 100, target: player });
+  ctx.plTick();
+
+  assert.equal(ctx.pl.playerError, 100);
+  assert.equal(ctx.pl.playbackEnded, false);
+  assert.equal(ctx.pl.transitionUntil, 0);
+  assert.equal(errors, 1);
+  assert.equal(transitions, 0);
+  assert.equal(pauses, 0);
+  assert.equal(loads, 0);
+  assert.equal(completions, 0);
 });
 
 test('YouTube 공용 이벤트는 자막 처리 뒤 교사 종료·오류 콜백을 전달한다', () => {

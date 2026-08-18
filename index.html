@@ -2859,12 +2859,28 @@ function plPlayerEventVideoId(event) {
   } catch (e) { return ''; }
 }
 
+function plPlayerEventStatus(event) {
+  const player = event && event.target ? event.target : (pl && pl.player);
+  const status = { state: null, currentTime: null, duration: null };
+  try {
+    if (player && player.getPlayerState) status.state = Number(player.getPlayerState());
+  } catch (e) {}
+  try {
+    if (player && player.getCurrentTime) status.currentTime = Number(player.getCurrentTime());
+  } catch (e) {}
+  try {
+    if (player && player.getDuration) status.duration = Number(player.getDuration());
+  } catch (e) {}
+  return status;
+}
+
 function plHandlePlayerStateChange(event) {
   if (!pl || !event) return;
   const currentVideoId = plPlayerEventVideoId(event);
+  const status = plPlayerEventStatus(event);
   const matchesExpected = !pl.expectedVideoId || currentVideoId === String(pl.expectedVideoId);
   if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.CUED) {
-    if (!matchesExpected) return;
+    if (!matchesExpected || (status.state !== null && status.state !== event.data)) return;
     pl.playerLoading = false;
     pl.activePlaybackGeneration = pl.loadGeneration;
     pl.playbackEnded = false;
@@ -2872,6 +2888,13 @@ function plHandlePlayerStateChange(event) {
   }
   if (event.data !== YT.PlayerState.ENDED) return;
   if (!matchesExpected || pl.playerLoading || pl.activePlaybackGeneration !== pl.loadGeneration) return;
+  if (status.state !== null && status.state !== YT.PlayerState.ENDED) return;
+  const video = pl.set && pl.set.videos && pl.set.videos[pl.videoIndex];
+  let end = video && video.endSec;
+  if (end === null || end === undefined || end === '') end = status.duration;
+  end = Number(end);
+  if (Number.isFinite(end) && end > 0 &&
+      (!Number.isFinite(status.currentTime) || status.currentTime < end - 1)) return;
   pl.playbackEnded = true;
   plTick();
 }
@@ -2879,9 +2902,12 @@ function plHandlePlayerStateChange(event) {
 function plHandlePlayerError(event) {
   if (!pl) return;
   const currentVideoId = plPlayerEventVideoId(event);
+  const status = plPlayerEventStatus(event);
   if (pl.expectedVideoId && currentVideoId !== String(pl.expectedVideoId)) return;
+  if (status.state === YT.PlayerState.PLAYING) return;
   if (!pl.playerLoading && pl.activePlaybackGeneration !== pl.loadGeneration) return;
   pl.playerLoading = false;
+  pl.playbackEnded = false;
   pl.playerError = event && event.data;
   plRenderPlayerError();
 }
@@ -2890,6 +2916,7 @@ function plTick() {
   if (!pl || !pl.player || !pl.player.getCurrentTime) return;
   if (pl.playlistDone) return;
   if (pl.playerLoading) return;
+  if (pl.playerError !== null && pl.playerError !== undefined) return;
 
   if (pl.transitionUntil) {
     if (pl.live.q >= 0 || pl.pendingLiveQuestion >= 0) {
