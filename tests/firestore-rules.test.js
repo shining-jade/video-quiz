@@ -22,6 +22,7 @@ const {
   where,
   writeBatch
 } = require('firebase/firestore');
+const { createFirestoreStore } = require('../firestore-store.js');
 
 const projectId = 'demo-video-quiz';
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -130,6 +131,54 @@ async function adminWrite(path, value) {
     if (value === undefined) await deleteDoc(reference);
     else await setDoc(reference, value);
   });
+}
+
+function compatStoreDb(modularDb, pauseFirstLiveAccess) {
+  let paused = false;
+  async function pause(path) {
+    if (paused || !pauseFirstLiveAccess || !path.endsWith('/meta/live')) return;
+    paused = true;
+    await pauseFirstLiveAccess();
+  }
+  function reference(path) {
+    const modularReference = doc(modularDb, path);
+    return {
+      path,
+      modularReference,
+      async set(value, options) {
+        await pause(path);
+        return setDoc(modularReference, value, options);
+      }
+    };
+  }
+  return {
+    doc: reference,
+    runTransaction(updateFunction) {
+      return runTransaction(modularDb, transaction => updateFunction({
+        async get(ref) {
+          const snapshot = await transaction.get(ref.modularReference);
+          await pause(ref.path);
+          return {
+            exists: snapshot.exists(),
+            id: snapshot.id,
+            data: () => snapshot.data()
+          };
+        },
+        set(ref, value, options) {
+          transaction.set(ref.modularReference, value, options);
+          return this;
+        }
+      }));
+    }
+  };
+}
+
+function emulatorStore(modularDb, pauseFirstLiveAccess) {
+  return createFirestoreStore(
+    compatStoreDb(modularDb, pauseFirstLiveAccess),
+    { serverTimestamp, delete() { throw new Error('not used'); } },
+    Date.now
+  );
 }
 
 async function expectPermission(allowed, request) {
@@ -630,7 +679,11 @@ rulesTest('fix-round-3: accepting timer live cannot change question before grace
       }));
 
       const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
-      const changing = change.q < 0 ? setDoc(live, change) : updateDoc(live, change);
+      const changing = change.q < 0 ? setDoc(live, change) : setDoc(live, liveQuestion(1, {
+        liveToken: 'pre-grace-q1',
+        openedAt: serverTimestamp(),
+        accepting: true
+      }));
       await assertFails(changing);
     });
   }
@@ -647,11 +700,98 @@ rulesTest('fix-round-3: timer live changes question after grace or an accepted f
   const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
 
   await new Promise(resolve => setTimeout(resolve, 400));
-  await assertSucceeds(updateDoc(live, { q: 1 }));
+  await assertSucceeds(setDoc(live, liveQuestion(1, {
+    liveToken: 'post-grace-q1',
+    openedAt: serverTimestamp(),
+    accepting: true
+  })));
 
   await adminWrite('sessions/s1/meta/live', liveQuestion(0, { accepting: true }));
   await assertSucceeds(updateDoc(live, { accepting: false }));
-  await assertSucceeds(updateDoc(live, { q: 1 }));
+  await assertSucceeds(setDoc(live, liveQuestion(1, {
+    liveToken: 'post-freeze-q1',
+    openedAt: serverTimestamp(),
+    accepting: true
+  })));
+});
+
+rulesTest('fix-round-4: live token is accepted on open and cannot change inside one instance', async () => {
+  const owner = actorFirestore('owner');
+  const live = doc(owner, 'sessions/s1/meta/live');
+
+  await assertSucceeds(setDoc(live, liveQuestion(1, {
+    liveToken: 'live-q1-instance',
+    openedAt: serverTimestamp(),
+    accepting: true
+  })));
+  await assertFails(updateDoc(live, { liveToken: 'rewritten-token' }));
+  await assertSucceeds(updateDoc(live, { accepting: false }));
+});
+
+rulesTest('fix-round-4: stale freeze and final close transactions preserve a newer live instance', async t => {
+  for (const method of ['freezeLive', 'closeLive']) {
+    await t.test(method, async () => {
+      await resetFirestore();
+      const q0 = liveQuestion(0, {
+        liveToken: 'live-q0-instance',
+        openedAt: Timestamp.fromMillis(10_000),
+        accepting: true
+      });
+      await adminWrite('sessions/s1/meta/live', q0);
+
+      let markCaptured;
+      let releaseCaptured;
+      const captured = new Promise(resolve => { markCaptured = resolve; });
+      const release = new Promise(resolve => { releaseCaptured = resolve; });
+      const store = emulatorStore(actorFirestore('owner'), async () => {
+        markCaptured();
+        await release;
+      });
+      assert.equal(typeof store[method], 'function');
+      const staleWrite = store[method]('s1', {
+        q: 0, liveToken: 'live-q0-instance', openedAt: 10_000
+      });
+
+      await captured;
+      await adminWrite('sessions/s1/meta/live', liveQuestion(1, {
+        liveToken: 'live-q1-instance',
+        openedAt: Timestamp.fromMillis(20_000),
+        accepting: true
+      }));
+      releaseCaptured();
+
+      assert.equal(await staleWrite, false);
+      const latest = await assertSucceeds(getDoc(doc(
+        actorFirestore('owner'), 'sessions/s1/meta/live'
+      )));
+      assert.equal(latest.data().q, 1);
+      assert.equal(latest.data().liveToken, 'live-q1-instance');
+      assert.equal(latest.data().accepting, true);
+      assert.equal(latest.data().revealed, false);
+    });
+  }
+
+  await t.test('normal close', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+      liveToken: 'live-q0-normal',
+      openedAt: Timestamp.fromMillis(30_000),
+      accepting: true
+    }));
+    const store = emulatorStore(actorFirestore('owner'));
+    const identity = {
+      q: 0, liveToken: 'live-q0-normal', openedAt: 30_000
+    };
+
+    assert.equal(await store.freezeLive('s1', identity), true);
+    assert.equal(await store.closeLive('s1', identity), true);
+    const closed = await assertSucceeds(getDoc(doc(
+      actorFirestore('owner'), 'sessions/s1/meta/live'
+    )));
+    assert.deepEqual(closed.data(), {
+      q: -1, openedAt: 0, revealed: false, limitSec: 0
+    });
+  });
 });
 
 rulesTest('current-live-question response validation', async () => {

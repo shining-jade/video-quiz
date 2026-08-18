@@ -7,6 +7,48 @@
   else root.FirestoreStore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
+  let fallbackLiveTokenSequence = 0;
+
+  function createLiveToken() {
+    const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+    if (cryptoApi && typeof cryptoApi.randomUUID === 'function') {
+      return cryptoApi.randomUUID();
+    }
+    if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      cryptoApi.getRandomValues(bytes);
+      return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+    }
+    fallbackLiveTokenSequence += 1;
+    return Date.now().toString(36) + '-' + fallbackLiveTokenSequence.toString(36) + '-' +
+      Math.random().toString(36).slice(2);
+  }
+
+  function liveIdentity(live) {
+    const value = live || {};
+    const q = Number(value.q);
+    const openedAt = timestampMillis(value.openedAt);
+    const liveToken = typeof value.liveToken === 'string' && value.liveToken
+      ? value.liveToken
+      : '';
+    if (!Number.isInteger(q) || q < 0 || (!liveToken && openedAt === null)) return null;
+    const identity = { q };
+    if (liveToken) identity.liveToken = liveToken;
+    if (openedAt !== null) identity.openedAt = openedAt;
+    return identity;
+  }
+
+  function sameLiveIdentity(current, expected) {
+    const currentIdentity = liveIdentity(current);
+    const expectedIdentity = liveIdentity(expected);
+    if (!currentIdentity || !expectedIdentity ||
+        currentIdentity.q !== expectedIdentity.q) return false;
+    if (expectedIdentity.liveToken) {
+      return currentIdentity.liveToken === expectedIdentity.liveToken;
+    }
+    return !currentIdentity.liveToken &&
+      currentIdentity.openedAt === expectedIdentity.openedAt;
+  }
 
   function publicQuestion(flatQuestion, number, total, image) {
     const question = flatQuestion || {};
@@ -554,14 +596,43 @@
       return db.doc('sessions/' + sessionId + '/meta/live').set(live);
     }
 
-    function revealLive(sessionId, answer) {
-      return db.doc('sessions/' + sessionId + '/meta/live')
-        .set({ revealed: true, publicAnswer: answer }, { merge: true });
+    function updateCurrentLive(sessionId, expectedLive, update, options) {
+      const expectedIdentity = liveIdentity(expectedLive);
+      if (!expectedIdentity) return Promise.resolve(false);
+      const reference = db.doc('sessions/' + sessionId + '/meta/live');
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists || !sameLiveIdentity(snapshot.data(), expectedIdentity)) return false;
+        transaction.set(reference, update, options);
+        return true;
+      });
     }
 
-    function freezeLive(sessionId) {
-      return db.doc('sessions/' + sessionId + '/meta/live')
-        .set({ accepting: false }, { merge: true });
+    function revealLive(sessionId, expectedLive, answer) {
+      return updateCurrentLive(
+        sessionId,
+        expectedLive,
+        { revealed: true, publicAnswer: answer },
+        { merge: true }
+      );
+    }
+
+    function freezeLive(sessionId, expectedLive) {
+      return updateCurrentLive(
+        sessionId,
+        expectedLive,
+        { accepting: false },
+        { merge: true }
+      );
+    }
+
+    function closeLive(sessionId, expectedLive) {
+      return updateCurrentLive(sessionId, expectedLive, {
+        q: -1,
+        openedAt: 0,
+        revealed: false,
+        limitSec: 0
+      });
     }
 
     async function endSession(sessionId) {
@@ -631,6 +702,7 @@
       setLive,
       revealLive,
       freezeLive,
+      closeLive,
       endSession,
       writeBoard,
 
@@ -689,5 +761,11 @@
     };
   }
 
-  return { createFirestoreStore, publicQuestion, publicAnswer };
+  return {
+    createFirestoreStore,
+    publicQuestion,
+    publicAnswer,
+    createLiveToken,
+    liveIdentity
+  };
 });

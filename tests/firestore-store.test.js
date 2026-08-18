@@ -2175,18 +2175,93 @@ test('live 갱신은 meta/live 문서를 통째로 교체한다', async () => {
 test('정답 공개는 publicAnswer를 병합해 openedAt Timestamp를 그대로 보존한다', async () => {
   const openedAt = { toMillis: () => 12_345 };
   const fake = makeFirestoreFake({
-    'sessions/a/meta/live': { q: 2, openedAt, revealed: false, limitSec: 30 }
+    'sessions/a/meta/live': {
+      q: 2, liveToken: 'live-q2', openedAt, revealed: false, limitSec: 30
+    }
   });
   const store = createStore(fake);
 
-  await store.revealLive('a', { answer: 1, explain: '해설' });
+  const revealed = await store.revealLive('a', {
+    q: 2, liveToken: 'live-q2', openedAt: 12_345
+  }, { answer: 1, explain: '해설' });
 
   const live = fake.value('sessions/a/meta/live');
+  assert.equal(revealed, true);
   assert.equal(live.q, 2);
+  assert.equal(live.liveToken, 'live-q2');
   assert.equal(live.openedAt.toMillis(), 12_345);
   assert.equal(live.revealed, true);
   assert.equal(live.limitSec, 30);
   assert.deepEqual(live.publicAnswer, { answer: 1, explain: '해설' });
+});
+
+function staleLiveFixture() {
+  const current = {
+    q: 1, liveToken: 'live-q1', openedAt: 20_000, revealed: false,
+    accepting: true, limitSec: 30, publicQuestion: { text: 'new question' }
+  };
+  const fake = makeFirestoreFake({ 'sessions/a/meta/live': current });
+  return {
+    current,
+    fake,
+    store: createStore(fake),
+    stale: { q: 0, liveToken: 'live-q0', openedAt: 10_000 }
+  };
+}
+
+test('stale reveal identity makes zero live mutation', async () => {
+  const { current, fake, store, stale } = staleLiveFixture();
+  assert.equal(await store.revealLive('a', stale, { answer: 0 }), false);
+  assert.deepEqual(fake.value('sessions/a/meta/live'), current);
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 0);
+});
+
+test('stale freeze identity makes zero live mutation', async () => {
+  const { current, fake, store, stale } = staleLiveFixture();
+  assert.equal(await store.freezeLive('a', stale), false);
+  assert.deepEqual(fake.value('sessions/a/meta/live'), current);
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 0);
+});
+
+test('stale final close identity makes zero live mutation', async () => {
+  const { current, fake, store, stale } = staleLiveFixture();
+  assert.equal(typeof store.closeLive, 'function');
+  assert.equal(await store.closeLive('a', stale), false);
+  assert.deepEqual(fake.value('sessions/a/meta/live'), current);
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 0);
+});
+
+test('captured live identity freezes and closes the same server instance', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/meta/live': {
+      q: 0, liveToken: 'live-q0', openedAt: 10_000, revealed: false,
+      accepting: true, limitSec: 30, publicQuestion: { text: 'question' }
+    }
+  });
+  const store = createStore(fake);
+  const identity = { q: 0, liveToken: 'live-q0', openedAt: 10_000 };
+
+  assert.equal(await store.freezeLive('a', identity), true);
+  assert.equal(fake.value('sessions/a/meta/live').accepting, false);
+  assert.equal(await store.closeLive('a', identity), true);
+  assert.deepEqual(fake.value('sessions/a/meta/live'), {
+    q: -1, openedAt: 0, revealed: false, limitSec: 0
+  });
+});
+
+test('live token identity works while the local openedAt server timestamp is unresolved', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/meta/live': {
+      q: 0, liveToken: 'live-q0', openedAt: 10_000, revealed: false,
+      accepting: true, limitSec: 30, publicQuestion: { text: 'question' }
+    }
+  });
+  const store = createStore(fake);
+
+  assert.equal(await store.freezeLive('a', {
+    q: 0, liveToken: 'live-q0', openedAt: null
+  }), true);
+  assert.equal(fake.value('sessions/a/meta/live').accepting, false);
 });
 
 test('세션 종료는 상태를 병합하고 live를 대기 상태로 되돌린다', async () => {
@@ -2310,7 +2385,13 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   subscriptions.students({ s1: { name: '가' } });
   subscriptions.responses({ s1: { answers: { '0': { c: 1, revision: 2, ok: true } } } });
   subscriptions.grades({ 's1__0': { uid: 's1', questionIndex: 0, revision: 2, ok: false } });
-  subscriptions.live({ q: 0, openedAt: 123, revealed: false, limitSec: 20 });
+  subscriptions.live({
+    q: 0, liveToken: 'live-q0', openedAt: null, revealed: false, limitSec: 20
+  });
+  const pendingLiveGeneration = context.pl.liveGeneration;
+  subscriptions.live({
+    q: 0, liveToken: 'live-q0', openedAt: 123, revealed: false, limitSec: 20
+  });
   const studentsBefore = context.pl.students;
   const responsesBefore = context.pl.responses;
   context.plLoadVideo(1, true);
@@ -2318,6 +2399,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   assert.deepEqual(context.pl.students, { s1: { name: '가' } });
   assert.deepEqual(context.pl.responses, { '0': { s1: { c: 1, revision: 2, ok: false } } });
   assert.equal(context.pl.live.q, 0);
+  assert.equal(context.pl.liveGeneration, pendingLiveGeneration);
   assert.equal(boardWrites, 0);
   assert.match(app.innerHTML, /id="pl-stage" onpointerdown="plActivateStageControls\(\)"/);
   assert.match(app.innerHTML, /id="pl-quiz-timeline"/);
@@ -2423,7 +2505,7 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
     isAutoGraded() { return true; },
     gradeResponse() { return true; },
     store: {
-      async freezeLive() {},
+      async freezeLive() { return true; },
       async getResponses() {
         return { student: { uid: 'student', answers: {
           '0': { answer: 1, submitted: true, revision: 7 }
@@ -2434,7 +2516,7 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
         order.push('grade-start');
         return gradeReady.then(() => { order.push('grade-end'); return true; });
       },
-      async setLive() { order.push('live-close'); }
+      async closeLive() { order.push('live-close'); return true; }
     },
     async plPushBoard() { order.push('board'); },
     FirestoreCore: core,
@@ -2473,7 +2555,7 @@ test('grade failure keeps the frozen question and queue retryable until grading 
     isAutoGraded() { return true; },
     gradeResponse() { return true; },
     store: {
-      async freezeLive() {},
+      async freezeLive() { return true; },
       async getResponses() {
         return { s1: { uid: 's1', answers: {
           '0': { answer: 1, submitted: true, revision: 2 }
@@ -2485,7 +2567,7 @@ test('grade failure keeps the frozen question and queue retryable until grading 
         if (gradeAttempts === 1) throw new Error('grade offline');
         return true;
       },
-      async setLive() { liveCloses += 1; }
+      async closeLive() { liveCloses += 1; return true; }
     },
     async plPushBoard() { boardWrites += 1; },
     plOpenQuestion(i) { opened.push(i); state.pendingLiveQuestion = i; },
@@ -2526,7 +2608,7 @@ test('board failure keeps the frozen question and succeeds on retry before consu
     pl: state,
     FirestoreCore: core,
     store: {
-      async freezeLive() {},
+      async freezeLive() { return true; },
       async getResponses() {
         return { s1: { uid: 's1', answers: {
           '0': { answer: 1, submitted: true, revision: 3 }
@@ -2539,7 +2621,7 @@ test('board failure keeps the frozen question and succeeds on retry before consu
         boardAttempts += 1;
         if (boardAttempts === 1) throw new Error('board offline');
       },
-      async setLive() { liveCloses += 1; }
+      async closeLive() { liveCloses += 1; return true; }
     },
     async plGradeCurrentResponses() {},
     plOpenQuestion(i) { opened.push(i); state.pendingLiveQuestion = i; },
@@ -2579,10 +2661,10 @@ test('simultaneous close calls share one per-question promise and open queued ne
     pl: state,
     FirestoreCore: core,
     store: {
-      freezeLive() { freezes += 1; return freezeReady; },
+      freezeLive() { freezes += 1; return freezeReady.then(() => true); },
       async getResponses() { return {}; },
       async getGrades() { return {}; },
-      async setLive() { closes += 1; }
+      async closeLive() { closes += 1; return true; }
     },
     async plGradeCurrentResponses() {},
     async plPushBoard() {},
@@ -2616,10 +2698,10 @@ test('stale close completion cannot close a newer live question', async () => {
     pl: state,
     FirestoreCore: core,
     store: {
-      freezeLive() { return freezeReady; },
+      freezeLive() { return freezeReady.then(() => true); },
       async getResponses() { responseReads += 1; return {}; },
       async getGrades() { return {}; },
-      async setLive() { closes += 1; }
+      async closeLive() { closes += 1; return true; }
     },
     async plGradeCurrentResponses() {},
     async plPushBoard() {},
@@ -2637,6 +2719,77 @@ test('stale close completion cannot close a newer live question', async () => {
   assert.equal(responseReads, 0);
   assert.equal(closes, 0);
   assert.equal(state.live.q, 1);
+});
+
+test('server-rejected stale freeze stops close before reading responses', async () => {
+  let responseReads = 0;
+  let unconditionalCloses = 0;
+  let advances = 0;
+  const state = {
+    sessionId: 'session-a',
+    live: { q: 0, liveToken: 'live-q0', openedAt: 10_000, accepting: true },
+    liveGeneration: 5,
+    responses: {}, pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    store: {
+      async freezeLive() { return false; },
+      async getResponses() { responseReads += 1; return {}; },
+      async getGrades() { return {}; },
+      async setLive() { unconditionalCloses += 1; }
+    },
+    async plGradeCurrentResponses() {},
+    async plPushBoard() {},
+    plOpenNextDueQuestion() { advances += 1; return false; },
+    plTick() {}
+  };
+  loadStageFunctions(['plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), false);
+  assert.equal(responseReads, 0);
+  assert.equal(unconditionalCloses, 0);
+  assert.equal(advances, 0);
+  assert.equal(state.live.accepting, true);
+});
+
+test('close passes one captured live identity to freeze and final close CAS writes', async () => {
+  const calls = [];
+  const state = {
+    sessionId: 'session-a',
+    live: { q: 0, liveToken: 'live-q0', openedAt: 10_000, accepting: true },
+    liveGeneration: 3,
+    responses: {}, pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    store: {
+      async freezeLive(...args) { calls.push(['freeze', ...args]); return true; },
+      async getResponses() { return {}; },
+      async getGrades() { return {}; },
+      async closeLive(...args) { calls.push(['close', ...args]); return true; },
+      async setLive(...args) { calls.push(['unconditional', ...args]); }
+    },
+    async plGradeCurrentResponses() {},
+    async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; },
+    plTick() {}
+  };
+  loadStageFunctions(['plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), true);
+  assert.deepEqual(clone(calls), [
+    ['freeze', 'session-a', {
+      q: 0, liveToken: 'live-q0', openedAt: 10_000
+    }],
+    ['close', 'session-a', {
+      q: 0, liveToken: 'live-q0', openedAt: 10_000
+    }]
+  ]);
 });
 
 test('교사 재생 초기화는 videos를 평탄화해 전역 문항 상태를 만든다', async () => {
@@ -3331,14 +3484,18 @@ test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시
       player: {}
     },
     SV_TS: 1234,
-    FirestoreStore: loadStoreModule(),
+    FirestoreStore: {
+      ...loadStoreModule(),
+      createLiveToken() { return 'live-q1-token'; }
+    },
     store: { setLive(id, value) { written = [id, value]; return Promise.resolve(); } }
   });
 
   await ctx.plOpenQuestion(1);
 
   assert.deepEqual(clone(written), ['session-a', {
-    q: 1, openedAt: 1234, revealed: false, accepting: true, limitSec: 7,
+    q: 1, liveToken: 'live-q1-token', openedAt: 1234,
+    revealed: false, accepting: true, limitSec: 7,
     publicQuestion: {
       number: 2, total: 2, type: 'choice', text: 'B', choices: ['가', '나']
     }
@@ -3558,10 +3715,16 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
       assert.deepEqual([setId, key, sessionId], [undefined, 'v1q1', 'session-a']);
       return Promise.resolve('data:image/jpeg;base64,current');
     },
-    FirestoreStore: loadStoreModule(),
+    FirestoreStore: {
+      ...loadStoreModule(),
+      createLiveToken() { return 'live-q3-token'; }
+    },
     store: {
       setLive(id, value) { writes.push(['setLive', id, value]); return Promise.resolve(); },
-      revealLive(id, answer) { writes.push(['revealLive', id, answer]); return Promise.resolve(); }
+      revealLive(id, identity, answer) {
+        writes.push(['revealLive', id, identity, answer]);
+        return Promise.resolve(true);
+      }
     }
   };
   vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
@@ -3574,6 +3737,7 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
   assert.deepEqual(clone(writes), [
     ['setLive', 'session-a', {
       q: 3,
+      liveToken: 'live-q3-token',
       openedAt: serverTimestamp,
       revealed: false,
       accepting: true,
@@ -3587,7 +3751,9 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
         image: 'data:image/jpeg;base64,current'
       }
     }],
-    ['revealLive', 'session-a', { answer: 1, explain: '정답 해설' }]
+    ['revealLive', 'session-a', { q: 3, openedAt: 456 }, {
+      answer: 1, explain: '정답 해설'
+    }]
   ]);
 });
 
@@ -4176,8 +4342,9 @@ test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재�
     document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
     FirestoreCore: core,
     store: {
-      async freezeLive() {}, async getResponses() { return {}; }, async getGrades() { return {}; },
-      setLive() { writes++; return Promise.resolve(); }
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; },
+      closeLive() { writes++; return Promise.resolve(true); }
     }
   });
 
@@ -4201,12 +4368,12 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
     plPushBoard() { calls.push('board'); return Promise.resolve(); },
     FirestoreCore: core,
     store: {
-      async freezeLive() { calls.push('freeze'); },
+      async freezeLive() { calls.push('freeze'); return true; },
       async getResponses() { return {}; },
       async getGrades() { return {}; },
-      setLive(id, value) {
-        calls.push(['live', id, value]);
-        return Promise.resolve();
+      closeLive(id, identity) {
+        calls.push(['live', id, identity]);
+        return Promise.resolve(true);
       }
     }
   };
@@ -4216,9 +4383,7 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   await context.plCloseQuestion();
 
   assert.equal(calls.filter(call => call === 'board').length, 1);
-  assert.deepEqual(clone(calls[2]), ['live', 'session-a', {
-    q: -1, openedAt: 0, revealed: false, limitSec: 0
-  }]);
+  assert.deepEqual(clone(calls[2]), ['live', 'session-a', { q: 0, openedAt: undefined }]);
   assert.equal(calls[3], 'play');
 });
 
@@ -6305,7 +6470,8 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
     async plPushBoard() {},
     FirestoreCore: core,
     store: {
-      async freezeLive() {}, async getResponses() { return {}; }, async getGrades() {}, async setLive() {}
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() {}, async closeLive() { return true; }
     },
     plOpenQuestion(i) { opened.push(i); context.pl.pendingLiveQuestion = i; },
     PlaylistCore: require('../playlist-core.js'),
@@ -6628,6 +6794,8 @@ test('timer question stores authoritative close grace and reveal timestamps', as
   assert.equal(written[1].submitGraceUntil.getTime(), 107_000);
   assert.equal(written[1].revealAt.getTime(), 107_000);
   assert.equal(written[1].revealed, false);
+  assert.equal(typeof written[1].liveToken, 'string');
+  assert.ok(written[1].liveToken.length > 0);
   assert.equal('publicAnswer' in written[1], false);
 });
 
@@ -6686,7 +6854,7 @@ test('close freezes writes, reloads the accepted revision, grades it, then persi
     pl: state,
     FirestoreCore: core,
     store: {
-      async freezeLive() { events.push('freeze'); },
+      async freezeLive() { events.push('freeze'); return true; },
       async getResponses() {
         events.push('read-responses');
         return { s1: { uid: 's1', answers: {
@@ -6694,7 +6862,7 @@ test('close freezes writes, reloads the accepted revision, grades it, then persi
         } } };
       },
       async getGrades() { events.push('read-grades'); return {}; },
-      async setLive() { events.push('close'); }
+      async closeLive() { events.push('close'); return true; }
     },
     async plGradeCurrentResponses(current, questionIndex) {
       const response = current.responses[String(questionIndex)].s1;

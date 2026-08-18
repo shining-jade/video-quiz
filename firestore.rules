@@ -117,9 +117,8 @@ service cloud.firestore {
 
     function validAcceptList(values) {
       return values is list &&
-        values.size() > 0 &&
         values.size() <= 20 &&
-        (values.size() < 1 || (values[0] is string && values[0].size() <= 100)) &&
+        values[0] is string && values[0].size() <= 100 &&
         (values.size() < 2 || (values[1] is string && values[1].size() <= 100)) &&
         (values.size() < 3 || (values[2] is string && values[2].size() <= 100)) &&
         (values.size() < 4 || (values[3] is string && values[3].size() <= 100)) &&
@@ -181,7 +180,7 @@ service cloud.firestore {
         live.keys().hasAll(['q', 'openedAt', 'limitSec', 'revealed']) &&
         live.keys().hasOnly([
           'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer', 'status',
-          'responseClosesAt', 'submitGraceUntil', 'revealAt', 'accepting'
+          'responseClosesAt', 'submitGraceUntil', 'revealAt', 'accepting', 'liveToken'
         ]) &&
         live.q is int &&
         live.q >= -1 &&
@@ -190,6 +189,7 @@ service cloud.firestore {
         live.limitSec >= 0 &&
         live.revealed is bool &&
         (!('accepting' in live) || live.accepting is bool) &&
+        (!('liveToken' in live) || live.liveToken is string) &&
         (!('status' in live) || live.status is string) &&
         ((!('responseClosesAt' in live) &&
             !('submitGraceUntil' in live) &&
@@ -200,7 +200,9 @@ service cloud.firestore {
             live.responseClosesAt <= live.submitGraceUntil &&
             live.submitGraceUntil <= live.revealAt)) &&
         ((live.q == -1 &&
+            live.openedAt == 0 &&
             live.revealed == false &&
+            !('liveToken' in live) &&
             !('publicQuestion' in live) &&
             !('publicAnswer' in live) &&
             !('responseClosesAt' in live) &&
@@ -268,10 +270,12 @@ service cloud.firestore {
 
     function validLiveUpdateTransition() {
       return request.resource.data.q != resource.data.q ||
-        resource.data.revealed == true ||
-        request.resource.data.revealed == false ||
-        !('revealAt' in resource.data) ||
-        request.time >= resource.data.revealAt;
+        (request.resource.data.openedAt == resource.data.openedAt &&
+          request.resource.data.get('liveToken', '') == resource.data.get('liveToken', '') &&
+          (resource.data.revealed == true ||
+            request.resource.data.revealed == false ||
+            !('revealAt' in resource.data) ||
+            request.time >= resource.data.revealAt));
     }
 
     function validAcceptingTransition() {

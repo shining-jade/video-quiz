@@ -2909,9 +2909,16 @@ function renderPlayRun() {
     const nextLive = Object.assign(
       { q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {}
     );
+    const nextToken = String(nextLive.liveToken || '');
+    const currentToken = String(state.live && state.live.liveToken || '');
+    const identityChanged = nextToken || currentToken
+      ? nextToken !== currentToken
+      : Number(nextLive.openedAt) !== Number(state.live && state.live.openedAt);
     if (Number(nextLive.q) !== Number(state.live && state.live.q) ||
-        Number(nextLive.openedAt) !== Number(state.live && state.live.openedAt)) {
+        identityChanged) {
       state.liveGeneration = (Number(state.liveGeneration) || 0) + 1;
+      state.revealRequested = false;
+      state.revealRetryAt = 0;
     }
     state.live = nextLive;
     if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
@@ -3577,6 +3584,7 @@ async function plOpenQuestion(i) {
   let liveLimit = configuredLimit;
   const live = {
     q: i,
+    liveToken: FirestoreStore.createLiveToken(),
     openedAt: SV_TS,
     revealed,
     accepting: true,
@@ -3609,12 +3617,22 @@ function plReveal() {
   if (!pl || pl.live.q < 0) return;
   const question = pl.flatQuestions[pl.live.q];
   if (!question) return;
-  return store.revealLive(pl.sessionId, FirestoreStore.publicAnswer(question));
+  const identity = FirestoreStore.liveIdentity(pl.live);
+  if (!identity) return Promise.resolve(false);
+  return store.revealLive(
+    pl.sessionId,
+    identity,
+    FirestoreStore.publicAnswer(question)
+  );
 }
 function plCloseQuestion() {
   const state = pl;
   if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
   const questionIndex = Number(state.live.q);
+  const identity = { q: questionIndex, openedAt: state.live.openedAt };
+  if (typeof state.live.liveToken === 'string' && state.live.liveToken) {
+    identity.liveToken = state.live.liveToken;
+  }
   const generation = Number(state.liveGeneration) || 0;
   if (state.closeFlight) {
     return state.closeFlight.questionIndex === questionIndex &&
@@ -3630,7 +3648,8 @@ function plCloseQuestion() {
   state.closeError = '';
 
   const run = async () => {
-    await store.freezeLive(state.sessionId);
+    const frozen = await store.freezeLive(state.sessionId, identity);
+    if (!frozen) return false;
     if (!stillCurrent()) return false;
     state.live = Object.assign({}, state.live, { accepting: false });
     const [responseDocs, gradeDocs] = await Promise.all([
@@ -3647,17 +3666,16 @@ function plCloseQuestion() {
     if (!stillCurrent()) return false;
     await plPushBoard();
     if (!stillCurrent()) return false;
-    await store.setLive(state.sessionId, {
-      q: -1, openedAt: 0, revealed: false, limitSec: 0
-    });
+    const closed = await store.closeLive(state.sessionId, identity);
+    if (!closed) return false;
     if (pl !== state || state.closeFlight !== flight) return false;
     if (Number(state.live && state.live.q) !== questionIndex &&
         Number(state.live && state.live.q) !== -1) return false;
     if (Number(state.live && state.live.q) === questionIndex) {
       state.liveGeneration = generation + 1;
-      state.live = Object.assign({}, state.live, {
+      state.live = {
         q: -1, openedAt: 0, revealed: false, limitSec: 0
-      });
+      };
     }
     state.closeError = '';
     state.pendingLiveQuestion = -1;
@@ -4015,8 +4033,10 @@ function plTimerTick() {
       serverNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;
     state.revealPending = true;
-    Promise.resolve(plReveal()).then(() => {
-      if (pl === state) state.revealRequested = true;
+    Promise.resolve(plReveal()).then(revealed => {
+      if (pl !== state) return;
+      if (revealed === false) state.revealRetryAt = serverNow() + 1000;
+      else state.revealRequested = true;
     }).catch(e => {
       if (pl === state) {
         state.revealRequested = false;
@@ -4216,7 +4236,12 @@ function stStartWatching(expectedState) {
     if (st !== state) return;
     const previousQ = state.live.q;
     const nl = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
-    const changed = nl.q !== state.live.q || nl.openedAt !== state.live.openedAt;
+    const nextToken = String(nl.liveToken || '');
+    const currentToken = String(state.live.liveToken || '');
+    const identityChanged = nextToken || currentToken
+      ? nextToken !== currentToken
+      : nl.openedAt !== state.live.openedAt;
+    const changed = nl.q !== state.live.q || identityChanged;
     state.live = nl;
     const view = studentQuestionView(nl);
     state.currentQuestion = view.question || null;
@@ -4646,7 +4671,7 @@ function stDeadlineTick() {
   if (!st || st.live.q < 0 || !st.live.openedAt || !st.live.limitSec) return;
   const t = stLeftRatio();
   if (!t || t.left > 0) return;
-  const key = st.live.q + ':' + st.live.openedAt;
+  const key = st.live.liveToken || (st.live.q + ':' + st.live.openedAt);
   if (st.deadlineHandled === key) return;
   st.deadlineHandled = key;
   if (!st.submitted && stHasDraftAnswer()) stSubmitCurrent('timer');
