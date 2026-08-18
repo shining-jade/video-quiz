@@ -1055,6 +1055,29 @@ test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면�
   assert.equal(rendered, 0);
 });
 
+test('세트 목록 행은 videos 배열에서 영상과 전체 문항 수를 표시한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {
+    PlaylistCore: require('../playlist-core.js'),
+    REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
+    esc(value) { return String(value); },
+    fmtDate() { return ''; },
+    linkTo(value) { return value; }
+  };
+  vm.runInNewContext(extractFunction(html, 'setListRow'), context);
+
+  const row = context.setListRow({
+    id: 'legacy-normalized', title: '이전 세트', author: '', archived: false,
+    settings: { revealMode: 'timer' },
+    videos: [
+      { questions: [{ text: '1' }, { text: '2' }] },
+      { questions: [{ text: '3' }] }
+    ]
+  });
+
+  assert.match(row, /영상 2개 · 문항 3개/);
+});
+
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({

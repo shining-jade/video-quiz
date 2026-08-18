@@ -1224,13 +1224,15 @@ function renderSetList() {
 }
 
 function setListRow(s) {
+  const videos = PlaylistCore.normalizeVideos(s);
+  const questionCount = PlaylistCore.flattenQuestions(videos).length;
   return '<div class="card" style="padding:15px;margin-bottom:10px' + (s.archived ? ';opacity:.6' : '') + '">' +
     '<div class="row" style="align-items:center">' +
       '<div style="flex:1 1 260px;min-width:0">' +
         '<div style="font-size:15px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
           (s.archived ? '<span class="tag mute" style="margin-right:6px">숨김</span>' : '') + esc(s.title) + '</div>' +
         '<div style="font-size:12.5px;color:var(--ink-2);margin-top:3px">' +
-          '문항 ' + s.questions.length + '개' +
+          '영상 ' + videos.length + '개 · 문항 ' + questionCount + '개' +
           (s.author ? ' · ' + esc(s.author) : '') +
           ' · ' + REVEAL_LABEL[s.settings.revealMode] +
           (s.updatedAt ? ' · ' + fmtDate(s.updatedAt) : '') +
