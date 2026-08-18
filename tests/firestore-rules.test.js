@@ -562,11 +562,27 @@ rulesTest('fix-round-2: freeze denies the racing revision and the accepted revis
   await assertSucceeds(updateDoc(response, {
     'answers.0': { answer: 0, submitted: true, revision: 2 }
   }));
-  const freeze = assertSucceeds(updateDoc(live, { accepting: false }));
-  const racingRevision = freeze.then(() => assertFails(updateDoc(response, {
-    'answers.0': { answer: 1, submitted: true, revision: 3 }
-  })));
-  await Promise.all([freeze, racingRevision]);
+  let releaseCompetingCommit;
+  let markCompetingRead;
+  const competingCanCommit = new Promise(resolve => { releaseCompetingCommit = resolve; });
+  const competingRead = new Promise(resolve => { markCompetingRead = resolve; });
+  let firstAttempt = true;
+  const competingRevision = runTransaction(student, async transaction => {
+    await transaction.get(response);
+    if (firstAttempt) {
+      firstAttempt = false;
+      markCompetingRead();
+      await competingCanCommit;
+    }
+    transaction.update(response, {
+      'answers.0': { answer: 1, submitted: true, revision: 3 }
+    });
+  });
+
+  await competingRead;
+  await assertSucceeds(updateDoc(live, { accepting: false }));
+  releaseCompetingCommit();
+  await assertFails(competingRevision);
 
   const accepted = await assertSucceeds(getDoc(
     doc(owner, 'sessions/s1/responses/student-uid')
@@ -595,6 +611,47 @@ rulesTest('fix-round-2: timer live cannot freeze before submit grace ends', asyn
   await assertFails(updateDoc(live, { accepting: false }));
   await new Promise(resolve => setTimeout(resolve, 400));
   await assertSucceeds(updateDoc(live, { accepting: false }));
+});
+
+rulesTest('fix-round-3: accepting timer live cannot change question before grace', async t => {
+  const transitions = [
+    ['another question', { q: 1 }],
+    ['closed question', { q: -1, openedAt: 0, revealed: false, limitSec: 0 }]
+  ];
+  for (const [name, change] of transitions) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      const now = Date.now();
+      await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+        accepting: true,
+        responseClosesAt: Timestamp.fromMillis(now + 100),
+        submitGraceUntil: Timestamp.fromMillis(now + 700),
+        revealAt: Timestamp.fromMillis(now + 700)
+      }));
+
+      const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
+      const changing = change.q < 0 ? setDoc(live, change) : updateDoc(live, change);
+      await assertFails(changing);
+    });
+  }
+});
+
+rulesTest('fix-round-3: timer live changes question after grace or an accepted freeze', async () => {
+  const now = Date.now();
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    accepting: true,
+    responseClosesAt: Timestamp.fromMillis(now + 50),
+    submitGraceUntil: Timestamp.fromMillis(now + 300),
+    revealAt: Timestamp.fromMillis(now + 300)
+  }));
+  const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
+
+  await new Promise(resolve => setTimeout(resolve, 400));
+  await assertSucceeds(updateDoc(live, { q: 1 }));
+
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, { accepting: true }));
+  await assertSucceeds(updateDoc(live, { accepting: false }));
+  await assertSucceeds(updateDoc(live, { q: 1 }));
 });
 
 rulesTest('current-live-question response validation', async () => {

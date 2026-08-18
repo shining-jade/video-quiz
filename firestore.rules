@@ -275,12 +275,13 @@ service cloud.firestore {
     }
 
     function validAcceptingTransition() {
-      return request.resource.data.q != resource.data.q ||
-        !('accepting' in resource.data) ||
-        resource.data.accepting == false ||
-        ('accepting' in request.resource.data && request.resource.data.accepting == true) ||
-        !('submitGraceUntil' in resource.data) ||
+      let graceFinished = !('submitGraceUntil' in resource.data) ||
         request.time >= resource.data.submitGraceUntil;
+      return (request.resource.data.q != resource.data.q &&
+          (resource.data.get('accepting', true) == false || graceFinished)) ||
+        (request.resource.data.q == resource.data.q &&
+          (resource.data.get('accepting', true) == false ||
+            request.resource.data.get('accepting', true) == true || graceFinished));
     }
 
     function currentQuestionKey(sessionId) {

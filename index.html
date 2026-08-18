@@ -2577,7 +2577,10 @@ function screenPlay(setId) {
     sessionId: null, code: null,
     player: null, lastT: 0, fired: [], dueQuestions: [],
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    liveGeneration: 0,
     pendingLiveQuestion: -1,
+    closeFlight: null,
+    closeError: '',
     students: {}, responses: {},
     liveRef: null,
     isStageFullscreen: false,
@@ -2768,14 +2771,15 @@ function plGradeCurrentResponses(state, requestedQuestionIndex) {
       return store.gradeAnswer(
         state.sessionId, studentId, questionIndex, response.revision, ok
       ).then(graded => {
+        if (graded !== true) throw new Error('현재 제출 revision을 채점하지 못했습니다.');
         const current = state.responses && state.responses[String(questionIndex)] || {};
-        if (graded === true && pl === state && current[studentId] === response) response.ok = ok;
+        if (pl === state && current[studentId] === response) response.ok = ok;
         return graded;
       });
     }).catch(error => {
       delete state.gradeWrites[key];
       if (pl === state) console.error(error);
-      return false;
+      throw error;
     });
     state.gradeWrites[key] = writing;
     writes.push(writing);
@@ -2881,7 +2885,9 @@ function renderPlayRun() {
     state.responses = FirestoreCore.responseDocsToQuestionMaps(
       state.responseDocs, state.gradeDocs || {}
     );
-    if (state.live && state.live.revealed) plGradeCurrentResponses(state);
+    if (state.live && state.live.revealed) {
+      plGradeCurrentResponses(state).catch(e => { if (pl === state) console.error(e); });
+    }
     plRenderQList();
     plRenderOverlayCounts();
     plRenderStudents();
@@ -2900,13 +2906,22 @@ function renderPlayRun() {
   }, e => { if (pl === state) console.error(e); }));
   onCleanup(store.subscribeLive(state.sessionId, live => {
     if (pl !== state) return;
-    state.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
+    const nextLive = Object.assign(
+      { q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {}
+    );
+    if (Number(nextLive.q) !== Number(state.live && state.live.q) ||
+        Number(nextLive.openedAt) !== Number(state.live && state.live.openedAt)) {
+      state.liveGeneration = (Number(state.liveGeneration) || 0) + 1;
+    }
+    state.live = nextLive;
     if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
     if (state.live.revealed) {
       state.revealRequested = false;
       state.revealRetryAt = 0;
     }
-    if (state.live.revealed) plGradeCurrentResponses(state);
+    if (state.live.revealed) {
+      plGradeCurrentResponses(state).catch(e => { if (pl === state) console.error(e); });
+    }
     plRenderOverlay();
     if (typeof plRenderTimeline === 'function') plRenderTimeline();
     plRenderStageControls();
@@ -3544,6 +3559,10 @@ async function plOpenQuestion(i) {
   const state = pl;
   const question = state.flatQuestions[i];
   if (!question) return;
+  if (state.closeFlight && state.live && Number(state.live.q) >= 0) return false;
+  const graceUntil = Number(state.live && state.live.submitGraceUntil);
+  if (state.live && Number(state.live.q) >= 0 && state.live.accepting !== false &&
+      Number.isFinite(graceUntil) && serverNow() < graceUntil) return false;
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
   pl.pendingLiveQuestion = i;
   let image = '';
@@ -3592,34 +3611,75 @@ function plReveal() {
   if (!question) return;
   return store.revealLive(pl.sessionId, FirestoreStore.publicAnswer(question));
 }
-async function plCloseQuestion() {
+function plCloseQuestion() {
   const state = pl;
-  if (!state) return;
-  const questionIndex = Number(state.live && state.live.q);
-  await store.freezeLive(state.sessionId);
-  if (pl !== state) return;
-  const [responseDocs, gradeDocs] = await Promise.all([
-    store.getResponses(state.sessionId),
-    store.getGrades(state.sessionId)
-  ]);
-  if (pl !== state) return;
-  state.responseDocs = responseDocs || {};
-  state.gradeDocs = gradeDocs || {};
-  state.responses = FirestoreCore.responseDocsToQuestionMaps(
-    state.responseDocs, state.gradeDocs
-  );
-  await plGradeCurrentResponses(state, questionIndex);
-  if (pl !== state) return;
-  await plPushBoard();
-  if (pl !== state) return;
-  await store.setLive(state.sessionId, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
-  if (pl !== state) return;
-  state.live = Object.assign({}, state.live, { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
-  state.pendingLiveQuestion = -1;
-  if (plOpenNextDueQuestion()) return;
-  if (typeof plTick === 'function') plTick();
-  if (state.transitionUntil || state.playlistDone) return;
-  try { state.player.playVideo(); } catch (e) {}
+  if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
+  const questionIndex = Number(state.live.q);
+  const generation = Number(state.liveGeneration) || 0;
+  if (state.closeFlight) {
+    return state.closeFlight.questionIndex === questionIndex &&
+      state.closeFlight.generation === generation
+      ? state.closeFlight.promise
+      : Promise.resolve(false);
+  }
+
+  const flight = { questionIndex: questionIndex, generation: generation, promise: null };
+  const stillCurrent = () => pl === state && state.closeFlight === flight &&
+    Number(state.live && state.live.q) === questionIndex &&
+    (Number(state.liveGeneration) || 0) === generation;
+  state.closeError = '';
+
+  const run = async () => {
+    await store.freezeLive(state.sessionId);
+    if (!stillCurrent()) return false;
+    state.live = Object.assign({}, state.live, { accepting: false });
+    const [responseDocs, gradeDocs] = await Promise.all([
+      store.getResponses(state.sessionId),
+      store.getGrades(state.sessionId)
+    ]);
+    if (!stillCurrent()) return false;
+    state.responseDocs = responseDocs || {};
+    state.gradeDocs = gradeDocs || {};
+    state.responses = FirestoreCore.responseDocsToQuestionMaps(
+      state.responseDocs, state.gradeDocs
+    );
+    await plGradeCurrentResponses(state, questionIndex);
+    if (!stillCurrent()) return false;
+    await plPushBoard();
+    if (!stillCurrent()) return false;
+    await store.setLive(state.sessionId, {
+      q: -1, openedAt: 0, revealed: false, limitSec: 0
+    });
+    if (pl !== state || state.closeFlight !== flight) return false;
+    if (Number(state.live && state.live.q) !== questionIndex &&
+        Number(state.live && state.live.q) !== -1) return false;
+    if (Number(state.live && state.live.q) === questionIndex) {
+      state.liveGeneration = generation + 1;
+      state.live = Object.assign({}, state.live, {
+        q: -1, openedAt: 0, revealed: false, limitSec: 0
+      });
+    }
+    state.closeError = '';
+    state.pendingLiveQuestion = -1;
+    if (plOpenNextDueQuestion()) return true;
+    if (typeof plTick === 'function') plTick();
+    if (state.transitionUntil || state.playlistDone) return true;
+    try { state.player.playVideo(); } catch (e) {}
+    return true;
+  };
+
+  flight.promise = run().catch(error => {
+    if (pl === state && Number(state.live && state.live.q) === questionIndex) {
+      state.closeError = error && error.message ? error.message : String(error);
+    }
+    throw error;
+  }).finally(() => {
+    if (pl === state && state.closeFlight === flight) state.closeFlight = null;
+    if (pl === state && typeof plRenderOverlay === 'function') plRenderOverlay();
+  });
+  state.closeFlight = flight;
+  if (typeof plRenderOverlay === 'function') plRenderOverlay();
+  return flight.promise;
 }
 function plJumpTo(i) {
   if (!pl || !pl.player || !pl.player.seekTo) return;
@@ -3709,8 +3769,7 @@ function plPushBoard() {
         }
       : { uid: r.sid, visible: false };
   });
-  return store.writeBoard(pl.sessionId, board, studentScores)
-    .catch(e => console.warn('board', e));
+  return store.writeBoard(pl.sessionId, board, studentScores);
 }
 
 function plRenderStudents() {
@@ -3799,6 +3858,7 @@ function plRenderOverlay() {
   const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
   const mode = pl.set.settings.revealMode;
+  const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === i);
 
   if (!ov) {
     ov = document.createElement('div');
@@ -3829,9 +3889,13 @@ function plRenderOverlay() {
             '</div>').join('') +
         '</div>') +
     '<div class="ov-actions">' +
+      (pl.closeError ? '<div class="notice bad" role="alert">종료 저장 실패: ' +
+        esc(pl.closeError) + ' · 다시 시도해 주세요.</div>' : '') +
       (mode === 'never' ? '' :
         '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
-      '<button class="btn primary" onclick="plCloseQuestion()">▶ 계속 재생</button>' +
+      '<button class="btn primary" onclick="plCloseQuestion().catch(()=>{})"' +
+        (closeBusy ? ' disabled aria-busy="true"' : '') + '>' +
+        (closeBusy ? '저장 중…' : '▶ 계속 재생') + '</button>' +
       '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
       '<a class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
     '</div>' +

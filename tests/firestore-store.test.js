@@ -2456,6 +2456,189 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
   assert.deepEqual(order, ['grade-start', 'grade-end', 'board', 'live-close', 'play']);
 });
 
+test('grade failure keeps the frozen question and queue retryable until grading succeeds', async () => {
+  const opened = [];
+  let gradeAttempts = 0;
+  let boardWrites = 0;
+  let liveCloses = 0;
+  const state = {
+    sessionId: 'session-a', live: { q: 0, accepting: true }, liveGeneration: 4,
+    flatQuestions: [{ type: 'choice', answer: 1 }, { type: 'choice', answer: 0 }],
+    responses: {}, dueQuestions: [1], pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    isAutoGraded() { return true; },
+    gradeResponse() { return true; },
+    store: {
+      async freezeLive() {},
+      async getResponses() {
+        return { s1: { uid: 's1', answers: {
+          '0': { answer: 1, submitted: true, revision: 2 }
+        } } };
+      },
+      async getGrades() { return {}; },
+      async gradeAnswer() {
+        gradeAttempts += 1;
+        if (gradeAttempts === 1) throw new Error('grade offline');
+        return true;
+      },
+      async setLive() { liveCloses += 1; }
+    },
+    async plPushBoard() { boardWrites += 1; },
+    plOpenQuestion(i) { opened.push(i); state.pendingLiveQuestion = i; },
+    plTick() {},
+    console: { error() {} }
+  };
+  loadStageFunctions(['plGradeCurrentResponses', 'plOpenNextDueQuestion', 'plCloseQuestion'], context);
+
+  await assert.rejects(context.plCloseQuestion(), /grade offline/);
+  assert.equal(state.live.q, 0);
+  assert.equal(state.live.accepting, false);
+  assert.match(state.closeError, /grade offline/);
+  assert.deepEqual(state.dueQuestions, [1]);
+  assert.deepEqual(opened, []);
+  assert.equal(boardWrites, 0);
+  assert.equal(liveCloses, 0);
+
+  await context.plCloseQuestion();
+  assert.equal(gradeAttempts, 2);
+  assert.equal(boardWrites, 1);
+  assert.equal(liveCloses, 1);
+  assert.deepEqual(opened, [1]);
+});
+
+test('board failure keeps the frozen question and succeeds on retry before consuming queue', async () => {
+  const opened = [];
+  let boardAttempts = 0;
+  let liveCloses = 0;
+  const state = {
+    sessionId: 'session-a', live: { q: 0, accepting: true }, liveGeneration: 2,
+    students: { s1: { name: 'A', num: 1 } },
+    flatQuestions: [{ type: 'choice' }, { type: 'choice' }],
+    set: { settings: { revealMode: 'never' } },
+    responses: {}, dueQuestions: [1], pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    store: {
+      async freezeLive() {},
+      async getResponses() {
+        return { s1: { uid: 's1', answers: {
+          '0': { answer: 1, submitted: true, revision: 3 }
+        } } };
+      },
+      async getGrades() {
+        return { 's1__0': { uid: 's1', questionIndex: 0, revision: 3, ok: true } };
+      },
+      async writeBoard() {
+        boardAttempts += 1;
+        if (boardAttempts === 1) throw new Error('board offline');
+      },
+      async setLive() { liveCloses += 1; }
+    },
+    async plGradeCurrentResponses() {},
+    plOpenQuestion(i) { opened.push(i); state.pendingLiveQuestion = i; },
+    plTick() {},
+    console: { warn() {} }
+  };
+  loadStageFunctions([
+    'plScoreboard', 'plPushBoard', 'plOpenNextDueQuestion', 'plCloseQuestion'
+  ], context);
+
+  await assert.rejects(context.plCloseQuestion(), /board offline/);
+  assert.equal(state.live.q, 0);
+  assert.equal(state.live.accepting, false);
+  assert.match(state.closeError, /board offline/);
+  assert.deepEqual(state.dueQuestions, [1]);
+  assert.deepEqual(opened, []);
+  assert.equal(liveCloses, 0);
+
+  await context.plCloseQuestion();
+  assert.equal(boardAttempts, 2);
+  assert.equal(liveCloses, 1);
+  assert.deepEqual(opened, [1]);
+});
+
+test('simultaneous close calls share one per-question promise and open queued next once', async () => {
+  let releaseFreeze;
+  const freezeReady = new Promise(resolve => { releaseFreeze = resolve; });
+  let freezes = 0;
+  let closes = 0;
+  const opened = [];
+  const state = {
+    sessionId: 'session-a', live: { q: 0, accepting: true }, liveGeneration: 7,
+    responses: {}, dueQuestions: [1], pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    store: {
+      freezeLive() { freezes += 1; return freezeReady; },
+      async getResponses() { return {}; },
+      async getGrades() { return {}; },
+      async setLive() { closes += 1; }
+    },
+    async plGradeCurrentResponses() {},
+    async plPushBoard() {},
+    plOpenQuestion(i) { opened.push(i); state.pendingLiveQuestion = i; },
+    plTick() {}
+  };
+  loadStageFunctions(['plOpenNextDueQuestion', 'plCloseQuestion'], context);
+
+  const first = context.plCloseQuestion();
+  const second = context.plCloseQuestion();
+  assert.equal(first, second);
+  assert.equal(freezes, 1);
+
+  releaseFreeze();
+  await first;
+  assert.equal(closes, 1);
+  assert.deepEqual(opened, [1]);
+});
+
+test('stale close completion cannot close a newer live question', async () => {
+  let releaseFreeze;
+  const freezeReady = new Promise(resolve => { releaseFreeze = resolve; });
+  let responseReads = 0;
+  let closes = 0;
+  const state = {
+    sessionId: 'session-a', live: { q: 0, accepting: true }, liveGeneration: 5,
+    responses: {}, pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    store: {
+      freezeLive() { return freezeReady; },
+      async getResponses() { responseReads += 1; return {}; },
+      async getGrades() { return {}; },
+      async setLive() { closes += 1; }
+    },
+    async plGradeCurrentResponses() {},
+    async plPushBoard() {},
+    plOpenNextDueQuestion() { throw new Error('must not advance'); },
+    plTick() {}
+  };
+  loadStageFunctions(['plCloseQuestion'], context);
+
+  const closing = context.plCloseQuestion();
+  state.live = { q: 1, accepting: true };
+  state.liveGeneration = 6;
+  releaseFreeze();
+
+  assert.equal(await closing, false);
+  assert.equal(responseReads, 0);
+  assert.equal(closes, 0);
+  assert.equal(state.live.q, 1);
+});
+
 test('교사 재생 초기화는 videos를 평탄화해 전역 문항 상태를 만든다', async () => {
   let introRendered = 0;
   const savedSet = {
@@ -3160,6 +3343,39 @@ test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시
       number: 2, total: 2, type: 'choice', text: 'B', choices: ['가', '나']
     }
   }]);
+});
+
+test('열린 timer 문항의 grace 전에는 교사가 다른 문항을 직접 열 수 없다', async () => {
+  let writes = 0;
+  let pauses = 0;
+  let now = 10_000;
+  const ctx = loadStageFunctions(['limitFor', 'plOpenQuestion'], {
+    pl: {
+      sessionId: 'session-a',
+      live: { q: 0, accepting: true, submitGraceUntil: 20_000 },
+      pendingLiveQuestion: -1,
+      flatQuestions: [
+        { type: 'choice', text: 'A', choices: [] },
+        { type: 'choice', text: 'B', choices: [] }
+      ],
+      set: { settings: { autoPause: true, revealMode: 'timer', revealDelaySec: 5 } },
+      player: { pauseVideo() { pauses += 1; } }
+    },
+    serverNow() { return now; },
+    SV_TS: 10_000,
+    FirestoreStore: loadStoreModule(),
+    store: { async setLive() { writes += 1; } }
+  });
+
+  assert.equal(await ctx.plOpenQuestion(1), false);
+  assert.equal(writes, 0);
+  assert.equal(pauses, 0);
+  assert.equal(ctx.pl.pendingLiveQuestion, -1);
+
+  now = 21_000;
+  assert.equal(await ctx.plOpenQuestion(1), true);
+  assert.equal(writes, 1);
+  assert.equal(pauses, 1);
 });
 
 test('교사 문항 목록은 모든 영상의 전역 번호를 이어서 렌더링한다', () => {
@@ -3869,6 +4085,7 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
   const ctx = loadStageFunctions(['plStageRoot', 'plRenderOverlay', 'plToggleBoard'], {
     pl: {
       live: { q: 0 }, students: {}, responses: {},
+      closeFlight: { questionIndex: 0 }, closeError: 'board offline',
       flatQuestions: [{ type: 'choice', text: '문제', choices: ['1', '2'] }],
       set: {
         title: '세트', settings: { revealMode: 'manual' },
@@ -3892,6 +4109,9 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
 
   assert.deepEqual(appended.map(node => node.id), ['overlay', 'board-overlay']);
   assert.equal(stageClasses.has('quiz-open'), true);
+  assert.match(appended[0].innerHTML, /종료 저장 실패: board offline/);
+  assert.match(appended[0].innerHTML, /disabled aria-busy="true"/);
+  assert.match(appended[0].innerHTML, /저장 중…/);
 });
 
 test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 유지한다', () => {
@@ -3950,7 +4170,7 @@ test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재�
   let writes = 0, played = 0, exits = 0;
   const player = { playVideo() { played++; } };
   const ctx = loadStageFunctions(['plOpenNextDueQuestion', 'plCloseQuestion'], {
-    pl: { sessionId: 'session1', player },
+    pl: { sessionId: 'session1', live: { q: 0 }, liveGeneration: 1, player },
     plGradeCurrentResponses() { return Promise.resolve(); },
     plPushBoard() { return Promise.resolve(); },
     document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
@@ -3973,7 +4193,10 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const context = {
-    pl: { sessionId: 'session-a', player: { playVideo() { calls.push('play'); } } },
+    pl: {
+      sessionId: 'session-a', live: { q: 0 }, liveGeneration: 1,
+      player: { playVideo() { calls.push('play'); } }
+    },
     plGradeCurrentResponses() { return Promise.resolve(); },
     plPushBoard() { calls.push('board'); return Promise.resolve(); },
     FirestoreCore: core,
