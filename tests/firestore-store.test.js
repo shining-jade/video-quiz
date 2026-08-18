@@ -31,6 +31,22 @@ function merge(current, update) {
   return result;
 }
 
+function updateFieldPaths(current, update, resolveValue = clone) {
+  const result = clone(current || {});
+  Object.entries(update).forEach(([fieldPath, value]) => {
+    const segments = fieldPath.split('.');
+    let target = result;
+    segments.slice(0, -1).forEach(segment => {
+      if (!target[segment] || typeof target[segment] !== 'object') target[segment] = {};
+      target = target[segment];
+    });
+    const key = segments.at(-1);
+    if (value === DELETE_FIELD) delete target[key];
+    else target[key] = resolveValue(value);
+  });
+  return result;
+}
+
 function makeFirestoreFake(initial = {}, options = {}) {
   const committedServerMillis = options.committedServerMillis ?? 50_000;
   const documents = new Map(Object.entries(initial).map(([path, value]) => [path, clone(value)]));
@@ -232,6 +248,15 @@ function makeFirestoreFake(initial = {}, options = {}) {
           touched.add(ref.path);
           return transaction;
         },
+        update(ref, value) {
+          calls.push({ operation: 'transactionUpdate', path: ref.path, value: clone(value) });
+          if (!staged.has(ref.path)) throw new Error('not-found');
+          staged.set(ref.path, updateFieldPaths(
+            staged.get(ref.path), value, resolveServerTimestamps
+          ));
+          touched.add(ref.path);
+          return transaction;
+        },
         delete(ref) {
           calls.push({ operation: 'transactionDelete', path: ref.path });
           staged.delete(ref.path);
@@ -430,6 +455,7 @@ test('학생 참여는 자기 UID 문서를 먼저 읽고 프로필 필드로 �
 test('학생 응답은 자기 UID 경로에 Task 2 허용 필드만 기록한다', async () => {
   const fake = makeFirestoreFake({
     'sessions/session-a/responses/anonymous-uid': {
+      uid: 'anonymous-uid',
       answers: { '0': { answer: 0, submitted: true, revision: 1, ok: true } }
     }
   });
@@ -448,12 +474,43 @@ test('학생 응답은 자기 UID 경로에 Task 2 허용 필드만 기록한다
       '4': { ...stored.answers['4'], submittedAt: stored.answers['4'].submittedAt.toMillis() }
     }
   }, {
+    uid: 'anonymous-uid',
     answers: {
       '0': { answer: 0, submitted: true, revision: 1, ok: true },
       '4': { answer: [1, 3], submitted: true, revision: 2, submittedAt: 50_000 }
     }
   });
   assert.equal(fake.has('sessions/session-a/responses/3_2_7'), false);
+});
+
+test('returning student response keeps immutable uid and replaces the complete graded answer leaf', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/session-a/responses/anonymous-uid': {
+      uid: 'anonymous-uid',
+      answers: {
+        '0': { answer: 0, submitted: true, revision: 1 },
+        '4': { answer: 1, submitted: true, revision: 2, ok: true }
+      }
+    }
+  });
+  const store = createStore(fake);
+
+  await store.writeStudentAnswer('session-a', 'anonymous-uid', 4, {
+    answer: 1, submitted: false, revision: 3, submittedAt: SERVER_TIMESTAMP
+  });
+
+  const stored = fake.value('sessions/session-a/responses/anonymous-uid');
+  assert.equal(stored.uid, 'anonymous-uid');
+  assert.deepEqual(stored.answers['0'], {
+    answer: 0, submitted: true, revision: 1
+  });
+  assert.deepEqual({
+    ...stored.answers['4'],
+    submittedAt: stored.answers['4'].submittedAt.toMillis()
+  }, {
+    answer: 1, submitted: false, revision: 3, submittedAt: 50_000
+  });
+  assert.equal(Object.hasOwn(stored.answers['4'], 'ok'), false);
 });
 
 test('교사 승인 프로브는 정규화 이메일의 보호 문서를 서버에서만 읽고 역할을 판정한다', async () => {
@@ -2153,6 +2210,29 @@ test('점수판은 meta/board 문서에 scores 필드로 쓴다', async () => {
   assert.deepEqual(fake.value('sessions/a/meta/board'), { scores: { s1: 2, s2: 1 } });
 });
 
+test('teacher writes aggregate scores separately and student reads only the own score document', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  await store.writeBoard('a', { s1: 2, s2: 1 }, {
+    s1: { uid: 's1', visible: true, score: 2, graded: 3, answered: 3, rank: 1, total: 2 },
+    s2: { uid: 's2', visible: false }
+  });
+
+  assert.deepEqual(fake.value('sessions/a/meta/board'), {
+    scores: { s1: 2, s2: 1 }
+  });
+  assert.deepEqual(fake.value('sessions/a/student_scores/s1'), {
+    uid: 's1', visible: true, score: 2, graded: 3, answered: 3, rank: 1, total: 2
+  });
+  assert.deepEqual(fake.value('sessions/a/student_scores/s2'), {
+    uid: 's2', visible: false
+  });
+  assert.deepEqual(await store.getOwnScore('a', 's1'), {
+    uid: 's1', visible: true, score: 2, graded: 3, answered: 3, rank: 1, total: 2
+  });
+});
+
 test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기고 응답 문서를 화면 형태로 바꾼다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const subscriptions = {};
@@ -2218,7 +2298,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
     plTimerTick() {},
     console
   };
-  loadStageFunctions(['plLoadVideo', 'plGradeRevealedResponses', 'renderPlayRun'], context);
+  loadStageFunctions(['plLoadVideo', 'plGradeCurrentResponses', 'renderPlayRun'], context);
 
   context.renderPlayRun();
   subscriptions.students({ s1: { name: '가' } });
@@ -2274,19 +2354,91 @@ test('teacher grades only submitted auto-graded responses after reveal with a se
     isAutoGraded(q) { return q.type !== 'long'; },
     gradeResponse(q, response) { return Number(response.answer) === Number(q.answer); },
     store: {
-      async gradeAnswer(...args) { calls.push(args); }
+      async gradeAnswer(...args) { calls.push(args); return true; }
     },
     console
   };
-  loadStageFunctions(['plGradeRevealedResponses'], context);
+  loadStageFunctions(['plGradeCurrentResponses'], context);
 
-  await context.plGradeRevealedResponses(state);
+  await context.plGradeCurrentResponses(state);
   assert.equal(state.responses['0'].submitted.ok, true);
-  await context.plGradeRevealedResponses(state);
+  await context.plGradeCurrentResponses(state);
   state.live = { q: 1, revealed: true };
-  await context.plGradeRevealedResponses(state);
+  await context.plGradeCurrentResponses(state);
 
-  assert.deepEqual(calls, [['session-a', 'submitted', 0, true]]);
+  assert.deepEqual(calls, [['session-a', 'submitted', 0, 2, true]]);
+});
+
+test('teacher grades submitted auto responses before an unrevealed never-mode close', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const state = {
+    sessionId: 'session-a',
+    live: { q: 0, revealed: false },
+    flatQuestions: [{ type: 'choice', answer: 1 }],
+    responses: {
+      '0': { student: { answer: 1, submitted: true, revision: 4 } }
+    }
+  };
+  const context = {
+    pl: state,
+    isAutoGraded() { return true; },
+    gradeResponse() { return true; },
+    store: {
+      async gradeAnswer(...args) { calls.push(args); return true; }
+    },
+    console
+  };
+  loadStageFunctions(['plGradeCurrentResponses'], context);
+
+  await context.plGradeCurrentResponses(state, 0);
+
+  assert.deepEqual(calls, [['session-a', 'student', 0, 4, true]]);
+  assert.equal(state.responses['0'].student.ok, true);
+});
+
+test('close reuses and awaits the in-flight grade promise before persisting the board', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const order = [];
+  let resolveGrade;
+  const gradeReady = new Promise(resolve => { resolveGrade = resolve; });
+  const state = {
+    sessionId: 'session-a',
+    live: { q: 0, revealed: false },
+    flatQuestions: [{ type: 'choice', answer: 1 }],
+    responses: {
+      '0': { student: { answer: 1, submitted: true, revision: 7 } }
+    },
+    player: { playVideo() { order.push('play'); } }
+  };
+  const context = {
+    pl: state,
+    isAutoGraded() { return true; },
+    gradeResponse() { return true; },
+    store: {
+      gradeAnswer() {
+        order.push('grade-start');
+        return gradeReady.then(() => { order.push('grade-end'); return true; });
+      },
+      async setLive() { order.push('live-close'); }
+    },
+    async plPushBoard() { order.push('board'); },
+    console
+  };
+  loadStageFunctions([
+    'plGradeCurrentResponses', 'plOpenNextDueQuestion', 'plCloseQuestion'
+  ], context);
+
+  const firstGrade = context.plGradeCurrentResponses(state, 0);
+  const secondGrade = context.plGradeCurrentResponses(state, 0);
+  const closing = context.plCloseQuestion();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(order, ['grade-start']);
+  resolveGrade();
+  await Promise.all([firstGrade, secondGrade, closing]);
+  assert.deepEqual(order, ['grade-start', 'grade-end', 'board', 'live-close', 'play']);
 });
 
 test('교사 재생 초기화는 videos를 평탄화해 전역 문항 상태를 만든다', async () => {
@@ -2923,6 +3075,46 @@ test('순위는 모든 영상의 전역 문항 응답을 합산한다', () => {
 
   assert.equal(rows[0].answered, 2);
   assert.equal(rows[0].correct, 2);
+});
+
+test('score publication keeps aggregate teacher-only and hides own score until policy allows it', async () => {
+  const writes = [];
+  const context = {
+    pl: {
+      sessionId: 'session-a',
+      students: {
+        s1: { name: 'A', grade: 1, klass: 1, num: 1 },
+        s2: { name: 'B', grade: 1, klass: 1, num: 2 }
+      },
+      responses: {
+        '0': { s1: { ok: true }, s2: { ok: false } }
+      },
+      flatQuestions: [{ type: 'choice' }],
+      live: { q: 0, revealed: false },
+      set: { settings: { revealMode: 'never' } }
+    },
+    store: {
+      async writeBoard(...args) { writes.push(clone(args)); }
+    },
+    console
+  };
+  loadStageFunctions(['plScoreboard', 'plPushBoard'], context);
+
+  await context.plPushBoard();
+  context.pl.set.settings.revealMode = 'manual';
+  context.pl.live.revealed = true;
+  await context.plPushBoard();
+
+  assert.deepEqual(writes, [
+    ['session-a', { s1: 1, s2: 0 }, {
+      s1: { uid: 's1', visible: false },
+      s2: { uid: 's2', visible: false }
+    }],
+    ['session-a', { s1: 1, s2: 0 }, {
+      s1: { uid: 's1', visible: true, score: 1, graded: 1, answered: 1, rank: 1, total: 2 },
+      s2: { uid: 's2', visible: true, score: 0, graded: 1, answered: 1, rank: 2, total: 2 }
+    }]
+  ]);
 });
 
 test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시간을 쓴다', async () => {
@@ -3743,7 +3935,7 @@ test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재�
   const player = { playVideo() { played++; } };
   const ctx = loadStageFunctions(['plOpenNextDueQuestion', 'plCloseQuestion'], {
     pl: { sessionId: 'session1', player },
-    plGradeRevealedResponses() { return Promise.resolve(); },
+    plGradeCurrentResponses() { return Promise.resolve(); },
     plPushBoard() { return Promise.resolve(); },
     document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
     store: { setLive() { writes++; return Promise.resolve(); } }
@@ -3762,7 +3954,7 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   const calls = [];
   const context = {
     pl: { sessionId: 'session-a', player: { playVideo() { calls.push('play'); } } },
-    plGradeRevealedResponses() { return Promise.resolve(); },
+    plGradeCurrentResponses() { return Promise.resolve(); },
     plPushBoard() { calls.push('board'); return Promise.resolve(); },
     store: {
       setLive(id, value) {
@@ -4412,12 +4604,12 @@ test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수�
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let liveNext;
   const subscriptions = [];
-  let boardReads = 0;
+  let scoreReads = 0;
   const context = {
     st: {
       sessionId: 'a', session: { status: 'live' },
       live: { q: 2, openedAt: 10, revealed: false, limitSec: 20 },
-      myAnswers: {}, board: {}
+      authUid: 'student-uid', myAnswers: {}, ownScore: null
     },
     store: {
       subscribeLive(id, next) {
@@ -4425,10 +4617,11 @@ test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수�
         liveNext = next;
         return () => {};
       },
-      async getBoard(id) {
+      async getOwnScore(id, uid) {
         assert.equal(id, 'a');
-        boardReads += 1;
-        return { s1: 2 };
+        assert.equal(uid, 'student-uid');
+        scoreReads += 1;
+        return { uid, visible: true, score: 2, rank: 1, total: 3 };
       }
     },
     onCleanup() {},
@@ -4445,12 +4638,14 @@ test('학생 화면은 live 하나만 구독하고 문항이 닫힐 때 점수�
   await liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0 });
 
   assert.deepEqual(subscriptions, ['a']);
-  assert.equal(boardReads, 1);
-  assert.deepEqual(clone(context.st.board), { s1: 2 });
+  assert.equal(scoreReads, 1);
+  assert.deepEqual(clone(context.st.ownScore), {
+    uid: 'student-uid', visible: true, score: 2, rank: 1, total: 3
+  });
 
   await liveNext({ q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended' });
   assert.equal(context.st.session.status, 'ended');
-  assert.equal(boardReads, 1);
+  assert.equal(scoreReads, 1);
 });
 
 test('이전 학생 live 콜백과 오류는 새 참여 화면을 바꾸거나 출력하지 않는다', async () => {
@@ -4498,11 +4693,11 @@ test('느린 점수판 조회는 뒤이어 열린 문항의 선택 상태를 덮
     st: {
       sessionId: 'a', session: { status: 'live' },
       live: { q: 2, openedAt: 10, revealed: false, limitSec: 20 },
-      myAnswers: { '3': { answer: 1 } }, board: {}
+      authUid: 'student-uid', myAnswers: { '3': { answer: 1 } }, ownScore: null
     },
     store: {
       subscribeLive(id, next) { liveNext = next; return () => {}; },
-      async getBoard() { await boardReady; return { s1: 2 }; }
+      async getOwnScore() { await boardReady; return { uid: 'student-uid', visible: true, score: 2, rank: 1, total: 3 }; }
     },
     onCleanup() {},
     every() {},
@@ -5021,22 +5216,45 @@ test('startup routes after auth state without syncing a student clock', async ()
 test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', async () => {
   const fake = makeFirestoreFake({
     'sessions/a/responses/s1': {
+      uid: 's1',
       answers: { '3': { answer: '학생 글', submitted: true, revision: 2, submittedAt: 10 } }
     }
   });
   const store = createStore(fake);
 
-  await store.gradeAnswer('a', 's1', 3, true);
+  await store.gradeAnswer('a', 's1', 3, 2, true);
   assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
     answer: '학생 글', submitted: true, revision: 2, submittedAt: 10, ok: true
   });
 
-  await store.gradeAnswer('a', 's1', 3, null);
+  await store.gradeAnswer('a', 's1', 3, 2, null);
   const ungraded = (await store.getOwnResponses('a', 's1'))['3'];
   assert.deepEqual(ungraded, {
     answer: '학생 글', submitted: true, revision: 2, submittedAt: 10
   });
   assert.equal(Object.hasOwn(ungraded, 'ok'), false);
+});
+
+test('teacher grading transaction ignores a stale expected revision and grades the current submitted revision only', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a/responses/s1': {
+      uid: 's1',
+      answers: {
+        '3': { answer: 'new answer', submitted: true, revision: 2 }
+      }
+    }
+  });
+  const store = createStore(fake);
+
+  assert.equal(await store.gradeAnswer('a', 's1', 3, 1, true), false);
+  assert.equal(Object.hasOwn(
+    fake.value('sessions/a/responses/s1').answers['3'], 'ok'
+  ), false);
+
+  assert.equal(await store.gradeAnswer('a', 's1', 3, 2, false), true);
+  assert.deepEqual(fake.value('sessions/a/responses/s1').answers['3'], {
+    answer: 'new answer', submitted: true, revision: 2, ok: false
+  });
 });
 
 test('세션 목록은 문서 ID와 화면용 밀리초 시각을 반환한다', async () => {
@@ -5279,7 +5497,10 @@ test('대시보드 서술형 채점은 저장소에 ok만 전달한다', async (
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const context = {
-    dash: { sessionId: 'session-a' },
+    dash: {
+      sessionId: 'session-a',
+      answers: { '3': { 'student-a': { revision: 5 } } }
+    },
     store: {
       async gradeAnswer(...args) { calls.push(args); }
     },
@@ -5290,7 +5511,7 @@ test('대시보드 서술형 채점은 저장소에 ok만 전달한다', async (
 
   await context.dashGrade(3, 'student-a', null);
 
-  assert.deepEqual(calls, [['session-a', 'student-a', 3, null]]);
+  assert.deepEqual(calls, [['session-a', 'student-a', 3, 5, null]]);
 });
 
 test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 한 번만 읽는다', async () => {
@@ -5808,7 +6029,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
       flatQuestions: [{ videoIndex: 0, t: 5 }, { videoIndex: 0, t: 15 }],
       fired: [true, false], playbackEnded: false, transitionUntil: 0
     },
-    async plGradeRevealedResponses() {},
+    async plGradeCurrentResponses() {},
     async plPushBoard() {},
     store: { async setLive() {} },
     plOpenQuestion(i) { opened.push(i); context.pl.pendingLiveQuestion = i; },
@@ -6097,4 +6318,79 @@ test('CSV 셀은 수식으로 해석되는 선행 문자를 quoting 전에 중�
   assert.equal(context.csvSafeCell('\rformula'), "'\rformula");
   assert.equal(context.csvSafeCell('안전한 값'), '안전한 값');
   assert.equal(context.csvSafeCell(-2), '-2');
+});
+
+test('timer question stores authoritative close grace and reveal timestamps', async () => {
+  let written;
+  const context = {
+    pl: {
+      sessionId: 'session-a', setId: 'set-a', pendingLiveQuestion: -1,
+      flatQuestions: [
+        { number: 1, key: 'v0q0', type: 'choice', text: 'Q', choices: ['A', 'B'] }
+      ],
+      set: {
+        settings: {
+          autoPause: false, revealMode: 'timer', limitSec: 20, revealDelaySec: 5
+        }
+      },
+      player: {}
+    },
+    serverNow() { return 100_000; },
+    SV_TS: Symbol('server timestamp'),
+    FirestoreStore: loadStoreModule(),
+    limitFor() { return 20; },
+    store: {
+      async setLive(id, value) { written = [id, value]; }
+    }
+  };
+  loadStageFunctions(['plOpenQuestion'], context);
+
+  await context.plOpenQuestion(0);
+
+  assert.equal(written[0], 'session-a');
+  assert.equal(written[1].limitSec, 5);
+  assert.equal(written[1].responseClosesAt.getTime(), 105_000);
+  assert.equal(written[1].submitGraceUntil.getTime(), 107_000);
+  assert.equal(written[1].revealAt.getTime(), 107_000);
+  assert.equal(written[1].revealed, false);
+  assert.equal('publicAnswer' in written[1], false);
+});
+
+test('timer reveal UI waits for the observed live document and stays hidden after write failure', async () => {
+  let renders = 0;
+  let rejects = 0;
+  const overlay = { querySelector() { return null; } };
+  const state = {
+    set: { settings: { revealMode: 'timer', revealDelaySec: 5 } },
+    live: {
+      q: 0, openedAt: 1_000, revealed: false, revealAt: 5_000,
+      publicQuestion: { number: 1, total: 1, type: 'choice', text: 'Q', choices: [] }
+    },
+    uiRevealed: false,
+    revealPending: false,
+    revealRequested: false,
+    revealRetryAt: 0
+  };
+  const context = {
+    pl: state,
+    serverNow() { return 10_000; },
+    document: { getElementById() { return overlay; } },
+    FirestoreCore: core,
+    plReveal() { rejects += 1; return Promise.reject(new Error('offline')); },
+    plRenderOverlayCounts() { renders += 1; },
+    console: { error() {} }
+  };
+  loadStageFunctions(['plRevealed', 'plTimerTick'], context);
+
+  assert.equal(context.plRevealed(), false);
+  context.plTimerTick();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(rejects, 1);
+  assert.equal(renders, 0);
+  assert.equal(state.revealPending, false);
+  assert.equal(state.revealRequested, false);
+  state.live.revealed = true;
+  state.live.publicAnswer = { answer: 1 };
+  assert.equal(context.plRevealed(), true);
 });

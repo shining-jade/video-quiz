@@ -207,9 +207,11 @@ async function seedFirestore() {
         name: '다른 학생'
       }),
       setDoc(doc(db, 'sessions/s1/responses/student-uid'), {
+        uid: 'student-uid',
         answers: { 0: { answer: 1, submitted: true, revision: 1 } }
       }),
       setDoc(doc(db, 'sessions/s1/responses/other'), {
+        uid: 'other',
         answers: { 0: { answer: 2, submitted: true, revision: 1 } }
       }),
       setDoc(doc(db, 'config/app'), { retentionDays: 30 })
@@ -317,6 +319,7 @@ rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
 
   await adminWrite('sessions/s1/responses/student-uid', undefined);
   await assertSucceeds(setDoc(own, {
+    uid: 'student-uid',
     answers: { 0: { answer: 1, submitted: true, revision: 1 } }
   }));
   await assertFails(setDoc(own, {
@@ -326,6 +329,182 @@ rulesTest('학생은 자기 응답의 허용 필드만 쓴다', async () => {
 
   const snapshot = await assertSucceeds(getDoc(own));
   assert.equal(snapshot.data().answers['0'].revision, 1);
+});
+
+rulesTest('fix-round-1: response uid is required, authenticated, and immutable', async t => {
+  await t.test('missing uid is denied', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/s1/responses/student-uid', undefined);
+    const own = doc(actorFirestore('student'), 'sessions/s1/responses/student-uid');
+    await assertFails(setDoc(own, {
+      answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+    }));
+  });
+
+  await t.test('spoofed uid is denied', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/s1/responses/student-uid', undefined);
+    const own = doc(actorFirestore('student'), 'sessions/s1/responses/student-uid');
+    await assertFails(setDoc(own, {
+      uid: 'other-student-uid',
+      answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+    }));
+  });
+
+  await t.test('returning uid can revise but cannot change uid', async () => {
+    await resetFirestore();
+    await adminWrite('sessions/s1/responses/student-uid', {
+      uid: 'student-uid',
+      answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+    });
+    const own = doc(actorFirestore('student'), 'sessions/s1/responses/student-uid');
+    await assertSucceeds(updateDoc(own, {
+      'answers.0': { answer: 1, submitted: false, revision: 2 }
+    }));
+    await assertFails(updateDoc(own, {
+      uid: 'other-student-uid',
+      'answers.0': { answer: 1, submitted: true, revision: 3 }
+    }));
+    const snapshot = await assertSucceeds(getDoc(own));
+    assert.equal(snapshot.data().uid, 'student-uid');
+    assert.equal(snapshot.data().answers['0'].revision, 2);
+  });
+});
+
+rulesTest('fix-round-1: graded answer can be replaced on reopen, revised, and resubmitted', async () => {
+  const student = actorFirestore('student');
+  const owner = actorFirestore('owner');
+  const own = doc(student, 'sessions/s1/responses/student-uid');
+  await adminWrite('sessions/s1/responses/student-uid', undefined);
+
+  await assertSucceeds(setDoc(own, {
+    uid: 'student-uid',
+    answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+  }));
+  await assertSucceeds(updateDoc(
+    doc(owner, 'sessions/s1/responses/student-uid'),
+    { 'answers.0.ok': true }
+  ));
+  await assertSucceeds(updateDoc(own, {
+    'answers.0': { answer: 1, submitted: false, revision: 2 }
+  }));
+  await assertSucceeds(updateDoc(own, {
+    'answers.0': { answer: 0, submitted: true, revision: 3 }
+  }));
+
+  const snapshot = await assertSucceeds(getDoc(own));
+  assert.deepEqual(snapshot.data(), {
+    uid: 'student-uid',
+    answers: { 0: { answer: 0, submitted: true, revision: 3 } }
+  });
+});
+
+rulesTest('fix-round-1: aggregate scores are teacher-only and each student reads only own score', async () => {
+  await adminWrite('sessions/s1/student_scores/student-uid', {
+    uid: 'student-uid', visible: true, score: 2, rank: 1, total: 2
+  });
+  await adminWrite('sessions/s1/student_scores/other-student-uid', {
+    uid: 'other-student-uid', visible: true, score: 1, rank: 2, total: 2
+  });
+  const student = actorFirestore('student');
+  const owner = actorFirestore('owner');
+  const otherTeacher = actorFirestore('otherTeacher');
+  const admin = actorFirestore('admin');
+
+  await assertFails(getDoc(doc(student, 'sessions/s1/meta/board')));
+  const own = await assertSucceeds(getDoc(
+    doc(student, 'sessions/s1/student_scores/student-uid')
+  ));
+  assert.equal(own.data().score, 2);
+  await assertFails(getDoc(
+    doc(student, 'sessions/s1/student_scores/other-student-uid')
+  ));
+  await assertFails(getDocs(collection(student, 'sessions/s1/student_scores')));
+
+  await assertSucceeds(getDoc(doc(owner, 'sessions/s1/meta/board')));
+  await assertSucceeds(getDocs(collection(owner, 'sessions/s1/student_scores')));
+  await assertFails(getDocs(collection(otherTeacher, 'sessions/s1/student_scores')));
+  await assertSucceeds(getDocs(collection(admin, 'sessions/s1/student_scores')));
+
+  await assertSucceeds(setDoc(
+    doc(owner, 'sessions/s1/student_scores/student-uid'),
+    { uid: 'student-uid', visible: false }
+  ));
+  await assertSucceeds(setDoc(
+    doc(owner, 'sessions/s1/student_scores/student-uid'),
+    {
+      uid: 'student-uid', visible: true, score: 2, graded: 3,
+      answered: 4, rank: 1, total: 2
+    }
+  ));
+  await assertFails(setDoc(
+    doc(owner, 'sessions/s1/student_scores/student-uid'),
+    { uid: 'student-uid', visible: true, score: 2, rank: 1, total: 2 }
+  ));
+  await assertFails(setDoc(
+    doc(student, 'sessions/s1/student_scores/student-uid'),
+    { uid: 'student-uid', visible: true, score: 99, rank: 1, total: 2 }
+  ));
+});
+
+rulesTest('fix-round-1: deadline response and delayed reveal complete without exposing answers during grace', async () => {
+  const now = Date.now();
+  const closesAt = Timestamp.fromMillis(now + 100);
+  const graceUntil = Timestamp.fromMillis(now + 400);
+  const revealAt = Timestamp.fromMillis(now + 400);
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    limitSec: 0.1,
+    responseClosesAt: closesAt,
+    submitGraceUntil: graceUntil,
+    revealAt
+  }));
+  await adminWrite('sessions/s1/responses/student-uid', undefined);
+  const student = actorFirestore('student');
+  const owner = actorFirestore('owner');
+
+  const deadlineSubmit = assertSucceeds(setDoc(
+    doc(student, 'sessions/s1/responses/student-uid'),
+    {
+      uid: 'student-uid',
+      answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+    }
+  ));
+  const delayedReveal = new Promise(resolve => setTimeout(resolve, 500)).then(() =>
+    assertSucceeds(updateDoc(doc(owner, 'sessions/s1/meta/live'), {
+      revealed: true,
+      publicAnswer: { answer: 1 }
+    }))
+  );
+
+  await Promise.all([deadlineSubmit, delayedReveal]);
+  const live = await assertSucceeds(getDoc(doc(student, 'sessions/s1/meta/live')));
+  assert.equal(live.data().revealed, true);
+  assert.deepEqual(live.data().publicAnswer, { answer: 1 });
+});
+
+rulesTest('fix-round-1: timer reveal is denied before revealAt and response is denied after grace', async () => {
+  const now = Date.now();
+  const owner = actorFirestore('owner');
+  const student = actorFirestore('student');
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    responseClosesAt: Timestamp.fromMillis(now + 500),
+    submitGraceUntil: Timestamp.fromMillis(now + 1_000),
+    revealAt: Timestamp.fromMillis(now + 1_000)
+  }));
+  await assertFails(updateDoc(doc(owner, 'sessions/s1/meta/live'), {
+    revealed: true,
+    publicAnswer: { answer: 1 }
+  }));
+
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    responseClosesAt: Timestamp.fromMillis(now - 2_000),
+    submitGraceUntil: Timestamp.fromMillis(now - 1_000),
+    revealAt: Timestamp.fromMillis(now - 1_000)
+  }));
+  await assertFails(updateDoc(
+    doc(student, 'sessions/s1/responses/student-uid'),
+    { 'answers.0': { answer: 0, submitted: true, revision: 2 } }
+  ));
 });
 
 rulesTest('current-live-question response validation', async () => {
@@ -484,6 +663,7 @@ async function seedOrphanSession() {
         name: '고아 학생'
       }),
       setDoc(doc(db, 'sessions/orphan/responses/student-uid'), {
+        uid: 'student-uid',
         answers: { 0: { answer: 1, submitted: true, revision: 1 } }
       })
     ]);
@@ -572,7 +752,7 @@ rulesTest('fix-round: response validation rejects stale, closed, and malformed w
     await adminWrite('sessions/s1/responses/student-uid', undefined);
     await assertFails(setDoc(
       doc(actorFirestore('student'), 'sessions/s1/responses/student-uid'),
-      { answers: { '-1': { answer: 1, submitted: true, revision: 1 } } }
+      { uid: 'student-uid', answers: { '-1': { answer: 1, submitted: true, revision: 1 } } }
     ));
   });
 
@@ -746,7 +926,7 @@ const readMatrix = [
     name: 'board',
     getPath: 'sessions/s1/meta/board',
     list: db => getDocs(collection(db, 'sessions/s1/meta')),
-    get: ['owner', 'admin', 'student', 'otherStudent'],
+    get: ['owner', 'admin'],
     listAllowed: ['owner', 'admin']
   },
   {
@@ -898,7 +1078,10 @@ const writeMatrix = [
         : 'sessions/s1/responses/student-uid',
       undefined
     ),
-    createValue: () => ({ answers: { 0: { answer: 1, submitted: true, revision: 1 } } }),
+    createValue: actorName => ({
+      uid: actors[actorName].uid,
+      answers: { 0: { answer: 1, submitted: true, revision: 1 } }
+    }),
     updateValue: actorName => actorName === 'student'
       ? { answers: { 0: { answer: 2, submitted: true, revision: 2 } } }
       : { answers: { 0: { answer: 1, submitted: true, revision: 1, ok: true } } },

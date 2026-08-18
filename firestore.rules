@@ -180,7 +180,8 @@ service cloud.firestore {
       return live is map &&
         live.keys().hasAll(['q', 'openedAt', 'limitSec', 'revealed']) &&
         live.keys().hasOnly([
-          'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer', 'status'
+          'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer', 'status',
+          'responseClosesAt', 'submitGraceUntil', 'revealAt'
         ]) &&
         live.q is int &&
         live.q >= -1 &&
@@ -189,24 +190,73 @@ service cloud.firestore {
         live.limitSec >= 0 &&
         live.revealed is bool &&
         (!('status' in live) || live.status is string) &&
+        ((!('responseClosesAt' in live) &&
+            !('submitGraceUntil' in live) &&
+            !('revealAt' in live)) ||
+          (live.responseClosesAt is timestamp &&
+            live.submitGraceUntil is timestamp &&
+            live.revealAt is timestamp &&
+            live.responseClosesAt <= live.submitGraceUntil &&
+            live.submitGraceUntil <= live.revealAt)) &&
         ((live.q == -1 &&
             live.revealed == false &&
             !('publicQuestion' in live) &&
-            !('publicAnswer' in live)) ||
+            !('publicAnswer' in live) &&
+            !('responseClosesAt' in live) &&
+            !('submitGraceUntil' in live) &&
+            !('revealAt' in live)) ||
           (live.q >= 0 &&
             validPublicQuestion(live.publicQuestion) &&
             ((live.revealed == false && !('publicAnswer' in live)) ||
               (live.revealed == true && validPublicAnswer(live.publicAnswer)))));
     }
 
+    function validStudentScore(studentId) {
+      return request.resource.data is map &&
+        request.resource.data.keys().hasAll(['uid', 'visible']) &&
+        request.resource.data.keys().hasOnly(['uid', 'visible', 'score', 'graded', 'answered', 'rank', 'total']) &&
+        request.resource.data.uid == studentId &&
+        request.resource.data.visible is bool &&
+        ((request.resource.data.visible == false &&
+            !('score' in request.resource.data) &&
+            !('graded' in request.resource.data) &&
+            !('answered' in request.resource.data) &&
+            !('rank' in request.resource.data) &&
+            !('total' in request.resource.data)) ||
+          (request.resource.data.visible == true &&
+            request.resource.data.score is int &&
+            request.resource.data.score >= 0 &&
+            request.resource.data.graded is int &&
+            request.resource.data.graded >= request.resource.data.score &&
+            request.resource.data.answered is int &&
+            request.resource.data.answered >= request.resource.data.graded &&
+            request.resource.data.rank is int &&
+            request.resource.data.rank > 0 &&
+            request.resource.data.total is int &&
+            request.resource.data.total >= request.resource.data.rank));
+    }
+
     function currentQuestionIsOpen(sessionId) {
+      let live = get(
+        /databases/$(database)/documents/sessions/$(sessionId)/meta/live
+      ).data;
       return sessionIsJoinable(sessionId) &&
         exists(/databases/$(database)/documents/sessions/$(sessionId)/meta/live) &&
-        validLiveData(get(
-          /databases/$(database)/documents/sessions/$(sessionId)/meta/live
-        ).data) &&
-        get(/databases/$(database)/documents/sessions/$(sessionId)/meta/live).data.q >= 0 &&
-        get(/databases/$(database)/documents/sessions/$(sessionId)/meta/live).data.revealed == false;
+        live is map &&
+        live.q >= 0 &&
+        validPublicQuestion(live.publicQuestion) &&
+        ((!('submitGraceUntil' in live) && live.revealed == false) ||
+          ('submitGraceUntil' in live &&
+            live.submitGraceUntil is timestamp &&
+            request.time <= live.submitGraceUntil));
+    }
+
+    function validLiveUpdateTransition() {
+      return request.resource.data.q != resource.data.q ||
+        resource.data.revealed == true ||
+        request.resource.data.revealed == false ||
+        !('revealAt' in resource.data) ||
+        request.time >= resource.data.revealAt;
     }
 
     function currentQuestionKey(sessionId) {
@@ -217,7 +267,9 @@ service cloud.firestore {
 
     function validStudentResponseCreate(sessionId) {
       return currentQuestionIsOpen(sessionId) &&
-        request.resource.data.keys().hasOnly(['answers']) &&
+        request.resource.data.keys().hasAll(['uid', 'answers']) &&
+        request.resource.data.keys().hasOnly(['uid', 'answers']) &&
+        request.resource.data.uid == request.auth.uid &&
         request.resource.data.answers is map &&
         request.resource.data.answers.keys().hasAll([currentQuestionKey(sessionId)]) &&
         request.resource.data.answers.keys().hasOnly([currentQuestionKey(sessionId)]) &&
@@ -227,8 +279,12 @@ service cloud.firestore {
     function validOpenStudentResponseUpdate(sessionId) {
       let questionKey = currentQuestionKey(sessionId);
       let previousAnswer = resource.data.answers.get(questionKey, { 'revision': 0 });
-      return request.resource.data.keys().hasOnly(['answers']) &&
-        resource.data.keys().hasOnly(['answers']) &&
+      return request.resource.data.keys().hasAll(['uid', 'answers']) &&
+        request.resource.data.keys().hasOnly(['uid', 'answers']) &&
+        resource.data.keys().hasAll(['uid', 'answers']) &&
+        resource.data.keys().hasOnly(['uid', 'answers']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.uid == resource.data.uid &&
         request.resource.data.answers is map &&
         resource.data.answers is map &&
         request.resource.data.answers.diff(resource.data.answers).affectedKeys().hasOnly([questionKey]) &&
@@ -293,14 +349,15 @@ service cloud.firestore {
         allow get: if isAdmin() || ownsSession(sessionId) ||
           (isJoinedStudent(sessionId) && validLiveData(resource.data));
         allow list: if isAdmin() || ownsSession(sessionId);
-        allow create, update: if ownsSessionAfter(sessionId) &&
-          validLiveData(request.resource.data);
+        allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data);
+        allow update: if ownsSessionAfter(sessionId) &&
+          validLiveData(request.resource.data) && validLiveUpdateTransition();
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
 
       match /meta/board {
-        allow get: if isAdmin() || ownsSession(sessionId) || isJoinedStudent(sessionId);
+        allow get: if isAdmin() || ownsSession(sessionId);
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId);
         allow delete: if isAdmin() || ownsSession(sessionId);
@@ -340,6 +397,15 @@ service cloud.firestore {
             sessionIsJoinable(sessionId) &&
             studentId == request.auth.uid &&
             validStudentResponseUpdate(sessionId));
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /student_scores/{studentId} {
+        allow get: if isAdmin() || ownsSession(sessionId) ||
+          (isJoinedStudent(sessionId) && studentId == request.auth.uid);
+        allow list: if isAdmin() || ownsSession(sessionId);
+        allow create, update: if ownsSessionAfter(sessionId) && validStudentScore(studentId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }

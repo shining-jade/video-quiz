@@ -87,8 +87,10 @@
     const liveValue = snapshot => {
       const value = snapshotValue(snapshot);
       if (!value) return null;
-      const millis = timestampMillis(value.openedAt);
-      if (millis !== null) value.openedAt = millis;
+      ['openedAt', 'responseClosesAt', 'submitGraceUntil', 'revealAt'].forEach(field => {
+        const millis = timestampMillis(value[field]);
+        if (millis !== null) value[field] = millis;
+      });
       return value;
     };
     const sessionValue = snapshot => {
@@ -433,9 +435,22 @@
       if (Object.prototype.hasOwnProperty.call(source, 'submittedAt')) {
         answer.submittedAt = source.submittedAt;
       }
-      return db.doc('sessions/' + sessionId + '/responses/' + authUid).set({
-        answers: { [String(questionIndex)]: answer }
-      }, { merge: true });
+      const reference = db.doc('sessions/' + sessionId + '/responses/' + authUid);
+      const answerPath = 'answers.' + String(questionIndex);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists) {
+          transaction.set(reference, {
+            uid: authUid,
+            answers: { [String(questionIndex)]: answer }
+          });
+        } else {
+          transaction.update(reference, {
+            uid: authUid,
+            [answerPath]: answer
+          });
+        }
+      });
     }
 
     function mergeAnswer(sessionId, authUid, questionIndex, answer) {
@@ -446,10 +461,22 @@
       return writeStudentAnswer(sessionId, authUid, questionIndex, answer);
     }
 
-    function gradeAnswer(sessionId, studentId, questionIndex, ok) {
-      return db.doc('sessions/' + sessionId + '/responses/' + studentId).set({
-        answers: { [String(questionIndex)]: { ok: ok == null ? fieldValue.delete() : ok } }
-      }, { merge: true });
+    function gradeAnswer(sessionId, studentId, questionIndex, expectedRevision, ok) {
+      const reference = db.doc('sessions/' + sessionId + '/responses/' + studentId);
+      const questionKey = String(questionIndex);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists) return false;
+        const response = snapshot.data() || {};
+        const answer = response.answers && response.answers[questionKey];
+        if (response.uid !== studentId || !answer || answer.submitted !== true ||
+            Number(answer.revision) !== Number(expectedRevision)) return false;
+        const graded = { ...answer };
+        if (ok == null) delete graded.ok;
+        else graded.ok = !!ok;
+        transaction.update(reference, { ['answers.' + questionKey]: graded });
+        return true;
+      });
     }
 
     async function listSessions() {
@@ -460,7 +487,9 @@
     async function purgeSessions(sessionIds) {
       const references = [];
       for (const sessionId of [...new Set(sessionIds || [])]) {
-        for (const collectionName of ['meta', 'students', 'responses', 'snapshot', 'snapshot_images']) {
+        for (const collectionName of [
+          'meta', 'students', 'responses', 'student_scores', 'snapshot', 'snapshot_images'
+        ]) {
           const snapshot = await db.collection(
             'sessions/' + sessionId + '/' + collectionName
           ).get();
@@ -487,6 +516,13 @@
       return value && value.scores ? value.scores : {};
     }
 
+    async function getOwnScore(sessionId, authUid) {
+      const snapshot = await db.doc(
+        'sessions/' + sessionId + '/student_scores/' + authUid
+      ).get();
+      return snapshot.exists ? snapshot.data() : null;
+    }
+
     function setLive(sessionId, live) {
       return db.doc('sessions/' + sessionId + '/meta/live').set(live);
     }
@@ -510,8 +546,18 @@
       });
     }
 
-    function writeBoard(sessionId, board) {
-      return db.doc('sessions/' + sessionId + '/meta/board').set({ scores: board });
+    function writeBoard(sessionId, board, studentScores) {
+      if (!studentScores) {
+        return db.doc('sessions/' + sessionId + '/meta/board').set({ scores: board });
+      }
+      const batch = db.batch();
+      batch.set(db.doc('sessions/' + sessionId + '/meta/board'), { scores: board });
+      Object.entries(studentScores).forEach(([studentId, score]) => {
+        batch.set(db.doc(
+          'sessions/' + sessionId + '/student_scores/' + studentId
+        ), score);
+      });
+      return batch.commit();
     }
 
     return {
@@ -546,6 +592,7 @@
       listSessions,
       purgeSessions,
       getBoard,
+      getOwnScore,
       setLive,
       revealLive,
       endSession,

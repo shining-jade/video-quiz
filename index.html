@@ -2742,9 +2742,10 @@ function plStartSession() {
 }
 
 /** 공개가 끝난 자동 채점 문항은 학생 쓰기와 분리해 세션 소유 교사 권한으로 채점한다. */
-function plGradeRevealedResponses(state) {
-  if (pl !== state || !state.live || !state.live.revealed) return Promise.resolve([]);
-  const questionIndex = Number(state.live.q);
+function plGradeCurrentResponses(state, requestedQuestionIndex) {
+  if (pl !== state || !state.live) return Promise.resolve([]);
+  const questionIndex = requestedQuestionIndex === undefined
+    ? Number(state.live.q) : Number(requestedQuestionIndex);
   const question = state.flatQuestions && state.flatQuestions[questionIndex];
   if (!question || !isAutoGraded(question)) return Promise.resolve([]);
   const responses = state.responses && state.responses[String(questionIndex)] || {};
@@ -2754,23 +2755,30 @@ function plGradeRevealedResponses(state) {
     const response = responses[studentId];
     if (!response || response.submitted !== true || Object.prototype.hasOwnProperty.call(response, 'ok')) return;
     const key = studentId + ':' + questionIndex + ':' + (Number(response.revision) || 0);
-    if (state.gradeWrites[key]) return;
-    state.gradeWrites[key] = true;
+    if (state.gradeWrites[key]) {
+      writes.push(state.gradeWrites[key]);
+      return;
+    }
     const ok = gradeResponse(question, response);
-    writes.push(Promise.resolve().then(() => {
+    const writing = Promise.resolve().then(() => {
       if (pl !== state) {
         delete state.gradeWrites[key];
-        return null;
+        return false;
       }
-      return store.gradeAnswer(state.sessionId, studentId, questionIndex, ok).then(() => {
+      return store.gradeAnswer(
+        state.sessionId, studentId, questionIndex, response.revision, ok
+      ).then(graded => {
         const current = state.responses && state.responses[String(questionIndex)] || {};
-        if (pl === state && current[studentId] === response) response.ok = ok;
+        if (graded === true && pl === state && current[studentId] === response) response.ok = ok;
+        return graded;
       });
     }).catch(error => {
       delete state.gradeWrites[key];
       if (pl === state) console.error(error);
-      return null;
-    }));
+      return false;
+    });
+    state.gradeWrites[key] = writing;
+    writes.push(writing);
   });
   return Promise.all(writes);
 }
@@ -2870,7 +2878,7 @@ function renderPlayRun() {
   onCleanup(store.subscribeResponses(state.sessionId, responseDocs => {
     if (pl !== state) return;
     state.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
-    plGradeRevealedResponses(state);
+    if (state.live && state.live.revealed) plGradeCurrentResponses(state);
     plRenderQList();
     plRenderOverlayCounts();
     plRenderStudents();
@@ -2880,7 +2888,11 @@ function renderPlayRun() {
     if (pl !== state) return;
     state.live = Object.assign({ q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {});
     if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
-    plGradeRevealedResponses(state);
+    if (state.live.revealed) {
+      state.revealRequested = false;
+      state.revealRetryAt = 0;
+    }
+    if (state.live.revealed) plGradeCurrentResponses(state);
     plRenderOverlay();
     if (typeof plRenderTimeline === 'function') plRenderTimeline();
     plRenderStageControls();
@@ -3526,16 +3538,30 @@ async function plOpenQuestion(i) {
     state.setId, question.key || i, state.sessionId
   );
   if (pl !== state || state.pendingLiveQuestion !== i) return false;
-  const revealed = state.set.settings.revealMode === 'instant';
+  const mode = state.set.settings.revealMode;
+  const revealed = mode === 'instant';
+  const configuredLimit = limitFor(state.set, i, state.flatQuestions);
+  let liveLimit = configuredLimit;
   const live = {
     q: i,
     openedAt: SV_TS,
     revealed,
-    limitSec: limitFor(state.set, i, state.flatQuestions),
+    limitSec: liveLimit,
     publicQuestion: FirestoreStore.publicQuestion(
       question, question.number || i + 1, state.flatQuestions.length, image
     )
   };
+  if (mode === 'timer') {
+    const openedMillis = serverNow();
+    const revealDelay = Math.max(0, Number(state.set.settings.revealDelaySec) || 0);
+    liveLimit = configuredLimit > 0 ? Math.min(configuredLimit, revealDelay) : revealDelay;
+    const closesAt = openedMillis + liveLimit * 1000;
+    const graceUntil = closesAt + 2000;
+    live.limitSec = liveLimit;
+    live.responseClosesAt = new Date(closesAt);
+    live.submitGraceUntil = new Date(graceUntil);
+    live.revealAt = new Date(Math.max(openedMillis + revealDelay * 1000, graceUntil));
+  }
   if (revealed) live.publicAnswer = FirestoreStore.publicAnswer(question);
   try {
     await store.setLive(state.sessionId, live);
@@ -3554,7 +3580,8 @@ function plReveal() {
 async function plCloseQuestion() {
   const state = pl;
   if (!state) return;
-  await plGradeRevealedResponses(state);
+  const questionIndex = Number(state.live && state.live.q);
+  await plGradeCurrentResponses(state, questionIndex);
   if (pl !== state) return;
   await plPushBoard();
   if (pl !== state) return;
@@ -3642,8 +3669,21 @@ function plScoreboard() {
 function plPushBoard() {
   if (!pl || !pl.sessionId) return;
   const board = {};
-  plScoreboard().forEach(r => { board[r.sid] = r.correct; });
-  return store.writeBoard(pl.sessionId, board).catch(e => console.warn('board', e));
+  const studentScores = {};
+  const rows = plScoreboard();
+  const visible = !!(pl.live && pl.live.revealed &&
+    pl.set && pl.set.settings && pl.set.settings.revealMode !== 'never');
+  rows.forEach(r => {
+    board[r.sid] = r.correct;
+    studentScores[r.sid] = visible
+      ? {
+          uid: r.sid, visible: true, score: r.correct, graded: r.graded,
+          answered: r.answered, rank: r.rank, total: rows.length
+        }
+      : { uid: r.sid, visible: false };
+  });
+  return store.writeBoard(pl.sessionId, board, studentScores)
+    .catch(e => console.warn('board', e));
 }
 
 function plRenderStudents() {
@@ -3787,15 +3827,7 @@ function plRenderOverlay() {
 /** 교사 화면은 교실 앞에 투사되므로 학생 화면과 같은 시점에만 정답을 드러낸다.
     (instant 모드는 학생마다 공개 시점이 달라, 교사가 직접 누를 때까지 기다린다) */
 function plRevealed() {
-  if (!pl) return false;
-  const mode = pl.set.settings.revealMode;
-  if (mode === 'never') return false;
-  if (pl.live.revealed) return true;
-  if (mode === 'timer') {
-    if (!pl.live.openedAt) return false;
-    return (serverNow() - pl.live.openedAt) / 1000 >= pl.set.settings.revealDelaySec;
-  }
-  return false;
+  return !!(pl && pl.live && pl.live.revealed && pl.live.publicAnswer);
 }
 
 /** 텍스트 답안 요약 — 단답형은 같은 답끼리 묶어 세고, 서술형은 답을 그대로 보여준다 */
@@ -3885,12 +3917,23 @@ function plTimerTick() {
   if (!ov || !pl || pl.live.q < 0) return;
 
   // timer 모드는 시간이 차면 정답 projection도 Firestore에 함께 공개한다.
+  const revealAt = Number(pl.live.revealAt) || 0;
+  const revealDue = revealAt > 0 && serverNow() >= revealAt;
   if (pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
-      !pl.live.revealed && !pl.revealPending &&
-      plRevealed()) {
+      !pl.live.revealed && !pl.revealPending && !pl.revealRequested &&
+      serverNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;
     state.revealPending = true;
-    Promise.resolve(plReveal()).catch(e => console.error(e)).finally(() => {
+    Promise.resolve(plReveal()).then(() => {
+      if (pl === state) state.revealRequested = true;
+    }).catch(e => {
+      if (pl === state) {
+        state.revealRequested = false;
+        state.revealRetryAt = serverNow() + 1000;
+        state.revealPending = false;
+      }
+      console.error(e);
+    }).finally(() => {
       if (pl === state) state.revealPending = false;
     });
   }
@@ -3937,8 +3980,8 @@ function screenStudent(codeArg, authUser) {
     authUid: currentUser && currentUser.isAnonymous ? currentUser.uid : null,
     sid: null, me: null, currentQuestion: null, totalQuestions: 0,
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
-    myAnswers: {},          // { 문항index: {c, ok, ms} }
-    sel: null, multiSel: [], draft: '', submitted: false, board: {},
+    myAnswers: {},          // { 문항index: {answer, submitted, revision, ok?} }
+    sel: null, multiSel: [], draft: '', submitted: false, ownScore: null,
     revision: 0, deadlineHandled: '', writeQueues: {},
     uiRevealed: false, uiLocked: false, uiQ: -2
   };
@@ -4100,9 +4143,9 @@ function stStartWatching(expectedState) {
     stRender();
     if (previousQ >= 0 && nl.q < 0) {
       try {
-        const board = await store.getBoard(state.sessionId);
+        const ownScore = await store.getOwnScore(state.sessionId, state.authUid);
         if (st !== state) return;
-        state.board = board;
+        state.ownScore = ownScore;
         stRender();
       } catch (e) { if (st === state) console.error(e); }
     }
@@ -4118,6 +4161,8 @@ function stRevealed() {
 /** 제한 시간이 지났거나 공개됐으면 더 못 고른다 */
 function stLocked() {
   if (stRevealed()) return true;
+  const responseClosesAt = Number(st.live.responseClosesAt) || 0;
+  if (responseClosesAt) return serverNow() >= responseClosesAt;
   const limit = Number(st.live.limitSec) || 0;
   if (!limit || !st.live.openedAt) return false;
   return (serverNow() - st.live.openedAt) / 1000 >= limit;
@@ -4159,14 +4204,18 @@ function stRender() {
   if (!st || !st.sid) return;
   const i = st.live.q;
   const ended = st.session && st.session.status === 'ended';
-  const showScore = true;
+  const showScore = !!(st.ownScore && st.ownScore.visible === true);
 
   const keys = Object.keys(st.myAnswers);
   const answered = keys.length;
   // 서술형은 아직 채점 전이므로 정답률 계산에서 뺀다
   const gradedKeys = keys.filter(k => st.myAnswers[k].ok !== null && st.myAnswers[k].ok !== undefined);
-  const correct = gradedKeys.filter(k => st.myAnswers[k].ok).length;
-  const nUngraded = answered - gradedKeys.length;
+  const localCorrect = gradedKeys.filter(k => st.myAnswers[k].ok).length;
+  const correct = showScore ? Math.max(0, Number(st.ownScore.score) || 0) : localCorrect;
+  const graded = showScore ? Math.max(0, Number(st.ownScore.graded) || 0) : gradedKeys.length;
+  const nUngraded = showScore
+    ? Math.max(0, (Number(st.ownScore.answered) || answered) - graded)
+    : answered - graded;
 
   const header =
     '<div class="stu-status">' +
@@ -4174,7 +4223,7 @@ function stRender() {
       '<span>' + esc(st.me.grade) + '-' + esc(st.me.klass) + '-' + esc(st.me.num) + ' ' + esc(st.me.name) + '</span>' +
       '<span class="spacer"></span>' +
       (showScore
-        ? '<span style="color:var(--ink-2)">' + correct + ' / ' + gradedKeys.length + ' 정답' +
+        ? '<span style="color:var(--ink-2)">' + correct + ' / ' + graded + ' 정답' +
             (nUngraded ? ' <span style="color:var(--ink-3)">(채점 전 ' + nUngraded + ')</span>' : '') + '</span>'
         : '<span style="color:var(--ink-2)">' + answered + '문항 제출</span>') +
     '</div>';
@@ -4185,7 +4234,7 @@ function stRender() {
         '<div class="big">🎉</div><h2>수업이 끝났습니다</h2>' +
         '<p>' + esc(st.session.label || st.code) + '</p>' +
         (showScore
-          ? '<div class="result-banner ok" style="margin-top:18px">' + gradedKeys.length + '문항 중 ' + correct + '개 정답' +
+          ? '<div class="result-banner ok" style="margin-top:18px">' + graded + '문항 중 ' + correct + '개 정답' +
               (function () {
                 const rk = stRank();
                 return rk ? '<div style="font-size:14px;font-weight:700;margin-top:6px">' + rk.total + '명 중 ' + rk.rank + '등</div>' : '';
@@ -4193,7 +4242,7 @@ function stRender() {
               (nUngraded ? '<div style="font-size:13px;font-weight:600;margin-top:6px;color:var(--ink-2)">서술형 ' + nUngraded + '문항은 선생님이 채점합니다</div>' : '') + '</div>'
           : '<div class="result-banner mute" style="margin-top:18px">' + answered + '문항 제출 완료</div>') +
       '</div>' +
-      stMyStat(st.totalQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
+      stMyStat(st.totalQuestions, answered, correct, graded, nUngraded, showScore) +
       '</div>');
     st.uiQ = -3;
     return;
@@ -4207,7 +4256,7 @@ function stRender() {
           '<h2>선생님 화면을 보세요</h2>' +
           '<p>퀴즈가 나오면 이 화면에 자동으로 뜹니다.</p>' +
         '</div>' +
-        stMyStat(st.totalQuestions, answered, correct, gradedKeys.length, nUngraded, showScore) +
+        stMyStat(st.totalQuestions, answered, correct, graded, nUngraded, showScore) +
       '</div>');
     st.uiQ = -1;
     return;
@@ -4248,11 +4297,9 @@ function stRender() {
 
 /** 내 순위 — 교사 화면이 올린 점수 요약(board)으로만 계산한다 */
 function stRank() {
-  const b = st.board || {};
-  const keys = Object.keys(b);
-  if (!keys.length || b[st.sid] === undefined) return null;
-  const my = Number(b[st.sid]) || 0;
-  return { rank: keys.filter(k => (Number(b[k]) || 0) > my).length + 1, total: keys.length };
+  const score = st && st.ownScore;
+  if (!score || score.visible !== true) return null;
+  return { rank: Number(score.rank) || 0, total: Number(score.total) || 0 };
 }
 
 /** 대기 화면·종료 화면에 쓰는 내 진행 현황 */
@@ -4780,7 +4827,9 @@ function dashTextAnswers(q, i, rows, resp) {
 /** 서술형 채점 — 교사가 O/X 를 누르면 그 응답의 ok 만 고쳐 쓴다 */
 function dashGrade(qIdx, sid, ok) {
   if (!dash) return;
-  return store.gradeAnswer(dash.sessionId, sid, qIdx, ok)
+  const response = dash.answers && dash.answers[qIdx] && dash.answers[qIdx][sid];
+  if (!response) return Promise.resolve(false);
+  return store.gradeAnswer(dash.sessionId, sid, qIdx, response.revision, ok)
     .catch(e => { console.error(e); alert('채점 저장 실패: ' + e.message); });
 }
 
