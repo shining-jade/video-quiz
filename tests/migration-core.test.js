@@ -1,58 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-test('approved legacy owner plans only ownerless documents and resumes own sessions', () => {
-  const core = require('../migration-core.js');
-  const plan = core.planLegacyMigration(
-    [
-      { id: 'legacy-set' },
-      { id: 'own-set', ownerUid: 'teacher-1' },
-      { id: 'other-set', ownerUid: 'teacher-2' }
-    ],
-    [
-      { id: 'legacy-session', setId: 'legacy-set' },
-      { id: 'own-session', teacherUid: 'teacher-1' },
-      { id: 'other-session', teacherUid: 'teacher-2' }
-    ],
-    {
-      status: 'teacher', uid: 'teacher-1', email: ' Teacher@School.KR ',
-      legacyOwnerVerified: true
-    }
-  );
-
-  assert.deepEqual(plan.setIds, ['legacy-set']);
-  assert.deepEqual(plan.sessionIds, ['legacy-session']);
-  assert.deepEqual(plan.resumeSetIds, ['own-set']);
-  assert.deepEqual(plan.resumeSessionIds, ['own-session']);
-  assert.deepEqual(plan.skippedSetIds, ['other-set']);
-  assert.deepEqual(plan.skippedSessionIds, ['other-session']);
-  assert.deepEqual(plan.teacher, { uid: 'teacher-1', email: 'teacher@school.kr' });
-});
-
-test('unverified, unapproved, anonymous, and non-legacy teachers cannot plan a claim', () => {
-  const core = require('../migration-core.js');
-  const invalidTeachers = [
-    { status: 'unverified', uid: 'u1', email: 'owner@school.kr', legacyOwnerVerified: true },
-    { status: 'unapproved', uid: 'u1', email: 'owner@school.kr', legacyOwnerVerified: true },
-    { status: 'teacher', uid: 'u1', email: 'owner@school.kr', legacyOwnerVerified: false },
-    { status: 'teacher', uid: 'u1', email: '', legacyOwnerVerified: true },
-    { status: 'teacher', uid: '', email: 'owner@school.kr', legacyOwnerVerified: true }
-  ];
-
-  invalidTeachers.forEach(teacher => {
-    assert.throws(
-      () => core.planLegacyMigration([{ id: 'set' }], [], teacher),
-      /verified legacy owner/i
-    );
-  });
-});
-
 test('legacy response grading moves to private revision grades and removes public leaks', () => {
   const core = require('../migration-core.js');
   const prepared = core.prepareLegacyResponse('student-1', {
     answers: {
       0: { answer: 2, submitted: true, revision: 4, ok: true, score: 1 },
-      1: { answer: 'text', submitted: true, ok: false }
+      1: { answer: 'text', submitted: true, revision: 2, ok: false }
     }
   });
 
@@ -61,12 +15,12 @@ test('legacy response grading moves to private revision grades and removes publi
     uid: 'student-1',
     answers: {
       0: { answer: 2, submitted: true, revision: 4 },
-      1: { answer: 'text', submitted: true, revision: 1 }
+      1: { answer: 'text', submitted: true, revision: 2 }
     }
   });
   assert.deepEqual(prepared.grades, [
     { id: 'student-1__0', uid: 'student-1', questionIndex: 0, revision: 4, ok: true },
-    { id: 'student-1__1', uid: 'student-1', questionIndex: 1, revision: 1, ok: false }
+    { id: 'student-1__1', uid: 'student-1', questionIndex: 1, revision: 2, ok: false }
   ]);
   assert.deepEqual(core.responseLeakPaths(prepared.response), []);
 });
@@ -111,6 +65,56 @@ test('null legacy grading is removed as ungraded without fabricating a private g
   assert.deepEqual(prepared.response, {
     uid: 'student-1',
     answers: { 0: { answer: 'essay', submitted: true, revision: 2 } }
+  });
+  assert.deepEqual(prepared.grades, []);
+});
+
+test('every present non-null ok and score value is independently validated', () => {
+  const core = require('../migration-core.js');
+  const invalidOk = core.prepareLegacyResponse('student-1', {
+    answers: { 0: { answer: 1, revision: 2, ok: 'yes', score: 1 } }
+  });
+  const invalidScore = core.prepareLegacyResponse('student-1', {
+    answers: { 0: { answer: 1, revision: 2, ok: true, score: '1' } }
+  });
+
+  assert.equal(invalidOk.status, 'failed');
+  assert.match(invalidOk.reason, /ok/i);
+  assert.equal(invalidScore.status, 'failed');
+  assert.match(invalidScore.reason, /score/i);
+});
+
+test('question keys must be canonical safe non-negative integers', () => {
+  const core = require('../migration-core.js');
+  for (const questionKey of ['01', '+1', '1.0', '9007199254740992']) {
+    const prepared = core.prepareLegacyResponse('student-1', {
+      answers: { [questionKey]: { answer: 1, revision: 2, ok: true } }
+    });
+    assert.equal(prepared.status, 'failed', questionKey);
+    assert.match(prepared.reason, /question index/i, questionKey);
+  }
+});
+
+test('correctness-bearing leaves without an explicit positive integer revision fail closed', () => {
+  const core = require('../migration-core.js');
+  for (const revision of [undefined, null, 0, '2', 1.5]) {
+    const answer = { answer: 1, ok: true };
+    if (revision !== undefined) answer.revision = revision;
+    const prepared = core.prepareLegacyResponse('student-1', { answers: { 0: answer } });
+    assert.equal(prepared.status, 'failed', String(revision));
+    assert.match(prepared.reason, /revision/i, String(revision));
+  }
+});
+
+test('null grading without a revision is removed without inventing one', () => {
+  const core = require('../migration-core.js');
+  const prepared = core.prepareLegacyResponse('student-1', {
+    answers: { 0: { answer: 'essay', ok: null, score: null } }
+  });
+
+  assert.equal(prepared.status, 'migrate');
+  assert.deepEqual(prepared.response, {
+    uid: 'student-1', answers: { 0: { answer: 'essay' } }
   });
   assert.deepEqual(prepared.grades, []);
 });

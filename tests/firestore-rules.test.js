@@ -317,62 +317,43 @@ rulesTest('보호된 비존재 문서 프로브는 allowlist를 공개하지 않
   await assertFails(getDoc(doc(owner, 'teacher_allowlist/owner@school.kr')));
 });
 
-rulesTest('only the approved matching legacy owner can use the private migration probe', async () => {
-  await adminWrite('config/legacy_owner', { email: 'owner@school.kr' });
-  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'config/__legacy_owner_probe__access')));
-  for (const actorName of ['otherTeacher', 'admin', 'student', 'unapproved']) {
-    await assertFails(getDoc(doc(actorFirestore(actorName), 'config/__legacy_owner_probe__access')));
+rulesTest('config/legacy_owner is completely client denied including admins', async () => {
+  await adminWrite('config/legacy_owner', { uid: 'owner-uid', email: 'owner@school.kr' });
+  for (const actorName of actorNames) {
+    const db = actorFirestore(actorName);
+    await assertFails(getDoc(doc(db, 'config/legacy_owner')));
+    await assertFails(getDocs(collection(db, 'config')));
+    await assertFails(updateDoc(doc(db, 'config/legacy_owner'), { email: 'changed@school.kr' }));
+    await assertFails(deleteDoc(doc(db, 'config/legacy_owner')));
   }
-  await assertFails(getDoc(doc(actorFirestore('owner'), 'config/legacy_owner')));
-  await assertFails(getDocs(collection(actorFirestore('owner'), 'config')));
+  await adminWrite('config/legacy_owner', undefined);
+  for (const actorName of actorNames) {
+    await assertFails(setDoc(doc(actorFirestore(actorName), 'config/legacy_owner'), {
+      uid: actors[actorName].uid, email: actors[actorName].email || 'student@school.kr'
+    }));
+  }
 });
 
-rulesTest('legacy owner claims only ownerless parents without changing their data', async () => {
-  await adminWrite('config/legacy_owner', { email: 'owner@school.kr' });
+rulesTest('all legacy parent claims and response replacements are client denied', async () => {
+  await adminWrite('config/legacy_owner', { uid: 'owner-uid', email: 'owner@school.kr' });
   await adminWrite('quiz_sets/legacy-set', { title: 'Legacy' });
   await adminWrite('sessions/legacy-session', { setId: 'legacy-set', status: 'ended' });
-  const owner = actorFirestore('owner');
-  const other = actorFirestore('otherTeacher');
-
-  await assertFails(updateDoc(doc(other, 'quiz_sets/legacy-set'), {
-    ownerUid: 'other-teacher-uid', ownerEmail: 'other@school.kr'
-  }));
-  await assertFails(updateDoc(doc(owner, 'quiz_sets/legacy-set'), {
-    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', title: 'Changed during claim'
-  }));
-  await assertSucceeds(updateDoc(doc(owner, 'quiz_sets/legacy-set'), {
-    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr'
-  }));
-
-  await assertFails(updateDoc(doc(other, 'sessions/legacy-session'), {
-    teacherUid: 'other-teacher-uid', teacherEmail: 'other@school.kr'
-  }));
-  await assertSucceeds(updateDoc(doc(owner, 'sessions/legacy-session'), {
-    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr'
-  }));
-  await assertFails(updateDoc(doc(owner, 'sessions/legacy-session'), {
-    teacherUid: 'other-teacher-uid', teacherEmail: 'other@school.kr'
-  }));
-});
-
-rulesTest('staged migration lets only legacy owner sanitize owned responses until the gate is removed', async () => {
-  await adminWrite('config/legacy_owner', { email: 'owner@school.kr' });
-  await adminWrite('sessions/s1/responses/legacy-student', {
+  await adminWrite('sessions/legacy-session/responses/legacy-student', {
     answers: { 0: { answer: 1, submitted: true, revision: 2, ok: true, score: 1 } }
   });
-  const path = 'sessions/s1/responses/legacy-student';
-  const sanitized = {
-    uid: 'legacy-student',
-    answers: { 0: { answer: 1, submitted: true, revision: 2 } }
-  };
-
-  await assertFails(setDoc(doc(actorFirestore('otherTeacher'), path), sanitized));
-  await assertSucceeds(setDoc(doc(actorFirestore('owner'), path), sanitized));
-  await adminWrite(path, {
-    answers: { 0: { answer: 1, submitted: true, revision: 2, ok: true } }
-  });
-  await adminWrite('config/legacy_owner', undefined);
-  await assertFails(setDoc(doc(actorFirestore('owner'), path), sanitized));
+  for (const actorName of ['owner', 'otherTeacher', 'admin']) {
+    const db = actorFirestore(actorName);
+    await assertFails(updateDoc(doc(db, 'quiz_sets/legacy-set'), {
+      ownerUid: actors[actorName].uid, ownerEmail: actors[actorName].email
+    }));
+    await assertFails(updateDoc(doc(db, 'sessions/legacy-session'), {
+      teacherUid: actors[actorName].uid, teacherEmail: actors[actorName].email
+    }));
+    await assertFails(setDoc(doc(db, 'sessions/legacy-session/responses/legacy-student'), {
+      uid: 'legacy-student',
+      answers: { 0: { answer: 1, submitted: true, revision: 2 } }
+    }));
+  }
 });
 
 rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 사본을 트랜잭션으로 만든다', async () => {
@@ -1293,7 +1274,7 @@ const readMatrix = [
     getPath: 'config/app',
     list: db => getDocs(collection(db, 'config')),
     get: ['admin'],
-    listAllowed: ['admin']
+    listAllowed: []
   }
 ];
 

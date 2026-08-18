@@ -9,50 +9,6 @@
     return String(email || '').trim().toLowerCase();
   }
 
-  function validLegacyTeacher(teacher) {
-    return !!teacher && teacher.status === 'teacher' &&
-      typeof teacher.uid === 'string' && teacher.uid.length > 0 &&
-      normalizeEmail(teacher.email).length > 0 &&
-      teacher.legacyOwnerVerified === true;
-  }
-
-  function planLegacyMigration(sets, sessions, teacher) {
-    if (!validLegacyTeacher(teacher)) {
-      throw new Error('A verified legacy owner teacher is required.');
-    }
-    const uid = teacher.uid;
-    const setIds = [];
-    const resumeSetIds = [];
-    const skippedSetIds = [];
-    const sessionIds = [];
-    const resumeSessionIds = [];
-    const skippedSessionIds = [];
-
-    (sets || []).forEach(set => {
-      if (!set || !set.id) return;
-      if (!set.ownerUid) setIds.push(set.id);
-      else if (set.ownerUid === uid) resumeSetIds.push(set.id);
-      else skippedSetIds.push(set.id);
-    });
-    (sessions || []).forEach(session => {
-      if (!session || !session.id) return;
-      if (!session.teacherUid) sessionIds.push(session.id);
-      else if (session.teacherUid === uid) resumeSessionIds.push(session.id);
-      else skippedSessionIds.push(session.id);
-    });
-
-    return {
-      teacher: { uid, email: normalizeEmail(teacher.email) },
-      legacyOwnerVerified: true,
-      setIds,
-      sessionIds,
-      resumeSetIds,
-      resumeSessionIds,
-      skippedSetIds,
-      skippedSessionIds
-    };
-  }
-
   function responseLeakPaths(value, prefix) {
     if (!value || typeof value !== 'object') return [];
     const base = prefix || '';
@@ -72,11 +28,11 @@
     const scoreEmpty = !hasScore || answer.score == null;
     const okValid = typeof answer.ok === 'boolean';
     const scoreValid = typeof answer.score === 'boolean' || answer.score === 0 || answer.score === 1;
+    if (!okEmpty && !okValid) {
+      return { error: 'Legacy ok value is not a boolean.' };
+    }
     if (!scoreEmpty && !scoreValid) {
       return { error: 'Legacy score cannot be represented as a boolean grade.' };
-    }
-    if (!okEmpty && !okValid && !scoreValid) {
-      return { error: 'Legacy ok value is not a boolean.' };
     }
     const fromOk = okValid ? answer.ok : null;
     const fromScore = scoreValid ? !!answer.score : null;
@@ -110,17 +66,28 @@
       if (answerLeaks.some(path => path.includes('.'))) {
         return { status: 'failed', reason: 'Legacy grading exists below an answer leaf.', response: original, grades: [] };
       }
+      if (!/^(0|[1-9]\d*)$/.test(questionKey)) {
+        return { status: 'failed', reason: 'Legacy grade has an invalid question index.', response: original, grades: [] };
+      }
       const questionIndex = Number(questionKey);
-      if (!Number.isInteger(questionIndex) || questionIndex < 0) {
+      if (!Number.isSafeInteger(questionIndex)) {
         return { status: 'failed', reason: 'Legacy grade has an invalid question index.', response: original, grades: [] };
       }
       const correctness = legacyCorrectness(answer);
       if (correctness.error) {
         return { status: 'failed', reason: correctness.error, response: original, grades: [] };
       }
-      const revisionValue = Number(answer.revision);
-      const revision = Number.isInteger(revisionValue) && revisionValue > 0 ? revisionValue : 1;
-      const sanitized = { ...answer, revision };
+      const revision = answer.revision;
+      if (correctness.present &&
+          (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision <= 0)) {
+        return {
+          status: 'failed',
+          reason: 'Correctness-bearing legacy grade requires an explicit positive integer revision.',
+          response: original,
+          grades: []
+        };
+      }
+      const sanitized = { ...answer };
       delete sanitized.ok;
       delete sanitized.score;
       next.answers[questionKey] = sanitized;
@@ -144,7 +111,6 @@
 
   return {
     normalizeEmail,
-    planLegacyMigration,
     prepareLegacyResponse,
     responseLeakPaths
   };

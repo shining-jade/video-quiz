@@ -345,150 +345,11 @@ function loadStageFunctions(names, context) {
   return context;
 }
 
-test('legacy owner probe reveals only the matching permission result', async () => {
-  const denied = Object.assign(new Error('denied'), { code: 'permission-denied' });
-  const calls = [];
-  const makeStore = result => loadStoreModule().createFirestoreStore({
-    doc(path) {
-      return {
-        async get(options) {
-          calls.push([path, options]);
-          if (result instanceof Error) throw result;
-          return { exists: false, id: path.split('/').at(-1), data() {} };
-        }
-      };
-    }
-  }, { serverTimestamp() {} }, Date.now);
+test('browser Firestore store exposes no legacy owner probe or migration write API', () => {
+  const store = loadStoreModule().createFirestoreStore({}, { serverTimestamp() {} }, Date.now);
 
-  assert.equal(await makeStore(null).probeLegacyOwner(), true);
-  assert.equal(await makeStore(denied).probeLegacyOwner(), false);
-  assert.deepEqual(calls[0], ['config/__legacy_owner_probe__access', { source: 'server' }]);
-});
-
-test('legacy migration claims parents, preserves child counts, snapshots fallback data, and privatizes grading', async () => {
-  const fake = makeFirestoreFake({
-    'quiz_sets/legacy-set': { title: 'Legacy', questions: [{ text: 'Q' }] },
-    'quiz_sets/own-set': { title: 'Own', ownerUid: 'teacher-1', ownerEmail: 'teacher@school.kr' },
-    'quiz_sets/other-set': { title: 'Other', ownerUid: 'teacher-2', ownerEmail: 'other@school.kr' },
-    'images/legacy-set/q/v0q0': { data: 'image-data' },
-    'images/other-set/q/v0q0': { data: 'other-image' },
-    'sessions/legacy-session': {
-      setId: 'legacy-set', status: 'ended',
-      setSnapshot: { title: 'Legacy', questions: [{ text: 'Q' }] },
-      snapshotImages: { v0q0: 'image-data' }
-    },
-    'sessions/own-session': {
-      setId: 'own-set', status: 'ended', teacherUid: 'teacher-1', teacherEmail: 'teacher@school.kr'
-    },
-    'sessions/other-session': {
-      setId: 'other-set', status: 'ended', teacherUid: 'teacher-2', teacherEmail: 'other@school.kr'
-    },
-    'sessions/legacy-session/students/student-1': { name: 'Student' },
-    'sessions/legacy-session/responses/student-1': {
-      answers: { 0: { answer: 1, submitted: true, revision: 3, ok: true, score: 1 } }
-    },
-    'sessions/own-session/responses/student-2': {
-      uid: 'student-2', answers: { 0: { answer: 0, submitted: true, revision: 2 } }
-    },
-    'sessions/other-session/students/student-3': { uid: 'student-3', name: 'Other student' },
-    'sessions/other-session/responses/student-3': {
-      uid: 'student-3', answers: { 0: { answer: 0, submitted: true, revision: 2 } }
-    }
-  });
-  const store = loadStoreModule().createFirestoreStore(fake.db, fake.fieldValue, Date.now);
-  const plan = require('../migration-core.js').planLegacyMigration(
-    [
-      { id: 'legacy-set' },
-      { id: 'own-set', ownerUid: 'teacher-1' },
-      { id: 'other-set', ownerUid: 'teacher-2' }
-    ],
-    [
-      { id: 'legacy-session' },
-      { id: 'own-session', teacherUid: 'teacher-1' },
-      { id: 'other-session', teacherUid: 'teacher-2' }
-    ],
-    {
-      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr',
-      legacyOwnerVerified: true
-    }
-  );
-
-  const report = await store.migrateLegacyOwnership(plan);
-
-  assert.equal(fake.value('quiz_sets/legacy-set').ownerUid, 'teacher-1');
-  assert.equal(fake.value('sessions/legacy-session').teacherEmail, 'teacher@school.kr');
-  assert.deepEqual(fake.value('sessions/legacy-session/responses/student-1'), {
-    uid: 'student-1',
-    answers: { 0: { answer: 1, submitted: true, revision: 3 } }
-  });
-  assert.deepEqual(fake.value('sessions/legacy-session/grades/student-1__0'), {
-    uid: 'student-1', questionIndex: 0, revision: 3, ok: true
-  });
-  assert.equal(fake.value('sessions/legacy-session/snapshot/set').title, 'Legacy');
-  assert.deepEqual(fake.value('sessions/legacy-session/snapshot_images/v0q0'), { data: 'image-data' });
-  assert.equal(fake.has('sessions/own-session/snapshot/set'), false);
-  assert.equal(report.byCollection.sets.migrated.includes('legacy-set'), true);
-  assert.equal(report.byCollection.images.migrated.includes('legacy-set/v0q0'), true);
-  assert.equal(report.byCollection.students.migrated.includes('legacy-session/student-1'), true);
-  assert.equal(report.byCollection.responses.migrated.includes('legacy-session/student-1'), true);
-  assert.equal(report.byCollection.sessions.skipped.includes('other-session'), true);
-  assert.equal(report.byCollection.images.skipped.includes('other-set/v0q0'), true);
-  assert.equal(report.byCollection.students.skipped.includes('other-session/student-3'), true);
-  assert.equal(report.byCollection.responses.skipped.includes('other-session/student-3'), true);
-  assert.equal(report.remainingResponseLeakCount, 0);
-  assert.equal(report.safeToDeployStrictRules, true);
-  assert.equal(fake.calls().filter(call => call.operation === 'batchCommit').every(call => call.size <= 400), true);
-});
-
-test('partial batch failure is resumable without rewriting already claimed documents', async () => {
-  const fake = makeFirestoreFake({
-    'quiz_sets/set-a': { title: 'A' },
-    'sessions/session-a': { setId: 'set-a', status: 'ended' }
-  }, { failBatchCommitAt: 2 });
-  const store = loadStoreModule().createFirestoreStore(fake.db, fake.fieldValue, Date.now);
-  const plan = require('../migration-core.js').planLegacyMigration(
-    [{ id: 'set-a' }],
-    [{ id: 'session-a' }],
-    {
-      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr',
-      legacyOwnerVerified: true
-    }
-  );
-
-  const first = await store.migrateLegacyOwnership(plan);
-  const second = await store.migrateLegacyOwnership(plan);
-
-  assert.equal(first.failed.length > 0, true);
-  assert.equal(second.failed.length, 0);
-  assert.equal(second.duplicated, 0);
-  assert.equal(fake.calls().filter(call =>
-    call.operation === 'set' && call.path === 'quiz_sets/set-a'
-  ).length, 1);
-  assert.equal(fake.value('sessions/session-a').teacherUid, 'teacher-1');
-});
-
-test('unsupported response grading keeps the leak visible in the deployment gate', async () => {
-  const fake = makeFirestoreFake({
-    'sessions/session-a': {
-      teacherUid: 'teacher-1', teacherEmail: 'teacher@school.kr', status: 'ended'
-    },
-    'sessions/session-a/responses/student-1': {
-      uid: 'student-1', answers: { 0: { answer: 1, revision: 2, score: 0.5 } }
-    }
-  });
-  const store = loadStoreModule().createFirestoreStore(fake.db, fake.fieldValue, Date.now);
-  const report = await store.migrateLegacyOwnership({
-    teacher: { uid: 'teacher-1', email: 'teacher@school.kr' },
-    legacyOwnerVerified: true,
-    setIds: [], sessionIds: [], resumeSetIds: [], resumeSessionIds: ['session-a'],
-    skippedSetIds: [], skippedSessionIds: []
-  });
-
-  assert.equal(report.safeToDeployStrictRules, false);
-  assert.equal(report.remainingResponseLeakCount, 1);
-  assert.deepEqual(report.remainingResponseLeakIds, ['session-a/student-1']);
-  assert.equal(report.byCollection.responses.failed.includes('session-a/student-1'), true);
-  assert.equal(fake.value('sessions/session-a/responses/student-1').answers[0].score, 0.5);
+  assert.equal(Object.prototype.hasOwnProperty.call(store, 'probeLegacyOwner'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(store, 'migrateLegacyOwnership'), false);
 });
 
 test('캐시된 YouTube API가 콜백보다 먼저 준비돼도 대기 작업을 즉시 실행한다', () => {
@@ -5486,7 +5347,7 @@ test('a verified Google session hydrates teacher allowance through the normalize
   assert.equal(context.teacherState.uid, 'google-user');
 });
 
-test('approved Google teacher hydrates legacy-owner permission only through the private probe', async () => {
+test('approved Google teacher never probes or hydrates browser legacy-owner authority', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const user = {
@@ -5497,7 +5358,6 @@ test('approved Google teacher hydrates legacy-owner permission only through the 
   };
   const context = {
     teacherUser: null, teacherAllowance: null, teacherState: null,
-    legacyOwnerVerified: false,
     clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 0,
     AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {},
     store: {
@@ -5515,49 +5375,8 @@ test('approved Google teacher hydrates legacy-owner permission only through the 
 
   await context.applyTeacherUser(user);
 
-  assert.deepEqual(calls, [['allowance', 'owner@school.kr'], ['legacy']]);
-  assert.equal(context.legacyOwnerVerified, true);
+  assert.deepEqual(calls, [['allowance', 'owner@school.kr']]);
   assert.equal(context.teacherState.status, 'teacher');
-});
-
-test('legacy migration runner creates a verified plan and renders the strict-rules deployment gate', async () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  const rendered = [];
-  let receivedPlan = null;
-  const context = {
-    teacherState: {
-      status: 'teacher', uid: 'legacy-owner', email: 'owner@school.kr', role: 'teacher'
-    },
-    legacyOwnerVerified: true,
-    AuthCore: require('../auth-core.js'),
-    MigrationCore: require('../migration-core.js'),
-    store: {
-      async listQuizSets() { return [{ id: 'legacy-set' }]; },
-      async listSessions() { return [{ id: 'legacy-session' }]; },
-      async migrateLegacyOwnership(plan, onProgress) {
-        receivedPlan = plan;
-        const report = {
-          counts: { migrated: 3, skipped: 1, failed: 0 },
-          byCollection: {}, remainingResponseLeakCount: 0,
-          remainingResponseLeakIds: [], safeToDeployStrictRules: true
-        };
-        onProgress(report);
-        return report;
-      }
-    },
-    document: { getElementById() { return { disabled: false }; } },
-    renderMigrationReport(report) { rendered.push(report); },
-    alert(message) { throw new Error(message); }
-  };
-  vm.runInNewContext(extractFunction(html, 'runLegacyMigration'), context);
-
-  const report = await context.runLegacyMigration();
-
-  assert.deepEqual(receivedPlan.setIds, ['legacy-set']);
-  assert.deepEqual(receivedPlan.sessionIds, ['legacy-session']);
-  assert.equal(receivedPlan.legacyOwnerVerified, true);
-  assert.equal(report.safeToDeployStrictRules, true);
-  assert.equal(rendered.at(-1).remainingResponseLeakCount, 0);
 });
 
 test('an offline server-only allowance probe leaves a verified Google user unapproved', async () => {
