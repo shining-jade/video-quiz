@@ -907,6 +907,9 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   assert.deepEqual(context.pl.responses, { '0': { s1: { c: 1, ok: true } } });
   assert.equal(context.pl.live.q, 0);
   assert.equal(boardWrites, 0);
+  assert.match(app.innerHTML, /id="pl-stage" onpointerdown="plActivateStageControls\(\)"/);
+  assert.doesNotMatch(app.innerHTML, /class="pl-stage-status"[^>]*aria-live/);
+  assert.match(app.innerHTML, /<span aria-live="polite">참여 <b id="pl-nstu">0<\/b>명<\/span>/);
 });
 
 test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 전달한다', async () => {
@@ -1429,6 +1432,44 @@ test('QR 헤더 포인터 드래그는 stage 경계 안에서 버블 위치를 �
   assert.equal(ctx.pl.qrDrag, null);
 });
 
+test('QR 닫기 버튼의 포인터 입력은 헤더 드래그를 시작하거나 포인터를 가로채지 않는다', () => {
+  let captured = 0;
+  const closeButton = { closest(selector) { return selector === 'button, a, input, select, textarea' ? this : null; } };
+  const ctx = loadStageFunctions(['plStartQrDrag'], {
+    pl: { qrPosition: null, qrDrag: null },
+    document: { getElementById() { return { offsetLeft: 20, offsetTop: 20 }; } }
+  });
+
+  ctx.plStartQrDrag({
+    pointerId: 8, clientX: 10, clientY: 10, button: 0,
+    target: closeButton,
+    currentTarget: { setPointerCapture() { captured++; } }
+  });
+
+  assert.equal(ctx.pl.qrDrag, null);
+  assert.equal(captured, 0);
+});
+
+test('stage 포인터 입력은 전체화면 도구를 잠시 선명하게 표시한다', () => {
+  const classes = new Set();
+  let scheduled = null;
+  const stage = { classList: {
+    add(name) { classes.add(name); },
+    remove(name) { classes.delete(name); }
+  } };
+  const ctx = loadStageFunctions(['plActivateStageControls'], {
+    document: { getElementById(id) { return id === 'pl-stage' ? stage : null; } },
+    clearTimeout() {},
+    setTimeout(callback) { scheduled = callback; return 1; }
+  });
+
+  ctx.plActivateStageControls();
+  assert.equal(classes.has('controls-active'), true);
+
+  scheduled();
+  assert.equal(classes.has('controls-active'), false);
+});
+
 test('stage 크기 변경은 열린 QR 버블을 새 경계 안으로 되돌린다', () => {
   const bubble = { hidden: false, offsetWidth: 100, offsetHeight: 80, style: {} };
   const stage = { clientWidth: 300, clientHeight: 200 };
@@ -1490,13 +1531,14 @@ test('넓은 화면의 문제 레이아웃은 stage 안의 실제 player-box를 
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+#pl-video/);
 });
 
-test('문제 오버레이 중에도 QR 버튼과 우상단 버블은 오버레이 위에서 클릭할 수 있다', () => {
+test('문제 오버레이 중 도구와 상태는 화면 가장자리에 고정되고 QR 제어는 클릭할 수 있다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  const overlayRule = html.match(/#overlay\s*\{([^}]*)\}/s);
+  const overlayRule = html.match(/^#overlay\s*\{([^}]*)\}/ms);
   const toolsRule = html.match(/#pl-stage\.quiz-open\s+\.pl-stage-tools\s*\{([^}]*)\}/s);
+  const statusRule = html.match(/#pl-stage:fullscreen\.quiz-open\s+\.pl-stage-status,\s*#pl-stage\.fullscreen-fallback\.quiz-open\s+\.pl-stage-status\s*\{([^}]*)\}/s);
   const bubbleRule = html.match(/#pl-stage\s+#pl-qr-bubble\s*\{([^}]*)\}/s);
 
-  assert.ok(overlayRule && toolsRule && bubbleRule);
+  assert.ok(overlayRule && toolsRule && statusRule && bubbleRule);
   const overlayZ = Number(overlayRule[1].match(/z-index:\s*(\d+)/)[1]);
   const toolsZ = Number(toolsRule[1].match(/z-index:\s*(\d+)/)[1]);
   const bubbleZ = Number(bubbleRule[1].match(/z-index:\s*(\d+)/)[1]);
@@ -1507,7 +1549,12 @@ test('문제 오버레이 중에도 QR 버튼과 우상단 버블은 오버레�
   assert.match(html, /aria-label="QR 닫기" onclick="plToggleQrBubble\(\)"/);
   assert.match(bubbleRule[1], /right:\s*20px/);
   assert.match(bubbleRule[1], /top:\s*20px/);
-  assert.doesNotMatch(toolsRule[1], /position:\s*fixed|inset:/);
+  assert.match(toolsRule[1], /position:\s*fixed/);
+  assert.match(toolsRule[1], /top:\s*16px/);
+  assert.match(statusRule[1], /position:\s*fixed/);
+  assert.match(statusRule[1], /bottom:\s*16px/);
+  assert.match(html, /@media \(min-width:\s*900px\)[\s\S]*#pl-stage\.fullscreen-fallback\.quiz-open \.pl-stage-status\s*\{[^}]*right:\s*calc\(47vw \+ 20px\)/);
+  assert.match(html, /#pl-stage:fullscreen\.quiz-open #overlay,\s*#pl-stage\.fullscreen-fallback\.quiz-open #overlay\s*\{[^}]*padding-top:\s*104px[^}]*padding-bottom:\s*64px/);
   assert.doesNotMatch(toolsRule[1] + bubbleRule[1], /pointer-events:\s*none/);
 });
 

@@ -371,7 +371,19 @@ body.stage-fallback-open { overflow: hidden; }
 #pl-stage.fullscreen-fallback .pl-stage-tools .btn {
   border-color: rgba(255,255,255,.32); background: rgba(18,22,36,.72); color: #fff;
 }
-#pl-stage.quiz-open .pl-stage-tools { position: relative; z-index: 202; }
+#pl-stage.quiz-open .pl-stage-tools {
+  position: fixed; top: 16px; left: 16px; right: 16px; z-index: 202;
+}
+#pl-stage:fullscreen.quiz-open .pl-stage-status,
+#pl-stage.fullscreen-fallback.quiz-open .pl-stage-status {
+  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 202;
+  width: fit-content; margin: 0 auto; padding: 6px 10px; border-radius: 8px;
+  background: rgba(18,22,36,.72);
+}
+#pl-stage:fullscreen.quiz-open #overlay,
+#pl-stage.fullscreen-fallback.quiz-open #overlay {
+  padding-top: 104px; padding-bottom: 64px;
+}
 #pl-stage #pl-qr-bubble {
   position: absolute; right: 20px; top: 20px; z-index: 203; width: 180px; padding: 14px;
   border-radius: 12px; background: rgba(255,255,255,.96); color: #171927; text-align: center;
@@ -425,6 +437,11 @@ body.stage-fallback-open { overflow: hidden; }
 /* 퀴즈가 열리면 영상은 왼쪽에 그대로 두고 문항을 오른쪽에 붙인다.
    iframe 을 DOM 에서 옮기면 영상이 처음부터 다시 로드되므로 CSS 로만 자리를 바꾼다. */
 @media (min-width: 900px) {
+  #pl-stage.quiz-open .pl-stage-tools,
+  #pl-stage:fullscreen.quiz-open .pl-stage-status,
+  #pl-stage.fullscreen-fallback.quiz-open .pl-stage-status {
+    left: 20px; right: calc(47vw + 20px);
+  }
   /* 반쪽 패널이 되면 뒤 페이지가 비쳐 산만하므로 불투명하게 */
   #pl-stage.quiz-open #overlay { left: 53vw; padding: 26px 30px; background: #12162a; }
   #pl-stage.quiz-open .player-box {
@@ -2330,7 +2347,7 @@ function renderPlayRun() {
 
       '<div>' +
         '<div class="card" id="pl-video" style="padding:14px">' +
-          '<div id="pl-stage">' +
+          '<div id="pl-stage" onpointerdown="plActivateStageControls()">' +
             '<div class="player-box"><div id="pl-player"></div></div>' +
             '<div class="pl-stage-tools" aria-label="전체화면 진행 도구">' +
               '<button class="btn sm" onclick="plGoHomeFromStage()" title="전체화면 나가기" aria-label="전체화면 나가기">⌂ 홈</button>' +
@@ -2340,9 +2357,9 @@ function renderPlayRun() {
               '<button class="btn sm" onclick="plExitStageFullscreen()" title="전체화면 해제" aria-label="전체화면 해제">⛶ 전체화면 해제</button>' +
               '<button class="btn sm" onclick="plEndSession()" title="수업 진행 종료" aria-label="수업 진행 종료">진행 종료</button>' +
             '</div>' +
-            '<div class="pl-stage-status" aria-live="polite">' +
+            '<div class="pl-stage-status">' +
               '<span class="mono" id="pl-clock">0:00</span><span id="pl-next">—</span>' +
-              '<span>참여 <b id="pl-nstu">0</b>명</span>' +
+              '<span aria-live="polite">참여 <b id="pl-nstu">0</b>명</span>' +
             '</div>' +
           '</div>' +
           '<div class="row pl-toolbar" style="margin-top:10px;align-items:center">' +
@@ -2518,6 +2535,17 @@ function plToggleMute() {
   }
 }
 
+function plActivateStageControls() {
+  const stage = document.getElementById('pl-stage');
+  if (!stage) return;
+  stage.classList.add('controls-active');
+  if (stage._plControlsTimer) clearTimeout(stage._plControlsTimer);
+  stage._plControlsTimer = setTimeout(() => {
+    stage.classList.remove('controls-active');
+    stage._plControlsTimer = null;
+  }, 2400);
+}
+
 function plToggleQrBubble() {
   if (!pl) return;
   pl.qrOpen = !pl.qrOpen;
@@ -2572,6 +2600,7 @@ function plRenderQrBubble() {
 
 function plStartQrDrag(event) {
   if (!pl || !event || (event.button != null && event.button !== 0)) return;
+  if (event.target && event.target.closest && event.target.closest('button, a, input, select, textarea')) return;
   const bubble = document.getElementById('pl-qr-bubble');
   if (!bubble) return;
   const position = pl.qrPosition || { x: bubble.offsetLeft || 0, y: bubble.offsetTop || 0 };
