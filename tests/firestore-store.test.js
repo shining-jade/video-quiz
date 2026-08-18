@@ -696,14 +696,14 @@ test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한�
     PlaylistCore: require('../playlist-core.js'),
     qType(q) { return q.type || 'choice'; }, QTYPES: { choice: '객관식' },
     mkAnswerField() { return ''; }, mkImageField() { return ''; },
-    mkRenderSettings() {}, mkInitResizer() {}, mkSyncVideo() {}, mkRenderQuestions() {},
+    mkRenderSettings() {}, mkSyncVideo() {},
     mkShowShare() {}, mkMarkDirty() {}, lsSet() {},
     $: selector => {
       if (!elements.has(selector)) elements.set(selector, { addEventListener() {}, style: {} });
       return elements.get(selector);
     }
   };
-  loadStageFunctions(['renderMake'], context);
+  loadStageFunctions(['mkTimelineDomain', 'renderMake'], context);
 
   context.renderMake();
 
@@ -747,7 +747,7 @@ test('구간 손잡이와 직접 입력은 1초 간격을 지키며 같은 초 �
     },
     renderMake() {}, mkMarkDirty() {}
   };
-  loadStageFunctions(['mkSetRange'], context);
+  loadStageFunctions(['mkTimelineDomain', 'mkRefreshVideoTiming', 'mkSetRange'], context);
 
   context.mkSetRange(0, 'start', '00:20');
   context.mkSetRange(0, 'end', 100);
@@ -761,12 +761,89 @@ test('타임라인 문항 시각은 현재 영상의 원본 YouTube 초로 저�
     mk: { videos: [{ startSec: 120, endSec: 630, durationSec: 700, questions: [{ t: 375 }] }] },
     parseTime(value) { return Number(value); }, renderMake() {}, mkMarkDirty() {}
   };
-  loadStageFunctions(['mkSetQuestionTime'], context);
+  loadStageFunctions(['mkTimelineDomain', 'mkSetQuestionTime'], context);
 
   context.mkSetQuestionTime(0, 0, 500);
   assert.equal(context.mk.videos[0].questions[0].t, 500);
   context.mkSetQuestionTime(0, 0, 999);
   assert.equal(context.mk.videos[0].questions[0].t, 630);
+});
+
+test('종료 시각이 없는 타임라인 드래그는 렌더와 같은 미확정 구간을 원본 초로 역산한다', () => {
+  const listeners = {};
+  let setTime;
+  const timeline = { getBoundingClientRect() { return { left: 100, width: 600 }; } };
+  const context = {
+    mk: { videos: [{ startSec: 100, endSec: null, durationSec: null, questions: [{ t: 300 }] }] },
+    document: {
+      addEventListener(name, listener) { listeners[name] = listener; },
+      removeEventListener() {}
+    },
+    mkSetQuestionTime(videoIndex, questionIndex, value) { setTime = [videoIndex, questionIndex, value]; }
+  };
+  loadStageFunctions(['mkTimelineDomain', 'mkStartQuestionDrag'], context);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(context.mkTimelineDomain(context.mk.videos[0]))), {
+    start: 100, end: 700, max: 700
+  });
+  context.mkStartQuestionDrag({ currentTarget: { parentElement: timeline }, preventDefault() {} }, 0, 0);
+  listeners.pointermove({ clientX: 400 });
+
+  assert.deepEqual(setTime, [0, 0, 400]);
+});
+
+test('늦게 확인한 영상 길이는 종료 입력·손잡이 max·문항 점을 즉시 갱신한다', () => {
+  const elements = new Map();
+  const dot = { style: {} };
+  const timeline = { querySelectorAll() { return [dot]; } };
+  const selector = key => {
+    if (key === '[data-timeline-video="0"]') return timeline;
+    if (!elements.has(key)) elements.set(key, { value: '', max: '' });
+    return elements.get(key);
+  };
+  const context = {
+    mk: { videos: [{ startSec: 0, endSec: null, durationSec: null, questions: [{ t: 60 }] }] },
+    document: { querySelector: selector },
+    PlaylistCore: require('../playlist-core.js'),
+    fmtTime(value) { return value === 120 ? '2:00' : '0:00'; }
+  };
+  loadStageFunctions(['mkTimelineDomain', 'mkRefreshVideoTiming', 'mkApplyDuration'], context);
+
+  context.mkApplyDuration(0, 120);
+
+  assert.equal(elements.get('[data-range-input="0-end"]').value, '2:00');
+  assert.equal(elements.get('[data-range-slider="0-start"]').max, 120);
+  assert.equal(elements.get('[data-range-slider="0-end"]').max, 120);
+  assert.equal(elements.get('[data-range-slider="0-end"]').value, 120);
+  assert.equal(dot.style.left, '50%');
+});
+
+test('처리 중인 이미지 업로드는 재정렬 뒤에도 원래 문항에만 적용되고 삭제 뒤에는 폐기된다', async () => {
+  const pending = [];
+  const first = { text: 'A', _img: '' }, second = { text: 'B', _img: '' };
+  const context = {
+    mk: { videos: [{ questions: [first, second] }] },
+    prepareImage() { return new Promise(resolve => pending.push(resolve)); },
+    toast() {}, mkMarkDirty() {}, renderMake() {},
+    console, alert(message) { throw new Error(message); }, Math
+  };
+  loadStageFunctions(['mkUploadImage'], context);
+  const inputA = { files: [{ name: 'a.png' }], value: 'a' };
+  const uploadA = context.mkUploadImage(0, 0, inputA);
+  context.mk.videos[0].questions.reverse();
+  pending.shift()('image-a');
+  await uploadA;
+
+  assert.equal(first._img, 'image-a');
+  assert.equal(second._img, '');
+
+  const inputB = { files: [{ name: 'b.png' }], value: 'b' };
+  const uploadB = context.mkUploadImage(0, 0, inputB);
+  context.mk.videos[0].questions.splice(0, 1);
+  pending.shift()('image-b');
+  await uploadB;
+
+  assert.equal(second._img, '');
 });
 
 test('저장 검증은 모든 영상의 재생 구간 오류에 영상 번호를 붙인다', () => {
