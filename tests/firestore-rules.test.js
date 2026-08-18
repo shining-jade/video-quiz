@@ -371,6 +371,47 @@ rulesTest('fix-round-1: response uid is required, authenticated, and immutable',
   });
 });
 
+rulesTest('fix-round-2: teachers and admins cannot mutate student response roots', async t => {
+  const responsePath = 'sessions/s1/responses/student-uid';
+  const cases = [
+    ['owner omits uid', 'owner', { answers: { 0: { answer: 1, submitted: true, revision: 2 } } }],
+    ['admin changes uid', 'admin', {
+      uid: 'admin-uid', answers: { 0: { answer: 1, submitted: true, revision: 2 } }
+    }],
+    ['owner adds a root field', 'owner', {
+      uid: 'student-uid', answers: { 0: { answer: 1, submitted: true, revision: 2 } }, score: 99
+    }],
+    ['admin writes malformed answers', 'admin', { uid: 'student-uid', answers: 'broken' }]
+  ];
+
+  for (const [name, actorName, value] of cases) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      await assertFails(setDoc(doc(actorFirestore(actorName), responsePath), value));
+    });
+  }
+});
+
+rulesTest('fix-round-2: private revision grades are writable by owner/admin and unreadable to students', async () => {
+  const gradePath = 'sessions/s1/grades/student-uid__0';
+  const grade = { uid: 'student-uid', questionIndex: 0, revision: 1, ok: true };
+  const owner = actorFirestore('owner');
+  const admin = actorFirestore('admin');
+  const student = actorFirestore('student');
+
+  await assertSucceeds(setDoc(doc(owner, gradePath), grade));
+  await assertSucceeds(updateDoc(doc(admin, gradePath), { ok: false }));
+  await assertFails(setDoc(doc(actorFirestore('otherTeacher'), gradePath), grade));
+  await assertFails(getDoc(doc(student, gradePath)));
+  await assertFails(getDocs(collection(student, 'sessions/s1/grades')));
+  const ownResponse = await assertSucceeds(getDoc(
+    doc(student, 'sessions/s1/responses/student-uid')
+  ));
+  assert.equal('ok' in ownResponse.data().answers['0'], false);
+  await assertSucceeds(getDoc(doc(owner, gradePath)));
+  await assertSucceeds(getDocs(collection(admin, 'sessions/s1/grades')));
+});
+
 rulesTest('fix-round-1: graded answer can be replaced on reopen, revised, and resubmitted', async () => {
   const student = actorFirestore('student');
   const owner = actorFirestore('owner');
@@ -381,9 +422,9 @@ rulesTest('fix-round-1: graded answer can be replaced on reopen, revised, and re
     uid: 'student-uid',
     answers: { 0: { answer: 1, submitted: true, revision: 1 } }
   }));
-  await assertSucceeds(updateDoc(
-    doc(owner, 'sessions/s1/responses/student-uid'),
-    { 'answers.0.ok': true }
+  await assertSucceeds(setDoc(
+    doc(owner, 'sessions/s1/grades/student-uid__0'),
+    { uid: 'student-uid', questionIndex: 0, revision: 1, ok: true }
   ));
   await assertSucceeds(updateDoc(own, {
     'answers.0': { answer: 1, submitted: false, revision: 2 }
@@ -397,6 +438,10 @@ rulesTest('fix-round-1: graded answer can be replaced on reopen, revised, and re
     uid: 'student-uid',
     answers: { 0: { answer: 0, submitted: true, revision: 3 } }
   });
+  const staleGrade = await assertSucceeds(getDoc(
+    doc(owner, 'sessions/s1/grades/student-uid__0')
+  ));
+  assert.equal(staleGrade.data().revision, 1);
 });
 
 rulesTest('fix-round-1: aggregate scores are teacher-only and each student reads only own score', async () => {
@@ -505,6 +550,51 @@ rulesTest('fix-round-1: timer reveal is denied before revealAt and response is d
     doc(student, 'sessions/s1/responses/student-uid'),
     { 'answers.0': { answer: 0, submitted: true, revision: 2 } }
   ));
+});
+
+rulesTest('fix-round-2: freeze denies the racing revision and the accepted revision is graded', async () => {
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, { accepting: true }));
+  const student = actorFirestore('student');
+  const owner = actorFirestore('owner');
+  const response = doc(student, 'sessions/s1/responses/student-uid');
+  const live = doc(owner, 'sessions/s1/meta/live');
+
+  await assertSucceeds(updateDoc(response, {
+    'answers.0': { answer: 0, submitted: true, revision: 2 }
+  }));
+  const freeze = assertSucceeds(updateDoc(live, { accepting: false }));
+  const racingRevision = freeze.then(() => assertFails(updateDoc(response, {
+    'answers.0': { answer: 1, submitted: true, revision: 3 }
+  })));
+  await Promise.all([freeze, racingRevision]);
+
+  const accepted = await assertSucceeds(getDoc(
+    doc(owner, 'sessions/s1/responses/student-uid')
+  ));
+  assert.equal(accepted.data().answers['0'].revision, 2);
+  await assertSucceeds(setDoc(doc(owner, 'sessions/s1/grades/student-uid__0'), {
+    uid: 'student-uid', questionIndex: 0, revision: 2, ok: true
+  }));
+  await assertSucceeds(setDoc(doc(owner, 'sessions/s1/meta/board'), {
+    scores: { 'student-uid': 1 }
+  }));
+  const board = await assertSucceeds(getDoc(doc(owner, 'sessions/s1/meta/board')));
+  assert.equal(board.data().scores['student-uid'], 1);
+});
+
+rulesTest('fix-round-2: timer live cannot freeze before submit grace ends', async () => {
+  const now = Date.now();
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    accepting: true,
+    responseClosesAt: Timestamp.fromMillis(now + 50),
+    submitGraceUntil: Timestamp.fromMillis(now + 300),
+    revealAt: Timestamp.fromMillis(now + 300)
+  }));
+  const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
+
+  await assertFails(updateDoc(live, { accepting: false }));
+  await new Promise(resolve => setTimeout(resolve, 400));
+  await assertSucceeds(updateDoc(live, { accepting: false }));
 });
 
 rulesTest('current-live-question response validation', async () => {
@@ -1087,7 +1177,7 @@ const writeMatrix = [
       : { answers: { 0: { answer: 1, submitted: true, revision: 1, ok: true } } },
     allowed: {
       create: ['student'],
-      update: ['owner', 'admin', 'student'],
+      update: ['student'],
       delete: ['owner', 'admin']
     }
   },

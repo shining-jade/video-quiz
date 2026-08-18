@@ -18,12 +18,20 @@
     return !!answer && answer.submitted !== false;
   }
 
-  function responseDocsToQuestionMaps(docs) {
+  function responseDocsToQuestionMaps(docs, gradeDocs) {
     const out = {};
     Object.keys(docs || {}).forEach(studentId => {
       Object.entries((docs[studentId] && docs[studentId].answers) || {}).forEach(([question, answer]) => {
         if (!answerIsSubmitted(answer)) return;
-        (out[question] || (out[question] = {}))[studentId] = answer;
+        const visible = { ...answer };
+        delete visible.ok;
+        delete visible.score;
+        const grade = (gradeDocs || {})[studentId + '__' + question];
+        if (grade && grade.uid === studentId &&
+            Number(grade.questionIndex) === Number(question) &&
+            Number(grade.revision) === Number(visible.revision) &&
+            typeof grade.ok === 'boolean') visible.ok = grade.ok;
+        (out[question] || (out[question] = {}))[studentId] = visible;
       });
     });
     return out;

@@ -83,7 +83,7 @@ test('학생별 응답 문서를 기존 문항별 화면 형태로 바꾼다', (
     s2: { answers: { '0': { c: 0, ok: false } } }
   };
   assert.deepEqual(core.responseDocsToQuestionMaps(docs), {
-    '0': { s1: { c: 1, ok: true }, s2: { c: 0, ok: false } },
+    '0': { s1: { c: 1 }, s2: { c: 0 } },
     '2': { s1: { txt: '서술' } }
   });
 });
@@ -109,7 +109,7 @@ test('기존 응답은 제출로 보고 다시 고르는 응답은 집계와 점
     s2: { answers: { '0': { c: 1, ok: false, submitted: false } } }
   };
   assert.deepEqual(core.responseDocsToQuestionMaps(docs), {
-    '0': { s1: { c: 0, ok: true } }
+    '0': { s1: { c: 0 } }
   });
   assert.deepEqual(core.buildBoard({ s1: {}, s2: {} }, docs), { s1: 1, s2: 0 });
 });
@@ -132,4 +132,22 @@ test('서버 마감 시각으로 타이머 비율과 색상 단계를 계산한�
 test('관리자 일괄 작업을 지정한 크기로 나눈다', () => {
   assert.deepEqual(core.chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
   assert.throws(() => core.chunk([1], 0), /양수/);
+});
+
+test('private grades join only the matching response revision and raw response ok is discarded', () => {
+  const responses = {
+    s1: { uid: 's1', answers: {
+      '0': { answer: 1, submitted: true, revision: 2, ok: true },
+      '1': { answer: 'new', submitted: true, revision: 4, ok: false }
+    } }
+  };
+  const grades = {
+    's1__0': { uid: 's1', questionIndex: 0, revision: 2, ok: false },
+    's1__1': { uid: 's1', questionIndex: 1, revision: 3, ok: true }
+  };
+
+  assert.deepEqual(core.responseDocsToQuestionMaps(responses, grades), {
+    '0': { s1: { answer: 1, submitted: true, revision: 2, ok: false } },
+    '1': { s1: { answer: 'new', submitted: true, revision: 4 } }
+  });
 });

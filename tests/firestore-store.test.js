@@ -2130,26 +2130,31 @@ test('학생·응답·live 구독은 세션의 각 Firestore 경로 데이터만
   const fake = makeFirestoreFake({
     'sessions/a/students/s1': { name: '가' },
     'sessions/a/responses/s1': { answers: { '0': { c: 1, ok: true } } },
+    'sessions/a/grades/s1__0': { uid: 's1', questionIndex: 0, revision: 1, ok: true },
     'sessions/a/meta/live': { q: 0, openedAt: 123, revealed: false, limitSec: 20 }
   });
   const store = createStore(fake);
   let students;
   let responses;
+  let grades;
   let live;
 
   const stops = [
     store.subscribeStudents('a', value => { students = value; }),
     store.subscribeResponses('a', value => { responses = value; }),
+    store.subscribeGrades('a', value => { grades = value; }),
     store.subscribeLive('a', value => { live = value; })
   ];
   await fake.flush();
 
   assert.deepEqual(students, { s1: { name: '가' } });
   assert.deepEqual(responses, { s1: { answers: { '0': { c: 1, ok: true } } } });
+  assert.deepEqual(grades, { 's1__0': { uid: 's1', questionIndex: 0, revision: 1, ok: true } });
   assert.deepEqual(live, { id: 'live', q: 0, openedAt: 123, revealed: false, limitSec: 20 });
   assert.deepEqual(fake.subscribedPaths(), [
     'sessions/a/students',
     'sessions/a/responses',
+    'sessions/a/grades',
     'sessions/a/meta/live'
   ]);
   stops.forEach(stop => stop());
@@ -2236,7 +2241,7 @@ test('teacher writes aggregate scores separately and student reads only the own 
 test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기고 응답 문서를 화면 형태로 바꾼다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const subscriptions = {};
-  const subscriptionCounts = { students: 0, responses: 0, live: 0 };
+  const subscriptionCounts = { students: 0, responses: 0, grades: 0, live: 0 };
   const playerLoads = [];
   const playerConfigs = [];
   let boardWrites = 0;
@@ -2263,6 +2268,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
     store: {
       subscribeStudents(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.students++; subscriptions.students = next; return () => {}; },
       subscribeResponses(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.responses++; subscriptions.responses = next; return () => {}; },
+      subscribeGrades(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.grades++; subscriptions.grades = next; return () => {}; },
       subscribeLive(id, next) { assert.equal(id, 'session-a'); subscriptionCounts.live++; subscriptions.live = next; return () => {}; }
     },
     FirestoreCore: require('../firestore-core.js'),
@@ -2302,14 +2308,15 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
 
   context.renderPlayRun();
   subscriptions.students({ s1: { name: '가' } });
-  subscriptions.responses({ s1: { answers: { '0': { c: 1, ok: true } } } });
+  subscriptions.responses({ s1: { answers: { '0': { c: 1, revision: 2, ok: true } } } });
+  subscriptions.grades({ 's1__0': { uid: 's1', questionIndex: 0, revision: 2, ok: false } });
   subscriptions.live({ q: 0, openedAt: 123, revealed: false, limitSec: 20 });
   const studentsBefore = context.pl.students;
   const responsesBefore = context.pl.responses;
   context.plLoadVideo(1, true);
 
   assert.deepEqual(context.pl.students, { s1: { name: '가' } });
-  assert.deepEqual(context.pl.responses, { '0': { s1: { c: 1, ok: true } } });
+  assert.deepEqual(context.pl.responses, { '0': { s1: { c: 1, revision: 2, ok: false } } });
   assert.equal(context.pl.live.q, 0);
   assert.equal(boardWrites, 0);
   assert.match(app.innerHTML, /id="pl-stage" onpointerdown="plActivateStageControls\(\)"/);
@@ -2322,7 +2329,7 @@ test('교사 실행 화면은 학생·응답·live 구독을 저장소에 맡기
   assert.equal(playerConfigs[0].config.playerVars.start, 10);
   assert.deepEqual(clone(playerLoads), [{ videoId: 'lmnopqrstuv', startSeconds: 30 }]);
   assert.equal(context.pl.player, player);
-  assert.deepEqual(subscriptionCounts, { students: 1, responses: 1, live: 1 });
+  assert.deepEqual(subscriptionCounts, { students: 1, responses: 1, grades: 1, live: 1 });
   assert.equal(context.pl.students, studentsBefore);
   assert.equal(context.pl.responses, responsesBefore);
 });
@@ -2416,6 +2423,13 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
     isAutoGraded() { return true; },
     gradeResponse() { return true; },
     store: {
+      async freezeLive() {},
+      async getResponses() {
+        return { student: { uid: 'student', answers: {
+          '0': { answer: 1, submitted: true, revision: 7 }
+        } } };
+      },
+      async getGrades() { return {}; },
       gradeAnswer() {
         order.push('grade-start');
         return gradeReady.then(() => { order.push('grade-end'); return true; });
@@ -2423,6 +2437,7 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
       async setLive() { order.push('live-close'); }
     },
     async plPushBoard() { order.push('board'); },
+    FirestoreCore: core,
     console
   };
   loadStageFunctions([
@@ -3140,7 +3155,7 @@ test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시
   await ctx.plOpenQuestion(1);
 
   assert.deepEqual(clone(written), ['session-a', {
-    q: 1, openedAt: 1234, revealed: false, limitSec: 7,
+    q: 1, openedAt: 1234, revealed: false, accepting: true, limitSec: 7,
     publicQuestion: {
       number: 2, total: 2, type: 'choice', text: 'B', choices: ['가', '나']
     }
@@ -3345,6 +3360,7 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
       q: 3,
       openedAt: serverTimestamp,
       revealed: false,
+      accepting: true,
       limitSec: 20,
       publicQuestion: {
         number: 4,
@@ -3938,7 +3954,11 @@ test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재�
     plGradeCurrentResponses() { return Promise.resolve(); },
     plPushBoard() { return Promise.resolve(); },
     document: { fullscreenElement: {}, exitFullscreen() { exits++; } },
-    store: { setLive() { writes++; return Promise.resolve(); } }
+    FirestoreCore: core,
+    store: {
+      async freezeLive() {}, async getResponses() { return {}; }, async getGrades() { return {}; },
+      setLive() { writes++; return Promise.resolve(); }
+    }
   });
 
   await ctx.plCloseQuestion();
@@ -3956,7 +3976,11 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
     pl: { sessionId: 'session-a', player: { playVideo() { calls.push('play'); } } },
     plGradeCurrentResponses() { return Promise.resolve(); },
     plPushBoard() { calls.push('board'); return Promise.resolve(); },
+    FirestoreCore: core,
     store: {
+      async freezeLive() { calls.push('freeze'); },
+      async getResponses() { return {}; },
+      async getGrades() { return {}; },
       setLive(id, value) {
         calls.push(['live', id, value]);
         return Promise.resolve();
@@ -3969,10 +3993,10 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   await context.plCloseQuestion();
 
   assert.equal(calls.filter(call => call === 'board').length, 1);
-  assert.deepEqual(clone(calls[1]), ['live', 'session-a', {
+  assert.deepEqual(clone(calls[2]), ['live', 'session-a', {
     q: -1, openedAt: 0, revealed: false, limitSec: 0
   }]);
-  assert.equal(calls[2], 'play');
+  assert.equal(calls[3], 'play');
 });
 
 test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답과 보기별 수를 숨긴다', () => {
@@ -4274,7 +4298,7 @@ test('새 답은 같은 학생 문서의 다른 문항 답을 보존한다', asy
     ...answers,
     '2': { ...answers['2'], submittedAt: answers['2'].submittedAt.toMillis() }
   }, {
-    '0': { c: 1, ok: true },
+    '0': { c: 1 },
     '2': { answer: '서술', submitted: true, revision: 2, submittedAt: 50_000 }
   });
 });
@@ -5213,7 +5237,7 @@ test('startup routes after auth state without syncing a student clock', async ()
   assert.match(app.innerHTML, /연결 중/);
 });
 
-test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', async () => {
+test('서술형 채점은 학생 응답을 보존하고 private grade만 변경한다', async () => {
   const fake = makeFirestoreFake({
     'sessions/a/responses/s1': {
       uid: 's1',
@@ -5224,15 +5248,17 @@ test('서술형 채점은 답안 내용을 보존하고 ok만 변경한다', asy
 
   await store.gradeAnswer('a', 's1', 3, 2, true);
   assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
-    answer: '학생 글', submitted: true, revision: 2, submittedAt: 10, ok: true
-  });
-
-  await store.gradeAnswer('a', 's1', 3, 2, null);
-  const ungraded = (await store.getOwnResponses('a', 's1'))['3'];
-  assert.deepEqual(ungraded, {
     answer: '학생 글', submitted: true, revision: 2, submittedAt: 10
   });
-  assert.equal(Object.hasOwn(ungraded, 'ok'), false);
+  assert.deepEqual(fake.value('sessions/a/grades/s1__3'), {
+    uid: 's1', questionIndex: 3, revision: 2, ok: true
+  });
+
+  assert.equal(await store.gradeAnswer('a', 's1', 3, 2, null), true);
+  assert.equal(fake.value('sessions/a/grades/s1__3'), undefined);
+  assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
+    answer: '학생 글', submitted: true, revision: 2, submittedAt: 10
+  });
 });
 
 test('teacher grading transaction ignores a stale expected revision and grades the current submitted revision only', async () => {
@@ -5253,7 +5279,10 @@ test('teacher grading transaction ignores a stale expected revision and grades t
 
   assert.equal(await store.gradeAnswer('a', 's1', 3, 2, false), true);
   assert.deepEqual(fake.value('sessions/a/responses/s1').answers['3'], {
-    answer: 'new answer', submitted: true, revision: 2, ok: false
+    answer: 'new answer', submitted: true, revision: 2
+  });
+  assert.deepEqual(fake.value('sessions/a/grades/s1__3'), {
+    uid: 's1', questionIndex: 3, revision: 2, ok: false
   });
 });
 
@@ -5342,6 +5371,9 @@ test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답�
       },
       subscribeResponses(id, next) {
         calls.push(['subscribeResponses', id]); subscriptions.responses = next; return () => {};
+      },
+      subscribeGrades(id, next) {
+        calls.push(['subscribeGrades', id]); subscriptions.grades = next; return () => {};
       }
     },
     FirestoreCore: require('../firestore-core.js'),
@@ -5361,16 +5393,20 @@ test('대시보드는 세션과 세트를 단발 조회하고 학생과 응답�
   context.screenDashboard('session-a');
   await new Promise(resolve => setImmediate(resolve));
   subscriptions.students({ s1: { name: '가' } });
-  subscriptions.responses({ s1: { answers: { '2': { txt: '학생 글', ok: null } } } });
+  subscriptions.responses({ s1: { answers: { '2': { txt: '학생 글', revision: 3, ok: true } } } });
+  subscriptions.grades({ 's1__2': { uid: 's1', questionIndex: 2, revision: 3, ok: false } });
 
   assert.deepEqual(calls, [
     ['getSession', 'session-a'],
     ['getQuizSet', 'set1'],
     ['subscribeStudents', 'session-a'],
-    ['subscribeResponses', 'session-a']
+    ['subscribeResponses', 'session-a'],
+    ['subscribeGrades', 'session-a']
   ]);
   assert.deepEqual(context.dash.students, { s1: { name: '가' } });
-  assert.deepEqual(context.dash.answers, { '2': { s1: { txt: '학생 글', ok: null } } });
+  assert.deepEqual(context.dash.answers, {
+    '2': { s1: { txt: '학생 글', revision: 3, ok: false } }
+  });
   assert.deepEqual(context.dash.flatQuestions.map(q => [q.number, q.videoIndex, q.text]), [
     [1, 0, 'A'],
     [2, 1, 'B']
@@ -5395,7 +5431,8 @@ test('이전 대시보드 조회와 cleanup은 새 대시보드 상태나 구독
         return Promise.resolve({ id, title: '새 세트', videos: [{ questions: [{ text: '새 문항' }] }] });
       },
       subscribeStudents(id) { subscriptions.push(['students', id]); return () => {}; },
-      subscribeResponses(id) { subscriptions.push(['responses', id]); return () => {}; }
+      subscribeResponses(id) { subscriptions.push(['responses', id]); return () => {}; },
+      subscribeGrades(id) { subscriptions.push(['grades', id]); return () => {}; }
     },
     FirestoreCore: require('../firestore-core.js'),
     PlaylistCore: require('../playlist-core.js'),
@@ -5421,13 +5458,14 @@ test('이전 대시보드 조회와 cleanup은 새 대시보드 상태나 구독
   assert.equal(context.dash.sessionId, 'new-session');
   assert.deepEqual(subscriptions, [
     ['students', 'new-session'],
-    ['responses', 'new-session']
+    ['responses', 'new-session'],
+    ['grades', 'new-session']
   ]);
 });
 
 test('이전 대시보드 구독 콜백과 오류는 새 대시보드를 바꾸거나 출력하지 않는다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  let studentsNext, studentsError, responsesNext, responsesError;
+  let studentsNext, studentsError, responsesNext, responsesError, gradesNext, gradesError;
   let renders = 0, errors = 0;
   const app = { innerHTML: '' };
   const context = {
@@ -5440,6 +5478,9 @@ test('이전 대시보드 구독 콜백과 오류는 새 대시보드를 바꾸�
       },
       subscribeResponses(id, next, error) {
         responsesNext = next; responsesError = error || (() => { errors += 1; }); return () => {};
+      },
+      subscribeGrades(id, next, error) {
+        gradesNext = next; gradesError = error || (() => { errors += 1; }); return () => {};
       }
     },
     FirestoreCore: require('../firestore-core.js'), PlaylistCore: require('../playlist-core.js'),
@@ -5454,8 +5495,10 @@ test('이전 대시보드 구독 콜백과 오류는 새 대시보드를 바꾸�
 
   studentsNext({ old: { name: '이전' } });
   responsesNext({ old: { answers: { '0': { c: 1 } } } });
+  gradesNext({ 'old__0': { uid: 'old', questionIndex: 0, revision: 1, ok: true } });
   studentsError(new Error('late students'));
   responsesError(new Error('late responses'));
+  gradesError(new Error('late grades'));
 
   assert.equal(context.dash, newState);
   assert.deepEqual(newState.students, {});
@@ -5543,9 +5586,12 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
       },
       async getCollection(collectionPath) {
         calls.push(['getCollection', collectionPath]);
+        if (collectionPath.endsWith('/grades')) return {
+          's1__0': { uid: 's1', questionIndex: 0, revision: 2, ok: true }
+        };
         if (collectionPath.endsWith('/students')) return { s1: { name: '가' } };
         return { s1: { answers: {
-          '0': { c: 1, ok: true },
+          '0': { c: 1, revision: 2 },
           '2': { txt: '두 번째 영상 답', ok: null }
         } } };
       }
@@ -5569,13 +5615,15 @@ test('관리자 조회는 세션과 해당 학생·응답 컬렉션을 각각 �
     ['getQuizSet', 'set1'],
     ['getCollection', 'sessions/in/students'],
     ['getCollection', 'sessions/in/responses'],
+    ['getCollection', 'sessions/in/grades'],
     ['getCollection', 'sessions/in-2/students'],
-    ['getCollection', 'sessions/in-2/responses']
+    ['getCollection', 'sessions/in-2/responses'],
+    ['getCollection', 'sessions/in-2/grades']
   ]);
   assert.deepEqual(context.adm.sessions.in.students, { s1: { name: '가' } });
   assert.deepEqual(context.adm.resp.in, {
-    '0': { s1: { c: 1, ok: true } },
-    '2': { s1: { txt: '두 번째 영상 답', ok: null } }
+    '0': { s1: { c: 1, revision: 2, ok: true } },
+    '2': { s1: { txt: '두 번째 영상 답' } }
   });
   assert.deepEqual(context.adm.sets.set1.flatQuestions.map(q => [q.number, q.videoIndex, q.text]), [
     [1, 0, '첫 영상'],
@@ -5827,7 +5875,8 @@ test('대시보드는 세션 snapshot을 현재 편집본보다 우선한다', a
         return { title: '원래 세트', videos: [{ questions: [{ text: '원래 문항' }] }] };
       },
       async getQuizSet() { calls.push(['mutable']); return null; },
-      subscribeStudents() { return () => {}; }, subscribeResponses() { return () => {}; }
+      subscribeStudents() { return () => {}; }, subscribeResponses() { return () => {}; },
+      subscribeGrades() { return () => {}; }
     },
     FirestoreCore: require('../firestore-core.js'), PlaylistCore: require('../playlist-core.js'),
     APP() { return { innerHTML: '' }; }, topbar() { return ''; }, normSet(value) { return value; },
@@ -6031,7 +6080,10 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
     },
     async plGradeCurrentResponses() {},
     async plPushBoard() {},
-    store: { async setLive() {} },
+    FirestoreCore: core,
+    store: {
+      async freezeLive() {}, async getResponses() { return {}; }, async getGrades() {}, async setLive() {}
+    },
     plOpenQuestion(i) { opened.push(i); context.pl.pendingLiveQuestion = i; },
     PlaylistCore: require('../playlist-core.js'),
     plRenderTimeline() {}, plUpdateTimeline() {}, plTimelineDomain() { return { start: 0, end: 100 }; },
@@ -6393,4 +6445,52 @@ test('timer reveal UI waits for the observed live document and stays hidden afte
   state.live.revealed = true;
   state.live.publicAnswer = { answer: 1 };
   assert.equal(context.plRevealed(), true);
+});
+
+test('close freezes writes, reloads the accepted revision, grades it, then persists the board', async () => {
+  const events = [];
+  const state = {
+    sessionId: 'session-a',
+    live: { q: 0, accepting: true },
+    responseDocs: { s1: { uid: 's1', answers: {
+      '0': { answer: 0, submitted: true, revision: 1 }
+    } } },
+    gradeDocs: {},
+    responses: { '0': { s1: { answer: 0, submitted: true, revision: 1 } } },
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state,
+    FirestoreCore: core,
+    store: {
+      async freezeLive() { events.push('freeze'); },
+      async getResponses() {
+        events.push('read-responses');
+        return { s1: { uid: 's1', answers: {
+          '0': { answer: 1, submitted: true, revision: 2 }
+        } } };
+      },
+      async getGrades() { events.push('read-grades'); return {}; },
+      async setLive() { events.push('close'); }
+    },
+    async plGradeCurrentResponses(current, questionIndex) {
+      const response = current.responses[String(questionIndex)].s1;
+      events.push('grade:' + response.revision);
+      response.ok = true;
+    },
+    async plPushBoard() {
+      events.push('board:' + (state.responses['0'].s1.ok ? 1 : 0));
+    },
+    plOpenNextDueQuestion() { return false; },
+    plTick() {}
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'plCloseQuestion'
+  ), context);
+
+  await context.plCloseQuestion();
+
+  assert.deepEqual(events, [
+    'freeze', 'read-responses', 'read-grades', 'grade:2', 'board:1', 'close'
+  ]);
 });

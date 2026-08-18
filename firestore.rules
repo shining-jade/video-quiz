@@ -181,7 +181,7 @@ service cloud.firestore {
         live.keys().hasAll(['q', 'openedAt', 'limitSec', 'revealed']) &&
         live.keys().hasOnly([
           'q', 'openedAt', 'limitSec', 'revealed', 'publicQuestion', 'publicAnswer', 'status',
-          'responseClosesAt', 'submitGraceUntil', 'revealAt'
+          'responseClosesAt', 'submitGraceUntil', 'revealAt', 'accepting'
         ]) &&
         live.q is int &&
         live.q >= -1 &&
@@ -189,6 +189,7 @@ service cloud.firestore {
         live.limitSec is number &&
         live.limitSec >= 0 &&
         live.revealed is bool &&
+        (!('accepting' in live) || live.accepting is bool) &&
         (!('status' in live) || live.status is string) &&
         ((!('responseClosesAt' in live) &&
             !('submitGraceUntil' in live) &&
@@ -236,6 +237,19 @@ service cloud.firestore {
             request.resource.data.total >= request.resource.data.rank));
     }
 
+    function validGrade(gradeId) {
+      return request.resource.data is map &&
+        request.resource.data.keys().hasAll(['uid', 'questionIndex', 'revision', 'ok']) &&
+        request.resource.data.keys().hasOnly(['uid', 'questionIndex', 'revision', 'ok']) &&
+        request.resource.data.uid is string &&
+        request.resource.data.questionIndex is int &&
+        request.resource.data.questionIndex >= 0 &&
+        request.resource.data.revision is int &&
+        request.resource.data.revision > 0 &&
+        request.resource.data.ok is bool &&
+        gradeId == request.resource.data.uid + '__' + string(request.resource.data.questionIndex);
+    }
+
     function currentQuestionIsOpen(sessionId) {
       let live = get(
         /databases/$(database)/documents/sessions/$(sessionId)/meta/live
@@ -245,6 +259,7 @@ service cloud.firestore {
         live is map &&
         live.q >= 0 &&
         validPublicQuestion(live.publicQuestion) &&
+        (!('accepting' in live) || live.accepting == true) &&
         ((!('submitGraceUntil' in live) && live.revealed == false) ||
           ('submitGraceUntil' in live &&
             live.submitGraceUntil is timestamp &&
@@ -257,6 +272,15 @@ service cloud.firestore {
         request.resource.data.revealed == false ||
         !('revealAt' in resource.data) ||
         request.time >= resource.data.revealAt;
+    }
+
+    function validAcceptingTransition() {
+      return request.resource.data.q != resource.data.q ||
+        !('accepting' in resource.data) ||
+        resource.data.accepting == false ||
+        ('accepting' in request.resource.data && request.resource.data.accepting == true) ||
+        !('submitGraceUntil' in resource.data) ||
+        request.time >= resource.data.submitGraceUntil;
     }
 
     function currentQuestionKey(sessionId) {
@@ -351,7 +375,8 @@ service cloud.firestore {
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data);
         allow update: if ownsSessionAfter(sessionId) &&
-          validLiveData(request.resource.data) && validLiveUpdateTransition();
+          validLiveData(request.resource.data) &&
+          validLiveUpdateTransition() && validAcceptingTransition();
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
@@ -392,11 +417,21 @@ service cloud.firestore {
           sessionIsJoinable(sessionId) &&
           studentId == request.auth.uid &&
           validStudentResponseCreate(sessionId);
-        allow update: if isAdmin() || ownsSession(sessionId) ||
-          (isJoinedStudent(sessionId) &&
+        allow update: if isJoinedStudent(sessionId) &&
             sessionIsJoinable(sessionId) &&
             studentId == request.auth.uid &&
-            validStudentResponseUpdate(sessionId));
+            validStudentResponseUpdate(sessionId);
+        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow read, write: if false;
+      }
+
+      match /grades/{gradeId} {
+        allow get, list: if isAdmin() || ownsSession(sessionId);
+        allow create: if (isAdmin() || ownsSessionAfter(sessionId)) && validGrade(gradeId);
+        allow update: if (isAdmin() || ownsSessionAfter(sessionId)) &&
+          validGrade(gradeId) &&
+          request.resource.data.uid == resource.data.uid &&
+          request.resource.data.questionIndex == resource.data.questionIndex;
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }

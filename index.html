@@ -2877,8 +2877,22 @@ function renderPlayRun() {
   }, e => { if (pl === state) console.error(e); }));
   onCleanup(store.subscribeResponses(state.sessionId, responseDocs => {
     if (pl !== state) return;
-    state.responses = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
+    state.responseDocs = responseDocs || {};
+    state.responses = FirestoreCore.responseDocsToQuestionMaps(
+      state.responseDocs, state.gradeDocs || {}
+    );
     if (state.live && state.live.revealed) plGradeCurrentResponses(state);
+    plRenderQList();
+    plRenderOverlayCounts();
+    plRenderStudents();
+    plRenderBoardOverlay();
+  }, e => { if (pl === state) console.error(e); }));
+  onCleanup(store.subscribeGrades(state.sessionId, gradeDocs => {
+    if (pl !== state) return;
+    state.gradeDocs = gradeDocs || {};
+    state.responses = FirestoreCore.responseDocsToQuestionMaps(
+      state.responseDocs || {}, state.gradeDocs
+    );
     plRenderQList();
     plRenderOverlayCounts();
     plRenderStudents();
@@ -3546,6 +3560,7 @@ async function plOpenQuestion(i) {
     q: i,
     openedAt: SV_TS,
     revealed,
+    accepting: true,
     limitSec: liveLimit,
     publicQuestion: FirestoreStore.publicQuestion(
       question, question.number || i + 1, state.flatQuestions.length, image
@@ -3581,6 +3596,18 @@ async function plCloseQuestion() {
   const state = pl;
   if (!state) return;
   const questionIndex = Number(state.live && state.live.q);
+  await store.freezeLive(state.sessionId);
+  if (pl !== state) return;
+  const [responseDocs, gradeDocs] = await Promise.all([
+    store.getResponses(state.sessionId),
+    store.getGrades(state.sessionId)
+  ]);
+  if (pl !== state) return;
+  state.responseDocs = responseDocs || {};
+  state.gradeDocs = gradeDocs || {};
+  state.responses = FirestoreCore.responseDocsToQuestionMaps(
+    state.responseDocs, state.gradeDocs
+  );
   await plGradeCurrentResponses(state, questionIndex);
   if (pl !== state) return;
   await plPushBoard();
@@ -4570,7 +4597,7 @@ function screenDashboard(sessionId) {
   if (!sessionId) { go('home'); return; }
   dash = {
     sessionId: sessionId, session: null, set: null, flatQuestions: [],
-    students: {}, answers: {},
+    students: {}, responseDocs: {}, gradeDocs: {}, answers: {},
     sort: { key: 'no', dir: 1 },
     open: {}
   };
@@ -4597,7 +4624,18 @@ function screenDashboard(sessionId) {
       }, e => { if (dash === state) console.error(e); }));
       onCleanup(store.subscribeResponses(sessionId, responseDocs => {
         if (dash !== state) return;
-        state.answers = FirestoreCore.responseDocsToQuestionMaps(responseDocs || {});
+        state.responseDocs = responseDocs || {};
+        state.answers = FirestoreCore.responseDocsToQuestionMaps(
+          state.responseDocs, state.gradeDocs
+        );
+        renderDash();
+      }, e => { if (dash === state) console.error(e); }));
+      onCleanup(store.subscribeGrades(sessionId, gradeDocs => {
+        if (dash !== state) return;
+        state.gradeDocs = gradeDocs || {};
+        state.answers = FirestoreCore.responseDocsToQuestionMaps(
+          state.responseDocs, state.gradeDocs
+        );
         renderDash();
       }, e => { if (dash === state) console.error(e); }));
     });
@@ -5035,11 +5073,12 @@ function admLoad() {
       }));
     const sessionLoads = ids.map(id => Promise.all([
       store.getCollection('sessions/' + id + '/students'),
-      store.getCollection('sessions/' + id + '/responses')
-    ]).then(([students, responseDocs]) => [
+      store.getCollection('sessions/' + id + '/responses'),
+      store.getCollection('sessions/' + id + '/grades')
+    ]).then(([students, responseDocs, gradeDocs]) => [
       id,
       students || {},
-      FirestoreCore.responseDocsToQuestionMaps(responseDocs || {})
+      FirestoreCore.responseDocsToQuestionMaps(responseDocs || {}, gradeDocs || {})
     ]));
     return Promise.all([Promise.all(setLoads), Promise.all(sessionLoads)])
       .then(([sets, pairs]) => {

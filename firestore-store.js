@@ -364,6 +364,11 @@
         .onSnapshot(snapshot => next(responseCollectionValue(snapshot)), error);
     }
 
+    function subscribeGrades(sessionId, next, error) {
+      return db.collection('sessions/' + sessionId + '/grades')
+        .onSnapshot(snapshot => next(collectionValue(snapshot)), error);
+    }
+
     function subscribeLive(sessionId, next, error) {
       return db.doc('sessions/' + sessionId + '/meta/live')
         .onSnapshot(snapshot => next(liveValue(snapshot)), error);
@@ -422,7 +427,23 @@
     async function getOwnResponses(sessionId, studentId) {
       const value = await db.doc('sessions/' + sessionId + '/responses/' + studentId)
         .get().then(snapshotValue);
-      return value && value.answers ? value.answers : {};
+      const answers = value && value.answers ? value.answers : {};
+      return Object.fromEntries(Object.entries(answers).map(([question, raw]) => {
+        const answer = { ...(raw || {}) };
+        delete answer.ok;
+        delete answer.score;
+        return [question, answer];
+      }));
+    }
+
+    async function getResponses(sessionId) {
+      const snapshot = await db.collection('sessions/' + sessionId + '/responses').get();
+      return responseCollectionValue(snapshot);
+    }
+
+    async function getGrades(sessionId) {
+      const snapshot = await db.collection('sessions/' + sessionId + '/grades').get();
+      return collectionValue(snapshot);
     }
 
     function writeStudentAnswer(sessionId, authUid, questionIndex, patch) {
@@ -464,6 +485,9 @@
     function gradeAnswer(sessionId, studentId, questionIndex, expectedRevision, ok) {
       const reference = db.doc('sessions/' + sessionId + '/responses/' + studentId);
       const questionKey = String(questionIndex);
+      const gradeReference = db.doc(
+        'sessions/' + sessionId + '/grades/' + studentId + '__' + questionKey
+      );
       return db.runTransaction(async transaction => {
         const snapshot = await transaction.get(reference);
         if (!snapshot.exists) return false;
@@ -471,10 +495,13 @@
         const answer = response.answers && response.answers[questionKey];
         if (response.uid !== studentId || !answer || answer.submitted !== true ||
             Number(answer.revision) !== Number(expectedRevision)) return false;
-        const graded = { ...answer };
-        if (ok == null) delete graded.ok;
-        else graded.ok = !!ok;
-        transaction.update(reference, { ['answers.' + questionKey]: graded });
+        if (ok == null) transaction.delete(gradeReference);
+        else transaction.set(gradeReference, {
+          uid: studentId,
+          questionIndex: Number(questionIndex),
+          revision: Number(expectedRevision),
+          ok: !!ok
+        });
         return true;
       });
     }
@@ -488,7 +515,7 @@
       const references = [];
       for (const sessionId of [...new Set(sessionIds || [])]) {
         for (const collectionName of [
-          'meta', 'students', 'responses', 'student_scores', 'snapshot', 'snapshot_images'
+          'meta', 'students', 'responses', 'grades', 'student_scores', 'snapshot', 'snapshot_images'
         ]) {
           const snapshot = await db.collection(
             'sessions/' + sessionId + '/' + collectionName
@@ -530,6 +557,11 @@
     function revealLive(sessionId, answer) {
       return db.doc('sessions/' + sessionId + '/meta/live')
         .set({ revealed: true, publicAnswer: answer }, { merge: true });
+    }
+
+    function freezeLive(sessionId) {
+      return db.doc('sessions/' + sessionId + '/meta/live')
+        .set({ accepting: false }, { merge: true });
     }
 
     async function endSession(sessionId) {
@@ -576,6 +608,7 @@
       startSession,
       subscribeStudents,
       subscribeResponses,
+      subscribeGrades,
       subscribeLive,
       getCode,
       getSession,
@@ -585,6 +618,8 @@
       saveStudent,
       joinStudent,
       getOwnResponses,
+      getResponses,
+      getGrades,
       writeStudentAnswer,
       mergeAnswer,
       setAnswerState,
@@ -595,6 +630,7 @@
       getOwnScore,
       setLive,
       revealLive,
+      freezeLive,
       endSession,
       writeBoard,
 
