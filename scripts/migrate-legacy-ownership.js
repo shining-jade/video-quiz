@@ -5,30 +5,105 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const migration = require('../legacy-migration-admin.js');
 
-function reserveReport(filePath, initialContents) {
-  const descriptor = fs.openSync(filePath, 'wx');
-  let closed = false;
-  function replace(contents) {
-    if (closed) throw new Error('Report reservation is already closed.');
-    try {
-      fs.ftruncateSync(descriptor, 0);
-      fs.writeSync(descriptor, contents, 0, 'utf8');
-      fs.fsyncSync(descriptor);
-    } finally {
-      fs.closeSync(descriptor);
-      closed = true;
+function writeFully(fileSystem, descriptor, contents) {
+  const buffer = Buffer.from(contents, 'utf8');
+  let offset = 0;
+  while (offset < buffer.length) {
+    const written = fileSystem.writeSync(
+      descriptor, buffer, offset, buffer.length - offset, offset
+    );
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      throw new Error('Report write made no forward progress.');
     }
+    offset += written;
   }
+}
+
+function syncDirectory(fileSystem, directory) {
+  let descriptor;
   try {
-    fs.writeSync(descriptor, initialContents, 0, 'utf8');
-    fs.fsyncSync(descriptor);
+    descriptor = fileSystem.openSync(directory, 'r');
+    fileSystem.fsyncSync(descriptor);
   } catch (error) {
-    fs.closeSync(descriptor);
-    closed = true;
-    try { fs.unlinkSync(filePath); } catch (_) { /* exact file was created only for this reservation */ }
+    if (!['EINVAL', 'EPERM', 'EISDIR', 'ENOTSUP', 'ENOSYS', 'EBADF'].includes(error && error.code)) {
+      throw error;
+    }
+  } finally {
+    if (descriptor !== undefined) fileSystem.closeSync(descriptor);
+  }
+}
+
+function validJson(contents) {
+  const value = JSON.parse(contents);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Report artifact must be a JSON object.');
+  }
+  return value;
+}
+
+function reserveReport(filePath, initialContents, fileSystem = fs) {
+  const reservedPath = filePath + '.reserved';
+  const pendingPath = filePath + '.pending';
+  const directory = path.dirname(path.resolve(filePath));
+  const initial = validJson(initialContents);
+  if (initial.safeToDeployStrictRules === true || initial.safeToRemoveOwner === true) {
+    throw new Error('The reservation artifact must be fail-closed.');
+  }
+  if (fileSystem.existsSync(filePath) || fileSystem.existsSync(pendingPath)) {
+    throw new Error('Report output or pending artifact already exists: ' + filePath);
+  }
+  let descriptor;
+  let reservationCreated = false;
+  try {
+    descriptor = fileSystem.openSync(reservedPath, 'wx');
+    reservationCreated = true;
+    writeFully(fileSystem, descriptor, initialContents);
+    fileSystem.fsyncSync(descriptor);
+    fileSystem.closeSync(descriptor);
+    descriptor = undefined;
+    syncDirectory(fileSystem, directory);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { fileSystem.closeSync(descriptor); } catch (_) { /* preserve original reservation error */ }
+    }
+    if (reservationCreated) {
+      try { fileSystem.unlinkSync(reservedPath); } catch (_) { /* remove only our incomplete reservation */ }
+    }
     throw error;
   }
-  return { commit: replace };
+
+  let published = false;
+  function commit(contents) {
+    if (published) throw new Error('Report reservation is already published.');
+    validJson(contents);
+    if (fileSystem.existsSync(filePath)) {
+      throw new Error('Report output already exists while reservation is active: ' + filePath);
+    }
+    let pendingDescriptor;
+    try {
+      pendingDescriptor = fileSystem.openSync(pendingPath, 'wx');
+      writeFully(fileSystem, pendingDescriptor, contents);
+      fileSystem.fsyncSync(pendingDescriptor);
+      fileSystem.closeSync(pendingDescriptor);
+      pendingDescriptor = undefined;
+    } catch (error) {
+      if (pendingDescriptor !== undefined) {
+        try { fileSystem.closeSync(pendingDescriptor); } catch (_) { /* preserve original write error */ }
+      }
+      try { fileSystem.unlinkSync(pendingPath); } catch (_) { /* companion remains authoritative */ }
+      throw error;
+    }
+    try {
+      fileSystem.renameSync(pendingPath, filePath);
+      syncDirectory(fileSystem, directory);
+      fileSystem.unlinkSync(reservedPath);
+      published = true;
+    } catch (error) {
+      try { fileSystem.unlinkSync(pendingPath); } catch (_) { /* it may already be atomically renamed */ }
+      throw error;
+    }
+  }
+  return { commit, failClosedPath: reservedPath, outputPath: filePath, pendingPath };
 }
 
 function productionDependencies() {
@@ -121,8 +196,15 @@ async function main(argv, dependencies) {
       status: 'failed', safeToDeployStrictRules: false, safeToRemoveOwner: false,
       error: String(error && error.message || error), auditDigest: ''
     });
-    try { await reservation.commit(JSON.stringify(failed, null, 2) + '\n'); } catch (_) {
-      // Preserve the original operator failure when the already-reserved report cannot be rewritten.
+    try {
+      await reservation.commit(JSON.stringify(failed, null, 2) + '\n');
+    } catch (publicationError) {
+      throw new Error(
+        String(error && error.message || error) + '; fail-closed report remains at ' +
+        (reservation.failClosedPath || output + '.reserved') + '; publication error: ' +
+        String(publicationError && publicationError.message || publicationError),
+        { cause: error }
+      );
     }
     throw error;
   }

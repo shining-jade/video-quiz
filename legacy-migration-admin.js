@@ -8,6 +8,7 @@ const AMBIGUOUS_CODES = new Set([
   'cancelled', 'unknown', 'deadline-exceeded', 'resource-exhausted', 'aborted',
   'internal', 'unavailable', 'data-loss'
 ]);
+const INTERNAL_VERIFIED_IDENTITY = Symbol('internalVerifiedLegacyOwnerIdentity');
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 
@@ -249,12 +250,19 @@ function validateNormalizedImages(images) {
       (prototype !== Object.prototype && prototype !== null))) {
     return { images: result, errors: [{ key: '*', reason: 'snapshotImages must be a map.' }] };
   }
+  const safeComponent = digits => {
+    const value = Number(digits);
+    return Number.isSafeInteger(value) && value >= 0 && String(value) === digits
+      ? digits : '';
+  };
   for (const [key, data] of Object.entries(images || {})) {
     const legacy = /^(0|[1-9]\d*)$/.exec(key);
     const versioned = /^v(0|[1-9]\d*)q(0|[1-9]\d*)$/.exec(key);
-    const id = legacy ? 'v0q' + Number(key) : versioned
-      ? 'v' + Number(versioned[1]) + 'q' + Number(versioned[2])
-      : '';
+    const legacyQuestion = legacy && safeComponent(legacy[1]);
+    const videoIndex = versioned && safeComponent(versioned[1]);
+    const questionIndex = versioned && safeComponent(versioned[2]);
+    const id = legacyQuestion ? 'v0q' + legacyQuestion
+      : videoIndex && questionIndex ? 'v' + videoIndex + 'q' + questionIndex : '';
     if (!id) {
       errors.push({ key, reason: 'Snapshot image key is not canonicalizable.' });
     } else if (typeof data !== 'string' || !data) {
@@ -299,9 +307,15 @@ async function runLegacyMigration(options) {
   if (apply && confirmProject !== projectId) {
     throw new Error('Apply requires an exact project confirmation.');
   }
+  const internalIdentity = options && options[INTERNAL_VERIFIED_IDENTITY];
   let identity;
   let ownerConfigAction = '';
-  if (provisionOwnerEmail) {
+  if (internalIdentity) {
+    if (apply || provisionOwnerEmail || internalIdentity.uid !== ownerUid) {
+      throw new Error('Internal post-removal audit identity is invalid.');
+    }
+    identity = await verifiedIdentity(db, auth, ownerUid, internalIdentity.email);
+  } else if (provisionOwnerEmail) {
     if (!apply) throw new Error('Provisioning the legacy owner requires apply mode.');
     const canonical = migrationCore.normalizeEmail(provisionOwnerEmail);
     if (canonical !== provisionOwnerEmail) {
@@ -643,7 +657,9 @@ async function runLegacyMigration(options) {
   // Re-validate identity and immediately re-enumerate before producing the checksummed audit report.
   let finalIdentity;
   try {
-    finalIdentity = await verifiedIdentity(db, auth, ownerUid);
+    finalIdentity = await verifiedIdentity(
+      db, auth, ownerUid, internalIdentity ? identity.email : undefined
+    );
   } catch (error) {
     auditFailure('identity', ownerUid, String(error && error.message || error));
     return finalizeReport();
@@ -774,7 +790,7 @@ async function removeLegacyOwner(options) {
     throw new Error('Legacy owner removal requires apply and an exact project confirmation.');
   }
   const identity = await verifiedIdentity(db, auth, ownerUid);
-  const migrationAudit = await runLegacyMigration({
+  const preRemovalAudit = await runLegacyMigration({
     db, auth, projectId, ownerUid, apply: false, targetMode, now
   });
   const report = {
@@ -785,11 +801,15 @@ async function removeLegacyOwner(options) {
     targetMode,
     generatedAt: now(),
     owner: { uid: identity.uid, email: identity.email },
-    action: migrationAudit.safeToDeployStrictRules ? 'pending-removal' : 'blocked',
-    migrationAudit,
-    safeToRemoveOwner: false
+    action: preRemovalAudit.safeToDeployStrictRules ? 'pending-removal' : 'blocked',
+    preRemovalAudit,
+    postRemovalAudit: null,
+    migrationAudit: preRemovalAudit,
+    ownerConfigAbsent: false,
+    safeToRemoveOwner: false,
+    recoveryInstructions: ''
   };
-  if (!migrationAudit.safeToDeployStrictRules) return attachAuditDigest(report);
+  if (!preRemovalAudit.safeToDeployStrictRules) return attachAuditDigest(report);
 
   await db.runTransaction(async transaction => {
     const reference = db.doc('config/legacy_owner');
@@ -800,8 +820,33 @@ async function removeLegacyOwner(options) {
     }
     transaction.delete(reference);
   });
-  report.action = 'removed';
-  report.safeToRemoveOwner = true;
+
+  try {
+    report.postRemovalAudit = await runLegacyMigration({
+      db, auth, projectId, ownerUid, apply: false, targetMode, now,
+      [INTERNAL_VERIFIED_IDENTITY]: identity
+    });
+    report.migrationAudit = report.postRemovalAudit;
+  } catch (error) {
+    report.postRemovalAuditError = String(error && error.message || error);
+  }
+  let ownerConfigReadError = '';
+  try {
+    report.ownerConfigAbsent = await readDocument(db, 'config/legacy_owner') === null;
+  } catch (error) {
+    ownerConfigReadError = String(error && error.message || error);
+  }
+  if (ownerConfigReadError) report.ownerConfigReadError = ownerConfigReadError;
+  const postAuditClean = !!report.postRemovalAudit &&
+    report.postRemovalAudit.safeToDeployStrictRules === true;
+  if (report.ownerConfigAbsent && postAuditClean) {
+    report.action = 'removed';
+    report.safeToRemoveOwner = true;
+  } else {
+    report.action = 'removed-post-audit-failed';
+    report.recoveryInstructions = 'A trusted Admin operator may re-provision the same exact owner ' +
+      'with --provision-owner-email, remediate the reported findings, and rerun migration and removal.';
+  }
   return attachAuditDigest(report);
 }
 

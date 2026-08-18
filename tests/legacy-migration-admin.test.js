@@ -12,6 +12,7 @@ function makeAdminFake(initial, options) {
   const values = new Map(Object.entries(initial || {}).map(([path, value]) => [path, clone(value)]));
   const writes = [];
   let transactionCount = 0;
+  let collectionGroupReadCount = 0;
 
   const snapshot = path => ({
     id: path.split('/').at(-1),
@@ -41,6 +42,13 @@ function makeAdminFake(initial, options) {
     collectionGroup(name) {
       return {
         get: async () => {
+          collectionGroupReadCount += 1;
+          if (options && options.onCollectionGroupRead) {
+            options.onCollectionGroupRead(collectionGroupReadCount, {
+              set(path, value) { values.set(path, clone(value)); },
+              delete(path) { values.delete(path); }
+            });
+          }
           if (options && options.failCollectionGroup === name) {
             throw new Error('enumeration unavailable: ' + name);
           }
@@ -53,6 +61,12 @@ function makeAdminFake(initial, options) {
     },
     async runTransaction(callback) {
       transactionCount += 1;
+      if (options && options.beforeTransactionAt === transactionCount) {
+        options.beforeTransaction({
+          set(path, value) { values.set(path, clone(value)); },
+          delete(path) { values.delete(path); }
+        });
+      }
       const pending = [];
       const transaction = {
         get: async ref => snapshot(ref.path),
@@ -201,6 +215,8 @@ test('owner removal requires a clean authoritative audit and exact current ident
   assert.equal(removed.action, 'removed');
   assert.equal(removed.targetMode, 'emulator');
   assert.equal(removed.migrationAudit.safeToDeployStrictRules, true);
+  assert.equal(removed.postRemovalAudit.safeToDeployStrictRules, true);
+  assert.equal(removed.ownerConfigAbsent, true);
   assert.match(removed.auditDigest, /^[a-f0-9]{64}$/);
 
   const incomplete = makeAdminFake(baseIdentity({
@@ -223,6 +239,51 @@ test('owner removal requires a clean authoritative audit and exact current ident
     apply: true, confirmProject: 'demo-video-quiz'
   }), /canonical owner UID|legacy owner/i);
   assert.notEqual(mismatched.value('config/legacy_owner'), undefined);
+});
+
+test('owner removal post-audit catches a leak inserted after the pre-audit and gives recovery instructions', async () => {
+  const raced = makeAdminFake(baseIdentity(), {
+    beforeTransactionAt: 1,
+    beforeTransaction(store) {
+      store.set('sessions/raced/responses/student-1', {
+        uid: 'student-1', answers: { 0: { answer: 1, revision: 1, ok: true } }
+      });
+    }
+  });
+
+  const report = await adminMigration.removeLegacyOwner({
+    db: raced.db, auth: raced.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz', targetMode: 'emulator'
+  });
+
+  assert.equal(raced.value('config/legacy_owner'), undefined);
+  assert.equal(report.preRemovalAudit.safeToDeployStrictRules, true);
+  assert.equal(report.postRemovalAudit.safeToDeployStrictRules, false);
+  assert.equal(report.migrationAudit, report.postRemovalAudit);
+  assert.equal(report.safeToRemoveOwner, false);
+  assert.equal(report.action, 'removed-post-audit-failed');
+  assert.match(report.recoveryInstructions, /re-provision|--provision-owner-email/i);
+  assert.equal(report.postRemovalAudit.remainingResponseLeakCount, 1);
+});
+
+test('owner removal confirms config absence after the complete post-delete audit', async () => {
+  const raced = makeAdminFake(baseIdentity(), {
+    onCollectionGroupRead(count, store) {
+      if (count === 19) {
+        store.set('config/legacy_owner', { uid: 'teacher-uid', email: 'owner@school.kr' });
+      }
+    }
+  });
+
+  const report = await adminMigration.removeLegacyOwner({
+    db: raced.db, auth: raced.auth, projectId: 'demo-video-quiz', ownerUid: 'teacher-uid',
+    apply: true, confirmProject: 'demo-video-quiz', targetMode: 'emulator'
+  });
+
+  assert.equal(report.postRemovalAudit.safeToDeployStrictRules, true);
+  assert.equal(report.ownerConfigAbsent, false);
+  assert.equal(report.safeToRemoveOwner, false);
+  assert.equal(report.action, 'removed-post-audit-failed');
 });
 
 test('CLI parsing defaults to dry-run and apply requires exact project confirmation', () => {
@@ -400,12 +461,126 @@ test('report reservation is exclusive and immediately contains a fail-closed art
   const reportPath = path.join(directory, 'audit.json');
   try {
     const reservation = command.reserveReport(reportPath, '{"status":"reserved-fail-closed"}\n');
-    assert.equal(JSON.parse(fs.readFileSync(reportPath, 'utf8')).status, 'reserved-fail-closed');
+    assert.equal(fs.existsSync(reportPath), false);
+    assert.equal(JSON.parse(fs.readFileSync(reportPath + '.reserved', 'utf8')).status,
+      'reserved-fail-closed');
     assert.throws(() => command.reserveReport(reportPath, '{}\n'), /exist|EEXIST/i);
     reservation.commit('{"status":"failed","safeToDeployStrictRules":false}\n');
     assert.deepEqual(JSON.parse(fs.readFileSync(reportPath, 'utf8')), {
       status: 'failed', safeToDeployStrictRules: false
     });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function faultingReportFileSystem(method, persistent) {
+  const pathsByDescriptor = new Map();
+  let failuresRemaining = persistent ? Number.POSITIVE_INFINITY : 1;
+  const shouldFail = () => failuresRemaining > 0 && (failuresRemaining--, true);
+  return new Proxy(fs, {
+    get(target, property) {
+      if (property === 'openSync') return (...args) => {
+        const descriptor = target.openSync(...args);
+        pathsByDescriptor.set(descriptor, String(args[0]));
+        return descriptor;
+      };
+      if (property === 'closeSync') return descriptor => {
+        pathsByDescriptor.delete(descriptor);
+        return target.closeSync(descriptor);
+      };
+      if (property === 'ftruncateSync' && method === 'truncate') {
+        return () => { throw new Error('injected truncate failure'); };
+      }
+      if (property === 'writeSync' && method === 'write') return (descriptor, ...args) => {
+        if (String(pathsByDescriptor.get(descriptor) || '').endsWith('.pending') && shouldFail()) {
+          throw new Error('injected write failure');
+        }
+        return target.writeSync(descriptor, ...args);
+      };
+      if (property === 'fsyncSync' && method === 'fsync') return descriptor => {
+        if (String(pathsByDescriptor.get(descriptor) || '').endsWith('.pending') && shouldFail()) {
+          throw new Error('injected fsync failure');
+        }
+        return target.fsyncSync(descriptor);
+      };
+      if (property === 'renameSync' && method === 'rename') return (...args) => {
+        if (shouldFail()) throw new Error('injected rename failure');
+        return target.renameSync(...args);
+      };
+      return Reflect.get(target, property);
+    }
+  });
+}
+
+test('atomic report publication preserves fail-closed JSON across truncate, write, fsync, and rename faults', () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-faults-'));
+  const reserved = '{"status":"reserved-fail-closed","safeToDeployStrictRules":false}\n';
+  const safe = '{"status":"complete","safeToDeployStrictRules":true}\n';
+  const failed = '{"status":"failed","safeToDeployStrictRules":false}\n';
+  try {
+    const truncatePath = path.join(directory, 'truncate.json');
+    const truncateReservation = command.reserveReport(
+      truncatePath, reserved, faultingReportFileSystem('truncate')
+    );
+    truncateReservation.commit(safe);
+    assert.equal(JSON.parse(fs.readFileSync(truncatePath, 'utf8')).safeToDeployStrictRules, true);
+
+    for (const method of ['write', 'fsync', 'rename']) {
+      const reportPath = path.join(directory, method + '.json');
+      const reservation = command.reserveReport(
+        reportPath, reserved, faultingReportFileSystem(method)
+      );
+      assert.throws(() => reservation.commit(safe), new RegExp('injected ' + method));
+      assert.equal(fs.existsSync(reportPath), false, method);
+      assert.equal(
+        JSON.parse(fs.readFileSync(reportPath + '.reserved', 'utf8')).safeToDeployStrictRules,
+        false,
+        method
+      );
+      reservation.commit(failed);
+      assert.equal(JSON.parse(fs.readFileSync(reportPath, 'utf8')).safeToDeployStrictRules, false);
+      assert.equal(fs.existsSync(reportPath + '.reserved'), false);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI catch path leaves a discoverable fail-closed companion when atomic rename keeps failing', async () => {
+  const command = require('../scripts/migrate-legacy-ownership.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-report-catch-'));
+  const reportPath = path.join(directory, 'audit.json');
+  const fileSystem = faultingReportFileSystem('rename', true);
+  try {
+    await assert.rejects(command.main([
+      '--project', 'demo-video-quiz', '--owner-uid', 'teacher-uid', '--output', reportPath
+    ], {
+      environment: {},
+      reserveReport(filePath, contents) {
+        return command.reserveReport(filePath, contents, fileSystem);
+      },
+      initialize() { return { db: {}, auth: {} }; },
+      runLegacyMigration() {
+        return Promise.resolve({
+          projectId: 'demo-video-quiz', mode: 'dry-run', targetMode: 'production',
+          safeToDeployStrictRules: true, remainingResponseLeakCount: 0,
+          auditFailures: [], auditDigest: 'd'.repeat(64)
+        });
+      },
+      writeLine() {}
+    }), /injected rename failure/);
+    assert.equal(fs.existsSync(reportPath), false);
+    assert.equal(
+      JSON.parse(fs.readFileSync(reportPath + '.reserved', 'utf8')).safeToDeployStrictRules,
+      false
+    );
+    assert.throws(() => command.reserveReport(reportPath, '{}\n'), /exist|EEXIST/i);
+    const newPath = path.join(directory, 'retry-new-path.json');
+    const retry = command.reserveReport(newPath, '{"safeToDeployStrictRules":false}\n');
+    retry.commit('{"safeToDeployStrictRules":false}\n');
+    assert.equal(JSON.parse(fs.readFileSync(newPath, 'utf8')).safeToDeployStrictRules, false);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -591,6 +766,11 @@ test('unknown existing snapshotVersion is audited without being downgraded or fa
 test('snapshotImages rejects aliases, invalid keys, empty data, and non-string data without partial writes', async () => {
   const cases = [
     ['alias collision', { 1: 'legacy', v0q1: 'canonical' }],
+    ['unsafe legacy integer', { '9007199254740993': 'image' }],
+    ['unsafe question integer', { v0q9007199254740993: 'image' }],
+    ['unsafe video integer', { v9007199254740993q0: 'image' }],
+    ['leading-zero legacy alias', { '01': 'image' }],
+    ['leading-zero canonical alias', { v00q1: 'image' }],
     ['invalid key', { question1: 'image' }],
     ['empty data', { v0q1: '' }],
     ['non-string data', { v0q1: { data: 'image' } }]

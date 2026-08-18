@@ -90,6 +90,8 @@ emulatorTest('Firebase Admin operator dry-runs then atomically migrates only the
     });
     assert.equal(removed.action, 'removed');
     assert.equal(removed.migrationAudit.safeToDeployStrictRules, true);
+    assert.equal(removed.postRemovalAudit.safeToDeployStrictRules, true);
+    assert.equal(removed.ownerConfigAbsent, true);
     assert.equal((await db.doc('config/legacy_owner').get()).exists, false);
   } finally {
     await clearDemoFirestore();
