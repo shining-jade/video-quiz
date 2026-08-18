@@ -80,6 +80,12 @@
       return db.doc('quiz_sets/' + setId).set(withoutDocumentId(value));
     }
 
+    const ownedQuizSet = (value, teacher) => ({
+      ...withoutDocumentId(value),
+      ownerUid: teacher && teacher.uid || '',
+      ownerEmail: teacher && teacher.email || ''
+    });
+
     async function saveQuizSetWithImages(setId, value, images) {
       const path = 'images/' + setId + '/q';
       const current = await db.collection(path).get().then(collectionValue);
@@ -99,6 +105,10 @@
         batch.set(db.doc(path + '/' + questionIndex), { data });
       });
       await batch.commit();
+    }
+
+    function saveOwnedQuizSet(setId, value, images, teacher) {
+      return saveQuizSetWithImages(setId, ownedQuizSet(value, teacher), images);
     }
 
     function patchQuizSet(setId, value) {
@@ -150,6 +160,21 @@
       const copy = { ...source, ...(patch || {}), id: newId };
       await saveQuizSetWithImages(newId, copy, images);
       return copy;
+    }
+
+    async function copyOwnedQuizSet(sourceId, newId, teacher) {
+      const source = await getQuizSet(sourceId);
+      if (!source) return null;
+      const images = await getImages(sourceId);
+      const copy = ownedQuizSet({
+        ...source,
+        id: newId,
+        title: ((source.title || '제목 없음') + ' (사본)').slice(0, 200),
+        createdAt: fieldValue.serverTimestamp(),
+        updatedAt: fieldValue.serverTimestamp()
+      }, teacher);
+      await saveQuizSetWithImages(newId, copy, images);
+      return { ...copy, id: newId };
     }
 
     function claimSessionCode(code, sessionId, session) {
@@ -346,11 +371,13 @@
       getQuizSet,
       saveQuizSet,
       saveQuizSetWithImages,
+      saveOwnedQuizSet,
       patchQuizSet,
       getQuestionImage,
       getImages,
       replaceImages,
       copyQuizSet,
+      copyOwnedQuizSet,
       startSession,
       subscribeStudents,
       subscribeResponses,

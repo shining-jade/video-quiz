@@ -364,6 +364,48 @@ function createStore(fake) {
   return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
 }
 
+test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  await store.saveOwnedQuizSet(
+    's1',
+    { title: 'A', videos: [], ownerUid: 'spoofed', ownerEmail: 'spoofed@example.com' },
+    {},
+    { uid: 't1', email: 't@school.kr' }
+  );
+  assert.equal(fake.value('quiz_sets/s1').ownerUid, 't1');
+  assert.equal(fake.value('quiz_sets/s1').ownerEmail, 't@school.kr');
+
+  const copied = await store.copyOwnedQuizSet(
+    's1',
+    's2',
+    { uid: 't2', email: 'other@school.kr' }
+  );
+  assert.equal(fake.value('quiz_sets/s2').ownerUid, 't2');
+  assert.equal(fake.value('quiz_sets/s2').ownerEmail, 'other@school.kr');
+  assert.equal(copied.ownerUid, 't2');
+  assert.equal(copied.ownerEmail, 'other@school.kr');
+});
+
+test('세트 편집은 관리자 여부와 무관하게 기록된 소유자에게만 허용한다', () => {
+  const context = {};
+  loadStageFunctions(['canEditSet'], context);
+
+  assert.equal(context.canEditSet(
+    { ownerUid: 'teacher-1' },
+    { uid: 'teacher-1', role: 'teacher' }
+  ), true);
+  assert.equal(context.canEditSet(
+    { ownerUid: 'teacher-1' },
+    { uid: 'admin-1', role: 'admin' }
+  ), false);
+  assert.equal(context.canEditSet(
+    {},
+    { uid: 'teacher-1', role: 'teacher' }
+  ), false);
+});
+
 test('이미지를 문항별 문서로 교체하고 기존 화면 형태로 읽는다', async () => {
   const fake = makeFirestoreFake({
     'images/set1/q/0': { data: 'old' },
@@ -480,6 +522,24 @@ test('구형·신형 세트를 영상 배열 중심의 같은 화면 모델로 �
   assert.equal(legacy.videoId, undefined);
 });
 
+test('화면용 세트 정규화는 소유자 UID와 이메일을 보존한다', () => {
+  const context = {
+    DEFAULT_SETTINGS: { revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true },
+    REVEAL_LABEL: { timer: '타이머' },
+    QTYPES: { choice: '객관식' },
+    OX_CHOICES: ['O', 'X'],
+    PlaylistCore: require('../playlist-core.js')
+  };
+  loadStageFunctions(['normSettings', 'normQuestions', 'normSet'], context);
+
+  const set = context.normSet({
+    title: '소유 세트', ownerUid: 'teacher-1', ownerEmail: 'teacher@school.kr', videos: []
+  });
+
+  assert.equal(set.ownerUid, 'teacher-1');
+  assert.equal(set.ownerEmail, 'teacher@school.kr');
+});
+
 test('세트 날짜 Timestamp는 기존 화면과 내보내기가 쓰는 밀리초 숫자로 바꾼다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/set1': {
@@ -579,6 +639,34 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
   assert.equal(fake.has('images/copy/q/0'), false);
 });
 
+test('사본 만들기는 현재 교사를 소유자로 지정하는 복사 API를 사용한다', async () => {
+  const calls = [];
+  const context = {
+    teacherState: { uid: 'teacher-2', email: 'teacher2@school.kr', role: 'teacher' },
+    store: {
+      async getQuizSet() {
+        return { id: 'source', title: '원본', author: '원 교사', ownerUid: 'teacher-1' };
+      },
+      async copyOwnedQuizSet(...args) {
+        calls.push(clone(args));
+        return { id: args[1] };
+      }
+    },
+    rid() { return 'copy-1'; }, lsGet() { return '새 교사'; }, SV_TS: {},
+    toast() {}, go() {}, console,
+    alert(message) { throw new Error(message); }
+  };
+  loadStageFunctions(['setDuplicate'], context);
+
+  context.setDuplicate('source');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(calls, [[
+    'source', 'copy-1',
+    { uid: 'teacher-2', email: 'teacher2@school.kr', role: 'teacher' }
+  ]]);
+});
+
 test('단일 세트 내보내기는 Firestore 문서 ID를 빼고 기존 JSON 형식을 유지한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let downloaded;
@@ -616,6 +704,7 @@ test('가져오기는 모든 영상과 문항을 videos 배열로 저장한다',
   const saved = [];
   const images = [];
   const context = {
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
     normSet() {
       return {
         title: '세트', author: '교사', settings: { limitSec: 20 },
@@ -631,8 +720,10 @@ test('가져오기는 모든 영상과 문항을 videos 배열로 저장한다',
     lsGet() { return ''; },
     SV_TS: { kind: 'timestamp' },
     store: {
-      async saveQuizSet(id, value) { saved.push([id, clone(value)]); },
-      async replaceImages(id, value) { images.push([id, clone(value)]); }
+      async saveOwnedQuizSet(id, value, valueImages) {
+        saved.push([id, clone(value)]);
+        images.push([id, clone(valueImages)]);
+      }
     }
   };
   loadStageFunctions(['setImportOne'], context);
@@ -648,6 +739,39 @@ test('가져오기는 모든 영상과 문항을 videos 배열로 저장한다',
   ]);
   assert.equal(saved[0][1].questions, undefined);
   assert.deepEqual(images, [['new-set', { '0': 'legacy-image', v1q0: 'new-image' }]]);
+});
+
+test('가져온 세트는 현재 교사를 소유자로 지정하는 저장 API를 사용한다', async () => {
+  const calls = [];
+  const context = {
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    PlaylistCore: require('../playlist-core.js'),
+    normSet() {
+      return {
+        title: '가져온 세트', author: '', settings: {},
+        videos: [{ videoId: 'a', videoUrl: '', startSec: 0, endSec: null,
+          questions: [{ type: 'long', t: 1, text: '문항', choices: [], answer: 0 }] }]
+      };
+    },
+    qType(q) { return q.type; }, rid() { return 'imported-1'; }, lsGet() { return ''; }, SV_TS: {},
+    store: {
+      async saveOwnedQuizSet(id, value, images, teacher) {
+        calls.push([id, clone(value), clone(images), clone(teacher)]);
+      }
+    }
+  };
+  loadStageFunctions(['setImportOne'], context);
+
+  await context.setImportOne({
+    set: { ownerUid: 'spoofed', ownerEmail: 'spoofed@example.com' },
+    images: { v0q0: 'image' }
+  });
+
+  assert.equal(calls[0][0], 'imported-1');
+  assert.deepEqual(calls[0][2], { v0q0: 'image' });
+  assert.deepEqual(calls[0][3], {
+    uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+  });
 });
 
 test('편집 payload는 영상별 문항과 업로드 이미지를 신형 키로 보존한다', () => {
@@ -686,6 +810,7 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
   let rendered = 0;
   const context = {
     mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
     lsGet() { return '기본 교사'; },
     DEFAULT_SETTINGS: {},
     blankQuestion(t) { return { t }; },
@@ -696,7 +821,7 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
     store: {
       async getQuizSet() {
         return {
-          title: '세트', author: '교사', settings: {}, createdAt: 10, updatedAt: 20,
+          title: '세트', author: '교사', ownerUid: 'teacher-1', settings: {}, createdAt: 10, updatedAt: 20,
           videos: [
             { videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 20,
               questions: [{ text: 'A', imgUp: true, _img: '' }] },
@@ -711,7 +836,7 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
     renderMake() { rendered += 1; },
     console: { error(error) { errors.push(error); } }, toast() {}
   };
-  loadStageFunctions(['screenMake'], context);
+  loadStageFunctions(['canEditSet', 'screenMake'], context);
 
   context.screenMake('set1');
   await new Promise(resolve => setImmediate(resolve));
@@ -725,6 +850,42 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
   assert.equal(context.mk.questions, undefined);
   assert.equal(context.mk.videos[0].questions[0]._img, 'img-a');
   assert.equal(context.mk.videos[1].questions[0]._img, 'img-b');
+});
+
+test('비소유 세트 편집 URL은 읽기 전용 안내와 시작·사본 동작만 제공한다', async () => {
+  const app = { innerHTML: '' };
+  let imageReads = 0;
+  let editorRenders = 0;
+  const context = {
+    mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    lsGet() { return '교사'; }, DEFAULT_SETTINGS: {}, blankQuestion(t) { return { t }; },
+    document: { addEventListener() {}, removeEventListener() {} },
+    mkHandleSaveShortcut() {}, onCleanup() {}, clearTimeout() {}, every() {}, $() { return null; },
+    APP() { return app; }, topbar() { return '<nav></nav>'; }, esc(value) { return String(value); },
+    store: {
+      async getQuizSet() {
+        return {
+          id: 'shared-1', title: '공유 세트', ownerUid: 'teacher-2', ownerEmail: 'other@school.kr',
+          settings: {}, videos: [{ videoId: 'a', questions: [{ text: 'A' }] }]
+        };
+      },
+      async getImages() { imageReads += 1; return {}; }
+    },
+    normSet(value) { return value; }, mkRestoreDraft() { return false; },
+    renderMake() { editorRenders += 1; }, console, toast() {}
+  };
+  loadStageFunctions(['canEditSet', 'screenMake'], context);
+
+  context.screenMake('shared-1');
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(imageReads, 0);
+  assert.equal(editorRenders, 0);
+  assert.match(app.innerHTML, /읽기 전용/);
+  assert.match(app.innerHTML, /우리 반 시작하기/);
+  assert.match(app.innerHTML, /사본 만들기/);
+  assert.doesNotMatch(app.innerHTML, /변경 사항 저장|세트 편집/);
 });
 
 test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한다', () => {
@@ -916,13 +1077,15 @@ test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한�
   const calls = [];
   const context = {
     mk: { id: 'set1', saved: false, questions: [] },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
     mkValidate() { return ''; },
     mkPayload() { return { set: { title: '수정', questions: [{ text: '문항' }] }, images: {} }; },
     rid() { return 'new-id'; },
     SV_TS: { kind: 'timestamp' },
     store: {
-      async saveQuizSet(id, data) { calls.push(['save', id, clone(data)]); },
-      async replaceImages(id, images) { calls.push(['images', id, clone(images)]); }
+      async saveOwnedQuizSet(id, data, images, teacher) {
+        calls.push(['saveOwned', id, clone(data), clone(images), clone(teacher)]);
+      }
     },
     toast() {},
     normQuestions(value) { return clone(value); },
@@ -943,9 +1106,55 @@ test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한�
   await context.mkSave(false);
 
   assert.deepEqual(calls, [
-    ['save', 'set1', { title: '수정', questions: [{ text: '문항' }] }],
-    ['images', 'set1', {}]
+    ['saveOwned', 'set1', { title: '수정', questions: [{ text: '문항' }] }, {},
+      { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' }]
   ]);
+});
+
+test('편집 저장은 현재 교사 상태를 소유권 저장 API에 전달한다', async () => {
+  const calls = [];
+  const context = {
+    mk: { id: 'set1', saved: false, questions: [] },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: '수정', questions: [] }, images: {} }; },
+    rid() { return 'new-id'; }, SV_TS: {},
+    store: {
+      async saveOwnedQuizSet(id, value, images, teacher) {
+        calls.push([id, clone(value), clone(images), clone(teacher)]);
+      }
+    },
+    toast() {}, normQuestions(value) { return value; }, imgCache: {},
+    location: { hash: '#/make/set1' }, history: { replaceState() {} },
+    renderMake() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    $() { return null; }, Date, console,
+    alert(message) { throw new Error(message); }
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  await context.mkSave(false);
+
+  assert.deepEqual(calls, [[
+    'set1', { title: '수정', questions: [] }, {},
+    { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' }
+  ]]);
+});
+
+test('읽기 전용 세트는 단축키를 포함한 저장 진입점에서 쓰기를 차단한다', async () => {
+  let writes = 0;
+  const notices = [];
+  const context = {
+    mk: { id: 'shared-1', readOnly: true },
+    mkValidate() { throw new Error('읽기 전용 세트는 검증에도 들어가면 안 된다'); },
+    store: { async saveOwnedQuizSet() { writes += 1; } },
+    toast(message) { notices.push(message); }
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  await context.mkSave(false);
+
+  assert.equal(writes, 0);
+  assert.deepEqual(notices, ['읽기 전용 세트는 원본을 저장할 수 없습니다. 사본을 만들어 주세요.']);
 });
 
 test('Ctrl+S는 브라우저 저장을 막고 편집 화면의 정식 저장을 한 번 실행한다', () => {
@@ -969,6 +1178,7 @@ test('편집 변경은 로컬 초안을 남기고 정식 저장 성공 뒤 삭�
   const calls = [];
   const context = {
     mk: { id: 'set1', saved: false, questions: [] },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
     localStorage: {},
     EditorDraft: {
       write(storage, id) { calls.push(['draft', id]); },
@@ -977,7 +1187,7 @@ test('편집 변경은 로컬 초안을 남기고 정식 저장 성공 뒤 삭�
     mkValidate() { return ''; },
     mkPayload() { return { set: { title: '수정', questions: [] }, images: {} }; },
     rid() { return 'new-id'; }, SV_TS: {},
-    store: { async saveQuizSet() {}, async replaceImages() {} },
+    store: { async saveOwnedQuizSet() {} },
     toast() {}, normQuestions(value) { return value; }, imgCache: {},
     location: { hash: '#/make/set1' }, history: { replaceState() {} },
     renderMake() {}, $() { return null; }, console, alert() {},
@@ -1030,12 +1240,12 @@ test('두 번째 Ctrl+S는 첫 저장 뒤 수정한 문항 값을 다시 저장�
         questions: [{ type: 'long', t: 10, text: '첫 값', choices: [] }] }],
       activeVideo: 0, saved: false
     },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
     PlaylistCore: require('../playlist-core.js'),
     qType(q) { return q.type; }, normSettings(value) { return value; },
     mkValidate() { return ''; }, rid() { return 'new-id'; }, SV_TS: {},
     store: {
-      async saveQuizSet(id, value) { saved.push(clone(value)); },
-      async replaceImages() {}
+      async saveOwnedQuizSet(id, value) { saved.push(clone(value)); }
     },
     toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
     normQuestions(value) { return clone(value); }, imgCache: {},
@@ -1108,11 +1318,12 @@ test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게
   const context = {
     PlaylistCore: require('../playlist-core.js'),
     REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
+    teacherState: { uid: 'teacher-1', role: 'teacher' },
     esc: escapeHtml,
     fmtDate() { return ''; },
     linkTo(value) { return value; }
   };
-  vm.runInNewContext(extractFunction(html, 'setListRow'), context);
+  loadStageFunctions(['canEditSet', 'setListRow'], context);
 
   const cases = [
     {
@@ -1168,6 +1379,88 @@ test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게
     for (const pattern of item.matches) assert.match(row, pattern, item.name);
     for (const pattern of item.rejects || []) assert.doesNotMatch(row, pattern, item.name);
   }
+});
+
+test('세트 목록은 소유자만 편집·숨김을 표시하고 공유·이전 세트는 시작·사본만 표시한다', () => {
+  const context = {
+    PlaylistCore: require('../playlist-core.js'),
+    REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
+    teacherState: { uid: 'owner-1', role: 'teacher' },
+    esc(value) { return String(value); },
+    fmtDate() { return ''; },
+    linkTo(value) { return value; }
+  };
+  loadStageFunctions(['canEditSet', 'setListRow'], context);
+  const base = {
+    id: 'set-1', title: '공유 세트', author: '', archived: false,
+    settings: { revealMode: 'timer' }, videos: [{ questions: [] }]
+  };
+
+  const owned = context.setListRow({ ...base, ownerUid: 'owner-1' });
+  assert.match(owned, /편집/);
+  assert.match(owned, /숨기기/);
+
+  const shared = context.setListRow({ ...base, ownerUid: 'other-1' });
+  assert.match(shared, /우리 반 시작하기/);
+  assert.match(shared, /사본 만들기/);
+  assert.doesNotMatch(shared, /편집|숨기기|다시 표시|📤 파일|🔗 링크/);
+
+  context.teacherState = { uid: 'admin-1', role: 'admin' };
+  const adminShared = context.setListRow({ ...base, ownerUid: 'other-1' });
+  assert.doesNotMatch(adminShared, /편집|숨기기|다시 표시/);
+
+  const legacy = context.setListRow(base);
+  assert.match(legacy, /읽기 전용/);
+  assert.match(legacy, /우리 반 시작하기/);
+  assert.match(legacy, /사본 만들기/);
+  assert.doesNotMatch(legacy, /편집|숨기기|다시 표시|📤 파일|🔗 링크/);
+});
+
+test('공유 세트 진행 화면은 시작·사본만 제공하고 소유자에게만 편집 링크를 표시한다', () => {
+  const app = { innerHTML: '' };
+  const context = {
+    teacherState: { uid: 'teacher-1', role: 'teacher' },
+    pl: {
+      setId: 'shared-1',
+      set: {
+        title: '공유 세트', ownerUid: 'teacher-2', author: '',
+        settings: { revealMode: 'timer', limitSec: 20 },
+        videos: [{ questions: [] }]
+      },
+      flatQuestions: [{ t: 1, text: '문항', answer: 0 }]
+    },
+    APP() { return app; }, topbar(extra) { return '<nav>' + (extra || '') + '</nav>'; },
+    esc(value) { return String(value); }, REVEAL_LABEL: { timer: '타이머' },
+    lsGet() { return ''; }, fmtTime() { return '00:01'; }, LETTERS: ['A']
+  };
+  loadStageFunctions(['canEditSet', 'renderPlayIntro'], context);
+
+  context.renderPlayIntro();
+  assert.match(app.innerHTML, /우리 반 시작하기/);
+  assert.match(app.innerHTML, /사본 만들기/);
+  assert.doesNotMatch(app.innerHTML, /세트 편집/);
+
+  context.pl.set.ownerUid = 'teacher-1';
+  context.renderPlayIntro();
+  assert.match(app.innerHTML, /세트 편집/);
+});
+
+test('비소유 세트는 숨김 진입점을 직접 호출해도 저장소를 변경하지 않는다', () => {
+  let writes = 0;
+  const notices = [];
+  const context = {
+    teacherState: { uid: 'teacher-1', role: 'teacher' },
+    setList: { all: [{ id: 'shared-1', ownerUid: 'teacher-2', archived: true }] },
+    store: { patchQuizSet() { writes += 1; return Promise.resolve(); } },
+    confirm() { return true; }, toast(message) { notices.push(message); },
+    renderSetList() {}, console, alert() {}
+  };
+  loadStageFunctions(['canEditSet', 'setArchive'], context);
+
+  context.setArchive('shared-1', false);
+
+  assert.equal(writes, 0);
+  assert.deepEqual(notices, ['소유한 세트만 숨김 상태를 바꿀 수 있습니다.']);
 });
 
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
