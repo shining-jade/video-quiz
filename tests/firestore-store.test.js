@@ -508,13 +508,164 @@ test('늦게 끝난 이전 저장은 새 편집과 최신 저장 결과를 덮�
   context.mk.videos[0].questions[0].text = '두 번째 값';
   context.mk.editRevision += 1;
   const second = context.mkSave(false);
+  pending[0]();
+  await new Promise(resolve => setImmediate(resolve));
   pending[1]();
   await second;
-  pending[0]();
   await first;
 
   assert.equal(context.mk.videos[0].questions[0].text, '두 번째 값');
   assert.equal(context.mk.saved, true);
+});
+
+test('늦은 A 권한 확인 뒤 B 저장이 와도 Firestore 마지막 write는 최신 B payload다', async () => {
+  const checks = [];
+  const writes = [];
+  const context = {
+    mk: {
+      id: 'set-1', ownerUid: 'teacher-1', editRevision: 0, saveSequence: 0,
+      title: '세트', author: '', settings: {}, createdAt: 1, activeVideo: 0, saved: false,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: 'A', choices: [] }] }]
+    },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), SV_TS: {}, rid() { return 'new-id'; },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: '세트', videos: clone(context.mk.videos) }, images: {} }; },
+    store: {
+      canEditQuizSet() { return new Promise(resolve => checks.push(resolve)); },
+      saveQuizSetWithImages(id, value) { writes.push(clone(value)); return Promise.resolve(); }
+    },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    mkResetHistory() {}, mkShowSaveToast() {}, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console, alert() {}, Date
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  const saveA = context.mkSave(false);
+  await new Promise(resolve => setImmediate(resolve));
+  context.mk.videos[0].questions[0].text = 'B';
+  context.mk.editRevision += 1;
+  const saveB = context.mkSave(false);
+  checks[0](true);
+  await new Promise(resolve => setImmediate(resolve));
+  checks[1](true);
+  await Promise.all([saveA, saveB]);
+
+  assert.deepEqual(writes.map(value => value.videos[0].questions[0].text), ['B']);
+});
+
+test('실패한 저장 뒤에 대기 중인 후속 저장은 같은 편집기 큐에서 계속 실행된다', async () => {
+  const writes = [];
+  let rejectA;
+  const context = {
+    mk: {
+      id: 'set-1', ownerUid: 'teacher-1', editRevision: 0, saveSequence: 0,
+      title: '세트', author: '', settings: {}, createdAt: 1, activeVideo: 0, saved: false,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: 'A', choices: [] }] }]
+    },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), SV_TS: {}, rid() { return 'new-id'; },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: '세트', videos: clone(context.mk.videos) }, images: {} }; },
+    store: {
+      saveOwnedQuizSet(id, value) {
+        writes.push(clone(value));
+        return writes.length === 1
+          ? new Promise((resolve, reject) => { rejectA = reject; })
+          : Promise.resolve();
+      }
+    },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    mkResetHistory() {}, mkShowSaveToast() {}, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console: { error() {} }, alert() {}, Date
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  const saveA = context.mkSave(false);
+  await new Promise(resolve => setImmediate(resolve));
+  context.mk.videos[0].questions[0].text = 'B';
+  context.mk.editRevision += 1;
+  const saveB = context.mkSave(false);
+  rejectA(new Error('offline'));
+  await Promise.all([saveA, saveB]);
+
+  assert.deepEqual(writes.map(value => value.videos[0].questions[0].text), ['A', 'B']);
+});
+
+test('대기 중인 저장은 route 또는 교사 인증이 stale이면 Firestore write 전에 중단한다', async () => {
+  let resolveCheck;
+  let writes = 0;
+  const context = {
+    mk: {
+      id: 'set-1', ownerUid: 'teacher-1', routeToken: '#/make/set-1', editRevision: 0, saveSequence: 0,
+      title: '세트', author: '', settings: {}, createdAt: 1, activeVideo: 0, saved: false,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: 'A', choices: [] }] }]
+    },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), SV_TS: {}, rid() { return 'new-id'; },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: '세트', videos: clone(context.mk.videos) }, images: {} }; },
+    store: {
+      canEditQuizSet() { return new Promise(resolve => { resolveCheck = resolve; }); },
+      saveQuizSetWithImages() { writes += 1; return Promise.resolve(); }
+    },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    mkResetHistory() {}, mkShowSaveToast() {}, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console, alert() {}, Date
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  const saving = context.mkSave(false);
+  await new Promise(resolve => setImmediate(resolve));
+  context.location.hash = '#/sets';
+  resolveCheck(true);
+  await saving;
+
+  assert.equal(writes, 0);
+});
+
+test('대기 중인 저장은 교사 인증이 stale이면 Firestore write 전에 중단한다', async () => {
+  let resolveCheck;
+  let writes = 0;
+  const context = {
+    mk: {
+      id: 'set-1', ownerUid: 'teacher-1', routeToken: '#/make/set-1', editRevision: 0, saveSequence: 0,
+      title: '세트', author: '', settings: {}, createdAt: 1, activeVideo: 0, saved: false,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: 'A', choices: [] }] }]
+    },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), SV_TS: {}, rid() { return 'new-id'; },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: '세트', videos: clone(context.mk.videos) }, images: {} }; },
+    store: {
+      canEditQuizSet() { return new Promise(resolve => { resolveCheck = resolve; }); },
+      saveQuizSetWithImages() { writes += 1; return Promise.resolve(); }
+    },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    mkResetHistory() {}, mkShowSaveToast() {}, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console, alert() {}, Date
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  const saving = context.mkSave(false);
+  await new Promise(resolve => setImmediate(resolve));
+  context.teacherState.role = 'student';
+  resolveCheck(true);
+  await saving;
+
+  assert.equal(writes, 0);
 });
 
 test('undo 복원은 이미지까지 포함한 저장 기준 snapshot과 같을 때만 저장됨 상태가 된다', () => {

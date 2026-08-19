@@ -2377,14 +2377,20 @@ function screenMake(setId) {
     saveToastTimer: null,
     editRevision: 0,
     saveSequence: 0,
+    saveProcessedSequence: 0,
+    saveRequested: null,
+    saveRunning: false,
+    saveQueue: null,
     persistedSnapshot: null,
     pendingSaveId: null,
+    routeToken: '',
     ownerUid: teacherState && teacherState.uid || ''
   };
   const state = mk;
   if (typeof mkResetHistory === 'function') mkResetHistory();
   const editIdentity = { uid: teacherState && teacherState.uid || '', email: teacherState && teacherState.email || '' };
   const editRouteToken = typeof location !== 'undefined' ? String(location.hash || '') : '';
+  state.routeToken = editRouteToken;
   const editAuthGeneration = typeof teacherAuthVersion === 'number' ? teacherAuthVersion : null;
   let stopAccessWatch = null;
   const sameEditIdentity = () => !!teacherState && teacherState.uid === editIdentity.uid && teacherState.email === editIdentity.email && AuthCore.isTeacher(teacherState) &&
@@ -3333,87 +3339,135 @@ function mkSave(forceNew, options) {
   }
   const err = mkValidate();
   if (err) { toast(err); return; }
-  const id = forceNew ? rid(8) : (mk.id || state.pendingSaveId || rid(8));
-  const draftId = mk.id;
-  const isNew = (id !== mk.id);
-  if (isNew && !forceNew) state.pendingSaveId = id;
-  const saveRevision = Number(state.editRevision) || 0;
   const saveSequence = (Number(state.saveSequence) || 0) + 1;
   state.saveSequence = saveSequence;
-  const view = options && options.view || null;
-  const built = mkPayload();
-  const data = built.set;
-  if (isNew) data.createdAt = SV_TS;
-
-  const nImg = Object.keys(built.images).length;
-  if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
+  // A save request deliberately holds no payload.  The one in-flight worker
+  // builds it only after every older permission check/write has settled, so an
+  // old Ctrl+S cannot make its stale payload the final Firestore write.
+  state.saveRequested = {
+    sequence: saveSequence,
+    forceNew: !!forceNew,
+    view: options && options.view || null
+  };
   mkSetSaveStatus('saving');
+  if (state.saveRunning) return state.saveQueue;
 
-  const canSave = isNew
-    ? store.saveOwnedQuizSet(id, data, built.images, ownerState)
-    : state.id && store.canEditQuizSet
-    ? store.canEditQuizSet(state.id, ownerState).then(ok => {
-        if (!ok) throw Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
-        return store.saveQuizSetWithImages(state.id, data, built.images, ownerState);
-      })
-    : store.saveOwnedQuizSet(id, data, built.images, ownerState);
-  return canSave
-    .then(() => {
-      if (mk !== state) return;
-      // Earlier replies may arrive after a newer request.  They must never
-      // replace the current editor model or reset its undo baseline.
-      if (state.saveSequence !== saveSequence) return;
-      state.id = id;
-      state.pendingSaveId = null;
-      const unchangedSinceRequest = (Number(state.editRevision) || 0) === saveRevision;
-      if (!unchangedSinceRequest) {
+  const canWriteNow = () => {
+    const currentOwner = teacherState;
+    const routeMatches = !state.routeToken || typeof location === 'undefined' || String(location.hash || '') === state.routeToken;
+    const ownerMismatch = state.id && state.ownerUid && state.ownerUid !== (currentOwner && currentOwner.uid) && !store.canEditQuizSet;
+    return mk === state && routeMatches && !state.readOnly && AuthCore.isTeacher(currentOwner) &&
+      !(!state.id && !state.ownerUid) && !(state.id && !state.ownerUid && !store.canEditQuizSet) && !ownerMismatch;
+  };
+  const stale = request => !canWriteNow() || state.saveRequested !== request;
+  const finishLatest = (request, id, draftId, isNew, built, data) => {
+    if (stale(request)) return;
+    const view = request.view;
+    state.id = id;
+    state.pendingSaveId = null;
+    state.saved = true;
+    mkClearDraft(draftId);
+    if (draftId !== id) mkClearDraft(id);
+    // 저장 결과를 그대로 다시 읽어들여, 정렬·인덱스 재계산이 화면에도 반영되게 한다
+    if (Array.isArray(data.videos)) {
+      state.videos = data.videos.map((video, videoIndex) => Object.assign({}, video, {
+        questions: normQuestions(video.questions).map((q, questionIndex) => {
+          if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
+          return q;
+        })
+      }));
+      state.activeVideo = Math.max(0, Math.min(state.activeVideo, state.videos.length - 1));
+    }
+    Object.keys(built.images).forEach(i => { imgCache[id + '/' + i] = built.images[i]; });
+    const savedRoute = '#/make/' + id;
+    if (typeof location !== 'undefined' && location.hash !== savedRoute) history.replaceState(null, '', savedRoute);
+    state.routeToken = savedRoute;
+    if (typeof mkResetHistory === 'function') mkResetHistory(true);
+    toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
+    mkSetSaveStatus('saved', new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
+    if (typeof mkShowSaveToast === 'function') mkShowSaveToast('저장 완료');
+    // 새 세트도 저장 전 화면 위치와 입력 selection을 되돌린다.
+    if (isNew) {
+      renderMake();
+      if (typeof mkRestoreEditorView === 'function') mkRestoreEditorView(view);
+    } else if (typeof mkUpdateHistoryControls === 'function') mkUpdateHistoryControls();
+  };
+  const reportFailure = e => {
+    if (!canWriteNow()) return;
+    console.error(e);
+    mkSetSaveStatus('failed');
+    mkPersistDraft();
+    if (String(e && e.code || '').indexOf('permission-denied') >= 0 || /permission-denied|권한/.test(String(e && e.message || ''))) {
+      mkHandlePermissionLoss(e);
+    } else {
+      alert('저장 실패: ' + e.message);
+    }
+  };
+
+  state.saveRunning = true;
+  state.saveQueue = (async () => {
+    while (mk === state) {
+      const request = state.saveRequested;
+      if (!request || request.sequence <= (Number(state.saveProcessedSequence) || 0)) break;
+      if (!canWriteNow()) {
+        state.saveProcessedSequence = request.sequence;
+        break;
+      }
+      const requestRevision = Number(state.editRevision) || 0;
+      const id = request.forceNew ? rid(8) : (state.id || state.pendingSaveId || rid(8));
+      const draftId = state.id;
+      const isNew = id !== state.id;
+      if (isNew && !request.forceNew) state.pendingSaveId = id;
+      const built = mkPayload();
+      const data = built.set;
+      if (isNew) data.createdAt = SV_TS;
+      const nImg = Object.keys(built.images).length;
+      if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
+      try {
+        if (!isNew && state.id && store.canEditQuizSet) {
+          const permitted = await store.canEditQuizSet(state.id, teacherState);
+          if (!permitted) throw Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
+        }
+        // A later Ctrl+S can arrive while permission is checked.  Skip this
+        // payload before the write and rebuild the current request instead.
+        if (stale(request)) {
+          state.saveProcessedSequence = request.sequence;
+          continue;
+        }
+        if (isNew || !state.id || !store.canEditQuizSet) await store.saveOwnedQuizSet(id, data, built.images, teacherState);
+        else await store.saveQuizSetWithImages(state.id, data, built.images, teacherState);
+      } catch (e) {
+        state.saveProcessedSequence = request.sequence;
+        // A queued newer request must still run after any failed write.
+        if (state.saveRequested !== request) continue;
+        reportFailure(e);
+        break;
+      }
+      state.saveProcessedSequence = request.sequence;
+      if (state.saveRequested !== request) continue;
+      // A synchronous edit made while a write was active is a newer editor
+      // revision even when it did not invoke Ctrl+S again.
+      if ((Number(state.editRevision) || 0) !== requestRevision) {
         state.saved = false;
-        if (location.hash !== '#/make/' + id) history.replaceState(null, '', '#/make/' + id);
+        if (typeof location !== 'undefined' && location.hash !== '#/make/' + id) history.replaceState(null, '', '#/make/' + id);
+        state.routeToken = '#/make/' + id;
         mkClearDraft(draftId);
         mkPersistDraft();
         mkSetSaveStatus('dirty');
-        return;
+        break;
       }
-      state.saved = true;
-      mkClearDraft(draftId);
-      if (draftId !== id) mkClearDraft(id);
-      // 저장 결과를 그대로 다시 읽어들여, 정렬·인덱스 재계산이 화면에도 반영되게 한다
-      if (Array.isArray(data.videos)) {
-        state.videos = data.videos.map((video, videoIndex) => Object.assign({}, video, {
-          questions: normQuestions(video.questions).map((q, questionIndex) => {
-            if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
-            return q;
-          })
-        }));
-        state.activeVideo = Math.max(0, Math.min(state.activeVideo, state.videos.length - 1));
-      }
-      Object.keys(built.images).forEach(i => { imgCache[id + '/' + i] = built.images[i]; });
-      if (location.hash !== '#/make/' + id) {
-        history.replaceState(null, '', '#/make/' + id);
-      }
-      if (typeof mkResetHistory === 'function') mkResetHistory(true);
-      toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
-      mkSetSaveStatus('saved', new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
-      if (typeof mkShowSaveToast === 'function') mkShowSaveToast('저장 완료');
-      // 새 세트도 저장 전 화면 위치와 입력 selection을 되돌린다.
-      if (isNew) {
-        renderMake();
-        if (typeof mkRestoreEditorView === 'function') mkRestoreEditorView(view);
-      }
-      else if (typeof mkUpdateHistoryControls === 'function') mkUpdateHistoryControls();
-    })
-    .catch(e => {
-      if (mk !== state) return;
-      if (state.saveSequence !== saveSequence) return;
-      console.error(e);
-      mkSetSaveStatus('failed');
-      mkPersistDraft();
-      if (String(e && e.code || '').indexOf('permission-denied') >= 0 || /permission-denied|권한/.test(String(e && e.message || ''))) {
-        mkHandlePermissionLoss(e);
-      } else {
-        alert('저장 실패: ' + e.message);
-      }
-    });
+      finishLatest(request, id, draftId, isNew, built, data);
+      break;
+    }
+  })().finally(() => {
+    if (mk !== state) return;
+    state.saveRunning = false;
+    state.saveQueue = null;
+    // Requests made after the loop observed its last item start a fresh
+    // worker; this keeps the per-editor queue single-flight.
+    if (state.saveRequested && state.saveRequested.sequence > (Number(state.saveProcessedSequence) || 0)) mkSave(false);
+  });
+  return state.saveQueue;
 }
 function mkSaveAsNew() {
   if (!confirm('현재 내용을 새 세트로 복제 저장합니다. 원본은 그대로 남습니다. 계속할까요?')) return;
