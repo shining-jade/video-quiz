@@ -497,9 +497,9 @@ test('캐시된 YouTube API 준비 경로는 기존 대기 작업과 현재 작�
   assert.equal(vm.runInNewContext('ytWaiters.length', context), 0);
 });
 
-function createStore(fake) {
+function createStore(fake, nowFn) {
   const { createFirestoreStore } = loadStoreModule();
-  return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
+  return createFirestoreStore(fake.db, fake.fieldValue, nowFn || (() => 1000));
 }
 
 test('휴지통 이동과 복원은 소유자 상태 전환을 원자적으로 기록하고 archived를 보존한다', async () => {
@@ -822,6 +822,32 @@ test('휴지통 자동 정리는 counter migration gate가 해제된 경우에�
   assert.equal((await store.getCounterMigrationState()).ready, true);
   const locked = makeFirestoreFake({ 'migration_gates/set_counters': { locked: true } });
   assert.equal((await createStore(locked).getCounterMigrationState()).ready, false);
+});
+
+test('휴지통 만료 판정은 동기화된 serverNow를 사용하고 client clock을 신뢰하지 않는다', async () => {
+  const base = Date.UTC(2026, 7, 1);
+  const deadline = base + 30 * 86400000;
+  const fake = makeFirestoreFake({
+    'quiz_sets/skew': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
+      trashedAt: base, purgeStartedAt: null, collaboratorCount: 0, imageCount: 0
+    }
+  }, { committedServerMillis: deadline - 1 });
+  let clientNow = deadline - 5001;
+  const store = createStore(fake, () => clientNow);
+  await store.syncClock('clock/skew-before');
+  await assert.rejects(store.beginSetPurge('skew', 'expired', { uid: 'owner', role: 'teacher' }), /30일/);
+  const exactFake = makeFirestoreFake({
+    'quiz_sets/skew': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
+      trashedAt: base, purgeStartedAt: null, collaboratorCount: 0, imageCount: 0
+    }
+  }, { committedServerMillis: deadline });
+  clientNow = deadline - 5001;
+  const exactStore = createStore(exactFake, () => clientNow);
+  await exactStore.syncClock('clock/skew-exact');
+  const result = await exactStore.beginSetPurge('skew', 'expired', { uid: 'owner', role: 'teacher' });
+  assert.equal(result.started, true);
 });
 
 test('allowance API rejects non-admin, invalid role, empty email and stale auth generation before writes', async () => {
@@ -7805,6 +7831,62 @@ test('관리자 휴지통 정리는 실패를 화면에 남기고 앱 진입을 
   assert.match(context.trashMaintenance.warning, /permission-denied/);
   assert.ok(timer && timer.delay <= 5000);
   assert.equal(notices.length > 0, true);
+});
+
+test('휴지통 로그인 정리는 같은 인증 세대에서 단일 flight를 재사용하고 20개 초과 페이지를 끝까지 처리한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let page = 0, listCalls = 0, begins = 0;
+  const context = {
+    teacherUser: { uid: 'admin-uid', email: 'admin@school.kr' },
+    teacherState: { uid: 'admin-uid', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 4, clockUserId: 'admin-uid', trashMaintenance: null,
+    AuthCore: { isTeacher() { return true; } },
+    store: {
+      async listExpiredTrash() {
+        listCalls += 1;
+        if (page++ === 0) return Array.from({ length: 20 }, (_, index) => ({ id: 'a-' + index }));
+        return [{ id: 'last' }];
+      },
+      async beginSetPurge() { begins += 1; },
+      async continueSetPurge() { return { done: true, parentDeleted: true }; }
+    },
+    toast() {}, setTimeout() { return 1; }, clearTimeout() {}
+  };
+  loadStageFunctions(['maintenanceIsCurrent', 'startTrashMaintenance', 'runTrashMaintenancePage', 'stopTrashMaintenance'], context);
+  const first = context.startTrashMaintenance(4);
+  const second = context.startTrashMaintenance(4);
+  assert.equal(first, second);
+  await first;
+  assert.equal(listCalls, 2);
+  assert.equal(begins, 21);
+  assert.equal(context.trashMaintenance.completed, true);
+  assert.equal(context.startTrashMaintenance(4), first);
+});
+
+test('휴지통 정리 중 인증 세대가 바뀌면 대기 중 결과를 게시하거나 purge하지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let release;
+  let begins = 0;
+  const context = {
+    teacherUser: { uid: 'owner-uid', email: 'owner@school.kr' },
+    teacherState: { uid: 'owner-uid', email: 'owner@school.kr', role: 'teacher' },
+    teacherAuthVersion: 7, clockUserId: 'owner-uid', trashMaintenance: null,
+    AuthCore: { isTeacher() { return true; } },
+    store: {
+      listExpiredTrash() { return new Promise(resolve => { release = resolve; }); },
+      async beginSetPurge() { begins += 1; },
+      async continueSetPurge() { return { done: true }; }
+    },
+    toast() {}, setTimeout() { return 1; }, clearTimeout() {}
+  };
+  loadStageFunctions(['maintenanceIsCurrent', 'startTrashMaintenance', 'runTrashMaintenancePage', 'stopTrashMaintenance'], context);
+  const running = context.startTrashMaintenance(7);
+  context.teacherAuthVersion = 8;
+  context.stopTrashMaintenance();
+  release([{ id: 'stale' }]);
+  await running;
+  assert.equal(begins, 0);
+  assert.equal(context.trashMaintenance, null);
 });
 
 test('관리자 기간 삭제는 화면에서 경로를 만들지 않고 저장소 API에 세션 ID를 맡긴다', async () => {

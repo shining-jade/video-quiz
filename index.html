@@ -1240,6 +1240,7 @@ function runTrashMaintenancePage() {
   const state = trashMaintenance;
   if (!state || state.stopped) return false;
   if (state.promise) return state.promise;
+  if (state.completed) return Promise.resolve(true);
   state.promise = (async () => {
     try {
       if (!maintenanceIsCurrent(state) || !store.listExpiredTrash || !store.beginSetPurge || !store.continueSetPurge) return false;
@@ -1249,24 +1250,32 @@ function runTrashMaintenancePage() {
       }
       const scope = state.role === 'admin'
         ? { role: 'admin' } : { ownerUid: state.uid, role: state.role };
-      const items = await store.listExpiredTrash(scope, 20);
-      if (!maintenanceIsCurrent(state)) return false;
-      state.lastPageCount = (items || []).length;
-      for (const item of items || []) {
+      let pageCount = 0;
+      let pageNumber = 0;
+      while (true) {
+        if (++pageNumber > 1000) throw new Error('휴지통 정리 페이지 한도를 넘어 다음 로그인에서 이어서 진행합니다.');
+        const items = await store.listExpiredTrash(scope, 20);
         if (!maintenanceIsCurrent(state)) return false;
-        state.failedSetId = item.id;
-        await store.beginSetPurge(item.id, 'expired', teacherState);
-        let result = { done: false };
-        let guard = 0;
-        while (!result.done && guard++ < 1000) {
+        pageCount = (items || []).length;
+        state.lastPageCount = pageCount;
+        for (const item of items || []) {
           if (!maintenanceIsCurrent(state)) return false;
-          result = await store.continueSetPurge(item.id);
+          state.failedSetId = item.id;
+          await store.beginSetPurge(item.id, 'expired', teacherState);
+          let result = { done: false };
+          let guard = 0;
+          while (!result.done && guard++ < 1000) {
+            if (!maintenanceIsCurrent(state)) return false;
+            result = await store.continueSetPurge(item.id);
+          }
+          if (!result.done) throw new Error('정리 작업이 너무 오래 걸려 다음 로그인에서 이어서 진행합니다.');
         }
-        if (!result.done) throw new Error('정리 작업이 너무 오래 걸려 다음 로그인에서 이어서 진행합니다.');
+        if (pageCount < 20) break;
       }
       state.warning = '';
       state.failedSetId = '';
       state.retryCount = 0;
+      state.completed = true;
       return true;
     } catch (error) {
       if (!maintenanceIsCurrent(state)) return false;
@@ -1281,13 +1290,23 @@ function runTrashMaintenancePage() {
       }
       return false;
     } finally {
-      if (trashMaintenance === state) state.promise = null;
+      if (trashMaintenance === state) {
+        if (state.completed) state.completedPromise = state.promise;
+        state.promise = null;
+      }
     }
   })();
   return state.promise;
 }
 
 function startTrashMaintenance(authGeneration) {
+  if (trashMaintenance && !trashMaintenance.stopped &&
+      trashMaintenance.uid === (teacherUser && teacherUser.uid) &&
+      trashMaintenance.authGeneration === authGeneration) {
+    return trashMaintenance.promise || (trashMaintenance.completed
+      ? trashMaintenance.completedPromise
+      : runTrashMaintenancePage());
+  }
   stopTrashMaintenance();
   if (!AuthCore.isTeacher(teacherState) || !teacherUser ||
       !store.listExpiredTrash || !store.beginSetPurge || !store.continueSetPurge ||
@@ -1296,7 +1315,7 @@ function startTrashMaintenance(authGeneration) {
   const state = trashMaintenance = {
     uid: teacherUser.uid, role: teacherState.role, authGeneration,
     stopped: false, promise: null, retryTimer: null, retryCount: 0,
-    warning: '', failedSetId: '', lastPageCount: 0
+    warning: '', failedSetId: '', lastPageCount: 0, completed: false, completedPromise: null
   };
   return runTrashMaintenancePage();
 }

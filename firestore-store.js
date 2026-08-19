@@ -182,6 +182,7 @@
 
   function createFirestoreStore(db, fieldValue, nowFn) {
     let serverOffset = 0;
+    const serverNow = () => nowFn() + serverOffset;
     const serverTimestampProbe = fieldValue && typeof fieldValue.serverTimestamp === 'function'
       ? fieldValue.serverTimestamp()
       : null;
@@ -568,7 +569,7 @@
         }
         const owner = set.ownerUid === current.uid;
         const admin = current.role === 'admin';
-        const expired = collaboration.trashRetention({ trashedAt: trashDateMillis(set) }, nowFn()).expired;
+        const expired = collaboration.trashRetention({ trashedAt: trashDateMillis(set) }, serverNow()).expired;
         if (purgeMode === 'immediate' && !owner) {
           throw new Error('즉시 영구 삭제는 소유자만 시작할 수 있습니다.');
         }
@@ -684,7 +685,7 @@
         listQuizSets({ ...listOptions, lifecycleState: 'trashed' }),
         listQuizSets({ ...listOptions, lifecycleState: 'purging' })
       ]);
-      const now = nowFn();
+      const now = serverNow();
       return trashed.concat(purging).filter(set =>
         set.purgeStartedAt || collaboration.trashRetention(set, now).expired
       ).slice(0, max);
@@ -1769,7 +1770,7 @@
       },
 
       serverNow() {
-        return nowFn() + serverOffset;
+        return serverNow();
       },
 
       claimSessionCode
