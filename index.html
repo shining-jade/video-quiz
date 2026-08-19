@@ -1210,6 +1210,96 @@ let clockPromise = null;
 let clockPromiseUid = '';
 let teacherAuthVersion = 0;
 let appliedTeacherState = AuthCore.teacherState(null, null);
+let trashMaintenance = null;
+
+function maintenanceCanonicalEmail(value) {
+  if (typeof CollaborationTrashCore !== 'undefined' && CollaborationTrashCore.canonicalEmail) {
+    return CollaborationTrashCore.canonicalEmail(value);
+  }
+  return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+function maintenanceIsCurrent(state) {
+  return !!state && trashMaintenance === state && !state.stopped &&
+    AuthCore.isTeacher(teacherState) && !!teacherUser &&
+    teacherUser.uid === state.uid && teacherAuthVersion === state.authGeneration &&
+    (!clockUserId || clockUserId === state.uid);
+}
+
+function stopTrashMaintenance() {
+  const state = trashMaintenance;
+  if (!state) return;
+  state.stopped = true;
+  if (state.retryTimer != null && typeof clearTimeout === 'function') clearTimeout(state.retryTimer);
+  state.retryTimer = null;
+  state.promise = null;
+  trashMaintenance = null;
+}
+
+function runTrashMaintenancePage() {
+  const state = trashMaintenance;
+  if (!state || state.stopped) return false;
+  if (state.promise) return state.promise;
+  state.promise = (async () => {
+    try {
+      if (!maintenanceIsCurrent(state) || !store.listExpiredTrash || !store.beginSetPurge || !store.continueSetPurge) return false;
+      if (state.role === 'admin' && typeof store.getCounterMigrationState === 'function') {
+        const gate = await store.getCounterMigrationState();
+        if (gate && gate.ready === false) return false;
+      }
+      const scope = state.role === 'admin'
+        ? { role: 'admin' } : { ownerUid: state.uid, role: state.role };
+      const items = await store.listExpiredTrash(scope, 20);
+      if (!maintenanceIsCurrent(state)) return false;
+      state.lastPageCount = (items || []).length;
+      for (const item of items || []) {
+        if (!maintenanceIsCurrent(state)) return false;
+        state.failedSetId = item.id;
+        await store.beginSetPurge(item.id, 'expired', teacherState);
+        let result = { done: false };
+        let guard = 0;
+        while (!result.done && guard++ < 1000) {
+          if (!maintenanceIsCurrent(state)) return false;
+          result = await store.continueSetPurge(item.id);
+        }
+        if (!result.done) throw new Error('정리 작업이 너무 오래 걸려 다음 로그인에서 이어서 진행합니다.');
+      }
+      state.warning = '';
+      state.failedSetId = '';
+      state.retryCount = 0;
+      return true;
+    } catch (error) {
+      if (!maintenanceIsCurrent(state)) return false;
+      state.warning = error && error.message ? error.message : String(error);
+      state.retryCount = (Number(state.retryCount) || 0) + 1;
+      if (typeof toast === 'function') toast('휴지통 자동 정리 실패 — 다음 로그인에서 재시도합니다: ' + state.warning);
+      if (state.retryCount <= 1 && typeof setTimeout === 'function') {
+        state.retryTimer = setTimeout(() => {
+          state.retryTimer = null;
+          if (maintenanceIsCurrent(state)) runTrashMaintenancePage();
+        }, 1000);
+      }
+      return false;
+    } finally {
+      if (trashMaintenance === state) state.promise = null;
+    }
+  })();
+  return state.promise;
+}
+
+function startTrashMaintenance(authGeneration) {
+  stopTrashMaintenance();
+  if (!AuthCore.isTeacher(teacherState) || !teacherUser ||
+      !store.listExpiredTrash || !store.beginSetPurge || !store.continueSetPurge ||
+      teacherAuthVersion !== authGeneration ||
+      (clockUserId && clockUserId !== teacherUser.uid)) return Promise.resolve(false);
+  const state = trashMaintenance = {
+    uid: teacherUser.uid, role: teacherState.role, authGeneration,
+    stopped: false, promise: null, retryTimer: null, retryCount: 0,
+    warning: '', failedSetId: '', lastPageCount: 0
+  };
+  return runTrashMaintenancePage();
+}
 
 function teacherAuthMarkup() {
   if (!teacherUser) {
@@ -1310,6 +1400,7 @@ async function applyTeacherUser(user) {
   const heartbeatOwner = heartbeatState && AuthCore.isTeacher(teacherState)
     ? { uid: teacherState.uid, email: teacherState.email } : null;
   if (heartbeatState) heartbeatState.stopActivationHeartbeat();
+  if (typeof stopTrashMaintenance === 'function') stopTrashMaintenance();
   const updateVersion = ++teacherAuthVersion;
   if (typeof authReady !== 'undefined' && authReady && previousUid && (!user || user.uid !== previousUid)) {
     retractProtectedTeacherScreen();
@@ -1346,6 +1437,17 @@ async function applyTeacherUser(user) {
       typeof recoverPendingAllocationsForTeacher === 'function') {
     await recoverPendingAllocationsForTeacher(teacherState);
     if (updateVersion !== teacherAuthVersion) return false;
+  }
+  if (AuthCore.isTeacher(teacherState) && typeof startTrashMaintenance === 'function' &&
+      store && store.listExpiredTrash) {
+    const maintenanceUser = teacherUser;
+    const maintenanceGeneration = updateVersion;
+    const maintenanceClock = typeof ensureClock === 'function' && store.syncClock
+      ? ensureClock(maintenanceUser) : Promise.resolve();
+    maintenanceClock.then(() => {
+      if (teacherUser === maintenanceUser && teacherAuthVersion === maintenanceGeneration &&
+          AuthCore.isTeacher(teacherState)) startTrashMaintenance(maintenanceGeneration);
+    }).catch(error => console.error('휴지통 자동 정리 시각 동기화 실패', error));
   }
   if (heartbeatState && typeof pl !== 'undefined' && pl === heartbeatState &&
       heartbeatOwner && AuthCore.isTeacher(teacherState) &&
@@ -1433,6 +1535,7 @@ async function requireTeacher(next) {
     if (!teacherUser || teacherUser.uid !== user.uid || !AuthCore.isTeacher(teacherState)) {
       return requireTeacher(next);
     }
+    if (typeof startTrashMaintenance === 'function') startTrashMaintenance(teacherAuthVersion);
     next();
   } catch (error) {
     showTeacherAuthError(error);
@@ -1451,6 +1554,7 @@ async function requireAdmin(next) {
     if (!teacherUser || teacherUser.uid !== user.uid || !AuthCore.isAdmin(teacherState)) {
       return requireAdmin(next);
     }
+    if (typeof startTrashMaintenance === 'function') startTrashMaintenance(teacherAuthVersion);
     next();
   } catch (error) {
     showTeacherAuthError(error);
@@ -5684,6 +5788,84 @@ function dashExportCSV() {
    ══════════════════════════════════════════════════════════════════════ */
 let adm = null;
 
+function admTeacherAccounts() {
+  if (!AuthCore.isAdmin(teacherState)) return Promise.reject(new Error('관리자 권한이 필요합니다.'));
+  const state = adm || (adm = { allowances: {} });
+  state.loadingAllowances = true;
+  return store.listTeacherAllowances(teacherState).then(items => {
+    state.allowances = {};
+    Object.entries(items || {}).forEach(([email, allowance]) => {
+      const normalized = maintenanceCanonicalEmail(email);
+      if (normalized) state.allowances[normalized] = allowance || {};
+    });
+    state.loadingAllowances = false;
+    const rows = Object.entries(state.allowances).sort(([a], [b]) => a.localeCompare(b)).map(([email, allowance]) => {
+      const self = email === maintenanceCanonicalEmail(teacherState.email);
+      const role = allowance.role === 'admin' ? 'admin' : 'teacher';
+      const enabled = allowance.enabled === true;
+      return '<div class="row" style="justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)" data-teacher-email="' + esc(email) + '">' +
+        '<span><b>' + esc(email) + '</b> <span class="hint">' + (enabled ? '활성' : '비활성') + '</span></span>' +
+        '<span class="row" style="gap:6px"><select data-teacher-role="' + esc(email) + '"' + (self ? ' disabled' : '') + '>' +
+          '<option value="teacher"' + (role === 'teacher' ? ' selected' : '') + '>teacher</option>' +
+          '<option value="admin"' + (role === 'admin' ? ' selected' : '') + '>admin</option></select>' +
+          '<button class="btn sm" data-teacher-save="' + esc(email) + '"' + (self ? ' disabled title="현재 관리자 계정은 보호됩니다."' : '') + '>저장</button>' +
+          '<button class="btn sm danger" data-teacher-disable="' + esc(email) + '"' + (self ? ' disabled title="현재 관리자 계정은 보호됩니다."' : '') + '>비활성화</button></span></div>';
+    }).join('');
+    const maintenanceWarning = typeof trashMaintenance !== 'undefined' && trashMaintenance && trashMaintenance.warning
+      ? '<div class="notice bad">휴지통 자동 정리 실패' + (trashMaintenance.failedSetId ? ' (' + esc(trashMaintenance.failedSetId) + ')' : '') + ': ' + esc(trashMaintenance.warning) + ' <button class="btn sm" onclick="runTrashMaintenancePage()">재시도</button></div>' : '';
+    return '<div class="card"><h2>승인 교사 계정</h2><p class="sub">승인된 Google 계정만 교사 화면을 사용할 수 있습니다. 현재 관리자 계정은 자기 역할 하향·비활성화가 잠겨 있습니다.</p>' + maintenanceWarning +
+      '<form id="adm-teacher-add" class="row" style="margin:10px 0"><input id="adm-teacher-email" type="email" placeholder="교사 Google 이메일" required style="flex:1 1 260px"><select id="adm-teacher-role"><option value="teacher">teacher</option><option value="admin">admin</option></select><button class="btn primary" type="submit">승인 추가</button></form>' +
+      '<div id="adm-teacher-error" class="notice bad" style="display:none"></div><div id="adm-teacher-list">' + (rows || '<div class="empty">등록된 계정이 없습니다.</div>') + '</div></div>';
+  }).catch(error => {
+    state.loadingAllowances = false;
+    throw error;
+  });
+}
+
+async function admSaveTeacherAllowance(email, role, enabled) {
+  if (!AuthCore.isAdmin(teacherState)) throw new Error('관리자 권한이 필요합니다.');
+  const normalized = maintenanceCanonicalEmail(email);
+  if (!normalized || !normalized.includes('@')) throw new Error('유효한 이메일을 입력해 주세요.');
+  const self = normalized === maintenanceCanonicalEmail(teacherState.email);
+  if (self && (enabled === false || role === 'teacher')) throw new Error('현재 관리자 계정은 자기 계정을 낮추거나 비활성화할 수 없습니다.');
+  if (enabled === false && adm && adm.allowances && adm.allowances[normalized] && adm.allowances[normalized].role === 'admin' &&
+      typeof confirm === 'function' && !confirm(normalized + ' 관리자 계정을 비활성화할까요?')) return false;
+  const actor = Object.assign({}, teacherState, { authGeneration: teacherAuthVersion, currentAuthGeneration: teacherAuthVersion });
+  if (enabled === false) await store.disableTeacherAllowance(normalized, actor);
+  else await store.upsertTeacherAllowance(normalized, role === 'admin' ? 'admin' : 'teacher', actor);
+  await admTeacherAccounts();
+  if (typeof admRenderBody === 'function') admRenderBody();
+  return true;
+}
+
+function admAccountsView() {
+  const state = adm;
+  const body = $('#adm-body');
+  if (!body) return;
+  body.innerHTML = '<div class="empty">계정을 불러오는 중…</div>';
+  return admTeacherAccounts().then(markup => {
+    if (adm !== state) return;
+    body.innerHTML = markup;
+    const form = $('#adm-teacher-add');
+    if (form) form.onsubmit = async event => {
+      event.preventDefault();
+      try { await admSaveTeacherAllowance($('#adm-teacher-email').value, $('#adm-teacher-role').value, true); }
+      catch (error) { const box = $('#adm-teacher-error'); if (box) { box.textContent = error.message; box.style.display = 'block'; } }
+    };
+    body.querySelectorAll('[data-teacher-save]').forEach(button => {
+      button.onclick = () => {
+        const row = button.closest('[data-teacher-email]');
+        const roleSelect = row && row.querySelector('[data-teacher-role]');
+        return admSaveTeacherAllowance(button.dataset.teacherSave, roleSelect ? roleSelect.value : 'teacher', true)
+          .catch(error => alert(error.message));
+      };
+    });
+    body.querySelectorAll('[data-teacher-disable]').forEach(button => {
+      button.onclick = () => admSaveTeacherAllowance(button.dataset.teacherDisable, 'teacher', false).catch(error => alert(error.message));
+    });
+  }).catch(error => { body.innerHTML = '<div class="card"><div class="empty">계정 목록을 불러오지 못했습니다: ' + esc(error.message) + '</div></div>'; });
+}
+
 function screenAdmin() {
   adm = {
     sessions: {}, resp: {}, sets: {},
@@ -5723,6 +5905,7 @@ function admRenderShell() {
           '<button class="btn sm" onclick="admTab(\'students\')">학생별 누적</button>' +
           '<button class="btn sm" onclick="admTab(\'classes\')">학년·반 집계</button>' +
           '<div style="flex:1"></div>' +
+          '<button class="btn sm ghost" onclick="admTab(\'accounts\')">👥 교사 계정</button>' +
           '<button class="btn sm ghost" onclick="admTab(\'manage\')">⚙ 관리</button>' +
         '</div>' +
       '</div>' +
@@ -5941,6 +6124,7 @@ function admCompute() {
 function admRenderBody() {
   const body = $('#adm-body');
   if (!body || adm.loading) return;
+  if (adm.tab === 'accounts') { admAccountsView(); return; }
   if (adm.rangeRejected) {
     adm.displayedSessionIds = [];
     body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' +

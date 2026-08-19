@@ -811,6 +811,19 @@ test('allowance API canonicalizes email and writes audited admin changes', async
   );
 });
 
+test('휴지통 자동 정리는 counter migration gate가 해제된 경우에만 허용된다', async () => {
+  const ready = makeFirestoreFake({
+    'migration_gates/set_counters': {
+      locked: false, lockId: 'gate-1', projectId: 'video-quiz-65798', targetMode: 'production',
+      lockedAt: new Date(1), lockedByUid: 'admin', unlockedAt: new Date(2), unlockedByUid: 'admin'
+    }
+  });
+  const store = createStore(ready);
+  assert.equal((await store.getCounterMigrationState()).ready, true);
+  const locked = makeFirestoreFake({ 'migration_gates/set_counters': { locked: true } });
+  assert.equal((await createStore(locked).getCounterMigrationState()).ready, false);
+});
+
 test('allowance API rejects non-admin, invalid role, empty email and stale auth generation before writes', async () => {
   const fake = makeFirestoreFake({
     'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
@@ -7693,6 +7706,105 @@ test('admin Google 역할을 통과한 관리자 화면은 폐기된 비밀번�
     ['cleanup', 'function'],
     ['render']
   ]);
+});
+
+test('관리자 교사 계정 화면은 canonical 이메일과 자기 계정 보호를 표시한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const body = { innerHTML: '' };
+  const context = {
+    adm: { allowances: {}, loadingAllowances: false },
+    teacherState: { uid: 'admin-uid', email: ' Admin@School.KR ', role: 'admin', status: 'admin' },
+    AuthCore: { isAdmin(state) { return !!state && state.role === 'admin'; } },
+    store: {
+      async listTeacherAllowances() {
+        return {
+          ' Admin@School.KR ': { enabled: true, role: 'admin' },
+          'teacher@school.kr': { enabled: true, role: 'teacher' }
+        };
+      }
+    },
+    $() { return body; },
+    esc(value) { return String(value); },
+    collaboration: { canonicalEmail(value) { return String(value || '').trim().toLowerCase(); } },
+    admRenderBody() {}
+  };
+  loadStageFunctions(['maintenanceCanonicalEmail', 'admTeacherAccounts'], context);
+  const markup = await context.admTeacherAccounts();
+  assert.match(markup, /teacher@school\.kr/);
+  assert.match(markup, /disabled/);
+  assert.match(markup, /admin@school\.kr/);
+  assert.equal(context.adm.allowances['admin@school.kr'].role, 'admin');
+});
+
+test('휴지통 로그인 정리는 owner/admin 범위를 지키고 한 번에 한 세트만 처리한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [], resolvers = [];
+  const context = {
+    teacherUser: { uid: 'owner-uid', email: 'owner@school.kr' },
+    teacherState: { uid: 'owner-uid', email: 'owner@school.kr', role: 'teacher', status: 'teacher' },
+    teacherAuthVersion: 9, clockUserId: 'owner-uid', authReady: true,
+    trashMaintenance: null,
+    AuthCore: { isTeacher(state) { return !!state && (state.role === 'teacher' || state.role === 'admin'); } },
+    store: {
+      async listExpiredTrash(scope, limit) {
+        calls.push(['list', scope, limit]);
+        return [{ id: 'expired-1' }];
+      },
+      async beginSetPurge(id, mode, actor) {
+        calls.push(['begin', id, mode, actor.uid]);
+        return { started: true };
+      },
+      continueSetPurge(id) {
+        calls.push(['continue', id]);
+        return new Promise(resolve => resolvers.push(resolve));
+      }
+    },
+    toast() {}, setTimeout() { return 1; }, clearTimeout() {}
+  };
+  loadStageFunctions(['maintenanceIsCurrent', 'startTrashMaintenance', 'runTrashMaintenancePage', 'stopTrashMaintenance'], context);
+  const started = context.startTrashMaintenance(9);
+  const second = context.runTrashMaintenancePage();
+  assert.equal(second, context.trashMaintenance.promise);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(item => item[0] === 'continue').length, 1);
+  resolvers.shift()({ done: true, parentDeleted: true });
+  await started;
+  assert.deepEqual(calls.slice(0, 3).map(item => item[0]), ['list', 'begin', 'continue']);
+  assert.equal(calls[0][1].ownerUid, 'owner-uid');
+  assert.equal(calls[0][1].role, 'teacher');
+  assert.equal(calls[0][2], 20);
+  assert.equal(calls[1][1], 'expired-1');
+  assert.equal(calls[1][2], 'expired');
+  assert.equal(calls[1][3], 'owner-uid');
+  assert.equal(calls[2][1], 'expired-1');
+  context.teacherAuthVersion = 10;
+  context.stopTrashMaintenance();
+  assert.equal(context.trashMaintenance, null);
+});
+
+test('관리자 휴지통 정리는 실패를 화면에 남기고 앱 진입을 막지 않는다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const notices = [];
+  let timer;
+  const context = {
+    teacherUser: { uid: 'admin-uid', email: 'admin@school.kr' },
+    teacherState: { uid: 'admin-uid', email: 'admin@school.kr', role: 'admin', status: 'admin' },
+    teacherAuthVersion: 2, clockUserId: 'admin-uid', trashMaintenance: null,
+    AuthCore: { isTeacher() { return true; }, isAdmin() { return true; } },
+    store: {
+      async listExpiredTrash(scope, limit) { if (!scope || scope.role !== 'admin' || limit !== 20) throw new Error('bad scope'); return [{ id: 'bad' }]; },
+      async beginSetPurge() { throw new Error('permission-denied'); }
+      , async continueSetPurge() { return { done: true, parentDeleted: true }; }
+    },
+    toast(message) { notices.push(message); },
+    setTimeout(callback, delay) { timer = { callback, delay }; return 4; },
+    clearTimeout() {}
+  };
+  loadStageFunctions(['maintenanceIsCurrent', 'startTrashMaintenance', 'runTrashMaintenancePage', 'stopTrashMaintenance'], context);
+  await context.startTrashMaintenance(2);
+  assert.match(context.trashMaintenance.warning, /permission-denied/);
+  assert.ok(timer && timer.delay <= 5000);
+  assert.equal(notices.length > 0, true);
 });
 
 test('관리자 기간 삭제는 화면에서 경로를 만들지 않고 저장소 API에 세션 ID를 맡긴다', async () => {

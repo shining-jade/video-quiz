@@ -428,6 +428,20 @@
         .then(allowanceData);
     }
 
+    async function getCounterMigrationState() {
+      const snapshot = await db.doc('migration_gates/set_counters').get({ source: 'server' });
+      if (!snapshot || !snapshot.exists) return { ready: false, reason: 'missing' };
+      const data = snapshot.data() || {};
+      const required = ['locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid',
+        'unlockedAt', 'unlockedByUid'];
+      const complete = required.every(key => data[key] != null);
+      const ready = complete && data.locked === false &&
+        typeof data.lockId === 'string' && data.lockId.length > 0 &&
+        typeof data.projectId === 'string' && data.projectId.length > 0 &&
+        ['production', 'emulator'].includes(data.targetMode);
+      return { ready, locked: data.locked === true, projectId: data.projectId || '', targetMode: data.targetMode || '', reason: ready ? '' : 'locked-or-incomplete' };
+    }
+
     async function listQuizSets(options) {
       const config = options || {};
       let query = db.collection('quiz_sets');
@@ -1649,6 +1663,7 @@
       listTeacherAllowances,
       upsertTeacherAllowance,
       disableTeacherAllowance,
+      getCounterMigrationState,
       listQuizSets,
       listTrashQuizSets,
       listTrash,

@@ -54,7 +54,7 @@ function nextPurgeStep(state = {}) {
   return (state.collaboratorsRemaining > 0 || state.imagesRemaining > 0) ? 'children' : 'parent';
 }
 
-module.exports = {
+const CollaborationTrashCoreApi = {
   canonicalEmail,
   setAccess,
   trashDeadlineMs,
@@ -63,3 +63,5 @@ module.exports = {
   nextPurgeStep
 };
 
+if (typeof module === 'object' && module.exports) module.exports = CollaborationTrashCoreApi;
+else if (typeof globalThis !== 'undefined') globalThis.CollaborationTrashCore = CollaborationTrashCoreApi;
