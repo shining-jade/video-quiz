@@ -103,18 +103,52 @@
   function publicQuestion(flatQuestion, number, total, image) {
     const question = flatQuestion || {};
     const choices = question.choices == null ? [] : question.choices;
-    if (!Array.isArray(choices) || choices.length > 6 || choices.some(choice => typeof choice !== 'string')) {
+    if (!Array.isArray(choices) || choices.length > 6 || choices.some(choice =>
+      typeof choice !== 'string' || choice.length > 200)) {
       throw new Error('공개 문항 보기는 문자열 6개 이하이어야 합니다.');
     }
+    const text = String(question.text || '');
+    if (text.length > 1000) throw new Error('공개 문항은 1000자 이하여야 합니다.');
     const value = {
       number,
       total,
       type: String(question.type || 'choice'),
-      text: String(question.text || ''),
+      text,
       choices: choices.slice()
     };
-    if (typeof image === 'string' && image) value.image = image;
+    if (typeof image === 'string' && image) {
+      const permitted = image.startsWith('data:image/') || /^https:\/\//i.test(image);
+      if (!permitted || image.length > 380100) {
+        throw new Error('공개 이미지는 허용된 형식과 크기여야 합니다.');
+      }
+      value.image = image;
+    }
     return value;
+  }
+
+  function validateStudentAnswer(publicQuestionValue, answer) {
+    const question = publicQuestionValue || {};
+    const type = String(question.type || 'choice');
+    const choices = Array.isArray(question.choices) ? question.choices : [];
+    if (type === 'choice' || type === 'mc') {
+      if (!Number.isInteger(answer) || answer < 0 || answer >= choices.length) {
+        throw new Error('객관식 답안이 보기 범위를 벗어났습니다.');
+      }
+    } else if (type === 'multi') {
+      if (!Array.isArray(answer) || answer.length < 1 || answer.length > choices.length ||
+          answer.some(value => !Number.isInteger(value) || value < 0 || value >= choices.length) ||
+          new Set(answer).size !== answer.length) {
+        throw new Error(new Set(answer || []).size !== (answer || []).length
+          ? '복수 선택 답안에 중복이 있습니다.' : '복수 선택 답안이 보기 범위를 벗어났습니다.');
+      }
+    } else if (type === 'short') {
+      if (typeof answer !== 'string' || answer.length > 100) throw new Error('단답형 답안은 100자 이하여야 합니다.');
+    } else if (type === 'long') {
+      if (typeof answer !== 'string' || answer.length > 1000) throw new Error('서술형 답안은 1000자 이하여야 합니다.');
+    } else {
+      throw new Error('지원하지 않는 문항 유형입니다.');
+    }
+    return true;
   }
 
   function publicAnswer(flatQuestion) {
@@ -133,11 +167,13 @@
       }
       value.accept = accepted.slice(0, 20).map(answer => answer.slice(0, 100));
     } else if (type === 'long') {
-      value.explain = typeof question.explain === 'string' ? question.explain : '';
+      value.explain = typeof question.explain === 'string' ? question.explain.slice(0, 1000) : '';
     } else {
       value.answer = question.answer;
     }
-    if (type !== 'long' && typeof question.explain === 'string') value.explain = question.explain;
+    if (type !== 'long' && typeof question.explain === 'string') {
+      value.explain = question.explain.slice(0, 1000);
+    }
     return value;
   }
 
@@ -1195,6 +1231,7 @@
     createFirestoreStore,
     estimateBatchRequest,
     publicQuestion,
+    validateStudentAnswer,
     publicAnswer,
     createLiveToken,
     liveIdentity

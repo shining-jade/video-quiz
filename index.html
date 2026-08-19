@@ -1287,12 +1287,17 @@ function retryPendingAllocations() {
 }
 
 async function applyTeacherUser(user) {
+  const previousState = teacherState;
+  const previousUid = teacherUser && teacherUser.uid || '';
   const heartbeatState = typeof pl !== 'undefined' && pl &&
     typeof pl.stopActivationHeartbeat === 'function' ? pl : null;
   const heartbeatOwner = heartbeatState && AuthCore.isTeacher(teacherState)
     ? { uid: teacherState.uid, email: teacherState.email } : null;
   if (heartbeatState) heartbeatState.stopActivationHeartbeat();
   const updateVersion = ++teacherAuthVersion;
+  if (typeof authReady !== 'undefined' && authReady && previousUid && (!user || user.uid !== previousUid)) {
+    retractProtectedTeacherScreen();
+  }
   teacherUser = null;
   teacherAllowance = null;
   teacherState = AuthCore.teacherState(null, null);
@@ -1336,6 +1341,7 @@ async function applyTeacherUser(user) {
     );
   }
   renderTeacherAuthArea();
+  if (typeof authReady !== 'undefined' && authReady) reconcileTeacherRoute(previousState, teacherState);
   return true;
 }
 
@@ -1428,15 +1434,56 @@ async function requireAdmin(next) {
 }
 
 function ensureAnonymousStudent() {
-  const user = firebase.auth().currentUser;
+  const auth = firebase.auth();
+  const user = auth.currentUser;
   const signedIn = user && user.isAnonymous
     ? Promise.resolve(user)
-    : firebase.auth().signInAnonymously().then(result => result.user);
-  return signedIn.then(ensureClock);
+    : auth.signInAnonymously().then(result => result.user);
+  return signedIn.then(async pinned => {
+    await ensureClock(pinned);
+    const current = firebase.auth().currentUser;
+    if (!current || !current.isAnonymous || current.uid !== pinned.uid) {
+      throw new Error('학생 인증 계정이 준비 중 변경되었습니다. 다시 시도해 주세요.');
+    }
+    return pinned;
+  });
 }
 
 /* Firebase 인증 상태가 처음 확인되기 전에는 라우팅을 잠시 미뤄 둔다. */
 let authReady = false;
+
+function teacherRouteRequirement() {
+  const name = location.hash.replace(/^#\/?/, '').split('/')[0] || 'home';
+  if (name === 'admin') return 'admin';
+  return ['sets', 'make', 'play', 'live'].includes(name) ? 'teacher' : '';
+}
+
+function retractProtectedTeacherScreen() {
+  if (!authReady || !teacherRouteRequirement()) return false;
+  runCleanups();
+  APP().innerHTML = topbar() +
+    '<div class="wrap"><div class="empty">인증 상태를 다시 확인하는 중…</div></div>';
+  return true;
+}
+
+function reconcileTeacherRoute(previous, next) {
+  if (!authReady) return false;
+  const requirement = teacherRouteRequirement();
+  if (!requirement) return false;
+  const allowed = requirement === 'admin' ? AuthCore.isAdmin(next) : AuthCore.isTeacher(next);
+  const identityChanged = String(previous && previous.uid || '') !== String(next && next.uid || '');
+  if (!allowed) {
+    runCleanups();
+    go('home');
+    return true;
+  }
+  if (identityChanged) {
+    runCleanups();
+    router();
+    return true;
+  }
+  return false;
+}
 
 function router() {
   if (!authReady) return;
@@ -4459,7 +4506,7 @@ function screenJoin(codeArg) {
       APP().innerHTML = topbar() + '<div class="wrap"><div class="card">' +
         '<h2>학생 참여를 시작할 수 없습니다</h2>' +
         '<div class="notice" style="margin-top:12px">익명 학생 로그인을 확인한 뒤 다시 시도해 주세요.</div>' +
-        '<button class="btn primary" onclick="screenJoin()">다시 시도</button>' +
+        '<button class="btn primary" onclick="screenJoin(' + JSON.stringify(codeArg || '') + ')">다시 시도</button>' +
       '</div></div>';
     });
 }
@@ -5006,6 +5053,9 @@ function stBuildAnswer() {
     answer = String(st.draft || '').trim().slice(0, type === 'short' ? 100 : 1000);
   } else {
     answer = st.sel;
+  }
+  if (typeof FirestoreStore !== 'undefined' && FirestoreStore.validateStudentAnswer) {
+    FirestoreStore.validateStudentAnswer(q, answer);
   }
   return { payload: { answer }, local: { answer } };
 }

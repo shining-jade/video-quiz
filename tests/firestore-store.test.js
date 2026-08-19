@@ -534,6 +534,24 @@ test('공개 답은 필요한 정답 필드만 복사하고 legacy accept를 안
   );
 });
 
+test('공개 문항 projection은 편집기와 같은 문자열·이미지 경계를 적용한다', () => {
+  const { publicQuestion } = loadStoreModule();
+  assert.throws(() => publicQuestion({ type: 'choice', text: 'x'.repeat(1001), choices: [] }, 1, 1), /문항/);
+  assert.throws(() => publicQuestion({ type: 'choice', text: 'Q', choices: ['x'.repeat(201)] }, 1, 1), /보기/);
+  assert.throws(() => publicQuestion({ type: 'choice', text: 'Q', choices: [] }, 1, 1, 'javascript:alert(1)'), /이미지/);
+  assert.throws(() => publicQuestion({ type: 'choice', text: 'Q', choices: [] }, 1, 1,
+    'data:image/jpeg;base64,' + 'A'.repeat(380101)), /이미지/);
+});
+
+test('학생 응답 client validation은 공개 문항 유형과 같은 경계를 적용한다', () => {
+  const { validateStudentAnswer } = loadStoreModule();
+  assert.doesNotThrow(() => validateStudentAnswer({ type: 'choice', choices: ['A', 'B'] }, 1));
+  assert.throws(() => validateStudentAnswer({ type: 'choice', choices: ['A', 'B'] }, 2), /객관식/);
+  assert.throws(() => validateStudentAnswer({ type: 'multi', choices: ['A', 'B'] }, [0, 0]), /중복/);
+  assert.throws(() => validateStudentAnswer({ type: 'short', choices: [] }, 'x'.repeat(101)), /단답형/);
+  assert.throws(() => validateStudentAnswer({ type: 'long', choices: [] }, 'x'.repeat(1001)), /서술형/);
+});
+
 test('학생 참여는 자기 UID 문서를 먼저 읽고 프로필 필드로 저장한다', async () => {
   const fake = makeFirestoreFake();
   const store = createStore(fake);
@@ -687,7 +705,7 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   await store.saveOwnedQuizSet(
     's1',
     { title: 'A', videos: [], ownerUid: 'spoofed', ownerEmail: 'spoofed@example.com' },
-    { v0q0: 'source-image' },
+    { v0q0: 'source-image', v1q2: 'second-image' },
     { uid: 't1', email: 't@school.kr' }
   );
   assert.equal(fake.value('quiz_sets/s1').ownerUid, 't1');
@@ -704,7 +722,9 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   assert.equal(fake.value('quiz_sets/s2').contentRevision.toMillis(), 50_000);
   assert.equal(copied.ownerUid, 't2');
   assert.equal(copied.ownerEmail, 'other@school.kr');
-  assert.deepEqual(await store.getImages('s2'), { v0q0: 'source-image' });
+  assert.deepEqual(await store.getImages('s2'), {
+    v0q0: 'source-image', v1q2: 'second-image'
+  });
 });
 
 test('replaceImages는 이미지 교체와 부모 contentRevision을 같은 batch에 기록한다', async () => {
@@ -6592,6 +6612,57 @@ test('서술형 채점은 학생 응답을 보존하고 private grade만 변경�
   assert.deepEqual((await store.getOwnResponses('a', 's1'))['3'], {
     answer: '학생 글', submitted: true, revision: 2, submittedAt: 10
   });
+});
+
+test('anonymous identity stays pinned through clock sync and rejects an auth replacement', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let resolveClock;
+  const original = { uid: 'student-a', isAnonymous: true };
+  const replacement = { uid: 'student-b', isAnonymous: true };
+  const auth = { currentUser: original, signInAnonymously() { throw new Error('already anonymous'); } };
+  const context = {
+    firebase: { auth() { return auth; } },
+    ensureClock() { return new Promise(resolve => { resolveClock = resolve; }); }
+  };
+  vm.runInNewContext(extractFunction(html, 'ensureAnonymousStudent'), context);
+  const pending = context.ensureAnonymousStudent();
+  await Promise.resolve();
+  auth.currentUser = replacement;
+  resolveClock();
+  await assert.rejects(pending, /변경/);
+});
+
+test('student join retry preserves the original six-digit code', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(extractFunction(html, 'screenJoin'), /onclick="screenJoin\(' \+ JSON\.stringify\(codeArg \|\| ''\)/);
+});
+
+test('observer auth loss, downgrade, and account replacement retract protected routes', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const events = [];
+  const app = { innerHTML: 'private teacher data' };
+  const context = {
+    authReady: true, location: { hash: '#/sets' }, AuthCore: require('../auth-core.js'),
+    runCleanups() { events.push('cleanup'); }, router() { events.push('router'); },
+    go(route) { events.push('go:' + route); }, APP() { return app; }, topbar() { return '<nav></nav>'; }
+  };
+  vm.runInNewContext(extractFunction(html, 'teacherRouteRequirement') + '\n' +
+    extractFunction(html, 'retractProtectedTeacherScreen') + '\n' +
+    extractFunction(html, 'reconcileTeacherRoute'), context);
+  assert.equal(context.retractProtectedTeacherScreen(), true);
+  assert.doesNotMatch(app.innerHTML, /private teacher data/);
+  events.length = 0;
+  context.reconcileTeacherRoute({ uid: 'teacher-a', role: 'teacher' }, { status: 'signed-out', uid: '', role: '' });
+  assert.deepEqual(events, ['cleanup', 'go:home']);
+  events.length = 0; context.location.hash = '#/admin';
+  context.reconcileTeacherRoute({ uid: 'admin-a', role: 'admin' }, { uid: 'teacher-b', role: 'teacher' });
+  assert.deepEqual(events, ['cleanup', 'go:home']);
+  events.length = 0; context.location.hash = '#/live/session';
+  context.reconcileTeacherRoute({ uid: 'teacher-a', role: 'teacher' }, { uid: 'teacher-b', role: 'teacher' });
+  assert.deepEqual(events, ['cleanup', 'router']);
+  events.length = 0;
+  context.reconcileTeacherRoute({ uid: 'teacher-b', role: 'teacher' }, { uid: 'teacher-b', role: 'teacher' });
+  assert.deepEqual(events, []);
 });
 
 test('teacher grading transaction ignores a stale expected revision and grades the current submitted revision only', async () => {

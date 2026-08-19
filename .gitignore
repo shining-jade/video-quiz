@@ -16,3 +16,8 @@ database.rules.BACKUP.json
 
 # Superpowers 설계 목업 및 검토용 임시 작업공간
 .superpowers/
+
+# 로컬 Node/Firebase Emulator 생성물
+node_modules/
+firestore-debug.log
+firebase-debug.log

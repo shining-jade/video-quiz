@@ -1309,16 +1309,65 @@ rulesTest('current-live-question response validation', async () => {
   await assertSucceeds(updateDoc(own, {
     answers: {
       0: { answer: 1, submitted: true, revision: 1 },
-      1: { answer: 2, submitted: true, revision: 1 }
+      1: { answer: 1, submitted: true, revision: 1 }
     }
   }));
   await assertFails(updateDoc(own, {
     answers: {
       0: { answer: 1, submitted: true, revision: 1 },
-      1: { answer: 2, submitted: true, revision: 1 },
+      1: { answer: 1, submitted: true, revision: 1 },
       2: { answer: 3, submitted: true, revision: 1 }
     }
   }));
+});
+
+rulesTest('response answer shape is bounded by the current public question type', async t => {
+  const cases = [
+    ['choice rejects out of range', { type: 'choice', choices: ['A', 'B'] }, 2],
+    ['choice rejects fractional', { type: 'choice', choices: ['A', 'B'] }, 0.5],
+    ['multi rejects duplicates', { type: 'multi', choices: ['A', 'B', 'C'] }, [0, 0]],
+    ['multi rejects out of range', { type: 'multi', choices: ['A', 'B'] }, [0, 2]],
+    ['short rejects oversized', { type: 'short', choices: [] }, 'x'.repeat(101)],
+    ['long rejects oversized', { type: 'long', choices: [] }, 'x'.repeat(1001)],
+    ['short rejects number', { type: 'short', choices: [] }, 1]
+  ];
+  for (const [name, question, answer] of cases) {
+    await t.test(name, async () => {
+      await resetFirestore();
+      await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+        publicQuestion: { number: 1, total: 1, text: 'Q', ...question }
+      }));
+      await assertFails(updateDoc(doc(actorFirestore('student'), 'sessions/s1/responses/student-uid'), {
+        answers: { 0: { answer, submitted: true, revision: 2 } }
+      }));
+    });
+  }
+  await t.test('normal boundaries succeed', async () => {
+    await resetFirestore();
+    const response = doc(actorFirestore('student'), 'sessions/s1/responses/student-uid');
+    await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+      publicQuestion: { number: 1, total: 1, type: 'multi', text: 'Q', choices: ['A', 'B', 'C'] }
+    }));
+    await assertSucceeds(updateDoc(response, {
+      answers: { 0: { answer: [0, 2], submitted: true, revision: 2 } }
+    }));
+  });
+});
+
+rulesTest('public projection enforces editor-compatible text and image bounds', async () => {
+  const live = doc(actorFirestore('owner'), 'sessions/s1/meta/live');
+  await assertFails(setDoc(live, liveQuestion(0, {
+    publicQuestion: { ...publicQuestion(), text: 'x'.repeat(1001) }
+  })));
+  await assertFails(setDoc(live, liveQuestion(0, {
+    publicQuestion: { ...publicQuestion(), choices: ['x'.repeat(201)] }
+  })));
+  await assertFails(setDoc(live, liveQuestion(0, {
+    publicQuestion: { ...publicQuestion(), image: 'javascript:alert(1)' }
+  })));
+  await assertSucceeds(setDoc(live, liveQuestion(0, {
+    publicQuestion: { ...publicQuestion(), text: 'x'.repeat(1000), choices: ['x'.repeat(200)], image: 'data:image/png;base64,AA==' }
+  })));
 });
 
 rulesTest('fix-round: teacher code allocation reads unused and foreign collision candidates', async () => {
@@ -1544,12 +1593,15 @@ rulesTest('fix-round: response validation rejects stale, closed, and malformed w
     await assertSucceeds(updateDoc(response, {
       answers: {
         0: {
-          answer: 2,
+          answer: 1,
           submitted: true,
           revision: 2,
           submittedAt: Timestamp.fromMillis(2)
         }
       }
+    }));
+    await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+      publicQuestion: { number: 1, total: 1, type: 'multi', text: 'Q', choices: ['A', 'B', 'C'] }
     }));
     await assertSucceeds(updateDoc(response, {
       answers: {
@@ -1607,6 +1659,7 @@ rulesTest('fix-round-2: publicAnswer accept is bounded and string-only', async t
       await assertFails(setDoc(
         doc(actorFirestore('owner'), 'sessions/s1/meta/live'),
         liveQuestion(0, {
+          publicQuestion: { ...publicQuestion(), type: 'short', choices: [] },
           revealed: true,
           publicAnswer: { accept, explain: '공개 해설' }
         })
@@ -1621,6 +1674,7 @@ rulesTest('fix-round-2: publicAnswer accept is bounded and string-only', async t
     await assertSucceeds(setDoc(
       doc(actorFirestore('owner'), 'sessions/s1/meta/live'),
       liveQuestion(0, {
+        publicQuestion: { ...publicQuestion(), type: 'short', choices: [] },
         revealed: true,
         publicAnswer: { accept, explain: '공개 해설' }
       })
@@ -1866,7 +1920,7 @@ const writeMatrix = [
       answers: { 0: { answer: 1, submitted: true, revision: 1 } }
     }),
     updateValue: actorName => actorName === 'student'
-      ? { answers: { 0: { answer: 2, submitted: true, revision: 2 } } }
+      ? { answers: { 0: { answer: 1, submitted: true, revision: 2 } } }
       : { answers: { 0: { answer: 1, submitted: true, revision: 1, ok: true } } },
     allowed: {
       create: ['student'],
