@@ -78,6 +78,7 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
       targetMode: target.targetMode, status: 'failed', safeToDeployStrictRules: false,
       error: String(error && error.message || error)
     };
+    report.targetMode = target.targetMode;
     try {
       await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     } catch (publicationError) {

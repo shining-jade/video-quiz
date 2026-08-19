@@ -99,6 +99,14 @@ service cloud.firestore {
             request.time >= get(path).data.trashedAt + duration.value(30, 'd')));
     }
 
+    function validAuthoritativeCounters(data) {
+      return data.get('collaboratorCount', -1) is int &&
+        data.get('collaboratorCount', -1) >= 0 &&
+        data.get('collaboratorCount', -1) <= 20 &&
+        data.get('imageCount', -1) is int &&
+        data.get('imageCount', -1) >= 0;
+    }
+
     function validSetLifecycleTransition(setId) {
       let before = resource.data;
       let after = request.resource.data;
@@ -108,6 +116,7 @@ service cloud.firestore {
       let collaboratorTarget = /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(collaboratorMutation.email);
       let imageTarget = /databases/$(database)/documents/images/$(setId)/q/$(imageMutation.key);
       return before.ownerUid == after.ownerUid && before.ownerEmail == after.ownerEmail &&
+        validAuthoritativeCounters(before) && validAuthoritativeCounters(after) &&
         changed.hasOnly(['trashedAt', 'purgeStartedAt', 'lifecycleState', 'contentRevision',
           'collaboratorCount', 'collaboratorMutation', 'imageCount', 'imageMutation']) &&
         ((before.get('lifecycleState', 'active') == 'active' &&
@@ -168,17 +177,22 @@ service cloud.firestore {
             ((after.get('collaboratorMutation', {}).action == 'purge-remove' &&
               collaboratorMutation.email is string && exists(collaboratorTarget) &&
               !existsAfter(collaboratorTarget) &&
-              after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) - 1) ||
+              after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) - 1 &&
+              after.get('imageCount', -1) == before.get('imageCount', -1) &&
+              after.get('imageMutation', null) == before.get('imageMutation', null)) ||
              (after.get('imageMutation', {}).action == 'purge-remove' &&
               imageMutation.key is string && exists(imageTarget) && !existsAfter(imageTarget) &&
-              after.get('imageCount', -1) == before.get('imageCount', -1) - 1))));
+              after.get('imageCount', -1) == before.get('imageCount', -1) - 1 &&
+              after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
+              after.get('collaboratorMutation', null) == before.get('collaboratorMutation', null)))));
     }
 
     function validPurgeCollaboratorDelete(setId, email) {
       let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
       let childPath = /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email);
       return canPurgeSet(setId) && exists(childPath) && !existsAfter(childPath) &&
-        get(parentPath).data.get('collaboratorCount', -1) is int &&
+        validAuthoritativeCounters(get(parentPath).data) &&
+        validAuthoritativeCounters(getAfter(parentPath).data) &&
         getAfter(parentPath).data.get('collaboratorCount', -1) ==
           get(parentPath).data.get('collaboratorCount', -1) - 1 &&
         getAfter(parentPath).data.get('collaboratorMutation', {}).email == email &&
@@ -189,7 +203,8 @@ service cloud.firestore {
       let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
       let childPath = /databases/$(database)/documents/images/$(setId)/q/$(key);
       return canPurgeSet(setId) && exists(childPath) && !existsAfter(childPath) &&
-        get(parentPath).data.get('imageCount', -1) is int &&
+        validAuthoritativeCounters(get(parentPath).data) &&
+        validAuthoritativeCounters(getAfter(parentPath).data) &&
         getAfter(parentPath).data.get('imageCount', -1) ==
           get(parentPath).data.get('imageCount', -1) - 1 &&
         getAfter(parentPath).data.get('imageMutation', {}).key == key &&
@@ -200,7 +215,8 @@ service cloud.firestore {
       let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
       let childPath = /databases/$(database)/documents/images/$(setId)/q/$(key);
       return exists(parentPath) && canEditSetAfter(setId) && activeSetAfter(setId) && !exists(childPath) &&
-        existsAfter(childPath) && get(parentPath).data.get('imageCount', -1) is int &&
+        existsAfter(childPath) && validAuthoritativeCounters(get(parentPath).data) &&
+        validAuthoritativeCounters(getAfter(parentPath).data) &&
         getAfter(parentPath).data.get('imageCount', -1) == get(parentPath).data.get('imageCount', -1) + 1 &&
         getAfter(parentPath).data.get('imageMutation', {}).key == key &&
         getAfter(parentPath).data.get('imageMutation', {}).action == 'add';
@@ -210,6 +226,8 @@ service cloud.firestore {
       let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
       let childPath = /databases/$(database)/documents/images/$(setId)/q/$(key);
       return exists(parentPath) && changesSetContentRevisionAfter(setId) && exists(childPath) && existsAfter(childPath) &&
+        validAuthoritativeCounters(get(parentPath).data) &&
+        validAuthoritativeCounters(getAfter(parentPath).data) &&
         get(parentPath).data.get('imageCount', -1) == getAfter(parentPath).data.get('imageCount', -1) &&
         get(parentPath).data.get('imageMutation', null) == getAfter(parentPath).data.get('imageMutation', null);
     }
@@ -218,22 +236,11 @@ service cloud.firestore {
       let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
       let childPath = /databases/$(database)/documents/images/$(setId)/q/$(key);
       return exists(parentPath) && canEditSetAfter(setId) && activeSetAfter(setId) && exists(childPath) &&
-        !existsAfter(childPath) && get(parentPath).data.get('imageCount', -1) is int &&
+        !existsAfter(childPath) && validAuthoritativeCounters(get(parentPath).data) &&
+        validAuthoritativeCounters(getAfter(parentPath).data) &&
         getAfter(parentPath).data.get('imageCount', -1) == get(parentPath).data.get('imageCount', -1) - 1 &&
         getAfter(parentPath).data.get('imageMutation', {}).key == key &&
         getAfter(parentPath).data.get('imageMutation', {}).action == 'remove';
-    }
-
-    function legacyImageWrite(setId, key, creating, deleting) {
-      let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
-      let childPath = /databases/$(database)/documents/images/$(setId)/q/$(key);
-      return canEditSetAfter(setId) && activeSetAfter(setId) &&
-        ((!exists(parentPath) || !('imageCount' in get(parentPath).data))) &&
-        (!exists(parentPath) || getAfter(parentPath).data.get('contentRevision', null) !=
-          get(parentPath).data.get('contentRevision', null)) &&
-        (creating ? (!exists(childPath) && existsAfter(childPath)) :
-          deleting ? (exists(childPath) && !existsAfter(childPath)) :
-          (exists(childPath) && existsAfter(childPath)));
     }
 
     function activeSetAfter(setId) {
@@ -278,7 +285,9 @@ service cloud.firestore {
       let after = request.resource.data.get('collaboratorCount', 0);
       let mutation = request.resource.data.get('collaboratorMutation', {});
       let targetPath = /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(mutation.email);
-      return before is int && before >= 0 && before <= 20 &&
+      return validAuthoritativeCounters(resource.data) &&
+        validAuthoritativeCounters(request.resource.data) &&
+        before is int && before >= 0 && before <= 20 &&
         after is int && after >= 0 && after <= 20 &&
         (after == before ||
           (after == before + 1 &&
@@ -684,7 +693,9 @@ service cloud.firestore {
 
     match /quiz_sets/{setId} {
       allow get: if isApprovedTeacher() &&
-        (activeSet(setId) || ownsSet(setId) || isAdmin() || setId.matches('^__teacher_allowance_probe__.*$'));
+        (!exists(/databases/$(database)/documents/quiz_sets/$(setId)) ||
+          activeSet(setId) || ownsSet(setId) || isAdmin() ||
+          setId.matches('^__teacher_allowance_probe__.*$'));
       allow list: if isApprovedTeacher() &&
         resource.data.keys().hasAll(['lifecycleState']) &&
         (resource.data.lifecycleState == 'active' ||
@@ -694,9 +705,13 @@ service cloud.firestore {
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
         request.resource.data.lifecycleState == 'active' &&
-        request.resource.data.get('collaboratorCount', 0) is int &&
-        request.resource.data.get('collaboratorCount', 0) >= 0 &&
-        request.resource.data.get('collaboratorCount', 0) <= 20;
+        request.resource.data.keys().hasAll(['collaboratorCount', 'imageCount']) &&
+        request.resource.data.collaboratorCount == 0 &&
+        request.resource.data.imageCount == 0 &&
+        !('collaboratorMutation' in request.resource.data) &&
+        !('imageMutation' in request.resource.data) &&
+        !('trashedAt' in request.resource.data) &&
+        !('purgeStartedAt' in request.resource.data);
       allow update: if (canEditSet(setId) && activeSet(setId) &&
         request.resource.data.lifecycleState in ['active', 'trashed', 'purging'] &&
         request.resource.data.ownerUid == resource.data.ownerUid &&
@@ -707,6 +722,7 @@ service cloud.firestore {
         ])) &&
         validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
       allow delete: if canPurgeSet(setId) &&
+        validAuthoritativeCounters(resource.data) &&
         resource.data.get('collaboratorCount', -1) == 0 &&
         resource.data.get('imageCount', -1) == 0;
       allow read, write: if false;
@@ -729,11 +745,10 @@ service cloud.firestore {
 
     match /images/{setId}/q/{questionIndex} {
       allow get, list: if isApprovedTeacher() && activeSet(setId);
-      allow create: if validActiveImageCreate(setId, questionIndex) || legacyImageWrite(setId, questionIndex, true, false);
-      allow update: if validActiveImageUpdate(setId, questionIndex) || legacyImageWrite(setId, questionIndex, false, false);
+      allow create: if validActiveImageCreate(setId, questionIndex);
+      allow update: if validActiveImageUpdate(setId, questionIndex);
       allow delete: if validActiveImageDelete(setId, questionIndex) ||
-        validPurgeImageDelete(setId, questionIndex) ||
-        legacyImageWrite(setId, questionIndex, false, true);
+        validPurgeImageDelete(setId, questionIndex);
       allow read, write: if false;
     }
 

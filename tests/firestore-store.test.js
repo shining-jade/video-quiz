@@ -117,6 +117,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
   const calls = [];
   let pending = Promise.resolve();
   let batchCommitCount = 0;
+  let transactionCommitCount = 0;
 
   const fieldValue = {
     serverTimestamp() {
@@ -366,6 +367,10 @@ function makeFirestoreFake(initial = {}, options = {}) {
       if (options.maxRequestBytes && transactionBytes > options.maxRequestBytes) {
         throw new Error('fake Firestore transaction exceeds byte limit');
       }
+      transactionCommitCount += 1;
+      if (options.failTransactionAt === transactionCommitCount) {
+        throw new Error(options.failTransactionMessage || 'planned transaction failure ' + transactionCommitCount);
+      }
       documents.clear();
       staged.forEach((value, path) => documents.set(path, value));
       touched.forEach(notify);
@@ -501,7 +506,8 @@ test('휴지통 이동과 복원은 소유자 상태 전환을 원자적으로 �
   const fake = makeFirestoreFake({
     'quiz_sets/set-trash': {
       ownerUid: 'owner', ownerEmail: 'owner@school.kr', archived: true,
-      lifecycleState: 'active', trashedAt: null, purgeStartedAt: null
+      lifecycleState: 'active', trashedAt: null, purgeStartedAt: null,
+      collaboratorCount: 0, imageCount: 0
     }
   }, { committedServerMillis: 1_000 });
   const { createFirestoreStore } = loadStoreModule();
@@ -828,7 +834,10 @@ test('allowance API rejects non-admin, invalid role, empty email and stale auth 
 
 test('공동 편집자는 승인된 교사만 소유자 트랜잭션으로 추가·조회·삭제한다', async () => {
   const fake = makeFirestoreFake({
-    'quiz_sets/set1': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', collaboratorCount: 0 },
+    'quiz_sets/set1': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'active',
+      collaboratorCount: 0, imageCount: 0
+    },
     'teacher_allowlist/editor@school.kr': { enabled: true, role: 'teacher' },
     'teacher_allowlist/disabled@school.kr': { enabled: false, role: 'teacher' }
   });
@@ -936,6 +945,9 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   );
   assert.equal(fake.value('quiz_sets/s1').ownerUid, 't1');
   assert.equal(fake.value('quiz_sets/s1').ownerEmail, 't@school.kr');
+  assert.equal(fake.value('quiz_sets/s1').collaboratorCount, 0);
+  assert.equal(fake.value('quiz_sets/s1').imageCount, 2);
+  assert.equal(fake.value('quiz_sets/s1').lifecycleState, 'active');
   assert.equal(fake.value('quiz_sets/s1').contentRevision.toMillis(), 50_000);
 
   const copied = await store.copyOwnedQuizSet(
@@ -945,6 +957,9 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   );
   assert.equal(fake.value('quiz_sets/s2').ownerUid, 't2');
   assert.equal(fake.value('quiz_sets/s2').ownerEmail, 'other@school.kr');
+  assert.equal(fake.value('quiz_sets/s2').collaboratorCount, 0);
+  assert.equal(fake.value('quiz_sets/s2').imageCount, 2);
+  assert.equal(fake.value('quiz_sets/s2').lifecycleState, 'active');
   assert.equal(fake.value('quiz_sets/s2').contentRevision.toMillis(), 50_000);
   assert.equal(copied.ownerUid, 't2');
   assert.equal(copied.ownerEmail, 'other@school.kr');
@@ -953,10 +968,11 @@ test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async
   });
 });
 
-test('replaceImages는 이미지 교체와 부모 contentRevision을 같은 batch에 기록한다', async () => {
+test('replaceImages는 strict counter transaction으로 이미지와 부모 revision을 기록한다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/source': {
-      title: '원본', ownerUid: 'owner', ownerEmail: 'owner@school.kr', contentRevision: 1
+      title: '원본', ownerUid: 'owner', ownerEmail: 'owner@school.kr', contentRevision: 1,
+      lifecycleState: 'active', collaboratorCount: 0, imageCount: 2
     },
     'images/source/q/v0q0': { data: 'old-image' },
     'images/source/q/v0q1': { data: 'delete-image' }
@@ -966,17 +982,17 @@ test('replaceImages는 이미지 교체와 부모 contentRevision을 같은 batc
   await store.replaceImages('source', { v0q0: 'new-image' });
 
   assert.equal(fake.value('quiz_sets/source').contentRevision.toMillis(), 50_000);
+  assert.equal(fake.value('quiz_sets/source').imageCount, 1);
   assert.deepEqual(await store.getImages('source'), { v0q0: 'new-image' });
-  const commit = fake.calls().find(call => call.operation === 'batchCommit');
-  assert.equal(commit.size, 3);
-  assert.ok(fake.calls().some(call => call.operation === 'set' &&
+  assert.ok(fake.calls().some(call => call.operation === 'transactionSet' &&
     call.path === 'quiz_sets/source' && call.options && call.options.merge === true));
 });
 
 test('소유 세트 복사는 이미지 전용 변경과 삭제가 끼어들면 부모 revision으로 재시도한다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/source': {
-      title: '원본', ownerUid: 'owner', ownerEmail: 'owner@school.kr', contentRevision: 1
+      title: '원본', ownerUid: 'owner', ownerEmail: 'owner@school.kr', contentRevision: 1,
+      lifecycleState: 'active', collaboratorCount: 0, imageCount: 2
     },
     'images/source/q/v0q0': { data: 'delete-me' },
     'images/source/q/v0q1': { data: 'old-image' }
@@ -1109,6 +1125,7 @@ test('세트 편집은 관리자 여부와 무관하게 기록된 소유자에�
 
 test('이미지를 문항별 문서로 교체하고 기존 화면 형태로 읽는다', async () => {
   const fake = makeFirestoreFake({
+    'quiz_sets/set1': { lifecycleState: 'active', collaboratorCount: 0, imageCount: 2 },
     'images/set1/q/0': { data: 'old' },
     'images/set1/q/3': { data: 'remove-me' }
   });
@@ -1123,7 +1140,10 @@ test('이미지를 문항별 문서로 교체하고 기존 화면 형태로 읽�
 });
 
 test('기존 JSON의 희소 이미지 배열은 null 슬롯을 이미지 문서로 저장하지 않는다', async () => {
-  const fake = makeFirestoreFake({ 'images/set1/q/1': { data: 'remove-old' } });
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { lifecycleState: 'active', collaboratorCount: 0, imageCount: 1 },
+    'images/set1/q/1': { data: 'remove-old' }
+  });
   const store = createStore(fake);
 
   await store.replaceImages('set1', ['first', null, 'third']);
@@ -1283,7 +1303,9 @@ test('세트 저장은 문서 ID를 중복 저장하지 않고 문항 배열을 
 
   await store.saveQuizSet('set1', { id: 'wrong', title: '저장', questions });
 
-  assert.deepEqual(fake.value('quiz_sets/set1'), { title: '저장', questions });
+  assert.deepEqual(fake.value('quiz_sets/set1'), {
+    title: '저장', questions, lifecycleState: 'active', collaboratorCount: 0, imageCount: 0
+  });
 });
 
 test('세트 숨김 패치는 다른 필드를 보존한다', async () => {
@@ -1337,7 +1359,7 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
   assert.deepEqual(copied, {
     id: 'copy', title: '원본 (사본)', author: '새 교사',
     questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100,
-    collaboratorCount: 0, lifecycleState: 'active'
+    collaboratorCount: 0, imageCount: 0, lifecycleState: 'active'
   });
   assert.deepEqual(fake.value('quiz_sets/source'), {
     title: '원본', author: '교사', questions: [{ type: 'choice', text: '문항' }]
@@ -1348,11 +1370,65 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
   assert.deepEqual(storedCopy, {
     title: '원본 (사본)', author: '새 교사',
     questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100,
-    collaboratorCount: 0, lifecycleState: 'active'
+    collaboratorCount: 0, imageCount: 2, lifecycleState: 'active',
+    imageMutation: { key: 'v0q2', action: 'add' }
   });
   assert.deepEqual(await store.getImages('copy'), { v0q0: 'first-image', v0q2: 'third-image' });
   assert.equal(fake.value('images/copy/q/v0q0').data, 'first-image');
   assert.equal(fake.has('images/copy/q/0'), false);
+});
+
+test('모든 새 세트 저장은 빈 authoritative counters와 active lifecycle로 시작한다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  await store.saveQuizSet('plain', {
+    ownerUid: 'owner', ownerEmail: 'owner@school.kr', title: '일반 저장',
+    lifecycleState: 'purging', collaboratorCount: 7, imageCount: -1,
+    collaboratorMutation: { email: 'x@school.kr', action: 'add' },
+    imageMutation: { key: 'q', action: 'add' }, trashedAt: 1, purgeStartedAt: 2
+  });
+  assert.deepEqual(fake.value('quiz_sets/plain'), {
+    ownerUid: 'owner', ownerEmail: 'owner@school.kr', title: '일반 저장',
+    lifecycleState: 'active', collaboratorCount: 0, imageCount: 0
+  });
+
+  await store.saveOwnedQuizSet('owned', {
+    title: '소유 저장', lifecycleState: 'trashed', collaboratorCount: 3, imageCount: -1,
+    collaboratorMutation: { email: 'x@school.kr', action: 'add' },
+    imageMutation: { key: 'q', action: 'add' }, trashedAt: 1, purgeStartedAt: 2
+  }, {}, { uid: 'owner', email: 'owner@school.kr' });
+  const owned = fake.value('quiz_sets/owned');
+  assert.equal(owned.lifecycleState, 'active');
+  assert.equal(owned.collaboratorCount, 0);
+  assert.equal(owned.imageCount, 0);
+  assert.equal(owned.collaboratorMutation, undefined);
+  assert.equal(owned.imageMutation, undefined);
+  assert.equal(owned.trashedAt, undefined);
+  assert.equal(owned.purgeStartedAt, undefined);
+});
+
+test('legacy 또는 음수 counter 세트의 이미지 저장은 migration 전 fail-closed다', async () => {
+  for (const [name, parent] of [
+    ['missing', { ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'active' }],
+    ['negative', { ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'active', imageCount: -1, collaboratorCount: 0 }]
+  ]) {
+    const fake = makeFirestoreFake({
+      [`quiz_sets/${name}`]: parent,
+      [`images/${name}/q/v0q0`]: { data: 'old' }
+    });
+    const store = createStore(fake);
+    await assert.rejects(
+      store.saveQuizSetWithImages(name, { ...parent, title: '변경' }, { v0q0: 'new' }),
+      /counter migration/
+    );
+    await assert.rejects(
+      store.replaceImages(name, { v0q0: 'new' }),
+      /counter migration/
+    );
+    assert.equal(fake.value(`quiz_sets/${name}`).title, undefined);
+    assert.equal(fake.value(`images/${name}/q/v0q0`).data, 'old');
+  }
 });
 
 test('사본 만들기는 현재 교사를 소유자로 지정하는 복사 API를 사용한다', async () => {
@@ -7514,9 +7590,12 @@ test('대시보드 CSV는 서술형 텍스트와 미채점 표시를 유지한�
   assert.equal(downloaded.rows[6][8], '미채점');
 });
 
-test('세트 구조와 이미지는 하나의 batch에서 함께 교체된다', async () => {
+test('세트 구조와 이미지는 strict counter transaction으로 함께 교체된다', async () => {
   const fake = makeFirestoreFake({
-    'quiz_sets/set1': { title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }] },
+    'quiz_sets/set1': {
+      title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }],
+      lifecycleState: 'active', collaboratorCount: 0, imageCount: 1
+    },
     'images/set1/q/v0q0': { data: 'old-image' }
   });
   const store = createStore(fake);
@@ -7528,10 +7607,9 @@ test('세트 구조와 이미지는 하나의 batch에서 함께 교체된다', 
   assert.equal(fake.value('quiz_sets/set1').title, '새 값');
   assert.equal(fake.value('images/set1/q/v0q0').data, 'new-image');
   assert.equal(fake.value('images/set1/q/v0q1').data, 'second-image');
-  assert.deepEqual(
-    fake.calls().filter(call => call.operation === 'batchCommit').map(call => call.size),
-    [3]
-  );
+  assert.equal(fake.value('quiz_sets/set1').imageCount, 2);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 2);
+  assert.equal(fake.calls().filter(call => call.operation === 'batchCommit').length, 0);
 });
 
 test('estimateBatchRequest는 transform 포함 500 쓰기와 10 MiB 안전 경계를 계산한다', () => {
@@ -7666,7 +7744,8 @@ test('delete-heavy 이미지 교체는 기존 문서·index 비용을 읽은 뒤
   const existingData = '가'.repeat(10_500);
   const initial = {
     'quiz_sets/set1': {
-      title: '세트', ownerUid: 'teacher-1', contentRevision: 1
+      title: '세트', ownerUid: 'teacher-1', contentRevision: 1,
+      lifecycleState: 'active', collaboratorCount: 0, imageCount: 300
     }
   };
   for (let index = 0; index < 300; index += 1) {
@@ -7692,7 +7771,9 @@ test('작은 overwrite도 기존 Unicode 부모와 same-key 이미지의 제거 
     ]))
   };
   const initial = {
-    'quiz_sets/set1': oldParent,
+    'quiz_sets/set1': {
+      ...oldParent, lifecycleState: 'active', collaboratorCount: 0, imageCount: 1
+    },
     'images/set1/q/v0q0': { data: 'data:image/jpeg;base64,' + 'A'.repeat(4_000_000) }
   };
   const fake = makeFirestoreFake(initial, {
@@ -7737,25 +7818,32 @@ test('사본 목적지 overwrite도 기존 부모와 same-key image 비용을 tr
   assert.equal(fake.calls().some(call => call.operation === 'runTransaction'), false);
 });
 
-test('이미지 batch가 실패하면 새 세트 구조도 공개되지 않는다', async () => {
+test('이미지 transaction이 실패하면 authoritative counter를 어기지 않고 재시도할 수 있다', async () => {
   const fake = makeFirestoreFake({
-    'quiz_sets/set1': { title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }] },
+    'quiz_sets/set1': {
+      title: '이전', videos: [{ questions: [{ text: '이전 문항' }] }],
+      lifecycleState: 'active', collaboratorCount: 0, imageCount: 1
+    },
     'images/set1/q/v0q0': { data: 'old-image' }
-  }, { failBatchCommit: 'image write failed' });
+  }, { failTransactionAt: 2, failTransactionMessage: 'image write failed' });
   const store = createStore(fake);
 
   await assert.rejects(store.saveQuizSetWithImages('set1', {
     title: '새 값', videos: [{ questions: [{ text: '새 문항' }, { text: '추가 문항' }] }]
   }, { v0q0: 'new-image', v0q1: 'second-image' }), /image write failed/);
 
-  assert.equal(fake.value('quiz_sets/set1').title, '이전');
-  assert.equal(fake.value('images/set1/q/v0q0').data, 'old-image');
+  assert.equal(fake.value('quiz_sets/set1').title, '새 값');
+  assert.equal(fake.value('quiz_sets/set1').imageCount, 1);
+  assert.equal(fake.value('images/set1/q/v0q0').data, 'new-image');
   assert.equal(fake.value('images/set1/q/v0q1'), undefined);
 });
 
 test('세션 시작은 세트와 이미지 revision을 고정하고 이후 편집과 분리한다', async () => {
   const fake = makeFirestoreFake({
-    'quiz_sets/set1': { title: '시작 전', videos: [{ questions: [{ text: '원래 문항', imgUp: true }] }] },
+    'quiz_sets/set1': {
+      title: '시작 전', videos: [{ questions: [{ text: '원래 문항', imgUp: true }] }],
+      lifecycleState: 'active', collaboratorCount: 0, imageCount: 1
+    },
     'images/set1/q/v0q0': { data: 'original-image' }
   });
   const store = createStore(fake);

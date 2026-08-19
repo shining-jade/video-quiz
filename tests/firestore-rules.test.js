@@ -153,6 +153,14 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
     return {
       path,
       modularReference,
+      async get() {
+        const snapshot = await getDoc(modularReference);
+        return {
+          exists: snapshot.exists(),
+          id: snapshot.id,
+          data: () => snapshot.data()
+        };
+      },
       async set(value, options) {
         await pause(path);
         return setDoc(modularReference, value, options);
@@ -254,6 +262,8 @@ async function seedFirestore() {
         trashedAt: null,
         purgeStartedAt: null,
         lifecycleState: 'active',
+        collaboratorCount: 0,
+        imageCount: 1,
         title: '보안 규칙 테스트'
       }),
       setDoc(doc(db, 'quiz_sets/set2'), {
@@ -262,6 +272,8 @@ async function seedFirestore() {
         trashedAt: null,
         purgeStartedAt: null,
         lifecycleState: 'active',
+        collaboratorCount: 0,
+        imageCount: 0,
         title: '다른 교사 세트'
       }),
       setDoc(doc(db, 'images/set1/q/0'), { data: 'owner-image' }),
@@ -410,28 +422,17 @@ rulesTest('all legacy parent claims and response replacements are client denied'
   }
 });
 
-rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 사본을 트랜잭션으로 만든다', async () => {
+rulesTest('승인 교사는 공유 원본과 이미지를 strict counter 프로토콜로 자기 소유 사본을 만든다', async () => {
   const teacher = actorFirestore('otherTeacher');
   const sourceReference = doc(teacher, 'quiz_sets/set1');
   const before = await assertSucceeds(getDoc(sourceReference));
   const images = await assertSucceeds(getDocs(collection(teacher, 'images/set1/q')));
-
-  await assertSucceeds(runTransaction(teacher, async transaction => {
-    const current = await transaction.get(sourceReference);
-    assert.deepEqual(current.data(), before.data());
-    transaction.set(doc(teacher, 'quiz_sets/copied-by-other'), {
-      ...current.data(),
-      ownerUid: actors.otherTeacher.uid,
-      ownerEmail: actors.otherTeacher.email,
-      lifecycleState: 'active',
-      collaboratorCount: 0,
-      title: '공유 사본',
-      contentRevision: serverTimestamp()
-    });
-    images.forEach(image => {
-      transaction.set(doc(teacher, `images/copied-by-other/q/${image.id}`), image.data());
-    });
-  }));
+  assert.equal(images.size, 1);
+  const copiedValue = await emulatorStore(teacher).copyOwnedQuizSet(
+    'set1', 'copied-by-other', actors.otherTeacher
+  );
+  assert.equal(copiedValue.ownerUid, actors.otherTeacher.uid);
+  assert.equal(before.data().ownerUid, actors.owner.uid);
 
   const copied = await assertSucceeds(getDoc(doc(teacher, 'quiz_sets/copied-by-other')));
   assert.equal(copied.data().ownerUid, actors.otherTeacher.uid);
@@ -469,19 +470,24 @@ rulesTest('소유 교사의 standalone 이미지 create·update·delete는 모�
   assert.equal(existing.data().data, 'owner-image');
 });
 
-rulesTest('부모 contentRevision을 바꾸는 공식 batch는 이미지 create·update·delete를 함께 허용한다', async () => {
+rulesTest('strict counter 저장 API는 이미지 create·update·delete를 함께 허용한다', async () => {
   await adminWrite('images/set1/q/delete-me', { data: 'old-delete' });
+  await adminWrite('quiz_sets/set1', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'active', collaboratorCount: 0, imageCount: 2,
+    title: '보안 규칙 테스트', contentRevision: Timestamp.fromMillis(1)
+  });
   const owner = actorFirestore('owner');
-  const batch = writeBatch(owner);
-  batch.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
-  batch.set(doc(owner, 'images/set1/q/new'), { data: 'batch-create' });
-  batch.set(doc(owner, 'images/set1/q/0'), { data: 'batch-update' });
-  batch.delete(doc(owner, 'images/set1/q/delete-me'));
-
-  await assertSucceeds(batch.commit());
-  assert.equal((await getDoc(doc(owner, 'images/set1/q/new'))).data().data, 'batch-create');
-  assert.equal((await getDoc(doc(owner, 'images/set1/q/0'))).data().data, 'batch-update');
+  await emulatorStore(owner).saveQuizSetWithImages('set1', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'active', collaboratorCount: 0, imageCount: 2,
+    title: '변경'
+  }, { v0q0: 'batch-update', v0q1: 'batch-create' }, actors.owner);
+  assert.equal((await getDoc(doc(owner, 'images/set1/q/v0q1'))).data().data, 'batch-create');
+  assert.equal((await getDoc(doc(owner, 'images/set1/q/v0q0'))).data().data, 'batch-update');
+  assert.equal((await getDoc(doc(owner, 'images/set1/q/0'))).exists(), false);
   assert.equal((await getDoc(doc(owner, 'images/set1/q/delete-me'))).exists(), false);
+  assert.equal((await getDoc(doc(owner, 'quiz_sets/set1'))).data().imageCount, 2);
 });
 
 rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code 재할당에서 fail closed다', async t => {
@@ -1832,6 +1838,8 @@ const writeMatrix = [
       ownerUid: actors[actorName].uid,
       ownerEmail: actors[actorName].email || '',
       lifecycleState: 'active',
+      collaboratorCount: 0,
+      imageCount: 0,
       title: '새 세트'
     }),
     updateValue: () => ({ title: '변경' }),
@@ -2137,6 +2145,134 @@ rulesTest('counter-ready active image add/delete requires one exact parent mutat
   remove.delete(doc(owner, 'images/set1/q/new'));
   await assertSucceeds(remove.commit());
   await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), { imageCount: 2 }));
+});
+
+rulesTest('strict counters reject malformed create, legacy promotion, underflow and purge transitions', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  const base = {
+    ownerUid: actors.owner.uid,
+    ownerEmail: actors.owner.email,
+    lifecycleState: 'active',
+    title: '새 세트'
+  };
+
+  await assertFails(setDoc(doc(owner, 'quiz_sets/missing-counts'), base));
+  await assertFails(setDoc(doc(owner, 'quiz_sets/nonzero-counts'), {
+    ...base, collaboratorCount: 1, imageCount: 0
+  }));
+  await assertFails(setDoc(doc(owner, 'quiz_sets/negative-count'), {
+    ...base, collaboratorCount: 0, imageCount: -1
+  }));
+  await assertFails(setDoc(doc(owner, 'quiz_sets/forged-mutation'), {
+    ...base, collaboratorCount: 0, imageCount: 0,
+    imageMutation: { key: 'q', action: 'add' }
+  }));
+  await assertFails(setDoc(doc(owner, 'quiz_sets/forged-trash'), {
+    ...base, collaboratorCount: 0, imageCount: 0,
+    trashedAt: serverTimestamp()
+  }));
+  await assertSucceeds(setDoc(doc(owner, 'quiz_sets/valid-empty'), {
+    ...base, collaboratorCount: 0, imageCount: 0
+  }));
+
+  await adminWrite('quiz_sets/legacy-missing', base);
+  const missingAdd = writeBatch(owner);
+  missingAdd.set(doc(owner, 'quiz_sets/legacy-missing'), {
+    imageCount: 0, imageMutation: { key: 'q', action: 'add' },
+    contentRevision: serverTimestamp()
+  }, { merge: true });
+  missingAdd.set(doc(owner, 'images/legacy-missing/q/q'), { data: 'image' });
+  await assertFails(missingAdd.commit());
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/legacy-missing'), {
+    trashedAt: serverTimestamp(), lifecycleState: 'trashed', contentRevision: serverTimestamp()
+  }));
+
+  await adminWrite('quiz_sets/negative-active', {
+    ...base, collaboratorCount: 0, imageCount: -1
+  });
+  const negativeAdd = writeBatch(owner);
+  negativeAdd.set(doc(owner, 'quiz_sets/negative-active'), {
+    imageCount: 0, imageMutation: { key: 'q', action: 'add' },
+    contentRevision: serverTimestamp()
+  }, { merge: true });
+  negativeAdd.set(doc(owner, 'images/negative-active/q/q'), { data: 'image' });
+  await assertFails(negativeAdd.commit());
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/negative-active'), {
+    trashedAt: serverTimestamp(), lifecycleState: 'trashed', contentRevision: serverTimestamp()
+  }));
+
+  await adminWrite('quiz_sets/underflow-active', {
+    ...base, collaboratorCount: 0, imageCount: 0
+  });
+  await adminWrite('images/underflow-active/q/q', { data: 'image' });
+  const activeUnderflow = writeBatch(owner);
+  activeUnderflow.set(doc(owner, 'quiz_sets/underflow-active'), {
+    imageCount: -1, imageMutation: { key: 'q', action: 'remove' },
+    contentRevision: serverTimestamp()
+  }, { merge: true });
+  activeUnderflow.delete(doc(owner, 'images/underflow-active/q/q'));
+  await assertFails(activeUnderflow.commit());
+
+  await adminWrite('quiz_sets/negative-trash', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1),
+    purgeStartedAt: null, collaboratorCount: -1, imageCount: 0
+  });
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/negative-trash'), {
+    lifecycleState: 'active', trashedAt: deleteField(), contentRevision: serverTimestamp()
+  }));
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/negative-trash'), {
+    lifecycleState: 'purging', purgeStartedAt: serverTimestamp()
+  }));
+
+  await adminWrite('quiz_sets/underflow-purge', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'purging', trashedAt: Timestamp.fromMillis(1),
+    purgeStartedAt: Timestamp.fromMillis(2), collaboratorCount: 0, imageCount: 0
+  });
+  await adminWrite('images/underflow-purge/q/q', { data: 'image' });
+  const purgeUnderflow = writeBatch(owner);
+  purgeUnderflow.set(doc(owner, 'quiz_sets/underflow-purge'), {
+    imageCount: -1, imageMutation: { key: 'q', action: 'purge-remove' }
+  }, { merge: true });
+  purgeUnderflow.delete(doc(owner, 'images/underflow-purge/q/q'));
+  await assertFails(purgeUnderflow.commit());
+});
+
+rulesTest('store create follows strict counter protocol', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  const store = emulatorStore(owner);
+
+  await store.saveOwnedQuizSet('store-new', {
+    title: '신규', videos: [], lifecycleState: 'purging',
+    collaboratorCount: 9, imageCount: -1,
+    imageMutation: { key: 'fake', action: 'add' }
+  }, { v0q0: 'new-image' }, actors.owner);
+  const created = await assertSucceeds(getDoc(doc(owner, 'quiz_sets/store-new')));
+  assert.equal(created.data().lifecycleState, 'active');
+  assert.equal(created.data().collaboratorCount, 0);
+  assert.equal(created.data().imageCount, 1);
+});
+
+rulesTest('store content-plus-image save follows strict counter protocol', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  const store = emulatorStore(owner);
+  await adminWrite('quiz_sets/store-existing', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'active', collaboratorCount: 0, imageCount: 0,
+    title: '이전', contentRevision: Timestamp.fromMillis(1)
+  });
+  await store.saveQuizSetWithImages('store-existing', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'active', collaboratorCount: 0, imageCount: 0,
+    title: '변경'
+  }, { v0q0: 'image' }, actors.owner);
+  const saved = await assertSucceeds(getDoc(doc(owner, 'quiz_sets/store-existing')));
+  assert.equal(saved.data().title, '변경');
+  assert.equal(saved.data().imageCount, 1);
 });
 
 rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용하고 missing source는 거부한다', async () => {

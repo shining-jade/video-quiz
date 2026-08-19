@@ -503,6 +503,7 @@
         if (!set || set.ownerUid !== current.uid || !activeSet(set)) {
           throw new Error('소유자만 활성 세트를 휴지통으로 이동할 수 있습니다.');
         }
+        requireAuthoritativeCounters(set);
         transaction.set(reference, {
           trashedAt: fieldValue.serverTimestamp(),
           purgeStartedAt: null,
@@ -522,6 +523,7 @@
         if (!set || set.ownerUid !== current.uid || !set.trashedAt || set.purgeStartedAt) {
           throw new Error('정리 시작 전 휴지통 세트의 소유자만 복원할 수 있습니다.');
         }
+        requireAuthoritativeCounters(set);
         transaction.set(reference, {
           trashedAt: fieldValue.delete(),
           lifecycleState: 'active',
@@ -578,14 +580,16 @@
           throw new Error('정리 세트 상태가 변경되어 삭제를 중단했습니다.');
         }
         if (type === 'collaborator') {
-          const count = Number.isInteger(parent.collaboratorCount) ? parent.collaboratorCount : 0;
+          requireAuthoritativeCounters(parent);
+          const count = parent.collaboratorCount;
           if (count < 1) throw new Error('공동 편집자 수가 올바르지 않습니다.');
           transaction.set(parentReference, {
             collaboratorCount: count - 1,
             collaboratorMutation: { email: document.id, action: 'purge-remove' }
           }, { merge: true });
         } else {
-          const count = Number.isInteger(parent.imageCount) ? parent.imageCount : 0;
+          requireAuthoritativeCounters(parent);
+          const count = parent.imageCount;
           if (count < 1) throw new Error('이미지 수가 올바르지 않습니다.');
           transaction.set(parentReference, {
             imageCount: count - 1,
@@ -708,7 +712,8 @@
           throw new Error('승인된 교사만 공동 편집자로 추가할 수 있습니다.');
         }
         if (existingTarget.exists) throw new Error('이미 공동 편집자로 등록되어 있습니다.');
-        const count = Number.isInteger(latest.collaboratorCount) ? latest.collaboratorCount : 0;
+        requireAuthoritativeCounters(latest);
+        const count = latest.collaboratorCount;
         if (count < 0 || count >= 20) throw new Error('공동 편집자는 최대 20명까지 추가할 수 있습니다.');
         transaction.set(collaboratorReference, {
           email: normalizedEmail,
@@ -739,7 +744,8 @@
           throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
         }
         if (!collaboratorSnapshot.exists) return false;
-        const count = Number.isInteger(set.collaboratorCount) ? set.collaboratorCount : 0;
+        requireAuthoritativeCounters(set);
+        const count = set.collaboratorCount;
         if (count < 1) throw new Error('공동 편집자 수가 올바르지 않습니다.');
         transaction.delete(collaboratorReference);
         transaction.set(setReference, {
@@ -754,11 +760,38 @@
       return db.doc('quiz_sets/' + setId).get().then(quizSetValue);
     }
 
+    function requireAuthoritativeCounters(set) {
+      if (!set || !Number.isInteger(set.collaboratorCount) ||
+          set.collaboratorCount < 0 || set.collaboratorCount > 20 ||
+          !Number.isInteger(set.imageCount) || set.imageCount < 0) {
+        throw new Error('세트 저장 전에 authoritative counter migration이 필요합니다.');
+      }
+      return set;
+    }
+
+    function initializedQuizSet(value) {
+      const data = withoutDocumentId(value);
+      delete data.collaboratorMutation;
+      delete data.imageMutation;
+      delete data.trashedAt;
+      delete data.purgeStartedAt;
+      return {
+        ...data,
+        lifecycleState: 'active',
+        collaboratorCount: 0,
+        imageCount: 0
+      };
+    }
+
     async function saveQuizSet(setId, value, actor) {
       if (actor && !(await canEditQuizSet(setId, actor))) {
         throw new Error('퀴즈 세트를 편집할 권한이 없습니다.');
       }
-      return db.doc('quiz_sets/' + setId).set(withoutDocumentId(value));
+      const reference = db.doc('quiz_sets/' + setId);
+      const snapshot = await reference.get();
+      return reference.set(snapshot.exists
+        ? withoutDocumentId(value)
+        : initializedQuizSet(value));
     }
 
     const ownedQuizSet = (value, teacher) => ({
@@ -794,18 +827,22 @@
       }
       const path = 'images/' + setId + '/q';
       const next = normalizedImages(images);
-      const storedSet = withContentRevision(value);
+      let storedSet = withContentRevision(value);
       const estimateOptions = {
         setPath: 'quiz_sets/' + setId,
         imagePath: path
       };
       assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
-      const [parentSnapshot, current] = await Promise.all([
-        db.doc('quiz_sets/' + setId).get(),
-        db.collection(path).get().then(collectionValue)
-      ]);
-      let counterReady = parentSnapshot.exists &&
-        Number.isInteger((parentSnapshot.data() || {}).imageCount);
+      const parentSnapshot = await db.doc('quiz_sets/' + setId).get();
+      const current = parentSnapshot.exists
+        ? await db.collection(path).get().then(collectionValue)
+        : {};
+      if (parentSnapshot.exists) {
+        requireAuthoritativeCounters(parentSnapshot.data() || {});
+      } else {
+        storedSet = withContentRevision(initializedQuizSet(value));
+      }
+      let counterReady = parentSnapshot.exists;
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
@@ -823,21 +860,27 @@
         }
       });
       assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
-      if (!parentSnapshot.exists && Number.isInteger(storedSet.imageCount)) {
-        await db.doc('quiz_sets/' + setId).set({
-          ...withoutDocumentId(storedSet), imageCount: 0
-        }, { merge: true });
+      const parentReference = db.doc('quiz_sets/' + setId);
+      if (!parentSnapshot.exists) {
+        await parentReference.set(withoutDocumentId(storedSet));
         counterReady = true;
+      } else {
+        const previous = parentSnapshot.data() || {};
+        const contentDocument = withoutDocumentId(storedSet);
+        for (const key of [
+          'ownerUid', 'ownerEmail', 'lifecycleState', 'trashedAt', 'purgeStartedAt',
+          'collaboratorCount', 'collaboratorMutation', 'imageCount', 'imageMutation'
+        ]) {
+          if (Object.prototype.hasOwnProperty.call(previous, key)) contentDocument[key] = previous[key];
+          else delete contentDocument[key];
+        }
+        await parentReference.set(contentDocument);
       }
       if (counterReady) {
-        const parentReference = db.doc('quiz_sets/' + setId);
         let count = parentSnapshot.exists ? Number(parentSnapshot.data().imageCount) : 0;
         const operations = [];
-        Object.entries(current).forEach(([questionIndex]) => {
-          if (!Object.prototype.hasOwnProperty.call(next, questionIndex) &&
-              questionIndex === imageKey(questionIndex)) {
-            operations.push({ key: questionIndex, action: 'remove' });
-          }
+        deletes.forEach(questionIndex => {
+          operations.push({ key: questionIndex, action: 'remove' });
         });
         Object.entries(next).forEach(([questionIndex]) => {
           operations.push({
@@ -847,23 +890,20 @@
             data: next[questionIndex]
           });
         });
-        let first = true;
         for (const operation of operations) {
           const childReference = db.doc(path + '/' + operation.key);
           await db.runTransaction(async transaction => {
             const latestParent = await transaction.get(parentReference);
             const latestChild = await transaction.get(childReference);
             const latest = quizSetValue(latestParent) || {};
-            let nextCount = Number.isInteger(latest.imageCount) ? latest.imageCount : count;
+            requireAuthoritativeCounters(latest);
+            let nextCount = latest.imageCount;
             if (operation.action === 'add' && !latestChild.exists) nextCount += 1;
-            if (operation.action === 'remove' && latestChild.exists) nextCount -= 1;
-            const patch = {};
-            if (first) {
-              const base = withoutDocumentId(storedSet);
-              delete base.imageCount;
-              delete base.imageMutation;
-              Object.assign(patch, base);
+            if (operation.action === 'remove' && latestChild.exists) {
+              if (nextCount < 1) throw new Error('이미지 수 counter underflow를 거부했습니다.');
+              nextCount -= 1;
             }
+            const patch = {};
             patch.imageCount = nextCount;
             patch.contentRevision = fieldValue.serverTimestamp();
             if (operation.action !== 'update') {
@@ -873,19 +913,11 @@
             if (operation.action === 'remove') transaction.delete(childReference);
             else transaction.set(childReference, { data: operation.data });
             count = nextCount;
-            first = false;
           });
         }
-        if (first) await parentReference.set({ ...withoutDocumentId(storedSet), imageCount: count }, { merge: true });
         return;
       }
-      const batch = db.batch();
-      batch.set(db.doc('quiz_sets/' + setId), storedSet);
-      deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
-      Object.entries(next).forEach(([questionIndex, data]) => {
-        batch.set(db.doc(path + '/' + questionIndex), { data });
-      });
-      await batch.commit();
+      throw new Error('세트 저장 전에 authoritative counter migration이 필요합니다.');
     }
 
     function saveOwnedQuizSet(setId, value, images, teacher) {
@@ -943,46 +975,20 @@
         imagePath: path
       };
       assertRequestAllowed(requestEstimate(revisionPatch, next, estimateOptions));
-      const [parentSnapshot, current] = await Promise.all([
-        db.doc('quiz_sets/' + setId).get(),
-        db.collection(path).get().then(collectionValue)
-      ]);
-      if (parentSnapshot.exists && Number.isInteger((parentSnapshot.data() || {}).imageCount)) {
-        await saveQuizSetWithImages(setId, {
-          ...(parentSnapshot.data() || {}), contentRevision: fieldValue.serverTimestamp()
-        }, images, actor);
-        return;
-      }
-      const deletes = Object.keys(current).filter(questionIndex =>
-        questionIndex !== imageKey(questionIndex) ||
-        !Object.prototype.hasOwnProperty.call(next, questionIndex)
-      );
-      estimateOptions.deleteDocuments = Object.fromEntries(
-        deletes.map(questionIndex => [questionIndex, current[questionIndex]])
-      );
-      estimateOptions.previousDocuments = {};
-      if (parentSnapshot.exists) {
-        estimateOptions.previousDocuments['quiz_sets/' + setId] = parentSnapshot.data();
-      }
-      Object.keys(next).forEach(questionIndex => {
-        if (Object.prototype.hasOwnProperty.call(current, questionIndex)) {
-          estimateOptions.previousDocuments[path + '/' + questionIndex] = current[questionIndex];
-        }
-      });
-      assertRequestAllowed(requestEstimate(revisionPatch, next, estimateOptions));
-      const batch = db.batch();
-      batch.set(db.doc('quiz_sets/' + setId), revisionPatch, { merge: true });
-      deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
-      Object.entries(next).forEach(([questionIndex, data]) => {
-        batch.set(db.doc(path + '/' + questionIndex), { data });
-      });
-      await batch.commit();
+      const parentSnapshot = await db.doc('quiz_sets/' + setId).get();
+      if (!parentSnapshot.exists) throw new Error('이미지를 저장할 퀴즈 세트를 찾을 수 없습니다.');
+      requireAuthoritativeCounters(parentSnapshot.data() || {});
+      await saveQuizSetWithImages(setId, {
+        ...(parentSnapshot.data() || {}), contentRevision: fieldValue.serverTimestamp()
+      }, images, actor);
     }
 
     function sanitizedCopy(value, newId, patch) {
       const copy = { ...withoutDocumentId(value), ...(patch || {}), id: newId };
       copy.collaboratorCount = 0;
+      copy.imageCount = 0;
       delete copy.collaboratorMutation;
+      delete copy.imageMutation;
       delete copy.trashedAt;
       delete copy.purgeStartedAt;
       copy.lifecycleState = 'active';
@@ -1015,10 +1021,10 @@
         const images = await getImages(sourceId);
         const entries = Object.entries(normalizedImages(images));
         const destinationImagePath = 'images/' + newId + '/q';
-        const [destinationSnapshot, destinationImages] = await Promise.all([
-          destinationReference.get(),
-          db.collection(destinationImagePath).get().then(collectionValue)
-        ]);
+        const destinationSnapshot = await destinationReference.get();
+        const destinationImages = destinationSnapshot.exists
+          ? await db.collection(destinationImagePath).get().then(collectionValue)
+          : {};
         const previousDocuments = {};
         if (destinationSnapshot.exists) {
           previousDocuments['quiz_sets/' + newId] = destinationSnapshot.data();
@@ -1043,13 +1049,13 @@
           if (!sameRevision(before, current)) return { retry: true };
           const copy = copyValue(current);
           transaction.set(destinationReference, withoutDocumentId(copy));
-          entries.forEach(([questionIndex, data]) => {
-            transaction.set(db.doc('images/' + newId + '/q/' + questionIndex), { data });
-          });
           return { copy };
         });
         if (result.missing) return null;
-        if (!result.retry) return { ...result.copy, id: newId };
+        if (!result.retry) {
+          await saveQuizSetWithImages(newId, result.copy, Object.fromEntries(entries));
+          return { ...result.copy, id: newId, imageCount: entries.length };
+        }
       }
       throw new Error('원본 세트가 계속 변경되어 사본을 만들지 못했습니다. 다시 시도해 주세요.');
     }
@@ -1100,18 +1106,9 @@
       const sourceReference = storedSession.setId && db.doc('quiz_sets/' + storedSession.setId);
       const sourceCheck = storedSession.setId && sourceReference &&
         typeof sourceReference.get === 'function'
-        ? getQuizSet(storedSession.setId).then(async source => {
+        ? getQuizSet(storedSession.setId).then(source => {
           if (!source) throw new Error('수업을 시작할 원본 세트를 찾을 수 없습니다.');
           if (!activeSet(source)) throw new Error('휴지통 또는 정리 중인 세트는 수업을 시작할 수 없습니다.');
-          const email = actorEmail({ email: storedSession.teacherEmail });
-          const allowanceReference = email && db.doc('teacher_allowlist/' + email);
-          const allowanceSnapshot = allowanceReference && typeof allowanceReference.get === 'function'
-            ? await allowanceReference.get({ source: 'server' }) : null;
-          if (allowanceSnapshot && (!allowanceSnapshot.exists ||
-              !allowanceData(allowanceSnapshot).enabled ||
-              !['teacher', 'admin'].includes(allowanceData(allowanceSnapshot).role))) {
-            throw new Error('승인된 교사만 수업을 시작할 수 있습니다.');
-          }
           return true;
         })
         : Promise.resolve(true);

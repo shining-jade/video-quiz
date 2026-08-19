@@ -15,6 +15,27 @@ test('counter migration target validation fails closed for stale emulator enviro
   }).targetMode, 'emulator');
 });
 
+test('counter migration publishes targetMode on a runner partial failure report', async () => {
+  let published;
+  const partialReport = {
+    tool: 'set-counter-migration-cli', schemaVersion: 1,
+    projectId: 'video-quiz-65798', mode: 'apply', operation: 'set-counter-backfill',
+    status: 'partial-failure', safeToDeployStrictRules: false
+  };
+  const failure = Object.assign(new Error('stopped'), { partialReport });
+  await assert.rejects(cli.main([
+    '--project', 'video-quiz-65798', '--apply',
+    '--confirm-project', 'video-quiz-65798', '--output', 'ignored.json'
+  ], {
+    environment: {},
+    reserveReport() { return { async commit(text) { published = JSON.parse(text); } }; },
+    async initialize() { return { db: {}, async close() {} }; },
+    async runCounterBackfill() { throw failure; },
+    writeLine() {}
+  }), /stopped/);
+  assert.equal(published.targetMode, 'production');
+});
+
 function fakeDb(initial) {
   const docs = new Map(Object.entries(initial));
   const ref = path => ({ path });
