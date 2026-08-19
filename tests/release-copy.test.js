@@ -41,6 +41,23 @@ test('편집기에는 undo/redo와 문항 제목 버블의 드래그·키보드 
   assert.match(html, /다음 영상/);
 });
 
+test('사용자 안내는 편집 이력, 교차 영상 이동과 seek 재출제 안전 규칙을 설명한다', () => {
+  const readme = read('README.md');
+  const handoff = read('docs/HANDOFF-2026-08-14.md');
+
+  assert.match(readme, /실행 취소[\s\S]*?Ctrl\+Z/);
+  assert.match(readme, /Ctrl\+Shift\+Z[\s\S]*?Ctrl\+Y[\s\S]*?다시 실행/);
+  assert.match(readme, /Ctrl\+S[\s\S]*?스크롤[\s\S]*?현재 위치/);
+  assert.match(readme, /문항 제목 버블[\s\S]*?다른 영상/);
+  assert.match(readme, /상대 위치[\s\S]*?새 영상/);
+  assert.match(readme, /1초[\s\S]*?앞[\s\S]*?다시 출제/);
+  assert.match(readme, /계속 재생[\s\S]*?같은 문항[\s\S]*?반복/);
+  assert.match(handoff, /EditorHistoryCore/);
+  assert.match(handoff, /PlaylistCore\.moveQuestion/);
+  assert.match(handoff, /QuizTriggerCore/);
+  assert.match(handoff, /1초[\s\S]*?재무장/);
+});
+
 test('전체화면 퀴즈는 stage 기준의 안전 영역과 본문 내부 스크롤 계약을 가진다', () => {
   const html = read('index.html');
 
