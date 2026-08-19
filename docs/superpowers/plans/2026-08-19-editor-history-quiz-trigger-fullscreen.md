@@ -354,4 +354,3 @@ git add README.md docs/HANDOFF-2026-08-14.md tests/release-copy.test.js
 git commit -m "편집과 퀴즈 발화 개선 검증 결과를 기록"
 git push origin main
 ```
-
