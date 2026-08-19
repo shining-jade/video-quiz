@@ -2311,6 +2311,23 @@ rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서
   await assertFails(updateDoc(doc(editor, 'quiz_sets/set1'), { title: '제거 후 저장' }));
 });
 
+rulesTest('일반 교사 소유자는 Store로 승인 대상만 추가하고 승인 목록은 읽지 못한다', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  const ownerStore = emulatorStore(owner);
+
+  await assertFails(getDoc(doc(owner, 'teacher_allowlist/other@school.kr')));
+  await ownerStore.addCollaborator('set1', 'other@school.kr', actors.owner);
+  assert.equal((await getDoc(doc(owner,
+    'quiz_sets/set1/collaborators/other@school.kr'))).data().email, 'other@school.kr');
+
+  await assert.rejects(ownerStore.addCollaborator(
+    'set1', 'blocked@school.kr', actors.owner
+  ), /승인된 교사/);
+  assert.equal((await getDoc(doc(owner,
+    'quiz_sets/set1/collaborators/blocked@school.kr'))).exists(), false);
+});
+
 rulesTest('휴지통 원본은 다른 교사의 읽기·새 수업 시작에서 닫힌다', async () => {
   await resetFirestore();
   await adminWrite('quiz_sets/set1', {

@@ -701,55 +701,53 @@
       const collaboratorReference = db.doc(
         'quiz_sets/' + setId + '/collaborators/' + normalizedEmail
       );
-      const allowanceReference = db.doc('teacher_allowlist/' + normalizedEmail);
-      const [setSnapshot, allowanceSnapshot, collaboratorsSnapshot] = await Promise.all([
+      const [setSnapshot, collaboratorsSnapshot] = await Promise.all([
         setReference.get({ source: 'server' }),
-        allowanceReference.get({ source: 'server' }),
         db.collection('quiz_sets/' + setId + '/collaborators').get()
       ]);
       const set = quizSetValue(setSnapshot);
-      const allowance = allowanceData(allowanceSnapshot);
       const existing = collaboratorsSnapshot.docs.map(document => document.id);
       const validation = collaboration.validateCollaboratorChange({
         ownerEmail: set && set.ownerEmail,
         email: normalizedEmail,
-        enabled: allowance && allowance.enabled === true &&
-          ['teacher', 'admin'].includes(allowance.role),
+        // The target allowance is private to admins. Firestore Rules validates it
+        // authoritatively as part of the atomic collaborator + counter write.
+        enabled: true,
         existing
       });
       if (!set || set.ownerUid !== current.uid || !activeSet(set)) {
         throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
       }
       if (validation.code) throw new Error('공동 편집자 추가가 거부되었습니다: ' + validation.code);
-      const result = await db.runTransaction(async transaction => {
-        const latestSnapshot = await transaction.get(setReference);
-        const latest = quizSetValue(latestSnapshot);
-        const target = await transaction.get(allowanceReference);
-        const existingTarget = await transaction.get(collaboratorReference);
-        if (!latest || latest.ownerUid !== current.uid || !activeSet(latest)) {
-          throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
-        }
-        const targetAllowance = allowanceData(target);
-        if (!targetAllowance || targetAllowance.enabled !== true ||
-            !['teacher', 'admin'].includes(targetAllowance.role)) {
+      try {
+        return await db.runTransaction(async transaction => {
+          const latestSnapshot = await transaction.get(setReference);
+          const existingTarget = await transaction.get(collaboratorReference);
+          const latest = quizSetValue(latestSnapshot);
+          if (!latest || latest.ownerUid !== current.uid || !activeSet(latest)) {
+            throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
+          }
+          if (existingTarget.exists) throw new Error('이미 공동 편집자로 등록되어 있습니다.');
+          requireAuthoritativeCounters(latest);
+          const count = latest.collaboratorCount;
+          if (count < 0 || count >= 20) throw new Error('공동 편집자는 최대 20명까지 추가할 수 있습니다.');
+          transaction.set(collaboratorReference, {
+            email: normalizedEmail,
+            addedByUid: current.uid,
+            addedAt: fieldValue.serverTimestamp()
+          });
+          transaction.set(setReference, {
+            collaboratorCount: count + 1,
+            collaboratorMutation: { email: normalizedEmail, action: 'add' }
+          }, { merge: true });
+          return normalizedEmail;
+        });
+      } catch (error) {
+        if (permissionDenied(error)) {
           throw new Error('승인된 교사만 공동 편집자로 추가할 수 있습니다.');
         }
-        if (existingTarget.exists) throw new Error('이미 공동 편집자로 등록되어 있습니다.');
-        requireAuthoritativeCounters(latest);
-        const count = latest.collaboratorCount;
-        if (count < 0 || count >= 20) throw new Error('공동 편집자는 최대 20명까지 추가할 수 있습니다.');
-        transaction.set(collaboratorReference, {
-          email: normalizedEmail,
-          addedByUid: current.uid,
-          addedAt: fieldValue.serverTimestamp()
-        });
-        transaction.set(setReference, {
-          collaboratorCount: count + 1,
-          collaboratorMutation: { email: normalizedEmail, action: 'add' }
-        }, { merge: true });
-        return normalizedEmail;
-      });
-      return result;
+        throw error;
+      }
     }
 
     async function removeCollaborator(setId, email, actor) {

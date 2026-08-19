@@ -78,7 +78,26 @@ pnpm migrate:legacy -- --project video-quiz-65798 --owner-uid <교사_UID> --app
 
 이전 보고서의 배포 게이트와 `pnpm test`, `pnpm test:rules`가 모두 통과한 뒤 `firestore.rules`를 게시합니다. 게시 직전 규칙 원문과 Firebase Console의 직전 릴리스 시각을 기록합니다. 문제가 생기면 데이터를 되돌리거나 재이전하지 말고, Firebase Console → Firestore Database → 규칙 → 릴리스 기록에서 직전 규칙을 복원해 게시한 뒤 원인을 조사합니다.
 
-공동 편집자·휴지통을 처음 운영에 켤 때는 `collaboratorCount`와 `imageCount`를 먼저 안전하게 채워야 합니다. [`docs/COUNTER-MIGRATION.md`](./docs/COUNTER-MIGRATION.md)의 순서대로 staged gate Rules 배포 → 잠금 → counter migration 및 audit → strict Rules 재배포 → 같은 lockId로 잠금 해제를 완료합니다. 감사 보고서의 `safeToDeployStrictRules: true`가 아니면 strict Rules를 배포하거나 잠금을 해제하지 마세요.
+공동 편집자·휴지통 최초 운영 전환은 다음 순서를 바꾸면 안 됩니다.
+
+1. lifecycle 이관·감사(dry-run → apply → `safeToDeployStrictRules: true`)
+2. 병합 및 앱 push
+3. 현재 Rules에서 두 admin 로그인 확인
+4. staged Rules 배포
+5. trusted CLI로 counter gate 잠금
+6. counter 이관·감사(`safeToDeployStrictRules: true`)
+7. strict Rules 배포
+8. 동일 `lockId`와 `updateTimeGeneration`으로 잠금 해제
+9. production smoke
+
+Lifecycle CLI도 대상을 명시하고 Emulator 환경 변수가 없는 터미널에서 실행합니다. 출력 파일은 기존 파일을 덮어쓰지 않습니다.
+
+```powershell
+pnpm migrate:lifecycle -- --project video-quiz-65798 --target-mode production --output lifecycle-dry-run.json
+pnpm migrate:lifecycle -- --project video-quiz-65798 --target-mode production --apply --confirm-project video-quiz-65798 --output lifecycle-apply.json
+```
+
+그 뒤의 잠금·counter 이관·해제 명령과 보고서 판정은 [`docs/COUNTER-MIGRATION.md`](./docs/COUNTER-MIGRATION.md)를 그대로 따릅니다. lifecycle 또는 counter 최종 보고서가 안전하지 않으면 다음 단계로 넘어가지 않습니다.
 
 ---
 

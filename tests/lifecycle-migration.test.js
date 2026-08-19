@@ -243,6 +243,64 @@ test('lifecycle CLI exposes the repository durable exclusive report reservation 
   }
 });
 
+test('lifecycle CLI target validation rejects stale emulator env and requires exact demo hosts', () => {
+  const command = require('../scripts/migrate-lifecycle-state.js');
+  assert.throws(() => command.validateTarget({
+    projectId: 'video-quiz-65798', targetMode: 'production'
+  }, {
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+    FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }), /stale/i);
+  assert.throws(() => command.validateTarget({
+    projectId: 'video-quiz-65798', targetMode: 'emulator'
+  }, {
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+    FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }), /demo/i);
+  assert.throws(() => command.validateTarget({
+    projectId: 'demo-video-quiz', targetMode: 'emulator'
+  }, {
+    FIRESTORE_EMULATOR_HOST: 'localhost:8080',
+    FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }), /127\.0\.0\.1:8080/);
+  assert.equal(command.validateTarget({
+    projectId: 'demo-video-quiz', targetMode: 'emulator'
+  }, {
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+    FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }).targetMode, 'emulator');
+});
+
+test('lifecycle CLI reports and forwards the validated target mode', async () => {
+  const command = require('../scripts/migrate-lifecycle-state.js');
+  let placeholder;
+  let published;
+  let received;
+  const report = await command.main([
+    '--project', 'demo-video-quiz', '--target-mode', 'emulator',
+    '--output', 'ignored.json'
+  ], {
+    environment: {
+      FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+      FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+    },
+    reserveReport(_path, contents) {
+      placeholder = JSON.parse(contents);
+      return { async commit(contents) { published = JSON.parse(contents); } };
+    },
+    async initialize() { return { db: {}, async close() {} }; },
+    async runLifecycleBackfill(options) {
+      received = options;
+      return { status: 'complete', safeToDeployStrictRules: true };
+    },
+    writeLine() {}
+  });
+  assert.equal(placeholder.targetMode, 'emulator');
+  assert.equal(received.targetMode, 'emulator');
+  assert.equal(published.targetMode, 'emulator');
+  assert.equal(report.targetMode, 'emulator');
+});
+
 test('lifecycle CLI reserves output before Admin initialization and refuses an existing target', async () => {
   const command = require('../scripts/migrate-lifecycle-state.js');
   const admin = require('firebase-admin');

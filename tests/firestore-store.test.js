@@ -879,11 +879,20 @@ test('공동 편집자는 승인된 교사만 소유자 트랜잭션으로 추�
     },
     'teacher_allowlist/editor@school.kr': { enabled: true, role: 'teacher' },
     'teacher_allowlist/disabled@school.kr': { enabled: false, role: 'teacher' }
+  }, {
+    beforeTransactionGet(path) {
+      if (path === 'quiz_sets/set1/collaborators/disabled@school.kr') {
+        throw Object.assign(new Error('rules denied unapproved target'), {
+          code: 'permission-denied'
+        });
+      }
+    }
   });
   const store = createStore(fake);
   const owner = { uid: 'owner', email: 'owner@school.kr', role: 'teacher' };
   const editor = { uid: 'editor', email: 'editor@school.kr', role: 'teacher' };
-  await assert.rejects(store.addCollaborator('set1', 'disabled@school.kr', owner), /unapproved/);
+  await assert.rejects(store.addCollaborator('set1', 'disabled@school.kr', owner),
+    /승인된 교사/);
   await store.addCollaborator('set1', 'EDITOR@School.KR', owner);
   assert.equal(fake.value('quiz_sets/set1').collaboratorCount, 1);
   assert.equal(fake.value('quiz_sets/set1/collaborators/editor@school.kr').email, 'editor@school.kr');
@@ -893,6 +902,28 @@ test('공동 편집자는 승인된 교사만 소유자 트랜잭션으로 추�
   assert.equal(await store.removeCollaborator('set1', 'EDITOR@School.KR', owner), true);
   assert.equal(fake.value('quiz_sets/set1').collaboratorCount, 0);
   assert.equal(await store.canEditQuizSet('set1', editor), false);
+});
+
+test('일반 교사의 공동 편집자 추가는 admin 전용 승인 목록을 직접 읽지 않는다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'active',
+      collaboratorCount: 0, imageCount: 0
+    },
+    'teacher_allowlist/editor@school.kr': { enabled: true, role: 'teacher' }
+  });
+  const store = createStore(fake);
+
+  await store.addCollaborator('set1', 'EDITOR@School.KR', {
+    uid: 'owner', email: 'owner@school.kr', role: 'teacher'
+  });
+
+  assert.equal(fake.calls().some(call =>
+    (call.operation === 'get' || call.operation === 'transactionGet') &&
+    call.path === 'teacher_allowlist/editor@school.kr'
+  ), false);
+  assert.equal(fake.value('quiz_sets/set1/collaborators/editor@school.kr').email,
+    'editor@school.kr');
 });
 
 test('공동 편집자 저장 API는 휴지통 세트와 권한 없는 actor를 거부한다', async () => {

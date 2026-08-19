@@ -197,12 +197,15 @@ Firestore Rules는 소유자, 활성 공동 편집자, 휴지통 상태, purge �
 
 ## 배포 순서
 
-1. 새 데이터 필드를 허용하되 기존 동작을 유지하는 Rules와 앱을 Emulator에서 검증한다.
-2. 로그인 UI·공동 편집·휴지통 UI를 선배포한다.
-3. 실제 두 admin 계정으로 공동 편집과 권한 제거를 확인한다.
-4. 엄격한 새 Rules를 운영에 배포한다.
-5. 휴지통 이동·복원·만료 fixture purge를 확인한다.
-6. 문제 발생 시 이전 Rules 릴리스와 직전 앱 커밋으로 롤백한다. 기존 데이터는 additive 필드라 구버전 앱에서도 손상되지 않는다.
+1. lifecycle 이관을 production target dry-run한 뒤 apply하고, durable 최종 감사 보고서의 `safeToDeployStrictRules: true`를 확인한다.
+2. 검토된 브랜치를 병합하고 앱을 push한다.
+3. 현재 Rules에서 두 admin 계정 로그인을 확인한다.
+4. 최종 규칙 파일을 가리키는 staged Rules를 배포한다. gate가 아직 없으므로 counter 종속 쓰기는 fail-closed다.
+5. trusted counter gate CLI로 새 `lockId`를 생성해 잠그고 readback `updateTime` generation을 기록한다.
+6. 같은 gate identity 아래 counter 이관·감사를 실행하고 durable 보고서의 `safeToDeployStrictRules: true`를 확인한다.
+7. strict Rules를 배포한다.
+8. counter 감사 보고서의 동일 `lockId`와 `updateTime` generation으로 gate를 해제한다.
+9. disposable production smoke를 실행한다. 문제 발생 시 이전 Rules 릴리스와 직전 앱 커밋으로 롤백하며 기존 데이터나 과거 수업 기록은 삭제하지 않는다.
 
 ## 제외 범위
 

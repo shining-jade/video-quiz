@@ -536,23 +536,31 @@ Use TDD for every fix. One reviewer must confirm each finding addressed and iden
 Run: `pnpm test && pnpm test:rules && git diff --check && git status --short`
 Expected: all tests PASS and tracked worktree clean.
 
-- [ ] **Step 4: Predeploy additive app code**
+- [ ] **Step 4: Run lifecycle production dry-run, apply, and audit gate**
 
-Fast-forward merge to `main`, rerun tests on merged `main`, push `main`, and verify GitHub Pages loads. Do not deploy new Rules until both admin accounts can still sign in under the current Rules.
+Run the lifecycle CLI with `--target-mode production` and durable, unused output paths. Review dry-run, then apply with exact project confirmation. Stop unless the final apply report is `status: "complete"` and `safeToDeployStrictRules: true`.
 
-- [ ] **Step 5: Verify production compatibility**
+- [ ] **Step 5: Merge and push the app**
+
+Fast-forward merge to `main`, rerun tests on merged `main`, push `main`, and verify GitHub Pages loads. Do not deploy staged or strict Rules yet.
+
+- [ ] **Step 6: Confirm both admins under the current Rules**
+
+Verify both admin accounts sign in and the app loads before changing Rules.
+
+- [ ] **Step 7: Deploy staged Rules, lock, and run counter migration/audit**
+
+Deploy `firebase.counter-migration.json`, then immediately use the trusted `gate:counters` CLI to create a new lock and record its exact readback `lockId` and `updateTimeGeneration`. Run counter dry-run/apply with that identity. Stop unless the durable counter report is `status: "complete"` and `safeToDeployStrictRules: true`.
+
+- [ ] **Step 8: Deploy strict Rules and unlock the exact gate generation**
+
+Deploy `firestore.rules`. Only after deployment succeeds, call `gate:counters --action unlock` with the exact `lockId` and `gate.updateTimeGeneration` from the successful counter audit report. Never delete the gate document or unlock a different/currently rewritten generation.
+
+- [ ] **Step 9: Verify production compatibility and smoke**
 
 Using trusted Admin SDK credentials, count existing sets with `trashedAt`, `purgeStartedAt`, and collaborator children. Expected before first release: zero new-state documents unless created by the acceptance fixture. Verify both current admin allowlist documents are readable by the new admin UI and acquire audit fields on first update without losing roles.
-
-- [ ] **Step 6: Deploy Firestore Rules**
-
-Run: `firebase deploy --only firestore:rules --project video-quiz-65798`
-Expected: compile and release succeed.
-
-- [ ] **Step 7: Run production smoke acceptance**
-
 Create a disposable test copy, add/remove the second admin as collaborator, trash/restore it, then typed-delete it. Confirm original sets and all historical sessions remain. Do not manufacture a 30-day production timestamp; exact-boundary purge remains an Emulator/test-project proof.
 
-- [ ] **Step 8: Preserve reports and document final state**
+- [ ] **Step 10: Preserve reports and document final state**
 
 Record commit, Rules deployment timestamp, test counts, disposable set ID, observed browser results, and any plugin/environment-only errors in the handoff report. Keep production migration reports outside git unless the user explicitly approves committing operational identifiers.

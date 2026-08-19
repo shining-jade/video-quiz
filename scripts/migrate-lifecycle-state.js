@@ -6,12 +6,16 @@ const migration = require('../lifecycle-migration.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
-  const result = { projectId: '', apply: false, confirmProject: '', output: '' };
+  const result = {
+    projectId: '', apply: false, confirmProject: '', output: '',
+    targetMode: 'production'
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--apply') { result.apply = true; continue; }
     const fields = new Map([
-      ['--project', 'projectId'], ['--confirm-project', 'confirmProject'], ['--output', 'output']
+      ['--project', 'projectId'], ['--confirm-project', 'confirmProject'],
+      ['--output', 'output'], ['--target-mode', 'targetMode']
     ]);
     const field = fields.get(argument);
     if (!field) throw new Error('Unknown argument: ' + argument);
@@ -20,10 +24,31 @@ function parseArgs(argv) {
     result[field] = value;
   }
   if (!result.projectId) throw new Error('--project is required.');
+  if (!['production', 'emulator'].includes(result.targetMode)) {
+    throw new Error('--target-mode must be production or emulator.');
+  }
   if (result.apply && result.confirmProject !== result.projectId) {
     throw new Error('--apply requires an exact --confirm-project.');
   }
   return result;
+}
+
+function validateTarget(options, environment = process.env) {
+  const firestoreHost = environment.FIRESTORE_EMULATOR_HOST || '';
+  const authHost = environment.FIREBASE_AUTH_EMULATOR_HOST || '';
+  if (options.targetMode === 'emulator') {
+    if (!/^demo-/.test(options.projectId)) {
+      throw new Error('Emulator mode requires a demo-* project.');
+    }
+    if (firestoreHost !== '127.0.0.1:8080' || authHost !== '127.0.0.1:9099') {
+      throw new Error('Emulator mode requires FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 and FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099.');
+    }
+    return { targetMode: 'emulator', firestoreHost, authHost };
+  }
+  if (firestoreHost || authHost) {
+    throw new Error('Production mode refuses stale Firestore/Auth emulator environment variables.');
+  }
+  return { targetMode: 'production', firestoreHost: '', authHost: '' };
 }
 
 function productionDependencies() {
@@ -50,7 +75,8 @@ function failedReport(options, error, partialReport) {
   }
   return {
     tool: 'lifecycle-migration-cli', schemaVersion: 1,
-    projectId: options.projectId, mode: options.apply ? 'apply' : 'dry-run',
+    projectId: options.projectId, targetMode: options.targetMode,
+    mode: options.apply ? 'apply' : 'dry-run',
     operation: 'lifecycle-backfill', status: 'failed',
     safeToDeployStrictRules: false,
     error: String(error && error.message || error)
@@ -60,12 +86,14 @@ function failedReport(options, error, partialReport) {
 async function main(argv = process.argv.slice(2), dependencies) {
   const options = parseArgs(argv);
   const runtime = dependencies || productionDependencies();
+  const target = validateTarget(options, runtime.environment || process.env);
   const output = options.output || path.resolve(
     'lifecycle-migration-' + options.projectId + '-' + Date.now() + '.json'
   );
   const placeholder = {
     tool: 'lifecycle-migration-cli', schemaVersion: 1,
-    projectId: options.projectId, mode: options.apply ? 'apply' : 'dry-run',
+    projectId: options.projectId, targetMode: target.targetMode,
+    mode: options.apply ? 'apply' : 'dry-run',
     operation: 'lifecycle-backfill', status: 'reserved-fail-closed',
     safeToDeployStrictRules: false
   };
@@ -78,11 +106,16 @@ async function main(argv = process.argv.slice(2), dependencies) {
     services = await runtime.initialize(options.projectId);
     report = await runtime.runLifecycleBackfill({
       db: services.db, projectId: options.projectId,
-      apply: options.apply, confirmProject: options.confirmProject
+      apply: options.apply, confirmProject: options.confirmProject,
+      targetMode: target.targetMode
     });
+    report.targetMode = target.targetMode;
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
   } catch (error) {
-    const failure = failedReport(options, error, error && error.partialReport);
+    const failure = failedReport(
+      { ...options, targetMode: target.targetMode }, error, error && error.partialReport
+    );
+    failure.targetMode = target.targetMode;
     try {
       await reservation.commit(JSON.stringify(failure, null, 2) + '\n');
     } catch (publicationError) {
@@ -108,4 +141,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = { failedReport, main, parseArgs, productionDependencies, reserveReport };
+module.exports = {
+  failedReport, main, parseArgs, productionDependencies, reserveReport, validateTarget
+};

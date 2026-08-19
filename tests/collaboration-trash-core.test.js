@@ -24,4 +24,3 @@ test('collaborator change rejects owner, duplicate, disabled and twenty-first ed
   assert.equal(Core.validateCollaboratorChange({ ownerEmail: 'a@x.kr', email: 'b@x.kr', enabled: false, existing: [] }).code, 'unapproved');
   assert.equal(Core.validateCollaboratorChange({ ownerEmail: 'a@x.kr', email: 'b@x.kr', enabled: true, existing: Array(20).fill('x') }).code, 'limit');
 });
-
