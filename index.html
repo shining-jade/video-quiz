@@ -1195,6 +1195,7 @@ let clockUserId = '';
 let clockPromise = null;
 let clockPromiseUid = '';
 let teacherAuthVersion = 0;
+let appliedTeacherState = AuthCore.teacherState(null, null);
 
 function teacherAuthMarkup() {
   if (!teacherUser) {
@@ -1287,8 +1288,9 @@ function retryPendingAllocations() {
 }
 
 async function applyTeacherUser(user) {
-  const previousState = teacherState;
-  const previousUid = teacherUser && teacherUser.uid || '';
+  const previousState = typeof appliedTeacherState !== 'undefined' && appliedTeacherState
+    ? appliedTeacherState : teacherState;
+  const previousUid = previousState && previousState.uid || '';
   const heartbeatState = typeof pl !== 'undefined' && pl &&
     typeof pl.stopActivationHeartbeat === 'function' ? pl : null;
   const heartbeatOwner = heartbeatState && AuthCore.isTeacher(teacherState)
@@ -1341,14 +1343,22 @@ async function applyTeacherUser(user) {
     );
   }
   renderTeacherAuthArea();
-  if (typeof authReady !== 'undefined' && authReady) reconcileTeacherRoute(previousState, teacherState);
+  if (typeof authReady !== 'undefined' && authReady) {
+    reconcileTeacherRoute(previousState, teacherState);
+  }
+  appliedTeacherState = teacherState;
   return true;
 }
 
 function setTeacherAllowance(allowance) {
+  const previousState = appliedTeacherState;
   teacherAllowance = allowance || null;
   teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
   renderTeacherAuthArea();
+  if (typeof authReady !== 'undefined' && authReady) {
+    reconcileTeacherRoute(previousState, teacherState);
+  }
+  appliedTeacherState = teacherState;
 }
 
 function teacherAuthMessage(state) {

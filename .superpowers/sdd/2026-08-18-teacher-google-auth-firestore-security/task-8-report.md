@@ -38,3 +38,17 @@
 - Kept legacy `mc` as an alias for `choice`.
 - Kept the editor's 20 accepted short-answer aliases and 100-character per-alias limit; Rules branches were reordered to stay within the 1,000-expression budget.
 - Public question limits are 1,000 characters for prompt text, 200 per choice, six choices, and 380,100 characters for HTTPS or `data:image/` image projections. Student text answers retain the existing client limits of 100/1,000 characters.
+
+## Fix Round 2 — overlapping same-user refresh and account replacement
+
+- Added durable `appliedTeacherState`, distinct from the mutable in-flight `teacherUser`/`teacherState`. It records the identity and role whose protected UI is currently allowed to remain rendered.
+- Starting a same-UID observer refresh may clear mutable auth state while verifying the new token, but it does not clear or retract the rendered identity. A subsequent B/sign-out callback compares against the durable A identity and retracts the protected DOM synchronously before its first await.
+- Only the current generation updates `appliedTeacherState`. A stale A token/allowance completion returns before committing UI auth state, routing, or the durable rendered identity.
+- A completed same-user refresh performs no cleanup; A→B reloads the same teacher route under B; signed-out and admin→teacher-on-admin transitions clean up and route home.
+
+TDD evidence:
+
+- RED: the deterministic A-authorized → pending A refresh → B callback test failed because `private A data` remained rendered immediately after B entered.
+- GREEN: the same test passed, along with stale token, stale allowance, signed-out/admin downgrade route reconciliation tests.
+- Final Node suite: 373 tests, 326 pass, 47 Emulator-only skip, 0 fail.
+- Final Rules/Admin Emulator suite: 421 tests, 421 pass, 0 fail, 0 skip.

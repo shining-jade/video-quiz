@@ -6665,6 +6665,60 @@ test('observer auth loss, downgrade, and account replacement retract protected r
   assert.deepEqual(events, []);
 });
 
+test('pending same-user refresh cannot hide the rendered A identity from a synchronous B retraction', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: 'private A data' };
+  const events = [];
+  const tokenResolvers = {};
+  const userA = {
+    uid: 'teacher-a', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { tokenResolvers.refreshA = resolve; }); }
+  };
+  const userB = {
+    uid: 'teacher-b', email: 'b@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { tokenResolvers.accountB = resolve; }); }
+  };
+  const context = {
+    authReady: true, location: { hash: '#/live/session-a' },
+    teacherUser: { uid: 'teacher-a', email: 'a@school.kr' },
+    teacherAllowance: { enabled: true, role: 'teacher' },
+    teacherState: { status: 'teacher', uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' },
+    appliedTeacherState: { status: 'teacher', uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' },
+    teacherAuthVersion: 0, clockUserId: 'teacher-a', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'),
+    store: { async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; } },
+    renderTeacherAuthArea() {}, runCleanups() { events.push('cleanup'); },
+    router() { events.push('router'); }, go(route) { events.push('go:' + route); },
+    APP() { return app; }, topbar() { return '<nav></nav>'; }, console
+  };
+  vm.runInNewContext(
+    extractFunction(html, 'teacherRouteRequirement') + '\n' +
+    extractFunction(html, 'retractProtectedTeacherScreen') + '\n' +
+    extractFunction(html, 'reconcileTeacherRoute') + '\n' +
+    extractFunction(html, 'applyTeacherUser'),
+    context
+  );
+
+  const refreshingA = context.applyTeacherUser(userA);
+  assert.equal(context.teacherUser, null);
+  assert.match(app.innerHTML, /private A data/);
+
+  const applyingB = context.applyTeacherUser(userB);
+  assert.doesNotMatch(app.innerHTML, /private A data/);
+  assert.deepEqual(events, ['cleanup']);
+
+  await Promise.resolve();
+  tokenResolvers.accountB({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applyingB;
+  assert.equal(context.teacherState.uid, 'teacher-b');
+  assert.deepEqual(events, ['cleanup', 'cleanup', 'router']);
+
+  tokenResolvers.refreshA({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  assert.equal(await refreshingA, false);
+  assert.equal(context.teacherState.uid, 'teacher-b');
+  assert.equal(context.appliedTeacherState.uid, 'teacher-b');
+});
+
 test('teacher grading transaction ignores a stale expected revision and grades the current submitted revision only', async () => {
   const fake = makeFirestoreFake({
     'sessions/a/responses/s1': {
