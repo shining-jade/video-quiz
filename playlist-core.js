@@ -69,7 +69,7 @@
     let end = normalizedEnd != null ? normalizedEnd : legacyEnd;
     if (end == null) {
       const duration = finiteNonNegative(video && video.durationSec);
-      if (duration > 0) end = start + duration;
+      if (duration > start) end = duration;
     }
     return { start, end: end != null && end > start ? end : null };
   }

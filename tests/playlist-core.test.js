@@ -110,15 +110,28 @@ test('같은 영상의 끝 index로 이동하면 문항이 실제 마지막에 �
   assert.deepEqual(moved.videos[0].questions.map(q => q.id), ['b', 'c', 'a']);
 });
 
-test('endSec이 null이면 durationSec을 재생구간 길이로 사용해 상대 시각을 옮긴다', () => {
+test('endSec이 null이면 durationSec을 원본 영상의 절대 끝 시각으로 사용한다', () => {
   const videos = [
-    { startSec: 0, endSec: null, durationSec: 100, questions: [{ t: 50, id: 'middle' }] },
-    { startSec: 200, endSec: null, durationSec: 40, questions: [] }
+    { startSec: 10, endSec: null, durationSec: 110, questions: [{ t: 60, id: 'middle' }] },
+    { startSec: 200, endSec: null, durationSec: 240, questions: [] }
   ];
   const moved = core.moveQuestion(videos, {},
     { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
   assert.equal(moved.videos[1].questions[0].t, 220);
-  assert.equal(videos[0].questions[0].t, 50);
+  assert.equal(videos[0].questions[0].t, 60);
+});
+
+test('명시적 endSec은 durationSec보다 우선하고 durationSec이 start 이하이면 fail-safe한다', () => {
+  const explicit = core.moveQuestion([
+    { startSec: 10, endSec: 110, durationSec: 999, questions: [{ t: 60 }] },
+    { startSec: 200, endSec: 240, durationSec: 999, questions: [] }
+  ], {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
+  assert.equal(explicit.videos[1].questions[0].t, 220);
+  const invalid = core.moveQuestion([
+    { startSec: 10, endSec: null, durationSec: 10, questions: [{ t: 60 }] },
+    { startSec: 200, endSec: null, durationSec: 200, questions: [] }
+  ], {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
+  assert.equal(invalid.videos[1].questions[0].t, 200);
 });
 
 test('끝 시각과 duration을 알 수 없거나 유효하지 않으면 목적지 시작시각으로 clamp한다', () => {
