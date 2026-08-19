@@ -36,7 +36,11 @@ service cloud.firestore {
       return isApprovedTeacher() && allowance().data.role == 'admin';
     }
 
-    function validAllowanceDocument() {
+    function canonicalAllowanceId(email) {
+      return email.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+$');
+    }
+
+    function validAllowanceDocument(email) {
       return request.resource.data.keys().hasOnly([
           'enabled', 'role', 'updatedAt', 'updatedByUid'
         ]) &&
@@ -429,8 +433,8 @@ service cloud.firestore {
 
     match /teacher_allowlist/{email} {
       allow get, list: if isAdmin();
-      allow create: if isAdmin() && validAllowanceDocument();
-      allow update: if isAdmin() && validAllowanceDocument() &&
+      allow create: if isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email);
+      allow update: if isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email) &&
         !protectsCurrentAdmin(email);
       allow delete: if false;
       allow read, write: if false;

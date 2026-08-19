@@ -2046,6 +2046,37 @@ rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고
   }));
 });
 
+rulesTest('승인 문서 ID는 소문자 canonical 이메일 경로만 허용한다', async () => {
+  await resetFirestore();
+  const admin = actorFirestore('admin');
+  const audited = { enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid' };
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/Mixed@School.KR'), audited));
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/not-an-email'), audited));
+  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/canonical@school.kr'), audited));
+});
+
+rulesTest('비활성화된 다른 admin은 후속 승인 목록 쓰기를 할 수 없다', async () => {
+  await resetFirestore();
+  const admin = actorFirestore('admin');
+  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
+    enabled: true, role: 'admin', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
+  await assertSucceeds(updateDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
+    enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
+  const disabledAdmin = testEnvironment.authenticatedContext('other-admin-uid', {
+    email: 'other-admin@school.kr',
+    email_verified: true,
+    firebase: { sign_in_provider: 'google.com' }
+  }).firestore();
+  await assertFails(setDoc(doc(disabledAdmin, 'teacher_allowlist/blocked-after-disable@school.kr'), {
+    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'other-admin-uid'
+  }));
+  await assertFails(updateDoc(doc(disabledAdmin, 'teacher_allowlist/owner@school.kr'), {
+    enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'other-admin-uid'
+  }));
+});
+
 rulesTest('승인 문서만으로는 비Google·미검증·비활성 계정에 교사 권한을 주지 않는다', async () => {
   await adminWrite('teacher_allowlist/password@school.kr', { enabled: true, role: 'teacher' });
   await adminWrite('teacher_allowlist/unverified@school.kr', { enabled: true, role: 'teacher' });
