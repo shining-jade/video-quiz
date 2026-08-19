@@ -290,6 +290,8 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-question-bubble b { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent); color: #fff; font-size: 11px; }
 .mk-question-bubble span { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
 .mk-question-bubble time { flex: none; color: var(--ink-2); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.mk-question-dropzone { width: 100%; min-height: 34px; padding: 6px 10px; border: 1px dashed #b7bef7; border-radius: 9px; background: #f8f8ff; color: var(--ink-2); font-size: 12px; cursor: copy; }
+.mk-question-dropzone.drop-target { border-color: var(--accent); background: var(--accent-2); color: var(--accent); font-weight: 700; }
 .mk-question-move-tools { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .mk-save-toast { position: fixed; z-index: 9999; right: 20px; bottom: 20px; max-width: min(360px, calc(100vw - 40px)); padding: 10px 14px; border-radius: 10px; background: #1c2030; color: #fff; box-shadow: 0 8px 28px rgba(20,25,45,.24); font-size: 13px; font-weight: 700; opacity: 0; pointer-events: none; transform: translateY(8px); transition: opacity .16s, transform .16s; }
 .mk-save-toast.show { opacity: 1; transform: translateY(0); }
@@ -2185,6 +2187,9 @@ function mkRestoreHistory(snapshot) {
   state.settings = normSettings(snapshot.settings);
   state.videos = PlaylistCore.normalizeVideos({ videos: snapshot.videos || [] });
   state.activeVideo = Math.max(0, Math.min(Number(snapshot.activeVideo) || 0, state.videos.length - 1));
+  // Undo/redo is an editor mutation too.  An in-flight save must treat the
+  // restored model as newer and leave it dirty until an explicit next save.
+  state.editRevision = (Number(state.editRevision) || 0) + 1;
   state.saved = typeof mkSnapshotsEqual === 'function' &&
     mkSnapshotsEqual(mkHistorySnapshot(state), state.persistedSnapshot);
   mkSetSaveStatus(state.saved ? 'saved' : 'dirty');
@@ -2525,7 +2530,6 @@ function screenMake(setId) {
       state.createdAt = set.createdAt;
       state.archived = set.archived;
       state.saved = true;
-      mkRestoreDraft(set.updatedAt || set.createdAt || 0);
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
         if (mk !== state || !sameEditIdentity()) { if (mk === state) showReadOnly(set); return; }
@@ -2540,7 +2544,13 @@ function screenMake(setId) {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
           });
         });
+        // The persisted comparison basis is always the canonical server model,
+        // including its images.  A newer local draft is restored only after
+        // that basis is captured and remains dirty until explicitly saved.
         if (typeof mkResetHistory === 'function') mkResetHistory(true);
+        if (mkRestoreDraft(set.updatedAt || set.createdAt || 0) && typeof mkResetHistory === 'function') {
+          mkResetHistory();
+        }
         renderMake();
         startAccessWatch();
         });
@@ -2578,18 +2588,27 @@ function renderMake() {
         'onpointerdown="mkStartQuestionDrag(event,' + videoIndex + ',' + questionIndex + ')" ' +
       'title="' + (questionIndex + 1) + '번 · ' + esc(fmtTime(q.t)) + '">' + (questionIndex + 1) + '</button>'
     ).join('');
+    const globalQuestionOffset = mk.videos.slice(0, videoIndex)
+      .reduce((count, item) => count + ((item && item.questions) || []).length, 0);
     const bubbles = video.questions.map((q, questionIndex) => {
       const title = String(q.text || '').trim() || '질문을 입력하세요';
-      const label = '문항 ' + (questionIndex + 1) + ' 이동: ' + title;
+      const globalQuestionNumber = globalQuestionOffset + questionIndex + 1;
+      const label = '문항 ' + globalQuestionNumber + ' 이동: ' + title;
       return '<button type="button" class="mk-question-bubble" draggable="true" ' +
-        'data-video="' + videoIndex + '" data-question="' + questionIndex + '" ' +
+        'data-video="' + videoIndex + '" data-question="' + questionIndex + '" data-global-question="' + globalQuestionNumber + '" ' +
         'aria-label="' + esc(label) + '" title="끌어서 순서를 바꾸거나 화살표 키로 이동" ' +
         'ondragstart="mkQuestionDragStart(event,' + videoIndex + ',' + questionIndex + ')" ' +
         'ondragover="mkQuestionDragOver(event)" ondragleave="mkQuestionDragLeave(event)" ' +
         'ondrop="mkQuestionDrop(event,' + videoIndex + ',' + questionIndex + ')" ' +
         'onkeydown="mkQuestionBubbleKeydown(event,' + videoIndex + ',' + questionIndex + ')">' +
-        '<b>' + (questionIndex + 1) + '</b><span>' + esc(title) + '</span><time>' + esc(fmtTime(q.t)) + '</time></button>';
+        '<b>' + globalQuestionNumber + '</b><span>' + esc(title) + '</span><time>' + esc(fmtTime(q.t)) + '</time></button>';
     }).join('');
+    const finalDropzone = '<button type="button" class="mk-question-dropzone" ' +
+      'data-drop-video="' + videoIndex + '" data-drop-index="' + video.questions.length + '" ' +
+      'ondragover="mkQuestionDragOver(event)" ondragleave="mkQuestionDragLeave(event)" ' +
+      'ondrop="mkQuestionDrop(event,' + videoIndex + ',' + video.questions.length + ')" ' +
+      'aria-label="영상 ' + (videoIndex + 1) + ' 문항 맨 뒤에 놓기">' +
+      (video.questions.length ? '＋ 이 영상의 맨 뒤에 놓기' : '여기에 문항 놓기') + '</button>';
     const questions = video.questions.length ? video.questions.map((q, questionIndex) =>
       '<div class="q-card" id="mk-q-' + videoIndex + '-' + questionIndex + '">' +
         '<div class="q-head"><div class="q-no">' + (questionIndex + 1) + '</div>' +
@@ -2634,7 +2653,7 @@ function renderMake() {
         '<input data-range-slider="' + videoIndex + '-end" aria-label="영상 ' + (videoIndex + 1) + ' 종료" type="range" min="0" max="' + domain.max + '" value="' + domain.end + '" oninput="mkSetRange(' + videoIndex + ',\'end\',Number(this.value))"></div>' +
         '<div class="mk-timeline" data-timeline-video="' + videoIndex + '">' + dots + '</div></div>' +
         '<div><h3 style="margin-bottom:4px">문항</h3><div class="sub">시각은 원본 YouTube 영상 기준입니다. 제목 버블을 끌거나 화살표 키로 순서를 바꿀 수 있습니다.</div>' +
-          '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + '</div>' +
+          '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + finalDropzone + '</div>' +
           questions + '<button class="btn" onclick="mkAddQuestion(' + videoIndex + ')">＋ 문항 추가</button> ' +
           '<button class="btn ghost sm" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button></div></div>' +
     '</section>';
@@ -3156,6 +3175,8 @@ function mkMoveQuestion(fromVi, fromQi, toVi, toQi) {
   if (!state || !state.videos[fromVi] || !state.videos[toVi]) return false;
   const destination = state.videos[toVi].questions || [];
   const targetIndex = Math.max(0, Math.min(Number(toQi) || 0, destination.length));
+  if (Number(fromVi) === Number(toVi) &&
+      (targetIndex === Number(fromQi) || targetIndex === Number(fromQi) + 1)) return false;
   const result = PlaylistCore.moveQuestion(state.videos, mkQuestionImageMap(state.videos),
     { videoIndex: Number(fromVi), questionIndex: Number(fromQi) },
     { videoIndex: Number(toVi), questionIndex: targetIndex });

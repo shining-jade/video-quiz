@@ -477,6 +477,38 @@ test('편집기 문항 이동은 PlaylistCore를 한 번 호출해 영상 사이
   assert.equal(context.mk.videos[1].questions[1]._img, 'data:image/a');
 });
 
+test('문항 drop은 영상 끝과 빈 영상에 삽입하고 no-op은 history를 만들지 않는다', () => {
+  let dirty = 0;
+  const context = {
+    mk: {
+      activeVideo: 0,
+      videos: [
+        { startSec: 0, endSec: 100, questions: [{ text: 'A', t: 10 }, { text: 'B', t: 20 }] },
+        { startSec: 100, endSec: 200, questions: [{ text: 'C', t: 110 }] },
+        { startSec: 200, endSec: 300, questions: [] }
+      ]
+    },
+    PlaylistCore: require('../playlist-core.js'),
+    mkMarkDirty() { dirty += 1; }, renderMake() {}
+  };
+  loadStageFunctions(['mkQuestionImageMap', 'mkMoveQuestion', 'mkQuestionDrop'], context);
+  const drop = (from, toVideo, toIndex) => context.mkQuestionDrop({
+    preventDefault() {}, currentTarget: { classList: { remove() {} } },
+    dataTransfer: { getData() { return JSON.stringify(from); } }
+  }, toVideo, toIndex);
+
+  assert.equal(drop({ videoIndex: 0, questionIndex: 0 }, 1, 1), true);
+  assert.deepEqual(context.mk.videos[1].questions.map(q => q.text), ['C', 'A']);
+  assert.equal(dirty, 1);
+
+  assert.equal(drop({ videoIndex: 1, questionIndex: 1 }, 1, 2), false);
+  assert.equal(dirty, 1);
+
+  assert.equal(drop({ videoIndex: 1, questionIndex: 1 }, 2, 0), true);
+  assert.deepEqual(context.mk.videos[2].questions.map(q => q.text), ['A']);
+  assert.equal(dirty, 2);
+});
+
 test('늦게 끝난 이전 저장은 새 편집과 최신 저장 결과를 덮어쓰지 않는다', async () => {
   const pending = [];
   const context = {
@@ -723,6 +755,60 @@ test('대기열의 최신 저장이 실행 직전 무효가 되면 dirty 초안�
   assert.deepEqual(writes.map(value => value.videos[0].questions[0].text), ['A', 'C']);
   assert.equal(context.mk.saved, true);
   assert.equal(historyResets.length, 1);
+});
+
+test('저장 중 undo와 redo는 revision을 올려 응답의 state 복원과 history reset을 차단한다', async () => {
+  const writes = [];
+  let resolveA;
+  let historyResets = 0;
+  const snapshot = text => ({
+    title: text, author: '', settings: {}, activeVideo: 0,
+    videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+      questions: [{ type: 'long', t: 10, text, choices: [] }] }]
+  });
+  const context = {
+    mk: Object.assign({
+      id: 'set-1', ownerUid: 'teacher-1', editRevision: 0, saveSequence: 0,
+      createdAt: 1, saved: true, persistedSnapshot: snapshot('서버 A')
+    }, snapshot('서버 A')),
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    SV_TS: {}, rid() { return 'new-id'; }, normSettings(value) { return value || {}; },
+    mkValidate() { return ''; },
+    mkPayload() { return { set: { title: context.mk.title, videos: clone(context.mk.videos) }, images: {} }; },
+    store: {
+      saveOwnedQuizSet(id, value) {
+        writes.push(clone(value));
+        return writes.length === 1 ? new Promise(resolve => { resolveA = resolve; }) : Promise.resolve();
+      }
+    },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    mkResetHistory() { historyResets += 1; }, mkShowSaveToast() {}, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console: { error() {} }, alert() {}, Date
+  };
+  context.mk.history = {
+    canUndo() { return true; }, undo() { return snapshot('undo 복원'); },
+    canRedo() { return true; }, redo() { return snapshot('redo 복원'); }
+  };
+  loadStageFunctions(['mkHistorySnapshot', 'mkSnapshotsEqual', 'mkRestoreHistory', 'mkUndo', 'mkRedo', 'mkSave'], context);
+
+  const saveA = context.mkSave(false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.mkUndo(), true);
+  assert.equal(context.mkRedo(), true);
+  assert.equal(context.mk.editRevision, 2);
+  resolveA();
+  await saveA;
+
+  assert.equal(context.mk.title, 'redo 복원');
+  assert.equal(context.mk.saved, false);
+  assert.equal(historyResets, 0);
+
+  await context.mkSave(false);
+  assert.deepEqual(writes.map(value => value.title), ['서버 A', 'redo 복원']);
+  assert.equal(historyResets, 1);
 });
 
 test('undo 복원은 이미지까지 포함한 저장 기준 snapshot과 같을 때만 저장됨 상태가 된다', () => {
@@ -2215,6 +2301,127 @@ test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한�
   assert.match(app.innerHTML, /class="mk-video-card[^\"]*" data-video-index="1"/);
   assert.match(app.innerHTML, /다음 YouTube 영상 추가/);
   assert.equal((app.innerHTML.match(/id="mk-player-wrap"/g) || []).length, 1);
+});
+
+test('문항 제목 버블은 영상 전체 번호와 빈 영상·마지막 삽입 dropzone을 렌더링한다', () => {
+  const app = { innerHTML: '' };
+  const elements = new Map();
+  const question = text => ({ type: 'long', t: 10, text, choices: [], explain: '', limitSec: null });
+  const context = {
+    mk: {
+      id: null, title: '세트', author: '', settings: {}, activeVideo: 0, saved: false,
+      videos: [
+        { videoId: 'a', videoUrl: 'a', startSec: 0, endSec: 60, durationSec: 90, questions: [question('첫째'), question('둘째')] },
+        { videoId: 'b', videoUrl: 'b', startSec: 0, endSec: 60, durationSec: 90, questions: [question('셋째')] },
+        { videoId: 'c', videoUrl: 'c', startSec: 0, endSec: 60, durationSec: 90, questions: [] }
+      ]
+    },
+    mkPlayer: null, mkPlayerVid: '',
+    APP() { return app; }, topbar() { return ''; }, esc(value) { return String(value ?? ''); },
+    fmtTime(value) { return '0:' + String(value || 0).padStart(2, '0'); },
+    PlaylistCore: require('../playlist-core.js'),
+    qType(q) { return q.type || 'long'; }, QTYPES: { long: '서술형' },
+    mkAnswerField() { return ''; }, mkImageField() { return ''; },
+    mkRenderSettings() {}, mkSyncVideo() {}, mkShowShare() {}, mkMarkDirty() {}, lsSet() {},
+    $: selector => {
+      if (!elements.has(selector)) elements.set(selector, { addEventListener() {}, style: {} });
+      return elements.get(selector);
+    }
+  };
+  loadStageFunctions(['mkTimelineDomain', 'renderMake'], context);
+
+  context.renderMake();
+
+  assert.match(app.innerHTML, /data-global-question="1"[^>]*>[\s\S]*?<b>1<\/b>/);
+  assert.match(app.innerHTML, /data-global-question="2"[^>]*>[\s\S]*?<b>2<\/b>/);
+  assert.match(app.innerHTML, /data-global-question="3"[^>]*>[\s\S]*?<b>3<\/b>/);
+  assert.match(app.innerHTML, /data-drop-video="0" data-drop-index="2"/);
+  assert.match(app.innerHTML, /data-drop-video="2" data-drop-index="0"/);
+});
+
+test('서버보다 최신 draft를 복원해도 persistedSnapshot은 이미지 포함 서버 canonical을 유지한다', async () => {
+  const values = new Map();
+  const localStorage = {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, value); }, removeItem(key) { values.delete(key); }
+  };
+  const EditorDraft = require('../editor-draft.js');
+  EditorDraft.write(localStorage, 'set1', {
+    title: '로컬 draft', author: '', settings: {}, createdAt: 10, archived: false,
+    videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+      questions: [{ type: 'long', t: 10, text: 'draft 문항', imgUp: true, _img: 'draft-image' }] }]
+  }, 30);
+  const app = { innerHTML: '' };
+  const context = {
+    mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    EditorDraft, EditorHistoryCore: require('../editor-history-core.js'), localStorage,
+    lsGet() { return ''; }, DEFAULT_SETTINGS: {}, blankQuestion(t) { return { t }; },
+    document: { addEventListener() {}, removeEventListener() {} },
+    mkHandleSaveShortcut() {}, onCleanup() {}, clearTimeout() {}, every() {}, $() { return null; },
+    APP() { return app; }, topbar() { return ''; }, confirm() { return true; },
+    mkUpdateHistoryControls() {}, mkSetSaveStatus() {}, mkPersistDraft() {},
+    normSettings(value) { return value || {}; }, renderMake() {}, Date,
+    store: {
+      async getQuizSet() {
+        return {
+          title: '서버 canonical', author: '', ownerUid: 'teacher-1', settings: {}, createdAt: 10, updatedAt: 20,
+          videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+            questions: [{ type: 'long', t: 10, text: '서버 문항', imgUp: true, _img: '' }] }]
+        };
+      },
+      async getImages() { return { v0q0: 'server-image' }; }
+    },
+    normSet(value) { return value; }, console, toast() {}
+  };
+  loadStageFunctions(['mkHistorySnapshot', 'mkSnapshotsEqual', 'mkHistoryRecord', 'mkResetHistory', 'mkRestoreHistory', 'mkUndo', 'mkClearDraft', 'mkRestoreDraft', 'canEditSet', 'screenMake'], context);
+
+  context.screenMake('set1');
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(context.mk.title, '로컬 draft');
+  assert.equal(context.mk.videos[0].questions[0]._img, 'draft-image');
+  assert.equal(context.mk.saved, false);
+  assert.equal(context.mk.persistedSnapshot.title, '서버 canonical');
+  assert.equal(context.mk.persistedSnapshot.videos[0].questions[0]._img, 'server-image');
+
+  context.mk.title = 'draft에서 추가 편집';
+  context.mkHistoryRecord('title');
+  assert.equal(context.mkUndo(), true);
+  assert.equal(context.mk.title, '로컬 draft');
+  assert.equal(context.mk.saved, false);
+});
+
+test('새 세트 draft 복원은 서버 기준점 없이 dirty history로 시작한다', () => {
+  const values = new Map();
+  const localStorage = {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, value); }, removeItem(key) { values.delete(key); }
+  };
+  const EditorDraft = require('../editor-draft.js');
+  EditorDraft.write(localStorage, null, {
+    title: '새 draft', author: '', settings: {}, createdAt: 0, archived: false,
+    videos: [{ videoId: '', videoUrl: '', startSec: 0, endSec: null, questions: [{ text: '임시 문항' }] }]
+  }, 10);
+  const context = {
+    mk: {
+      id: null, title: '', author: '', settings: {}, videos: [], activeVideo: 0,
+      saved: false, persistedSnapshot: null, history: null
+    },
+    EditorDraft, EditorHistoryCore: require('../editor-history-core.js'), localStorage,
+    PlaylistCore: require('../playlist-core.js'), confirm() { return true; },
+    mkUpdateHistoryControls() {}
+  };
+  loadStageFunctions(['mkHistorySnapshot', 'mkResetHistory', 'mkClearDraft', 'mkRestoreDraft'], context);
+
+  assert.equal(context.mkRestoreDraft(0), true);
+  context.mkResetHistory();
+
+  assert.equal(context.mk.title, '새 draft');
+  assert.equal(context.mk.saved, false);
+  assert.equal(context.mk.persistedSnapshot, null);
 });
 
 test('영상 카드는 추가·복사·이동·삭제해도 서로의 문항을 공유하지 않는다', () => {
