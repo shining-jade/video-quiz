@@ -433,7 +433,7 @@
       let query = db.collection('quiz_sets');
       if (typeof query.where === 'function') {
         const state = config.lifecycleState || 'active';
-        if (state !== 'active' && !config.ownerUid) {
+        if (state !== 'active' && !config.ownerUid && config.allowAdminTrash !== true) {
           throw new Error('휴지통 목록은 소유자 제한이 필요합니다.');
         }
         if (config.includeTrash && !config.lifecycleState) {
@@ -484,6 +484,154 @@
         return Promise.reject(new Error('휴지통 상태가 올바르지 않습니다.'));
       }
       return listQuizSets({ ownerUid, lifecycleState: state });
+    }
+
+    function trashDateMillis(value) {
+      return timestampMillis(value && value.trashedAt);
+    }
+
+    function purgeDateMillis(value) {
+      return timestampMillis(value && value.purgeStartedAt);
+    }
+
+    async function moveSetToTrash(setId, actor) {
+      const current = actor || {};
+      const reference = db.doc('quiz_sets/' + setId);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        const set = quizSetValue(snapshot);
+        if (!set || set.ownerUid !== current.uid || !activeSet(set)) {
+          throw new Error('소유자만 활성 세트를 휴지통으로 이동할 수 있습니다.');
+        }
+        transaction.set(reference, {
+          trashedAt: fieldValue.serverTimestamp(),
+          purgeStartedAt: null,
+          lifecycleState: 'trashed',
+          contentRevision: fieldValue.serverTimestamp()
+        }, { merge: true });
+        return true;
+      });
+    }
+
+    async function restoreSet(setId, actor) {
+      const current = actor || {};
+      const reference = db.doc('quiz_sets/' + setId);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        const set = quizSetValue(snapshot);
+        if (!set || set.ownerUid !== current.uid || !set.trashedAt || set.purgeStartedAt) {
+          throw new Error('정리 시작 전 휴지통 세트의 소유자만 복원할 수 있습니다.');
+        }
+        transaction.set(reference, {
+          trashedAt: fieldValue.delete(),
+          lifecycleState: 'active',
+          contentRevision: fieldValue.serverTimestamp()
+        }, { merge: true });
+        return true;
+      });
+    }
+
+    async function beginSetPurge(setId, mode, actor) {
+      const current = actor || {};
+      const purgeMode = mode || 'immediate';
+      if (!['immediate', 'expired'].includes(purgeMode)) {
+        throw new Error('영구 삭제 방식이 올바르지 않습니다.');
+      }
+      const reference = db.doc('quiz_sets/' + setId);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        const set = quizSetValue(snapshot);
+        if (!set || !set.trashedAt) {
+          throw new Error('휴지통에 있는 세트만 영구 삭제할 수 있습니다.');
+        }
+        if (set.purgeStartedAt) return { started: false, purgeStartedAt: purgeDateMillis(set) };
+        const owner = set.ownerUid === current.uid;
+        const admin = current.role === 'admin';
+        const expired = collaboration.trashRetention(set, nowFn()).expired;
+        if (purgeMode === 'immediate' && !owner) {
+          throw new Error('즉시 영구 삭제는 소유자만 시작할 수 있습니다.');
+        }
+        if (purgeMode !== 'immediate' && !(owner || admin) || (purgeMode !== 'immediate' && !expired)) {
+          throw new Error('30일이 지나기 전에는 영구 삭제할 수 없습니다.');
+        }
+        transaction.set(reference, {
+          purgeStartedAt: fieldValue.serverTimestamp(),
+          lifecycleState: 'purging'
+        }, { merge: true });
+        return { started: true };
+      });
+    }
+
+    async function purgeChildren(path, limit) {
+      const snapshot = await db.collection(path).get();
+      const docs = snapshot.docs.slice(0, limit);
+      if (!docs.length) return 0;
+      const batch = db.batch();
+      docs.forEach(document => batch.delete(document.ref));
+      await batch.commit();
+      return docs.length;
+    }
+
+    async function continueSetPurge(setId) {
+      const reference = db.doc('quiz_sets/' + setId);
+      const snapshot = await reference.get();
+      const set = quizSetValue(snapshot);
+      if (!set) return { done: true, parentDeleted: true, deleted: 0 };
+      if (!set.purgeStartedAt || set.lifecycleState !== 'purging') {
+        throw new Error('정리 시작된 세트만 계속 삭제할 수 있습니다.');
+      }
+      let deleted = await purgeChildren(
+        'quiz_sets/' + setId + '/collaborators', 200
+      );
+      if (deleted < 200) {
+        deleted += await purgeChildren('images/' + setId + '/q', 200 - deleted);
+      }
+      if (deleted > 0) return { done: false, deleted, parentDeleted: false };
+
+      // Both child collections were observed empty. The transaction re-reads the
+      // parent and deletes only the same purge generation, with the Rules closing
+      // child creation once purgeStartedAt exists.
+      await db.runTransaction(async transaction => {
+        const latestSnapshot = await transaction.get(reference);
+        const latest = quizSetValue(latestSnapshot);
+        if (!latest) return { done: true, parentDeleted: true, deleted: 0 };
+        if (!latest.purgeStartedAt || latest.lifecycleState !== 'purging') {
+          throw new Error('정리 세트 상태가 변경되어 삭제를 중단했습니다.');
+        }
+        transaction.set(reference, { purgeChildrenVerified: true }, { merge: true });
+        return { verified: true };
+      });
+      const result = await db.runTransaction(async transaction => {
+        const latestSnapshot = await transaction.get(reference);
+        const latest = quizSetValue(latestSnapshot);
+        if (!latest) return { done: true, parentDeleted: true, deleted: 0 };
+        if (!latest.purgeStartedAt || latest.lifecycleState !== 'purging' ||
+            latest.purgeChildrenVerified !== true) {
+          throw new Error('정리 세트 검증 상태가 변경되어 삭제를 중단했습니다.');
+        }
+        transaction.delete(reference);
+        return { done: true, parentDeleted: true, deleted: 0 };
+      });
+      return result;
+    }
+
+    async function listTrash(scope) {
+      const config = typeof scope === 'string' ? { ownerUid: scope } : (scope || {});
+      return listQuizSets({ ownerUid: config.ownerUid, lifecycleState: config.lifecycleState || 'trashed', allowAdminTrash: config.role === 'admin' });
+    }
+
+    async function listExpiredTrash(scope, limit) {
+      const config = typeof scope === 'string' ? { ownerUid: scope } : (scope || {});
+      const max = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 20) : 20;
+      const listOptions = { ownerUid: config.ownerUid, allowAdminTrash: config.role === 'admin' };
+      const [trashed, purging] = await Promise.all([
+        listQuizSets({ ...listOptions, lifecycleState: 'trashed' }),
+        listQuizSets({ ...listOptions, lifecycleState: 'purging' })
+      ]);
+      const now = nowFn();
+      return trashed.concat(purging).filter(set =>
+        set.purgeStartedAt || collaboration.trashRetention(set, now).expired
+      ).slice(0, max);
     }
 
     async function addCollaborator(setId, email, actor) {
@@ -1394,6 +1542,12 @@
       disableTeacherAllowance,
       listQuizSets,
       listTrashQuizSets,
+      listTrash,
+      listExpiredTrash,
+      moveSetToTrash,
+      restoreSet,
+      beginSetPurge,
+      continueSetPurge,
       getQuizSet,
       listCollaborators,
       addCollaborator,

@@ -492,6 +492,83 @@ function createStore(fake) {
   return createFirestoreStore(fake.db, fake.fieldValue, () => 1000);
 }
 
+test('휴지통 이동과 복원은 소유자 상태 전환을 원자적으로 기록하고 archived를 보존한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-trash': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', archived: true,
+      lifecycleState: 'active', trashedAt: null, purgeStartedAt: null
+    }
+  }, { committedServerMillis: 1_000 });
+  const { createFirestoreStore } = loadStoreModule();
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1 + 30 * 86400000 - 1);
+  await store.moveSetToTrash('set-trash', { uid: 'owner' });
+  assert.equal(fake.value('quiz_sets/set-trash').lifecycleState, 'trashed');
+  assert.equal(fake.value('quiz_sets/set-trash').archived, true);
+  assert.ok(fake.value('quiz_sets/set-trash').trashedAt);
+  await store.restoreSet('set-trash', { uid: 'owner' });
+  assert.equal(fake.value('quiz_sets/set-trash').lifecycleState, 'active');
+  assert.equal(fake.value('quiz_sets/set-trash').trashedAt, undefined);
+  await assert.rejects(store.moveSetToTrash('set-trash', { uid: 'editor' }), /소유자/);
+});
+
+test('휴지통 purge는 collaborators/images를 200개 이하 batch로 지우고 parent를 마지막에 idempotently 삭제한다', async () => {
+  const initial = {
+    'quiz_sets/set-purge': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
+      trashedAt: 1, purgeStartedAt: null
+    },
+    'sessions/keep': { teacherUid: 'owner' },
+    'sessions/keep/snapshot/set': { title: 'keep' }
+  };
+  for (let index = 0; index < 201; index += 1) {
+    initial['quiz_sets/set-purge/collaborators/e' + index + '@school.kr'] = { email: 'e' + index + '@school.kr' };
+  }
+  initial['images/set-purge/q/v0q0'] = { data: 'image' };
+  const fake = makeFirestoreFake(initial, { committedServerMillis: 100 });
+  const store = createStore(fake);
+  await store.beginSetPurge('set-purge', 'immediate', { uid: 'owner', role: 'teacher' });
+  const first = await store.continueSetPurge('set-purge');
+  assert.equal(first.done, false);
+  assert.equal(first.deleted, 200);
+  assert.equal(fake.has('quiz_sets/set-purge'), true);
+  const second = await store.continueSetPurge('set-purge');
+  assert.equal(second.done, false);
+  assert.equal(second.deleted, 2);
+  const completed = await store.continueSetPurge('set-purge');
+  assert.equal(completed.parentDeleted, true);
+  assert.equal(fake.has('quiz_sets/set-purge'), false);
+  assert.equal(fake.has('sessions/keep'), true);
+  assert.equal(fake.has('sessions/keep/snapshot/set'), true);
+  const third = await store.continueSetPurge('set-purge');
+  assert.equal(third.parentDeleted, true);
+});
+
+test('purge는 30일 경계 전 admin을 거부하고 경계 후에만 시작한다', async () => {
+  const { createFirestoreStore } = loadStoreModule();
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-expired': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
+      trashedAt: 1, purgeStartedAt: null
+    }
+  }, { committedServerMillis: 1 + 30 * 86400000 - 1 });
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1 + 30 * 86400000 - 1);
+  await assert.rejects(
+    store.beginSetPurge('set-expired', 'expired', { uid: 'admin', role: 'admin' }),
+    /30일/
+  );
+  const exactFake = makeFirestoreFake({
+    'quiz_sets/set-expired': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
+      trashedAt: 1, purgeStartedAt: null
+    }
+  }, { committedServerMillis: 1 + 30 * 86400000 });
+  const exactStore = createFirestoreStore(exactFake.db, exactFake.fieldValue, () => 1 + 30 * 86400000);
+  assert.deepEqual(
+    await exactStore.beginSetPurge('set-expired', 'expired', { uid: 'admin', role: 'admin' }),
+    { started: true }
+  );
+});
+
 test('공개 전 문항에는 정답과 해설과 비공개 이미지 경로가 없다', () => {
   const { publicQuestion } = loadStoreModule();
 

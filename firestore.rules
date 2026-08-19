@@ -85,6 +85,49 @@ service cloud.firestore {
       return ownsSet(setId) || isSetCollaborator(setId);
     }
 
+    function purgingSet(setId) {
+      let path = /databases/$(database)/documents/quiz_sets/$(setId);
+      return exists(path) && get(path).data.get('lifecycleState', '') == 'purging' &&
+        get(path).data.get('purgeStartedAt', null) is timestamp;
+    }
+
+    function canPurgeSet(setId) {
+      let path = /databases/$(database)/documents/quiz_sets/$(setId);
+      return purgingSet(setId) && isApprovedTeacher() &&
+        (get(path).data.ownerUid == request.auth.uid ||
+          (isAdmin() && get(path).data.get('trashedAt', null) is timestamp &&
+            request.time >= get(path).data.trashedAt + duration.value(30, 'd')));
+    }
+
+    function validSetLifecycleTransition(setId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let changed = after.diff(before).affectedKeys();
+      return before.ownerUid == after.ownerUid && before.ownerEmail == after.ownerEmail &&
+        changed.hasOnly(['trashedAt', 'purgeStartedAt', 'lifecycleState', 'contentRevision', 'purgeChildrenVerified']) &&
+        ((before.get('lifecycleState', 'active') == 'active' &&
+            after.get('lifecycleState', '') == 'trashed' &&
+            after.get('trashedAt', null) is timestamp && after.trashedAt == request.time &&
+            after.get('purgeStartedAt', null) == null && ownsSet(setId)) ||
+          (before.get('lifecycleState', '') == 'trashed' &&
+            after.get('lifecycleState', '') == 'active' &&
+            !('trashedAt' in after) && after.get('purgeStartedAt', null) == null &&
+            ownsSet(setId)) ||
+          (before.get('lifecycleState', '') == 'trashed' &&
+            after.get('lifecycleState', '') == 'purging' &&
+            before.get('purgeStartedAt', null) == null &&
+            after.get('purgeStartedAt', null) is timestamp &&
+            after.purgeStartedAt == request.time &&
+            (ownsSet(setId) ||
+              (isAdmin() && before.get('trashedAt', null) is timestamp &&
+                request.time >= before.trashedAt + duration.value(30, 'd')))) ||
+          (before.get('lifecycleState', '') == 'purging' &&
+            after.get('lifecycleState', '') == 'purging' &&
+            before.get('purgeStartedAt', null) == after.get('purgeStartedAt', null) &&
+            after.get('purgeChildrenVerified', false) == true &&
+            canPurgeSet(setId)));
+    }
+
     function activeSetAfter(setId) {
       let setPath = /databases/$(database)/documents/quiz_sets/$(setId);
       return existsAfter(setPath) &&
@@ -533,12 +576,12 @@ service cloud.firestore {
 
     match /quiz_sets/{setId} {
       allow get: if isApprovedTeacher() &&
-        (activeSet(setId) || ownsSet(setId) || setId.matches('^__teacher_allowance_probe__.*$'));
+        (activeSet(setId) || ownsSet(setId) || isAdmin() || setId.matches('^__teacher_allowance_probe__.*$'));
       allow list: if isApprovedTeacher() &&
         resource.data.keys().hasAll(['lifecycleState']) &&
         (resource.data.lifecycleState == 'active' ||
           (resource.data.lifecycleState in ['trashed', 'purging'] &&
-            resource.data.ownerUid == request.auth.uid));
+            (resource.data.ownerUid == request.auth.uid || isAdmin())));
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
@@ -546,16 +589,16 @@ service cloud.firestore {
         request.resource.data.get('collaboratorCount', 0) is int &&
         request.resource.data.get('collaboratorCount', 0) >= 0 &&
         request.resource.data.get('collaboratorCount', 0) <= 20;
-      allow update: if canEditSet(setId) && activeSet(setId) &&
+      allow update: if (canEditSet(setId) && activeSet(setId) &&
         request.resource.data.lifecycleState in ['active', 'trashed', 'purging'] &&
         request.resource.data.ownerUid == resource.data.ownerUid &&
         request.resource.data.ownerEmail == resource.data.ownerEmail &&
-        (ownsSet(setId) || (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt',
-          'collaboratorCount', 'collaboratorMutation', 'lifecycleState'
-        ]))) &&
-        validCollaboratorCount(setId);
-      allow delete: if false;
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'lifecycleState'
+        ])) &&
+        validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
+      allow delete: if canPurgeSet(setId) &&
+        resource.data.get('purgeChildrenVerified', false) == true;
       allow read, write: if false;
     }
 
@@ -567,15 +610,16 @@ service cloud.firestore {
         email != get(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('ownerEmail', '') &&
         validCollaboratorData(email) &&
         validCollaboratorMutation(setId, email, 'add');
-      allow delete: if ownsSet(setId) && activeSet(setId) &&
-        validCollaboratorMutation(setId, email, 'remove');
+      allow delete: if (ownsSet(setId) && activeSet(setId) &&
+        validCollaboratorMutation(setId, email, 'remove')) || canPurgeSet(setId);
       allow update: if false;
       allow read, write: if false;
     }
 
     match /images/{setId}/q/{questionIndex} {
       allow get, list: if isApprovedTeacher() && activeSet(setId);
-      allow create, update, delete: if changesSetContentRevisionAfter(setId);
+      allow create, update: if changesSetContentRevisionAfter(setId);
+      allow delete: if changesSetContentRevisionAfter(setId) || canPurgeSet(setId);
       allow read, write: if false;
     }
 

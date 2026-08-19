@@ -8,6 +8,7 @@ const {
 } = require('@firebase/rules-unit-testing');
 const {
   collection,
+  deleteField,
   deleteDoc,
   doc,
   getDoc,
@@ -2005,6 +2006,37 @@ rulesTest('승인 목록은 admin만 읽고 쓰며 다른 클라이언트에는 
     }));
     await assertFails(deleteDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
   }
+});
+
+rulesTest('소유자 휴지통 전환·복원과 만료 purge만 허용하고 direct parent delete는 닫는다', async () => {
+  const owner = actorFirestore('owner');
+  const admin = actorFirestore('admin');
+  await assertFails(deleteDoc(doc(owner, 'quiz_sets/set1')));
+  await assertSucceeds(updateDoc(doc(owner, 'quiz_sets/set1'), {
+    trashedAt: serverTimestamp(), purgeStartedAt: null, lifecycleState: 'trashed',
+    contentRevision: serverTimestamp()
+  }));
+  await assertSucceeds(updateDoc(doc(owner, 'quiz_sets/set1'), {
+    trashedAt: deleteField(), lifecycleState: 'active',
+    contentRevision: serverTimestamp()
+  }));
+  await assertFails(updateDoc(doc(admin, 'quiz_sets/set1'), {
+    trashedAt: serverTimestamp(), purgeStartedAt: null, lifecycleState: 'trashed'
+  }));
+
+  await adminWrite('quiz_sets/set1', {
+    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
+    trashedAt: Timestamp.fromMillis(Date.now() - 31 * 86400000), purgeStartedAt: null,
+    collaboratorCount: 0
+  });
+  await adminWrite('images/set1/q/purge-me', { data: 'image' });
+  await assertSucceeds(updateDoc(doc(admin, 'quiz_sets/set1'), {
+    purgeStartedAt: serverTimestamp(), lifecycleState: 'purging'
+  }));
+  await assertSucceeds(deleteDoc(doc(admin, 'images/set1/q/purge-me')));
+  await assertFails(deleteDoc(doc(admin, 'quiz_sets/set1')));
+  await assertSucceeds(updateDoc(doc(admin, 'quiz_sets/set1'), { purgeChildrenVerified: true }));
+  await assertSucceeds(deleteDoc(doc(admin, 'quiz_sets/set1')));
 });
 
 rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서만 바뀐다', async () => {
