@@ -7040,46 +7040,21 @@ test('관리자 집계는 세트별 평탄 문항 키만 포함하고 범위 밖
   assert.equal(result.students.s1.correct, 1);
 });
 
-test('관리자 로그인과 비밀번호 변경은 config/app의 adminHash를 사용한다', async () => {
+test('admin Google 역할을 통과한 관리자 화면은 폐기된 비밀번호 설정 없이 바로 열린다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
-  const fields = {
-    '#adm-pw': { value: 'old-password' },
-    '#adm-newpw': { value: 'new-password' },
-    '#adm-newpw2': { value: 'new-password' }
-  };
   const context = {
-    store: {
-      async getDoc(documentPath) {
-        calls.push(['getDoc', documentPath]);
-        return { adminHash: 'hash:old-password' };
-      },
-      async mergeDoc(documentPath, value) {
-        calls.push(['mergeDoc', documentPath, value]);
-      }
-    },
-    $(selector) { return fields[selector]; },
-    async sha256(value) { return 'hash:' + value; },
-    DEFAULT_ADMIN_HASH: 'default',
-    ssSet(key, value) { calls.push(['ssSet', key, value]); },
+    onCleanup(fn) { calls.push(['cleanup', typeof fn]); },
     admRenderShell() { calls.push(['render']); },
-    admRenderLogin(message) { throw new Error(message); },
-    toast(message) { calls.push(['toast', message]); },
-    alert(message) { throw new Error(message); },
-    console
+    admRenderLogin() { calls.push(['password']); },
+    ssGet() { calls.push(['legacy-session-read']); return ''; }
   };
-  vm.runInNewContext(extractFunction(html, 'admLogin'), context);
-  vm.runInNewContext(extractFunction(html, 'admChangePw'), context);
-
-  await context.admLogin();
-  await context.admChangePw();
+  vm.runInNewContext(extractFunction(html, 'screenAdmin'), context);
+  context.screenAdmin();
 
   assert.deepEqual(clone(calls), [
-    ['getDoc', 'config/app'],
-    ['ssSet', 'vq_admin', '1'],
-    ['render'],
-    ['mergeDoc', 'config/app', { adminHash: 'hash:new-password' }],
-    ['toast', '비밀번호를 변경했습니다']
+    ['cleanup', 'function'],
+    ['render']
   ]);
 });
 

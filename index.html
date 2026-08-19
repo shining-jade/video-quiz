@@ -5412,10 +5412,6 @@ function dashExportCSV() {
 /* ══════════════════════════════════════════════════════════════════════
    9. ⑤ 관리자 통합 조회 화면
    ══════════════════════════════════════════════════════════════════════ */
-/* 기본 비밀번호 admin1234 의 SHA-256. 관리자 화면에서 바꾸면 config/app에 저장된다.
-   ※ 클라이언트 검증이므로 화면 접근을 막아줄 뿐, DB 자체를 잠그지는 못한다 (README 참고). */
-const DEFAULT_ADMIN_HASH = 'ac9689e2272427085e35b9d3e3e8bed88cb3434828b43b86fc0596cad4c6e270';
-
 let adm = null;
 
 function screenAdmin() {
@@ -5427,39 +5423,10 @@ function screenAdmin() {
     rangeRejected: false, rejectedSessionCount: 0
   };
   onCleanup(() => { adm = null; });
-
-  if (ssGet('vq_admin') === '1') admRenderShell();
-  else admRenderLogin('');
-}
-
-function admRenderLogin(err) {
-  APP().innerHTML = topbar() + '<div class="wrap" style="max-width:420px">' +
-    '<div class="card" style="margin-top:40px;text-align:center;padding:30px 24px">' +
-      '<div style="font-size:38px;margin-bottom:6px">🔐</div>' +
-      '<h2 style="font-size:19px;margin-bottom:4px">관리자 로그인</h2>' +
-      '<p style="color:var(--ink-2);font-size:13.5px;margin-bottom:18px">학생 개인정보가 포함된 화면입니다.</p>' +
-      '<input type="password" id="adm-pw" placeholder="비밀번호" style="text-align:center">' +
-      (err ? '<div style="color:var(--bad);font-size:13px;margin-top:10px;font-weight:600">' + esc(err) + '</div>' : '') +
-      '<button class="btn primary lg block" style="margin-top:14px" onclick="admLogin()">로그인</button>' +
-    '</div></div>';
-  const inp = $('#adm-pw');
-  inp.onkeydown = e => { if (e.key === 'Enter') admLogin(); };
-  inp.focus();
-}
-
-function admLogin() {
-  const pw = $('#adm-pw').value;
-  if (!pw) return;
-  return Promise.all([sha256(pw), store.getDoc('config/app')]).then(([h, config]) => {
-    const want = (config && config.adminHash) || DEFAULT_ADMIN_HASH;
-    if (h !== want) { admRenderLogin('비밀번호가 올바르지 않습니다.'); return; }
-    ssSet('vq_admin', '1');
-    admRenderShell();
-  }).catch(e => { console.error(e); admRenderLogin('확인 실패: ' + e.message); });
+  admRenderShell();
 }
 function admLogout() {
-  ssDel('vq_admin');
-  go('home');
+  signOutTeacher();
 }
 
 function admRenderShell() {
@@ -5870,17 +5837,6 @@ function admManage(d) {
   const displayedRange = adm.displayedRange || { from: adm.from, to: adm.to };
   const purgeDisabled = admPurgeFilterChanged();
   return '<div class="card">' +
-      '<h2>비밀번호 변경</h2>' +
-      '<div class="sub">변경하면 모든 기기에서 새 비밀번호로 로그인합니다.</div>' +
-      '<div class="row" style="align-items:flex-end">' +
-        '<div class="fc" style="flex:1 1 200px"><label class="f">새 비밀번호 (4자 이상)</label>' +
-          '<input type="password" id="adm-newpw"></div>' +
-        '<div class="fc" style="flex:1 1 200px"><label class="f">한 번 더</label>' +
-          '<input type="password" id="adm-newpw2"></div>' +
-        '<button class="btn primary" onclick="admChangePw()">변경</button>' +
-      '</div>' +
-    '</div>' +
-    '<div class="card">' +
       '<h2>기간 지정 삭제</h2>' +
       '<div class="sub">학교 개인정보 보관 기준에 따라 오래된 기록을 지웁니다. 되돌릴 수 없습니다.</div>' +
       '<div class="notice">현재 게시된 조회 결과(' + esc(displayedRange.from) + ' ~ ' + esc(displayedRange.to) + ')의 <b>' +
@@ -5893,20 +5849,10 @@ function admManage(d) {
       '<h2>안내</h2>' +
       '<div style="font-size:13.5px;color:var(--ink-2);line-height:1.9">' +
         '· 이 화면은 학생 개인정보(학년·반·번호·이름)를 다룹니다. 공용 PC에서는 반드시 로그아웃하세요.<br>' +
-        '· 비밀번호는 브라우저에서 확인하는 방식이라 화면 접근을 막아줄 뿐입니다. 데이터베이스 자체를 잠그려면 Firebase 인증 도입이 필요합니다.<br>' +
+        '· 관리자 권한은 검증된 Google 계정과 비공개 승인 목록, Firestore 규칙으로 확인합니다.<br>' +
         '· 세션·응답은 Cloud Firestore의 <span class="mono">sessions/</span> 컬렉션에 저장됩니다.' +
       '</div>' +
     '</div>';
-}
-
-function admChangePw() {
-  const a = $('#adm-newpw').value, b = $('#adm-newpw2').value;
-  if (!a || a.length < 4) { alert('비밀번호는 4자 이상이어야 합니다.'); return; }
-  if (a !== b) { alert('두 입력이 다릅니다.'); return; }
-  return sha256(a).then(h => store.mergeDoc('config/app', { adminHash: h })).then(() => {
-    toast('비밀번호를 변경했습니다');
-    $('#adm-newpw').value = ''; $('#adm-newpw2').value = '';
-  }).catch(e => alert('변경 실패: ' + e.message));
 }
 
 function admPurge() {
