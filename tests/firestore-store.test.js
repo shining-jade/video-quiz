@@ -9148,6 +9148,47 @@ test('closeLive rejection 뒤에는 재생을 pause하고 live·overlay·open �
   assert.match(state.closeError, /close offline/);
 });
 
+test('closeLive 성공 직후 newer live로 바뀐 stale 경로도 이전 재생을 pause하고 새 q1을 보존한다', async () => {
+  const order = [];
+  const renders = [];
+  const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
+  trigger.advance({ videoIndex: 0, previousTime: 173, currentTime: 174, event: 'tick' });
+  trigger.open(0);
+  const state = {
+    sessionId: 'session1', live: { q: 0, openedAt: 1, liveToken: 'token' },
+    liveGeneration: 0, dueQuestions: [], fired: [true], quizTrigger: trigger,
+    flatQuestions: [{ t: 174, videoIndex: 0 }], set: { settings: {} },
+    player: { playVideo() { order.push('play'); }, pauseVideo() { order.push('pause'); } }
+  };
+  const context = {
+    pl: state, FirestoreCore: core,
+    store: {
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; },
+      async closeLive() {
+        state.live = { q: 1, openedAt: 2, liveToken: 'new-token' };
+        state.liveGeneration = 1;
+        state.dueQuestions = [1];
+        return true;
+      }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { throw new Error('stale old question must not open due'); }, plTick() {},
+    plSetQuizOpen(open) { order.push(open ? 'overlay-open' : 'overlay-close'); },
+    plRenderOverlay() { renders.push(state.live.q); }, console
+  };
+  loadStageFunctions(['plContinuePlayback', 'plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), false);
+  assert.deepEqual(order.filter(item => item === 'play'), ['play']);
+  assert.deepEqual(order.filter(item => item === 'pause'), ['pause']);
+  assert.equal(state.live.q, 1);
+  assert.equal(state.liveGeneration, 1);
+  assert.deepEqual(state.dueQuestions, [1]);
+  assert.equal(trigger.state()[0], 'open');
+  assert.equal(renders.at(-1), 1);
+});
+
 test('계속 재생 시작기는 false·throw·Promise rejection을 모두 재시도 가능한 실패로 반환한다', async () => {
   const ctx = loadStageFunctions(['plContinuePlayback'], {});
   assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { return false; } } })).ok, false);

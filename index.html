@@ -4910,7 +4910,10 @@ function plCloseQuestion() {
       return false;
     }
     if (Number(state.live && state.live.q) !== questionIndex &&
-        Number(state.live && state.live.q) !== -1) return false;
+        Number(state.live && state.live.q) !== -1) {
+      rollbackContinuePlayback();
+      return false;
+    }
     if (Number(state.live && state.live.q) === questionIndex) {
       state.liveGeneration = generation + 1;
       state.live = {
