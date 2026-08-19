@@ -36,6 +36,15 @@ test('편집기 단축키와 경로 종료 처리는 이전 화면의 listener�
   assert.match(html, /editRouteToken/);
 });
 
+test('새 세트 Ctrl+S도 저장 뒤 기존 scroll·focus·selection을 복원한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /function mkCaptureEditorView\(\)/);
+  assert.match(html, /mkHandleSaveShortcut\(event\)[\s\S]*?mkCaptureEditorView\(\)/);
+  assert.match(html, /function mkRestoreEditorView\(view\)/);
+  assert.match(html, /if \(isNew\) \{[\s\S]*?renderMake\(\);[\s\S]*?mkRestoreEditorView\(view\)/);
+});
+
 test('README는 자동 검증과 아직 닫힌 프로덕션 배포 게이트를 구분한다', () => {
   const readme = read('README.md');
 

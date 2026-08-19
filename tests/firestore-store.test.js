@@ -477,6 +477,99 @@ test('편집기 문항 이동은 PlaylistCore를 한 번 호출해 영상 사이
   assert.equal(context.mk.videos[1].questions[1]._img, 'data:image/a');
 });
 
+test('늦게 끝난 이전 저장은 새 편집과 최신 저장 결과를 덮어쓰지 않는다', async () => {
+  const pending = [];
+  const context = {
+    mk: {
+      id: 'set-1', ownerUid: 'teacher-1', editRevision: 0, saveSequence: 0,
+      title: '세트', author: '', settings: {}, createdAt: 1, activeVideo: 0, saved: false,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: '첫 값', choices: [] }] }]
+    },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), SV_TS: {}, rid() { return 'new-id'; },
+    mkValidate() { return ''; },
+    mkPayload() {
+      return { set: {
+        title: context.mk.title, author: '', settings: {}, createdAt: 1,
+        videos: clone(context.mk.videos)
+      }, images: {} };
+    },
+    store: { saveOwnedQuizSet() { return new Promise(resolve => pending.push(resolve)); } },
+    toast() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    mkResetHistory() {}, mkShowSaveToast() {}, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console, alert() {}, Date
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  const first = context.mkSave(false);
+  context.mk.videos[0].questions[0].text = '두 번째 값';
+  context.mk.editRevision += 1;
+  const second = context.mkSave(false);
+  pending[1]();
+  await second;
+  pending[0]();
+  await first;
+
+  assert.equal(context.mk.videos[0].questions[0].text, '두 번째 값');
+  assert.equal(context.mk.saved, true);
+});
+
+test('undo 복원은 이미지까지 포함한 저장 기준 snapshot과 같을 때만 저장됨 상태가 된다', () => {
+  const persisted = {
+    title: '세트', author: '', settings: {},
+    videos: [{ videoUrl: '', videoId: '', questions: [{ text: '문항', imgUp: true, _img: 'data:image/original' }] }],
+    activeVideo: 0
+  };
+  const context = {
+    mk: {
+      title: '세트', author: '', settings: {}, activeVideo: 0, saved: false,
+      persistedSnapshot: clone(persisted), videos: clone(persisted.videos)
+    },
+    PlaylistCore: require('../playlist-core.js'), normSettings(value) { return value || {}; },
+    mkSetSaveStatus() {}, mkPersistDraft() {}, renderMake() {}
+  };
+  loadStageFunctions(['mkHistorySnapshot', 'mkSnapshotsEqual', 'mkRestoreHistory'], context);
+  context.mk.persistedSnapshot = context.mkHistorySnapshot(context.mk);
+
+  context.mkRestoreHistory(clone(persisted));
+  assert.equal(context.mk.saved, true);
+  const changedImage = clone(persisted);
+  changedImage.videos[0].questions[0]._img = 'data:image/changed';
+  context.mkRestoreHistory(changedImage);
+  assert.equal(context.mk.saved, false);
+});
+
+test('문항 타임라인 pointer drag는 시작 시 한 번만 이력 경계를 만들고 cancel은 값 변경을 확정하지 않는다', () => {
+  const listeners = {};
+  let snapshots = 0;
+  let historyMutations = 0;
+  const context = {
+    mk: { videos: [{ startSec: 0, endSec: 100, questions: [{ t: 10 }] }] },
+    document: {
+      addEventListener(name, fn) { listeners[name] = fn; },
+      removeEventListener(name) { delete listeners[name]; }
+    },
+    mkTimelineDomain() { return { start: 0, end: 100 }; },
+    mkHistorySnapshot() { snapshots += 1; return {}; },
+    mkSetQuestionTime() {},
+    mkMarkDirty() { historyMutations += 1; }
+  };
+  loadStageFunctions(['mkStartQuestionDrag'], context);
+  const timeline = { getBoundingClientRect() { return { left: 0, width: 100 }; } };
+  const event = { currentTarget: { parentElement: timeline }, preventDefault() {} };
+
+  context.mkStartQuestionDrag(event, 0, 0);
+  listeners.pointermove({ clientX: 50 });
+  listeners.pointermove({ clientX: 70 });
+  listeners.pointercancel();
+
+  assert.equal(snapshots, 1);
+  assert.equal(historyMutations, 0);
+});
+
 test('browser Firestore store exposes no legacy owner probe or migration write API', () => {
   const store = loadStoreModule().createFirestoreStore({}, { serverTimestamp() {} }, Date.now);
 

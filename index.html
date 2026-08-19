@@ -2096,13 +2096,20 @@ let mkDraftTimer = null;
 
 function mkHistorySnapshot(state) {
   const source = state || mk || {};
+  const videos = typeof PlaylistCore !== 'undefined' && PlaylistCore.normalizeVideos
+    ? PlaylistCore.normalizeVideos({ videos: source.videos || [] })
+    : (source.videos || []);
   return {
     title: String(source.title || ''),
     author: String(source.author || ''),
     settings: JSON.parse(JSON.stringify(source.settings || {})),
-    videos: JSON.parse(JSON.stringify(source.videos || [])),
+    videos: JSON.parse(JSON.stringify(videos)),
     activeVideo: Number(source.activeVideo) || 0
   };
+}
+
+function mkSnapshotsEqual(left, right) {
+  return !!right && JSON.stringify(left) === JSON.stringify(right);
 }
 
 function mkHistoryRecord(key) {
@@ -2122,6 +2129,7 @@ function mkResetHistory() {
   const snapshot = mkHistorySnapshot(state);
   if (!state.history) state.history = EditorHistoryCore.create(snapshot, { limit: 50 });
   else state.history.reset(snapshot);
+  if (arguments[0] === true) state.persistedSnapshot = JSON.parse(JSON.stringify(snapshot));
   mkUpdateHistoryControls();
 }
 
@@ -2142,9 +2150,10 @@ function mkRestoreHistory(snapshot) {
   state.settings = normSettings(snapshot.settings);
   state.videos = PlaylistCore.normalizeVideos({ videos: snapshot.videos || [] });
   state.activeVideo = Math.max(0, Math.min(Number(snapshot.activeVideo) || 0, state.videos.length - 1));
-  state.saved = false;
-  mkSetSaveStatus('dirty');
-  mkPersistDraft();
+  state.saved = typeof mkSnapshotsEqual === 'function' &&
+    mkSnapshotsEqual(mkHistorySnapshot(state), state.persistedSnapshot);
+  mkSetSaveStatus(state.saved ? 'saved' : 'dirty');
+  if (!state.saved) mkPersistDraft();
   renderMake();
 }
 
@@ -2183,6 +2192,47 @@ function mkShowSaveToast(message) {
   }, 2600);
 }
 
+function mkCaptureEditorView() {
+  if (typeof document === 'undefined') return null;
+  const active = document.activeElement;
+  const view = {
+    x: typeof window !== 'undefined' ? Number(window.scrollX) || 0 : 0,
+    y: typeof window !== 'undefined' ? Number(window.scrollY) || 0 : 0,
+    selectionStart: active && typeof active.selectionStart === 'number' ? active.selectionStart : null,
+    selectionEnd: active && typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
+    id: active && active.id || '',
+    questionTime: active && active.dataset && active.dataset.questionTime || '',
+    cardId: '', fieldIndex: -1
+  };
+  const card = active && active.closest && active.closest('[id^="mk-q-"]');
+  if (card) {
+    view.cardId = card.id;
+    view.fieldIndex = Array.from(card.querySelectorAll('input, textarea, select')).indexOf(active);
+  }
+  return view;
+}
+
+function mkRestoreEditorView(view) {
+  if (!view || typeof document === 'undefined') return;
+  if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+    window.scrollTo(view.x || 0, view.y || 0);
+  }
+  let target = view.id ? document.getElementById(view.id) : null;
+  if (!target && view.questionTime && document.querySelector) {
+    target = document.querySelector('[data-question-time="' + view.questionTime + '"]');
+  }
+  if (!target && view.cardId) {
+    const card = document.getElementById(view.cardId);
+    const fields = card && card.querySelectorAll && card.querySelectorAll('input, textarea, select');
+    target = fields && fields[view.fieldIndex] || null;
+  }
+  if (!target || typeof target.focus !== 'function') return;
+  try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); }
+  if (view.selectionStart != null && typeof target.setSelectionRange === 'function') {
+    try { target.setSelectionRange(view.selectionStart, view.selectionEnd == null ? view.selectionStart : view.selectionEnd); } catch (e) {}
+  }
+}
+
 function mkSetSaveStatus(state, detail) {
   const el = $('#mk-save-status');
   if (!el) return;
@@ -2207,7 +2257,8 @@ function mkClearDraft(setId) {
 function mkMarkDirty(key) {
   const state = mk;
   if (!state) return;
-  if (typeof mkHistoryRecord === 'function') mkHistoryRecord(key);
+  const recorded = typeof mkHistoryRecord === 'function' && mkHistoryRecord(key);
+  if (recorded) state.editRevision = (Number(state.editRevision) || 0) + 1;
   state.saved = false;
   mkSetSaveStatus('dirty');
   clearTimeout(state.draftTimer);
@@ -2219,7 +2270,7 @@ function mkMarkDirty(key) {
 function mkHandleSaveShortcut(event) {
   if (!mk || !event || event.isComposing || String(event.key).toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) return;
   event.preventDefault();
-  return mkSave(false);
+  return mkSave(false, { view: typeof mkCaptureEditorView === 'function' ? mkCaptureEditorView() : null });
 }
 
 function mkHandleHistoryShortcut(event) {
@@ -2324,6 +2375,10 @@ function screenMake(setId) {
     ytCancels: [],
     history: null,
     saveToastTimer: null,
+    editRevision: 0,
+    saveSequence: 0,
+    persistedSnapshot: null,
+    pendingSaveId: null,
     ownerUid: teacherState && teacherState.uid || ''
   };
   const state = mk;
@@ -2444,7 +2499,7 @@ function screenMake(setId) {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
           });
         });
-        if (typeof mkResetHistory === 'function') mkResetHistory();
+        if (typeof mkResetHistory === 'function') mkResetHistory(true);
         renderMake();
         startAccessWatch();
         });
@@ -2741,14 +2796,16 @@ function mkSetRange(i, edge, value) {
   mkRefreshVideoTiming(i);
 }
 
-function mkSetQuestionTime(videoIndex, questionIndex, value) {
+function mkSetQuestionTime(videoIndex, questionIndex, value, options) {
   const video = mk.videos[videoIndex], question = video && video.questions[questionIndex];
   if (!question) return;
   let seconds = typeof value === 'number' ? value : parseTime(value);
   if (!Number.isFinite(seconds)) return;
   const domain = mkTimelineDomain(video);
-  question.t = Math.round(Math.max(domain.start, Math.min(domain.end, seconds)));
-  mkMarkDirty();
+  const next = Math.round(Math.max(domain.start, Math.min(domain.end, seconds)));
+  if (next === Number(question.t)) return false;
+  question.t = next;
+  if (!(options && options.skipHistory)) mkMarkDirty(options && options.key);
   if (typeof document !== 'undefined' && document.querySelector) {
     const input = document.querySelector('[data-question-time="' + videoIndex + '-' + questionIndex + '"]');
     if (input) input.value = fmtTime(question.t);
@@ -2758,24 +2815,55 @@ function mkSetQuestionTime(videoIndex, questionIndex, value) {
       if (dot) dot.style.left = (PlaylistCore.timelineRatio(question.t, domain.start, domain.end) * 100) + '%';
     }
   }
+  return true;
 }
 
 function mkStartQuestionDrag(event, videoIndex, questionIndex) {
   const timeline = event.currentTarget && event.currentTarget.parentElement;
-  const video = mk.videos[videoIndex];
-  if (!timeline || !video) return;
+  const state = mk;
+  const video = state && state.videos[videoIndex];
+  const question = video && video.questions[questionIndex];
+  if (!timeline || !video || !question) return;
+  // Keep one pre-drag snapshot. Pointer moves are DOM previews only.
+  const before = typeof mkHistorySnapshot === 'function' ? mkHistorySnapshot(state) : null;
+  const original = Number(question.t) || 0;
+  let preview = original;
+  let changed = false;
+  const previewDom = seconds => {
+    if (typeof document === 'undefined' || !document.querySelector) return;
+    const domain = mkTimelineDomain(video);
+    const input = document.querySelector('[data-question-time="' + videoIndex + '-' + questionIndex + '"]');
+    if (input) input.value = fmtTime(seconds);
+    const timelineEl = document.querySelector('[data-timeline-video="' + videoIndex + '"]');
+    const dot = timelineEl && timelineEl.querySelectorAll('.mk-q-dot')[questionIndex];
+    if (dot) dot.style.left = (PlaylistCore.timelineRatio(seconds, domain.start, domain.end) * 100) + '%';
+  };
   const move = e => {
     const rect = timeline.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
     const domain = mkTimelineDomain(video);
-    mkSetQuestionTime(videoIndex, questionIndex, domain.start + ratio * (domain.end - domain.start));
+    preview = Math.round(domain.start + ratio * (domain.end - domain.start));
+    changed = preview !== original;
+    mkSetQuestionTime(videoIndex, questionIndex, preview, { skipHistory: true });
   };
-  const up = () => {
+  const finish = cancelled => {
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
+    document.removeEventListener('pointercancel', cancel);
+    if (cancelled || !changed || mk !== state) {
+      if (cancelled && mk === state) mkSetQuestionTime(videoIndex, questionIndex, original, { skipHistory: true });
+      else previewDom(Number(question.t) || 0);
+      return;
+    }
+    // The history core records the pre-drag state while committing once.
+    if (before && typeof mkHistorySnapshot === 'function') mkHistorySnapshot(state);
+    mkMarkDirty('question-drag');
   };
+  const up = () => finish(false);
+  const cancel = () => finish(true);
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', up);
+  document.addEventListener('pointercancel', cancel);
   if (event.preventDefault) event.preventDefault();
 }
 
@@ -3231,7 +3319,7 @@ function mkHandlePermissionLoss(error) {
   if (typeof go === 'function') go('sets');
 }
 
-function mkSave(forceNew) {
+function mkSave(forceNew, options) {
   const state = mk;
   if (!state) return;
   const ownerState = teacherState;
@@ -3245,9 +3333,14 @@ function mkSave(forceNew) {
   }
   const err = mkValidate();
   if (err) { toast(err); return; }
-  const id = (forceNew || !mk.id) ? rid(8) : mk.id;
+  const id = forceNew ? rid(8) : (mk.id || state.pendingSaveId || rid(8));
   const draftId = mk.id;
   const isNew = (id !== mk.id);
+  if (isNew && !forceNew) state.pendingSaveId = id;
+  const saveRevision = Number(state.editRevision) || 0;
+  const saveSequence = (Number(state.saveSequence) || 0) + 1;
+  state.saveSequence = saveSequence;
+  const view = options && options.view || null;
   const built = mkPayload();
   const data = built.set;
   if (isNew) data.createdAt = SV_TS;
@@ -3267,7 +3360,20 @@ function mkSave(forceNew) {
   return canSave
     .then(() => {
       if (mk !== state) return;
+      // Earlier replies may arrive after a newer request.  They must never
+      // replace the current editor model or reset its undo baseline.
+      if (state.saveSequence !== saveSequence) return;
       state.id = id;
+      state.pendingSaveId = null;
+      const unchangedSinceRequest = (Number(state.editRevision) || 0) === saveRevision;
+      if (!unchangedSinceRequest) {
+        state.saved = false;
+        if (location.hash !== '#/make/' + id) history.replaceState(null, '', '#/make/' + id);
+        mkClearDraft(draftId);
+        mkPersistDraft();
+        mkSetSaveStatus('dirty');
+        return;
+      }
       state.saved = true;
       mkClearDraft(draftId);
       if (draftId !== id) mkClearDraft(id);
@@ -3285,16 +3391,20 @@ function mkSave(forceNew) {
       if (location.hash !== '#/make/' + id) {
         history.replaceState(null, '', '#/make/' + id);
       }
-      if (typeof mkResetHistory === 'function') mkResetHistory();
+      if (typeof mkResetHistory === 'function') mkResetHistory(true);
       toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
       mkSetSaveStatus('saved', new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
       if (typeof mkShowSaveToast === 'function') mkShowSaveToast('저장 완료');
-      // 기존 세트는 화면을 다시 만들지 않아 커서·스크롤 위치를 그대로 유지한다.
-      if (isNew) renderMake();
+      // 새 세트도 저장 전 화면 위치와 입력 selection을 되돌린다.
+      if (isNew) {
+        renderMake();
+        if (typeof mkRestoreEditorView === 'function') mkRestoreEditorView(view);
+      }
       else if (typeof mkUpdateHistoryControls === 'function') mkUpdateHistoryControls();
     })
     .catch(e => {
       if (mk !== state) return;
+      if (state.saveSequence !== saveSequence) return;
       console.error(e);
       mkSetSaveStatus('failed');
       mkPersistDraft();
