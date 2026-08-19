@@ -536,19 +536,23 @@ service cloud.firestore {
         (activeSet(setId) || ownsSet(setId) || setId.matches('^__teacher_allowance_probe__.*$'));
       allow list: if isApprovedTeacher() &&
         resource.data.keys().hasAll(['lifecycleState']) &&
-        resource.data.lifecycleState == 'active';
+        (resource.data.lifecycleState == 'active' ||
+          (resource.data.lifecycleState in ['trashed', 'purging'] &&
+            resource.data.ownerUid == request.auth.uid));
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
+        request.resource.data.lifecycleState == 'active' &&
         request.resource.data.get('collaboratorCount', 0) is int &&
         request.resource.data.get('collaboratorCount', 0) >= 0 &&
         request.resource.data.get('collaboratorCount', 0) <= 20;
       allow update: if canEditSet(setId) && activeSet(setId) &&
+        request.resource.data.lifecycleState in ['active', 'trashed', 'purging'] &&
         request.resource.data.ownerUid == resource.data.ownerUid &&
         request.resource.data.ownerEmail == resource.data.ownerEmail &&
         (ownsSet(setId) || (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
           'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt',
-          'collaboratorCount', 'collaboratorMutation'
+          'collaboratorCount', 'collaboratorMutation', 'lifecycleState'
         ]))) &&
         validCollaboratorCount(setId);
       allow delete: if false;

@@ -422,6 +422,8 @@ rulesTest('승인 교사는 공유 원본과 이미지를 읽어 자기 소유 �
       ...current.data(),
       ownerUid: actors.otherTeacher.uid,
       ownerEmail: actors.otherTeacher.email,
+      lifecycleState: 'active',
+      collaboratorCount: 0,
       title: '공유 사본',
       contentRevision: serverTimestamp()
     });
@@ -1828,6 +1830,7 @@ const writeMatrix = [
     createValue: actorName => ({
       ownerUid: actors[actorName].uid,
       ownerEmail: actors[actorName].email || '',
+      lifecycleState: 'active',
       title: '새 세트'
     }),
     updateValue: () => ({ title: '변경' }),

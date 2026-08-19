@@ -811,13 +811,36 @@ test('승인된 다른 교사도 활성 원본으로 수업을 시작할 수 있
 test('세트 목록은 활성 query와 소유자 휴지통 query를 분리한다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/active': { ownerUid: 'owner', trashedAt: null, purgeStartedAt: null, lifecycleState: 'active' },
-    'quiz_sets/trash': { ownerUid: 'owner', trashedAt: 1, lifecycleState: 'trash' },
+    'quiz_sets/trash': { ownerUid: 'owner', trashedAt: 1, lifecycleState: 'trashed' },
     'quiz_sets/other-trash': { ownerUid: 'other', trashedAt: 1 }
   });
   const store = createStore(fake);
   assert.deepEqual((await store.listQuizSets()).map(set => set.id), ['active']);
-  assert.deepEqual((await store.listQuizSets({ ownerUid: 'owner', includeTrash: true }))
-    .map(set => set.id), ['active', 'trash']);
+  await assert.rejects(
+    () => store.listQuizSets({ ownerUid: 'owner', includeTrash: true }),
+    /휴지통과 정리 중/,
+  );
+  assert.deepEqual((await store.listTrashQuizSets('owner', 'trashed'))
+    .map(set => set.id), ['trash']);
+});
+
+test('사본은 공동 편집·휴지통 상태를 물려받지 않고 활성 빈 상태로 시작한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/source': {
+      ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'active',
+      collaboratorCount: 3, collaboratorMutation: { email: 'x@school.kr', action: 'add' }, title: '원본'
+    },
+    'quiz_sets/source/collaborators/x@school.kr': { email: 'x@school.kr' }
+  });
+  const store = createStore(fake);
+  const copied = await store.copyOwnedQuizSet('source', 'copy', {
+    uid: 'teacher', email: 'teacher@school.kr'
+  });
+  assert.equal(copied.lifecycleState, 'active');
+  assert.equal(copied.collaboratorCount, 0);
+  assert.equal(copied.collaboratorMutation, undefined);
+  assert.equal(copied.trashedAt, undefined);
+  assert.equal(fake.has('quiz_sets/copy/collaborators/x@school.kr'), false);
 });
 
 test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
@@ -1232,7 +1255,8 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
 
   assert.deepEqual(copied, {
     id: 'copy', title: '원본 (사본)', author: '새 교사',
-    questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100
+    questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100,
+    collaboratorCount: 0, lifecycleState: 'active'
   });
   assert.deepEqual(fake.value('quiz_sets/source'), {
     title: '원본', author: '교사', questions: [{ type: 'choice', text: '문항' }]
@@ -1242,7 +1266,8 @@ test('세트 복제는 새 문서와 모든 이미지를 만들고 원본을 바
   delete storedCopy.contentRevision;
   assert.deepEqual(storedCopy, {
     title: '원본 (사본)', author: '새 교사',
-    questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100
+    questions: [{ type: 'choice', text: '문항' }], createdAt: 100, updatedAt: 100,
+    collaboratorCount: 0, lifecycleState: 'active'
   });
   assert.deepEqual(await store.getImages('copy'), { v0q0: 'first-image', v0q2: 'third-image' });
   assert.equal(fake.value('images/copy/q/v0q0').data, 'first-image');

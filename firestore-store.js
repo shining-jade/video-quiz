@@ -432,10 +432,18 @@
       const config = options || {};
       let query = db.collection('quiz_sets');
       if (typeof query.where === 'function') {
-        if (config.includeTrash) {
-          if (config.ownerUid) query = query.where('ownerUid', '==', config.ownerUid);
-        } else {
-          query = query.where('lifecycleState', '==', 'active');
+        const state = config.lifecycleState || 'active';
+        if (state !== 'active' && !config.ownerUid) {
+          throw new Error('휴지통 목록은 소유자 제한이 필요합니다.');
+        }
+        if (config.includeTrash && !config.lifecycleState) {
+          throw new Error('휴지통과 정리 중 목록을 한 번에 조회할 수 없습니다.');
+        }
+        query = query.where('lifecycleState', '==', state);
+        if (config.ownerUid && state !== 'active') {
+          query = query.where('ownerUid', '==', config.ownerUid);
+        } else if (config.ownerUid) {
+          query = query.where('ownerUid', '==', config.ownerUid);
         }
       }
       const snapshot = await query.get();
@@ -468,6 +476,14 @@
       if (!allowed) throw new Error('공동 편집자 목록을 볼 권한이 없습니다.');
       const snapshot = await db.collection('quiz_sets/' + setId + '/collaborators').get();
       return snapshot.docs.map(document => ({ ...document.data(), email: document.id }));
+    }
+
+    function listTrashQuizSets(ownerUid, lifecycleState) {
+      const state = lifecycleState || 'trashed';
+      if (!['trashed', 'purging'].includes(state)) {
+        return Promise.reject(new Error('휴지통 상태가 올바르지 않습니다.'));
+      }
+      return listQuizSets({ ownerUid, lifecycleState: state });
     }
 
     async function addCollaborator(setId, email, actor) {
@@ -717,11 +733,21 @@
       await batch.commit();
     }
 
+    function sanitizedCopy(value, newId, patch) {
+      const copy = { ...withoutDocumentId(value), ...(patch || {}), id: newId };
+      copy.collaboratorCount = 0;
+      delete copy.collaboratorMutation;
+      delete copy.trashedAt;
+      delete copy.purgeStartedAt;
+      copy.lifecycleState = 'active';
+      return copy;
+    }
+
     async function copyQuizSet(sourceId, newId, patch) {
       const source = await getQuizSet(sourceId);
       if (!source) return null;
       const images = await getImages(sourceId);
-      const copy = { ...source, ...(patch || {}), id: newId };
+      const copy = sanitizedCopy(source, newId, patch);
       await saveQuizSetWithImages(newId, copy, images);
       return copy;
     }
@@ -730,8 +756,7 @@
       const sourceReference = db.doc('quiz_sets/' + sourceId);
       const destinationReference = db.doc('quiz_sets/' + newId);
       const copyValue = current => ownedQuizSet({
-        ...current,
-        id: newId,
+        ...sanitizedCopy(current, newId),
         title: ((current.title || '제목 없음') + ' (사본)').slice(0, 200),
         createdAt: fieldValue.serverTimestamp(),
         updatedAt: fieldValue.serverTimestamp(),
@@ -1368,6 +1393,7 @@
       upsertTeacherAllowance,
       disableTeacherAllowance,
       listQuizSets,
+      listTrashQuizSets,
       getQuizSet,
       listCollaborators,
       addCollaborator,

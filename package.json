@@ -3,7 +3,8 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:rules": "firebase emulators:exec --only firestore --project demo-video-quiz \"node --test --test-concurrency=1 tests/firestore-rules.test.js tests/legacy-migration-admin-emulator.test.js\"",
-    "migrate:legacy": "node scripts/migrate-legacy-ownership.js"
+    "migrate:legacy": "node scripts/migrate-legacy-ownership.js",
+    "migrate:lifecycle": "node scripts/migrate-lifecycle-state.js"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^4.0.1",
