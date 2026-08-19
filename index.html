@@ -3413,6 +3413,18 @@ function mkSave(forceNew, options) {
         state.saveProcessedSequence = request.sequence;
         break;
       }
+      // The request may have waited behind another write.  Validate the
+      // current model again immediately before payload creation: the editor
+      // can have become invalid after Ctrl+S was queued.
+      const queuedValidationError = mkValidate();
+      if (queuedValidationError) {
+        state.saveProcessedSequence = request.sequence;
+        state.saved = false;
+        mkPersistDraft();
+        mkSetSaveStatus('dirty');
+        toast(queuedValidationError);
+        break;
+      }
       const requestRevision = Number(state.editRevision) || 0;
       const id = request.forceNew ? rid(8) : (state.id || state.pendingSaveId || rid(8));
       const draftId = state.id;

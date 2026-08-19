@@ -668,6 +668,63 @@ test('대기 중인 저장은 교사 인증이 stale이면 Firestore write 전�
   assert.equal(writes, 0);
 });
 
+test('대기열의 최신 저장이 실행 직전 무효가 되면 dirty 초안을 남기고 다음 유효 저장을 허용한다', async () => {
+  const writes = [];
+  const drafts = [];
+  const toasts = [];
+  const historyResets = [];
+  let resolveA;
+  const context = {
+    mk: {
+      id: 'set-1', ownerUid: 'teacher-1', editRevision: 0, saveSequence: 0,
+      title: '세트', author: '', settings: {}, createdAt: 1, activeVideo: 0, saved: false,
+      videos: [{ videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
+        questions: [{ type: 'long', t: 10, text: 'A', choices: [] }] }]
+    },
+    teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
+    AuthCore: require('../auth-core.js'), SV_TS: {}, rid() { return 'new-id'; },
+    mkValidate() { return context.mk.videos[0].questions[0].text ? '' : '문항 내용을 입력해 주세요.'; },
+    mkPayload() { return { set: { title: '세트', videos: clone(context.mk.videos) }, images: {} }; },
+    store: {
+      saveOwnedQuizSet(id, value) {
+        writes.push(clone(value));
+        return writes.length === 1 ? new Promise(resolve => { resolveA = resolve; }) : Promise.resolve();
+      }
+    },
+    toast(message) { toasts.push(message); }, mkSetSaveStatus() {}, mkClearDraft() {},
+    mkPersistDraft() { drafts.push('draft'); },
+    mkResetHistory() { historyResets.push('reset'); }, mkShowSaveToast() { toasts.push('저장 완료'); }, mkUpdateHistoryControls() {},
+    normQuestions(value) { return clone(value); }, imgCache: {},
+    location: { hash: '#/make/set-1' }, history: { replaceState() {} },
+    renderMake() {}, console: { error() {} }, alert() {}, Date
+  };
+  loadStageFunctions(['mkSave'], context);
+
+  const saveA = context.mkSave(false);
+  await new Promise(resolve => setImmediate(resolve));
+  context.mk.videos[0].questions[0].text = 'B';
+  context.mk.editRevision += 1;
+  const saveB = context.mkSave(false);
+  context.mk.videos[0].questions[0].text = '';
+  context.mk.editRevision += 1;
+  resolveA();
+  await Promise.all([saveA, saveB]);
+
+  assert.deepEqual(writes.map(value => value.videos[0].questions[0].text), ['A']);
+  assert.equal(context.mk.saved, false);
+  assert.ok(drafts.length >= 1);
+  assert.equal(historyResets.length, 0);
+  assert.equal(toasts.includes('저장 완료'), false);
+
+  context.mk.videos[0].questions[0].text = 'C';
+  context.mk.editRevision += 1;
+  await context.mkSave(false);
+
+  assert.deepEqual(writes.map(value => value.videos[0].questions[0].text), ['A', 'C']);
+  assert.equal(context.mk.saved, true);
+  assert.equal(historyResets.length, 1);
+});
+
 test('undo 복원은 이미지까지 포함한 저장 기준 snapshot과 같을 때만 저장됨 상태가 된다', () => {
   const persisted = {
     title: '세트', author: '', settings: {},
