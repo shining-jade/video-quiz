@@ -22,7 +22,7 @@ test('사용자 안내는 Google 관리자 역할과 세트 소유권을 정확�
   assert.doesNotMatch(html, /관리자 통합 조회[\s\S]{0,200}?비밀번호가 필요합니다/);
   assert.match(html, /부팅 — Google 교사 인증 상태 확인 후 라우팅/);
   assert.doesNotMatch(html, /교사도 학생도 아무것도 로그인하지 않습니다/);
-  assert.match(readme, /\| ✏️ 편집 \| 소유한 세트 내용을 고칩니다/);
+  assert.match(readme, /\| ✏️ 편집 \| 소유자 또는 소유자가 지정한 공동 편집자가 내용을 고칩니다/);
 });
 
 test('counter migration 운영 문서는 staged lock migration strict unlock 순서를 고정한다', () => {
@@ -49,4 +49,19 @@ test('counter migration 운영 문서는 staged lock migration strict unlock 순
   assert.match(guide, /운영 환경에서는 실행하지 않았습니다/);
   assert.match(guide, /staged[^\n]*배포[^\n]*직후[^\n]*즉시[^\n]*잠금/);
   assert.match(guide, /gate가 없거나 잠겨 있으면[^\n]*collaborator\/image[^\n]*parent[^\n]*(거부|차단)/);
+});
+
+test('공동 편집과 휴지통 공개 문구는 무료 정리의 한계와 보존 범위를 설명한다', () => {
+  const readme = read('README.md');
+  const handoff = read('docs/HANDOFF-2026-08-14.md');
+
+  assert.match(readme, /공동 편집자/);
+  assert.match(readme, /휴지통/);
+  assert.match(readme, /30일/);
+  assert.match(readme, /접속할 때 자동 정리/);
+  assert.match(readme, /과거 수업 기록은 보존/);
+  assert.doesNotMatch(readme, /세트 \*\*삭제\*\*는 일부러 막아 두었습니다/);
+  assert.match(handoff, /교사 계정 관리/);
+  assert.match(handoff, /staged gate Rules 배포/);
+  assert.match(handoff, /safeToDeployStrictRules/);
 });
