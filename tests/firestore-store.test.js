@@ -9033,6 +9033,62 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
   assert.equal(context.pl.live.q, -1);
 });
 
+test('계속 재생은 overlay와 dim을 먼저 정리한 뒤 player를 재생하고 완료 문항을 확정한다', async () => {
+  const order = [];
+  const classes = {
+    add() {},
+    remove(name) { order.push('class:' + name); }
+  };
+  const overlay = { remove() { order.push('overlay'); } };
+  const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
+  trigger.advance({ videoIndex: 0, previousTime: 173, currentTime: 174, event: 'tick' });
+  trigger.open(0);
+  const context = {
+    pl: {
+      sessionId: 'session1', live: { q: 0, openedAt: 1, liveToken: 'token' },
+      liveGeneration: 0, dueQuestions: [], fired: [true], quizTrigger: trigger,
+      flatQuestions: [{ t: 174, videoIndex: 0 }], set: { settings: {} },
+      player: { playVideo() { order.push('play'); } }
+    },
+    FirestoreCore: core,
+    store: {
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; }, async closeLive() { return true; }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; }, plTick() {},
+    document: { getElementById(id) { return id === 'overlay' ? overlay : id === 'pl-stage'
+      ? { classList: classes } : null; }, body: { classList: classes } },
+    plRenderOverlay() {}, console
+  };
+  loadStageFunctions(['plStageRoot', 'plRenderCenteredOverlay', 'plSetQuizOpen', 'plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), true);
+  assert.equal(trigger.state()[0], 'completed');
+  assert.ok(order.indexOf('overlay') >= 0);
+  assert.ok(order.indexOf('class:quiz-open') >= 0);
+  assert.ok(order.indexOf('overlay') < order.indexOf('play'));
+  assert.ok(order.indexOf('class:quiz-open') < order.indexOf('play'));
+});
+
+test('player tick은 quiz trigger가 준 문항만 queue하고 완료 직후 같은 시각을 다시 넣지 않는다', () => {
+  const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
+  const ctx = loadStageFunctions(['plQueueDueQuestions'], {
+    pl: {
+      videoIndex: 0, dueQuestions: [], fired: [false], quizTrigger: trigger,
+      flatQuestions: [{ t: 174, videoIndex: 0 }]
+    }
+  });
+
+  assert.equal(ctx.plQueueDueQuestions(173.5, 174.1), true);
+  assert.deepEqual(ctx.pl.dueQuestions, [0]);
+  trigger.open(0);
+  trigger.complete(0);
+  ctx.pl.dueQuestions = [];
+  assert.equal(ctx.plQueueDueQuestions(174.1, 174.2), false);
+  assert.deepEqual(ctx.pl.dueQuestions, []);
+});
+
 test('물리 영상 길이는 설정 종료보다 우선하고 ENDED는 terminal 신호다', () => {
   let ticks = 0;
   const context = {

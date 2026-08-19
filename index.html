@@ -616,6 +616,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="editor-draft.js"></script>
 <script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
+<script src="quiz-trigger-core.js"></script>
 <script src="teacher-stage.js"></script>
 <script src="auth-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
@@ -3515,7 +3516,8 @@ function screenPlay(setId) {
     playlistDone: false, transitionUntil: 0, playbackEnded: false,
     loadGeneration: 0, activePlaybackGeneration: 0, expectedVideoId: '',
     sessionId: null, code: null, snapshotVersion: undefined,
-    player: null, lastT: 0, fired: [], dueQuestions: [],
+    player: null, lastT: 0, fired: [], dueQuestions: [], quizTrigger: null,
+    quizTimerGeneration: 0,
     live: { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     liveGeneration: 0,
     pendingLiveQuestion: -1,
@@ -3595,6 +3597,8 @@ function screenPlay(setId) {
     state.lastT = Math.max(0, Number(set.videos[0].startSec) || 0) - 0.6;
     state.fired = flatQuestions.map(() => false);
     state.dueQuestions = [];
+    state.quizTrigger = typeof QuizTriggerCore === 'object' && QuizTriggerCore.create
+      ? QuizTriggerCore.create(flatQuestions) : null;
     renderPlayIntro();
   }).catch(e => {
     if (pl !== state) return;
@@ -3815,6 +3819,9 @@ function plStartSession() {
       lastT: firstStart - 0.6,
       fired: runtimeQuestions.map(() => false),
       dueQuestions: [],
+      quizTrigger: typeof QuizTriggerCore === 'object' && QuizTriggerCore.create
+        ? QuizTriggerCore.create(runtimeQuestions) : null,
+      quizTimerGeneration: 0,
       pendingLiveQuestion: -1,
       openError: '',
       closeFlight: null,
@@ -4415,6 +4422,11 @@ function plLoadVideo(index, autoplay) {
   if (!pl || !pl.player || !pl.player.loadVideoById) return;
   const video = pl.set && pl.set.videos && pl.set.videos[index];
   if (!video) return;
+  const previousVideoIndex = pl.videoIndex;
+  if (pl.quizTrigger && pl.quizTrigger.resetVideo) {
+    pl.quizTrigger.resetVideo(previousVideoIndex);
+    pl.quizTrigger.resetVideo(index);
+  }
   pl.videoIndex = index;
   pl.playlistDone = false;
   pl.transitionUntil = 0;
@@ -4460,6 +4472,7 @@ function plReplayPlaylist() {
   pl.playlistDone = false;
   pl.transitionUntil = 0;
   pl.fired = pl.fired.map(() => false);
+  if (pl.quizTrigger && pl.quizTrigger.reset) pl.quizTrigger.reset();
   plLoadVideo(0, true);
 }
 
@@ -4583,6 +4596,19 @@ function plHandlePlayerError(event) {
 function plQueueDueQuestions(prev, now) {
   if (!pl) return false;
   if (!Array.isArray(pl.dueQuestions)) pl.dueQuestions = [];
+  if (pl.quizTrigger && pl.quizTrigger.advance) {
+    const result = pl.quizTrigger.advance({
+      videoIndex: pl.videoIndex,
+      previousTime: prev,
+      currentTime: now,
+      event: 'tick'
+    });
+    (result.rearmed || []).forEach(index => { pl.fired[index] = false; });
+    (result.enqueue || []).forEach(index => {
+      if (pl.dueQuestions.indexOf(index) < 0) pl.dueQuestions.push(index);
+    });
+    return !!((result.rearmed && result.rearmed.length) || (result.enqueue && result.enqueue.length));
+  }
   let markerStateChanged = false;
   pl.flatQuestions.forEach((q, i) => {
     if (q.videoIndex !== pl.videoIndex) return;
@@ -4608,6 +4634,7 @@ function plOpenNextDueQuestion() {
   const finish = opened => {
     if (opened === false || pl !== state) return false;
     state.dueQuestions = state.dueQuestions.filter(index => index !== next);
+    if (state.quizTrigger && state.quizTrigger.open) state.quizTrigger.open(next);
     state.fired[next] = true;
     return true;
   };
@@ -4750,6 +4777,7 @@ async function plOpenQuestion(i) {
     if (pl !== state || state.pendingLiveQuestion !== i) return false;
     state.openError = '';
     state.dueQuestions = (state.dueQuestions || []).filter(index => index !== i);
+    if (state.quizTrigger && state.quizTrigger.open) state.quizTrigger.open(i);
     if (!Array.isArray(state.fired)) state.fired = [];
     state.fired[i] = true;
     if (typeof plRenderQList === 'function') plRenderQList();
@@ -4831,6 +4859,9 @@ function plCloseQuestion() {
     }
     state.closeError = '';
     state.pendingLiveQuestion = -1;
+    if (typeof plSetQuizOpen === 'function') plSetQuizOpen(false);
+    if (state.quizTrigger && state.quizTrigger.complete) state.quizTrigger.complete(questionIndex);
+    if (Array.isArray(state.fired)) state.fired[questionIndex] = true;
     try {
       if (await plOpenNextDueQuestion()) return true;
     } catch (error) {
@@ -4860,8 +4891,22 @@ function plJumpTo(i) {
   const question = pl.flatQuestions[i];
   if (!question) return;
   const t = Math.max(0, question.t - 3);
-  const markerStateChanged = pl.fired[i] !== false;
-  pl.fired[i] = false;
+  let markerStateChanged = false;
+  if (pl.quizTrigger && pl.quizTrigger.advance) {
+    const rearm = pl.quizTrigger.advance({
+      videoIndex: question.videoIndex,
+      previousTime: pl.lastT,
+      currentTime: t,
+      event: 'seek'
+    });
+    (rearm.rearmed || []).forEach(index => {
+      if (pl.fired[index]) markerStateChanged = true;
+      pl.fired[index] = false;
+    });
+  } else {
+    markerStateChanged = pl.fired[i] !== false;
+    pl.fired[i] = false;
+  }
   if (question.videoIndex !== pl.videoIndex) plLoadVideo(question.videoIndex, true);
   else if (markerStateChanged && typeof plRenderTimeline === 'function') plRenderTimeline();
   pl.lastT = t;
@@ -4982,6 +5027,23 @@ function plRenderCenteredOverlay(open) {
   return stage;
 }
 
+/** 퀴즈 종료는 다음 재생 전에 overlay·timer projection·dim을 한 번에 비운다. */
+function plSetQuizOpen(open) {
+  const stage = plStageRoot();
+  if (open) {
+    if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(true);
+    else stage.classList.add('quiz-open');
+    return stage;
+  }
+  if (pl) pl.quizTimerGeneration = (Number(pl.quizTimerGeneration) || 0) + 1;
+  const overlay = typeof document !== 'undefined' && document.getElementById
+    ? document.getElementById('overlay') : null;
+  if (overlay && overlay.remove) overlay.remove();
+  if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(false);
+  else stage.classList.remove('quiz-open');
+  return stage;
+}
+
 /* ── 교실 화면용 전체 순위표 ─────────────────────────────────────────── */
 function plToggleBoard() {
   const el = document.getElementById('board-overlay');
@@ -5022,16 +5084,18 @@ function plRenderBoardOverlay() {
 function plRenderOverlay() {
   let ov = document.getElementById('overlay');
   if (!pl || pl.live.q < 0) {
-    if (ov) ov.remove();
-    if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(false);
-    else plStageRoot().classList.remove('quiz-open');
+    if (typeof plSetQuizOpen === 'function') plSetQuizOpen(false);
+    else {
+      if (ov) ov.remove();
+      if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(false);
+      else plStageRoot().classList.remove('quiz-open');
+    }
     plRenderQList();
     return;
   }
-  const stage = typeof plRenderCenteredOverlay === 'function'
-    ? plRenderCenteredOverlay(true)
-    : plStageRoot();
-  if (typeof plRenderCenteredOverlay !== 'function') stage.classList.add('quiz-open');
+  const stage = typeof plSetQuizOpen === 'function' ? plSetQuizOpen(true) :
+    (typeof plRenderCenteredOverlay === 'function' ? plRenderCenteredOverlay(true) : plStageRoot());
+  if (typeof plSetQuizOpen !== 'function' && typeof plRenderCenteredOverlay !== 'function') stage.classList.add('quiz-open');
 
   const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
@@ -5186,6 +5250,13 @@ function plRenderOverlayCounts() {
 function plTimerTick() {
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
+  const timerGeneration = Number(pl.quizTimerGeneration) || 0;
+  const questionIndex = Number(pl.live.q);
+  const liveToken = String(pl.live.liveToken || '');
+  const isCurrentTimer = state => pl === state &&
+    (Number(state.quizTimerGeneration) || 0) === timerGeneration &&
+    Number(state.live && state.live.q) === questionIndex &&
+    String(state.live && state.live.liveToken || '') === liveToken;
 
   // timer 모드는 시간이 차면 정답 projection도 Firestore에 함께 공개한다.
   const revealAt = Number(pl.live.revealAt) || 0;
@@ -5196,18 +5267,18 @@ function plTimerTick() {
     const state = pl;
     state.revealPending = true;
     Promise.resolve(plReveal()).then(revealed => {
-      if (pl !== state) return;
+      if (!isCurrentTimer(state)) return;
       if (revealed === false) state.revealRetryAt = serverNow() + 1000;
       else state.revealRequested = true;
     }).catch(e => {
-      if (pl === state) {
+      if (isCurrentTimer(state)) {
         state.revealRequested = false;
         state.revealRetryAt = serverNow() + 1000;
         state.revealPending = false;
       }
       console.error(e);
     }).finally(() => {
-      if (pl === state) state.revealPending = false;
+      if (isCurrentTimer(state)) state.revealPending = false;
     });
   }
   if (plRevealed() !== pl.uiRevealed) plRenderOverlayCounts();
