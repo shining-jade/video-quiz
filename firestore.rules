@@ -64,8 +64,12 @@ service cloud.firestore {
 
     function activeSet(setId) {
       return exists(/databases/$(database)/documents/quiz_sets/$(setId)) &&
-        !('trashedAt' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data) &&
-        !('purgeStartedAt' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data);
+        (!('trashedAt' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data) ||
+          get(/databases/$(database)/documents/quiz_sets/$(setId)).data.trashedAt == null) &&
+        (!('purgeStartedAt' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data) ||
+          get(/databases/$(database)/documents/quiz_sets/$(setId)).data.purgeStartedAt == null) &&
+        (!('lifecycleState' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data) ||
+          get(/databases/$(database)/documents/quiz_sets/$(setId)).data.lifecycleState == 'active');
     }
 
     function collaboratorPath(setId) {
@@ -84,8 +88,9 @@ service cloud.firestore {
     function activeSetAfter(setId) {
       let setPath = /databases/$(database)/documents/quiz_sets/$(setId);
       return existsAfter(setPath) &&
-        !('trashedAt' in getAfter(setPath).data) &&
-        !('purgeStartedAt' in getAfter(setPath).data);
+        (!('trashedAt' in getAfter(setPath).data) || getAfter(setPath).data.trashedAt == null) &&
+        (!('purgeStartedAt' in getAfter(setPath).data) || getAfter(setPath).data.purgeStartedAt == null) &&
+        (!('lifecycleState' in getAfter(setPath).data) || getAfter(setPath).data.lifecycleState == 'active');
     }
 
     function isSetCollaboratorAfter(setId) {
@@ -98,8 +103,7 @@ service cloud.firestore {
     }
 
     function canStartSet(setId) {
-      return activeSet(setId) &&
-        (ownsSet(setId) || isSetCollaborator(setId));
+      return isApprovedTeacher() && activeSet(setId);
     }
 
     function canStartSetAfter(setId) {
@@ -530,7 +534,9 @@ service cloud.firestore {
     match /quiz_sets/{setId} {
       allow get: if isApprovedTeacher() &&
         (activeSet(setId) || ownsSet(setId) || setId.matches('^__teacher_allowance_probe__.*$'));
-      allow list: if isApprovedTeacher();
+      allow list: if isApprovedTeacher() &&
+        resource.data.keys().hasAll(['lifecycleState']) &&
+        resource.data.lifecycleState == 'active';
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
@@ -590,8 +596,9 @@ service cloud.firestore {
         request.resource.data.teacherUid == request.auth.uid &&
         request.resource.data.teacherEmail == request.auth.token.email &&
         (!('setId' in request.resource.data) ||
-          !exists(/databases/$(database)/documents/quiz_sets/$(request.resource.data.setId)) ||
-          canStartSet(request.resource.data.setId)) &&
+          (request.resource.data.setId is string &&
+            exists(/databases/$(database)/documents/quiz_sets/$(request.resource.data.setId)) &&
+            canStartSet(request.resource.data.setId))) &&
         (request.resource.data.status != 'live' ||
           (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
             request.resource.data.get('activationLeaseUntil', null) <=

@@ -428,8 +428,17 @@
         .then(allowanceData);
     }
 
-    async function listQuizSets() {
-      const snapshot = await db.collection('quiz_sets').get();
+    async function listQuizSets(options) {
+      const config = options || {};
+      let query = db.collection('quiz_sets');
+      if (typeof query.where === 'function') {
+        if (config.includeTrash) {
+          if (config.ownerUid) query = query.where('ownerUid', '==', config.ownerUid);
+        } else {
+          query = query.where('lifecycleState', '==', 'active');
+        }
+      }
+      const snapshot = await query.get();
       return snapshot.docs.map(quizSetValue);
     }
 
@@ -438,7 +447,8 @@
     }
 
     function activeSet(value) {
-      return !!value && !value.trashedAt && !value.purgeStartedAt;
+      return !!value && !value.trashedAt && !value.purgeStartedAt &&
+        (!value.lifecycleState || value.lifecycleState === 'active');
     }
 
     async function canEditQuizSet(setId, actor) {
@@ -559,6 +569,7 @@
 
     const ownedQuizSet = (value, teacher) => ({
       ...withoutDocumentId(value),
+      lifecycleState: withoutDocumentId(value).lifecycleState || 'active',
       ownerUid: teacher && teacher.uid || '',
       ownerEmail: teacher && teacher.email || ''
     });
@@ -819,16 +830,16 @@
       const sourceCheck = storedSession.setId && sourceReference &&
         typeof sourceReference.get === 'function'
         ? getQuizSet(storedSession.setId).then(async source => {
-          if (!source) return true;
+          if (!source) throw new Error('수업을 시작할 원본 세트를 찾을 수 없습니다.');
           if (!activeSet(source)) throw new Error('휴지통 또는 정리 중인 세트는 수업을 시작할 수 없습니다.');
           const email = actorEmail({ email: storedSession.teacherEmail });
-          const owner = source.ownerUid === storedSession.teacherUid;
-          const collaborator = email
-            ? await db.doc('quiz_sets/' + storedSession.setId + '/collaborators/' + email)
-              .get({ source: 'server' })
-            : { exists: false };
-          if (!owner && !collaborator.exists) {
-            throw new Error('세트 소유자 또는 공동 편집자만 수업을 시작할 수 있습니다.');
+          const allowanceReference = email && db.doc('teacher_allowlist/' + email);
+          const allowanceSnapshot = allowanceReference && typeof allowanceReference.get === 'function'
+            ? await allowanceReference.get({ source: 'server' }) : null;
+          if (allowanceSnapshot && (!allowanceSnapshot.exists ||
+              !allowanceData(allowanceSnapshot).enabled ||
+              !['teacher', 'admin'].includes(allowanceData(allowanceSnapshot).role))) {
+            throw new Error('승인된 교사만 수업을 시작할 수 있습니다.');
           }
           return true;
         })

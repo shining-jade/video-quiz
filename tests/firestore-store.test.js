@@ -796,6 +796,30 @@ test('휴지통·정리 중인 원본은 사본과 새 수업 시작에 사용�
   }, () => 'NEW235'), /수업을 시작할 수/);
 });
 
+test('승인된 다른 교사도 활성 원본으로 수업을 시작할 수 있다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', trashedAt: null, purgeStartedAt: null },
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' }
+  });
+  const store = createStore(fake);
+  const code = await store.startSession('session1', {
+    setId: 'set1', teacherUid: 'teacher', teacherEmail: 'teacher@school.kr'
+  }, () => 'ACTIVE1');
+  assert.equal(code, 'ACTIVE1');
+});
+
+test('세트 목록은 활성 query와 소유자 휴지통 query를 분리한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/active': { ownerUid: 'owner', trashedAt: null, purgeStartedAt: null, lifecycleState: 'active' },
+    'quiz_sets/trash': { ownerUid: 'owner', trashedAt: 1, lifecycleState: 'trash' },
+    'quiz_sets/other-trash': { ownerUid: 'other', trashedAt: 1 }
+  });
+  const store = createStore(fake);
+  assert.deepEqual((await store.listQuizSets()).map(set => set.id), ['active']);
+  assert.deepEqual((await store.listQuizSets({ ownerUid: 'owner', includeTrash: true }))
+    .map(set => set.id), ['active', 'trash']);
+});
+
 test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
   const fake = makeFirestoreFake();
   const store = createStore(fake);
@@ -1043,6 +1067,9 @@ test('세트 목록과 단건 읽기는 문서 ID를 우선하고 문항 배열�
     'quiz_sets/set1': {
       id: 'payload-id',
       title: '첫 세트',
+      trashedAt: null,
+      purgeStartedAt: null,
+      lifecycleState: 'active',
       questions: [{ type: 'choice', text: '문항' }]
     }
   });
@@ -1051,11 +1078,17 @@ test('세트 목록과 단건 읽기는 문서 ID를 우선하고 문항 배열�
   assert.deepEqual(await store.listQuizSets(), [{
     id: 'set1',
     title: '첫 세트',
+    trashedAt: null,
+    purgeStartedAt: null,
+    lifecycleState: 'active',
     questions: [{ type: 'choice', text: '문항' }]
   }]);
   assert.deepEqual(await store.getQuizSet('set1'), {
     id: 'set1',
     title: '첫 세트',
+    trashedAt: null,
+    purgeStartedAt: null,
+    lifecycleState: 'active',
     questions: [{ type: 'choice', text: '문항' }]
   });
 });
@@ -1117,6 +1150,7 @@ test('세트 날짜 Timestamp는 기존 화면과 내보내기가 쓰는 밀리�
   const fake = makeFirestoreFake({
     'quiz_sets/set1': {
       title: '날짜 세트',
+      lifecycleState: 'active',
       createdAt: { toMillis: () => 1_700_000_000_000 },
       updatedAt: { toMillis: () => 1_700_000_100_000 }
     }
@@ -1124,12 +1158,12 @@ test('세트 날짜 Timestamp는 기존 화면과 내보내기가 쓰는 밀리�
   const store = createStore(fake);
 
   assert.deepEqual(await store.listQuizSets(), [{
-    id: 'set1', title: '날짜 세트',
+    id: 'set1', title: '날짜 세트', lifecycleState: 'active',
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_100_000
   }]);
   assert.deepEqual(await store.getQuizSet('set1'), {
-    id: 'set1', title: '날짜 세트',
+    id: 'set1', title: '날짜 세트', lifecycleState: 'active',
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_100_000
   });
@@ -2287,7 +2321,10 @@ test('서버 Timestamp를 되읽어 오프셋을 캐시하고 임시 문서를 �
 
 test('이미 존재하는 반 코드는 덮어쓰지 않는다', async () => {
   const { createFirestoreStore } = loadStoreModule();
-  const fake = makeFirestoreFake({ 'codes/ABC234': { sessionId: 'old' } });
+  const fake = makeFirestoreFake({
+    'codes/ABC234': { sessionId: 'old' },
+    'quiz_sets/set1': { lifecycleState: 'active' }
+  });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1_000);
   assert.equal(await store.claimSessionCode('ABC234', 'new', { setId: 'set1' }), false);
   assert.deepEqual(fake.value('codes/ABC234'), { sessionId: 'old' });
@@ -2297,7 +2334,12 @@ test('이미 존재하는 반 코드는 덮어쓰지 않는다', async () => {
 
 test('빈 반 코드는 소유 교사 정보와 함께 한 트랜잭션에서 코드·세션·live·board를 초기화한다', async () => {
   const { createFirestoreStore } = loadStoreModule();
-  const fake = makeFirestoreFake({}, { committedServerMillis: 20_000 });
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': {
+      ownerUid: 'teacher-1', ownerEmail: 'teacher@school.kr', lifecycleState: 'active'
+    },
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' }
+  }, { committedServerMillis: 20_000 });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1_000);
   const session = {
     setId: 'set1', label: '3학년 2반', status: 'active',
@@ -2317,7 +2359,10 @@ test('빈 반 코드는 소유 교사 정보와 함께 한 트랜잭션에서 �
 });
 
 test('세션 시작은 충돌한 후보를 건너뛰고 열 개 안에서 선점한 코드를 반환한다', async () => {
-  const fake = makeFirestoreFake({ 'codes/OLD234': { sessionId: 'old' } });
+  const fake = makeFirestoreFake({
+    'codes/OLD234': { sessionId: 'old' },
+    'quiz_sets/set1': { ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', trashedAt: null, purgeStartedAt: null }
+  });
   const store = createStore(fake);
   const candidates = ['OLD234', 'NEW234'];
   const session = { setId: 'set1', status: 'live' };
@@ -2332,7 +2377,10 @@ test('세션 시작은 충돌한 후보를 건너뛰고 열 개 안에서 선점
 });
 
 test('세션 allocation은 처음에는 입장 불가이며 exact code·owner CAS 뒤에만 live가 된다', async () => {
-  const fake = makeFirestoreFake();
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', trashedAt: null, purgeStartedAt: null },
+    'teacher_allowlist/owner@school.kr': { enabled: true, role: 'teacher' }
+  });
   const store = createStore(fake);
 
   const code = await store.startSession('session-a', {
@@ -2354,7 +2402,10 @@ test('allocation과 heartbeat lease는 호출 시작의 보정 서버 시각에 
   const { createFirestoreStore } = loadStoreModule();
   let now = 60_000;
   let moveClockDuringRenew = false;
-  const fake = makeFirestoreFake({}, {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { ownerUid: 'teacher-1', ownerEmail: 'teacher@school.kr', trashedAt: null, purgeStartedAt: null },
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' }
+  }, {
     committedServerMillis: 999_999,
     beforeTransactionGet(path) {
       if (moveClockDuringRenew && path === 'sessions/leased-session') now = 600_000;
@@ -2508,7 +2559,10 @@ test('세션 시작은 열 후보가 모두 충돌하면 더 만들지 않고 �
   const initial = Object.fromEntries(
     Array.from({ length: 10 }, (_, index) => ['codes/CODE' + index, { sessionId: 'old-' + index }])
   );
-  const fake = makeFirestoreFake(initial);
+  const fake = makeFirestoreFake({
+    ...initial,
+    'quiz_sets/set1': { ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', trashedAt: null, purgeStartedAt: null }
+  });
   const store = createStore(fake);
   let generated = 0;
 

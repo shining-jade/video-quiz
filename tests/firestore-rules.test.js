@@ -250,11 +250,17 @@ async function seedFirestore() {
       setDoc(doc(db, 'quiz_sets/set1'), {
         ownerUid: 'owner-uid',
         ownerEmail: 'owner@school.kr',
+        trashedAt: null,
+        purgeStartedAt: null,
+        lifecycleState: 'active',
         title: '보안 규칙 테스트'
       }),
       setDoc(doc(db, 'quiz_sets/set2'), {
         ownerUid: 'other-teacher-uid',
         ownerEmail: 'other@school.kr',
+        trashedAt: null,
+        purgeStartedAt: null,
+        lifecycleState: 'active',
         title: '다른 교사 세트'
       }),
       setDoc(doc(db, 'images/set1/q/0'), { data: 'owner-image' }),
@@ -1719,7 +1725,10 @@ const readMatrix = [
   {
     name: '세트',
     getPath: 'quiz_sets/set1',
-    list: db => getDocs(collection(db, 'quiz_sets')),
+    list: db => getDocs(query(
+      collection(db, 'quiz_sets'),
+      where('lifecycleState', '==', 'active')
+    )),
     get: approvedTeachers,
     listAllowed: approvedTeachers
   },
@@ -2041,6 +2050,23 @@ rulesTest('휴지통 원본은 다른 교사의 읽기·새 수업 시작에서 
     teacherEmail: actors.otherTeacher.email, status: 'active'
   }));
   await assertFails(deleteDoc(doc(actorFirestore('owner'), 'quiz_sets/set1')));
+});
+
+rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용하고 missing source는 거부한다', async () => {
+  await resetFirestore();
+  const other = actorFirestore('otherTeacher');
+  await assertSucceeds(setDoc(doc(other, 'sessions/active-source'), {
+    setId: 'set1', teacherUid: actors.otherTeacher.uid,
+    teacherEmail: actors.otherTeacher.email, status: 'active'
+  }));
+  await assertFails(setDoc(doc(other, 'sessions/missing-source'), {
+    setId: 'does-not-exist', teacherUid: actors.otherTeacher.uid,
+    teacherEmail: actors.otherTeacher.email, status: 'active'
+  }));
+  await assertFails(setDoc(doc(other, 'sessions/non-string-source'), {
+    setId: 123, teacherUid: actors.otherTeacher.uid,
+    teacherEmail: actors.otherTeacher.email, status: 'active'
+  }));
 });
 
 rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고 자기 admin은 보호한다', async () => {
