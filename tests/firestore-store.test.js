@@ -548,6 +548,8 @@ test('늦게 끝난 이전 저장은 새 편집과 최신 저장 결과를 덮�
 
   assert.equal(context.mk.videos[0].questions[0].text, '두 번째 값');
   assert.equal(context.mk.saved, true);
+  assert.equal(context.mk.persistedSnapshot.videos[0].questions[0].text, '두 번째 값');
+  assert.equal(context.mk.persistedSaveSequence, 2);
 });
 
 test('늦은 A 권한 확인 뒤 B 저장이 와도 Firestore 마지막 write는 최신 B payload다', async () => {
@@ -757,7 +759,7 @@ test('대기열의 최신 저장이 실행 직전 무효가 되면 dirty 초안�
   assert.equal(historyResets.length, 1);
 });
 
-test('저장 중 undo와 redo는 revision을 올려 응답의 state 복원과 history reset을 차단한다', async () => {
+test('B 저장 중 undo A는 local history를 보존하고 성공한 server baseline만 B로 갱신한다', async () => {
   const writes = [];
   let resolveA;
   let historyResets = 0;
@@ -768,9 +770,9 @@ test('저장 중 undo와 redo는 revision을 올려 응답의 state 복원과 hi
   });
   const context = {
     mk: Object.assign({
-      id: 'set-1', ownerUid: 'teacher-1', editRevision: 0, saveSequence: 0,
+      id: 'set-1', ownerUid: 'teacher-1', editRevision: 1, saveSequence: 0,
       createdAt: 1, saved: true, persistedSnapshot: snapshot('서버 A')
-    }, snapshot('서버 A')),
+    }, snapshot('편집 B')),
     teacherState: { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
     AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
     SV_TS: {}, rid() { return 'new-id'; }, normSettings(value) { return value || {}; },
@@ -789,26 +791,30 @@ test('저장 중 undo와 redo는 revision을 올려 응답의 state 복원과 hi
     renderMake() {}, console: { error() {} }, alert() {}, Date
   };
   context.mk.history = {
-    canUndo() { return true; }, undo() { return snapshot('undo 복원'); },
-    canRedo() { return true; }, redo() { return snapshot('redo 복원'); }
+    canUndo() { return true; }, undo() { return snapshot('서버 A'); },
+    canRedo() { return true; }, redo() { return snapshot('편집 B'); }
   };
   loadStageFunctions(['mkHistorySnapshot', 'mkSnapshotsEqual', 'mkRestoreHistory', 'mkUndo', 'mkRedo', 'mkSave'], context);
 
-  const saveA = context.mkSave(false);
+  const saveB = context.mkSave(false);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(context.mkUndo(), true);
-  assert.equal(context.mkRedo(), true);
   assert.equal(context.mk.editRevision, 2);
   resolveA();
-  await saveA;
+  await saveB;
 
-  assert.equal(context.mk.title, 'redo 복원');
+  assert.deepEqual(writes.map(value => value.title), ['편집 B']);
+  assert.equal(context.mk.title, '서버 A');
   assert.equal(context.mk.saved, false);
   assert.equal(historyResets, 0);
+  assert.equal(context.mk.persistedSnapshot.title, '편집 B');
 
-  await context.mkSave(false);
-  assert.deepEqual(writes.map(value => value.title), ['서버 A', 'redo 복원']);
-  assert.equal(historyResets, 1);
+  assert.equal(context.mkRedo(), true);
+  assert.equal(context.mk.title, '편집 B');
+  assert.equal(context.mk.saved, true);
+  assert.equal(context.mkUndo(), true);
+  assert.equal(context.mk.title, '서버 A');
+  assert.equal(context.mk.saved, false);
 });
 
 test('undo 복원은 이미지까지 포함한 저장 기준 snapshot과 같을 때만 저장됨 상태가 된다', () => {

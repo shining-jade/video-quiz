@@ -2422,6 +2422,7 @@ function screenMake(setId) {
     saveRunning: false,
     saveQueue: null,
     persistedSnapshot: null,
+    persistedSaveSequence: 0,
     pendingSaveId: null,
     routeToken: '',
     ownerUid: teacherState && teacherState.uid || ''
@@ -3416,29 +3417,49 @@ function mkSave(forceNew, options) {
       !(!state.id && !state.ownerUid) && !(state.id && !state.ownerUid && !store.canEditQuizSet) && !ownerMismatch;
   };
   const stale = request => !canWriteNow() || state.saveRequested !== request;
-  const finishLatest = (request, id, draftId, isNew, built, data) => {
+  const snapshotFromWrite = (data, built, activeVideo) => {
+    const sourceVideos = typeof PlaylistCore !== 'undefined' && PlaylistCore.normalizeVideos
+      ? PlaylistCore.normalizeVideos({ videos: data.videos || [] }) : (data.videos || []);
+    const videos = Array.isArray(sourceVideos) ? sourceVideos.map((video, videoIndex) => Object.assign({}, video, {
+      questions: normQuestions(video.questions).map((question, questionIndex) => {
+        const q = Object.assign({}, question);
+        if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
+        return q;
+      })
+    })) : [];
+    return {
+      title: String(data.title || ''),
+      author: String(data.author || ''),
+      settings: JSON.parse(JSON.stringify(data.settings || {})),
+      videos: videos,
+      activeVideo: Math.max(0, Math.min(Number(activeVideo) || 0, Math.max(0, videos.length - 1)))
+    };
+  };
+  const recordPersistedWrite = (request, snapshot) => {
+    if (mk !== state || request.sequence < (Number(state.persistedSaveSequence) || 0)) return false;
+    state.persistedSnapshot = JSON.parse(JSON.stringify(snapshot));
+    state.persistedSaveSequence = request.sequence;
+    return true;
+  };
+  const finishLatest = (request, id, draftId, isNew, built, data, savedSnapshot) => {
     if (stale(request)) return;
     const view = request.view;
     state.id = id;
     state.pendingSaveId = null;
     state.saved = true;
+    state.title = savedSnapshot.title;
+    state.author = savedSnapshot.author;
+    state.settings = JSON.parse(JSON.stringify(savedSnapshot.settings));
     mkClearDraft(draftId);
     if (draftId !== id) mkClearDraft(id);
     // 저장 결과를 그대로 다시 읽어들여, 정렬·인덱스 재계산이 화면에도 반영되게 한다
-    if (Array.isArray(data.videos)) {
-      state.videos = data.videos.map((video, videoIndex) => Object.assign({}, video, {
-        questions: normQuestions(video.questions).map((q, questionIndex) => {
-          if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
-          return q;
-        })
-      }));
-      state.activeVideo = Math.max(0, Math.min(state.activeVideo, state.videos.length - 1));
-    }
+    state.videos = JSON.parse(JSON.stringify(savedSnapshot.videos));
+    state.activeVideo = savedSnapshot.activeVideo;
     Object.keys(built.images).forEach(i => { imgCache[id + '/' + i] = built.images[i]; });
     const savedRoute = '#/make/' + id;
     if (typeof location !== 'undefined' && location.hash !== savedRoute) history.replaceState(null, '', savedRoute);
     state.routeToken = savedRoute;
-    if (typeof mkResetHistory === 'function') mkResetHistory(true);
+    if (typeof mkResetHistory === 'function') mkResetHistory();
     toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
     mkSetSaveStatus('saved', new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
     if (typeof mkShowSaveToast === 'function') mkShowSaveToast('저장 완료');
@@ -3482,6 +3503,7 @@ function mkSave(forceNew, options) {
         break;
       }
       const requestRevision = Number(state.editRevision) || 0;
+      const requestActiveVideo = Number(state.activeVideo) || 0;
       const id = request.forceNew ? rid(8) : (state.id || state.pendingSaveId || rid(8));
       const draftId = state.id;
       const isNew = id !== state.id;
@@ -3511,6 +3533,11 @@ function mkSave(forceNew, options) {
         reportFailure(e);
         break;
       }
+      const savedSnapshot = snapshotFromWrite(data, built, requestActiveVideo);
+      // A successful server write advances the persisted basis even when an
+      // undo/redo made the local UI newer and therefore skips canonical apply.
+      // The sequence guard prevents any older completion from regressing it.
+      recordPersistedWrite(request, savedSnapshot);
       state.saveProcessedSequence = request.sequence;
       if (state.saveRequested !== request) continue;
       // A synchronous edit made while a write was active is a newer editor
@@ -3524,7 +3551,7 @@ function mkSave(forceNew, options) {
         mkSetSaveStatus('dirty');
         break;
       }
-      finishLatest(request, id, draftId, isNew, built, data);
+      finishLatest(request, id, draftId, isNew, built, data, savedSnapshot);
       break;
     }
   })().finally(() => {
