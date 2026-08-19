@@ -511,7 +511,10 @@
           addedByUid: current.uid,
           addedAt: fieldValue.serverTimestamp()
         });
-        transaction.set(setReference, { collaboratorCount: count + 1 }, { merge: true });
+        transaction.set(setReference, {
+          collaboratorCount: count + 1,
+          collaboratorMutation: { email: normalizedEmail, action: 'add' }
+        }, { merge: true });
         return normalizedEmail;
       });
       return result;
@@ -535,7 +538,10 @@
         const count = Number.isInteger(set.collaboratorCount) ? set.collaboratorCount : 0;
         if (count < 1) throw new Error('공동 편집자 수가 올바르지 않습니다.');
         transaction.delete(collaboratorReference);
-        transaction.set(setReference, { collaboratorCount: count - 1 }, { merge: true });
+        transaction.set(setReference, {
+          collaboratorCount: count - 1,
+          collaboratorMutation: { email: normalizedEmail, action: 'remove' }
+        }, { merge: true });
         return true;
       });
     }
@@ -723,6 +729,7 @@
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const before = await getQuizSet(sourceId);
         if (!before) return null;
+        if (!activeSet(before)) throw new Error('휴지통 또는 정리 중인 세트는 복사할 수 없습니다.');
         const images = await getImages(sourceId);
         const entries = Object.entries(normalizedImages(images));
         const destinationImagePath = 'images/' + newId + '/q';
@@ -808,7 +815,25 @@
       } catch (error) {
         return Promise.reject(error);
       }
-      return db.runTransaction(async transaction => {
+      const sourceReference = storedSession.setId && db.doc('quiz_sets/' + storedSession.setId);
+      const sourceCheck = storedSession.setId && sourceReference &&
+        typeof sourceReference.get === 'function'
+        ? getQuizSet(storedSession.setId).then(async source => {
+          if (!source) return true;
+          if (!activeSet(source)) throw new Error('휴지통 또는 정리 중인 세트는 수업을 시작할 수 없습니다.');
+          const email = actorEmail({ email: storedSession.teacherEmail });
+          const owner = source.ownerUid === storedSession.teacherUid;
+          const collaborator = email
+            ? await db.doc('quiz_sets/' + storedSession.setId + '/collaborators/' + email)
+              .get({ source: 'server' })
+            : { exists: false };
+          if (!owner && !collaborator.exists) {
+            throw new Error('세트 소유자 또는 공동 편집자만 수업을 시작할 수 있습니다.');
+          }
+          return true;
+        })
+        : Promise.resolve(true);
+      return sourceCheck.then(() => db.runTransaction(async transaction => {
         const codeReference = db.doc('codes/' + code);
         const codeSnapshot = await transaction.get(codeReference);
         if (codeSnapshot.exists) return false;
@@ -844,7 +869,7 @@
           );
         });
         return true;
-      });
+      }));
     }
 
     function startSession(sessionId, session, createCode) {

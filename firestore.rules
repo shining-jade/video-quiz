@@ -97,6 +97,16 @@ service cloud.firestore {
       return ownsSetAfter(setId) || isSetCollaboratorAfter(setId);
     }
 
+    function canStartSet(setId) {
+      return activeSet(setId) &&
+        (ownsSet(setId) || isSetCollaborator(setId));
+    }
+
+    function canStartSetAfter(setId) {
+      return activeSetAfter(setId) &&
+        (ownsSetAfter(setId) || isSetCollaboratorAfter(setId));
+    }
+
     function validCollaboratorData(email) {
       return canonicalAllowanceId(email) &&
         request.resource.data.keys().hasOnly(['email', 'addedByUid', 'addedAt']) &&
@@ -111,9 +121,30 @@ service cloud.firestore {
     function validCollaboratorCount(setId) {
       let before = resource.data.get('collaboratorCount', 0);
       let after = request.resource.data.get('collaboratorCount', 0);
+      let mutation = request.resource.data.get('collaboratorMutation', {});
+      let targetPath = /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(mutation.email);
       return before is int && before >= 0 && before <= 20 &&
         after is int && after >= 0 && after <= 20 &&
-        (after == before || after == before + 1 || after == before - 1);
+        (after == before ||
+          (after == before + 1 &&
+            mutation.action == 'add' && mutation.email is string &&
+            canonicalAllowanceId(mutation.email) && !exists(targetPath) &&
+            existsAfter(targetPath) && getAfter(targetPath).data.email == mutation.email) ||
+          (after == before - 1 &&
+            mutation.action == 'remove' && mutation.email is string &&
+            canonicalAllowanceId(mutation.email) && exists(targetPath) &&
+            !existsAfter(targetPath)));
+    }
+
+    function validCollaboratorMutation(setId, email, action) {
+      let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
+      let parent = getAfter(parentPath).data;
+      let before = get(parentPath).data.get('collaboratorCount', 0);
+      let after = parent.get('collaboratorCount', 0);
+      return parent.get('collaboratorMutation', {}).email == email &&
+        parent.get('collaboratorMutation', {}).action == action &&
+        ((action == 'add' && after == before + 1) ||
+          (action == 'remove' && after == before - 1));
     }
 
     function ownsSetAfter(setId) {
@@ -125,6 +156,8 @@ service cloud.firestore {
     function changesSetContentRevisionAfter(setId) {
       let setPath = /databases/$(database)/documents/quiz_sets/$(setId);
       return canEditSetAfter(setId) &&
+        (!exists(setPath) || activeSet(setId)) &&
+        activeSetAfter(setId) &&
         getAfter(setPath).data.get('contentRevision', null) != null &&
         (!exists(setPath) ||
           getAfter(setPath).data.get('contentRevision', null) !=
@@ -495,7 +528,9 @@ service cloud.firestore {
     }
 
     match /quiz_sets/{setId} {
-      allow get, list: if isApprovedTeacher();
+      allow get: if isApprovedTeacher() &&
+        (activeSet(setId) || ownsSet(setId) || setId.matches('^__teacher_allowance_probe__.*$'));
+      allow list: if isApprovedTeacher();
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
@@ -506,10 +541,11 @@ service cloud.firestore {
         request.resource.data.ownerUid == resource.data.ownerUid &&
         request.resource.data.ownerEmail == resource.data.ownerEmail &&
         (ownsSet(setId) || (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'collaboratorCount'
+          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt',
+          'collaboratorCount', 'collaboratorMutation'
         ]))) &&
         validCollaboratorCount(setId);
-      allow delete: if ownsSet(setId);
+      allow delete: if false;
       allow read, write: if false;
     }
 
@@ -520,11 +556,9 @@ service cloud.firestore {
         canonicalAllowanceId(email) &&
         email != get(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('ownerEmail', '') &&
         validCollaboratorData(email) &&
-        getAfter(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('collaboratorCount', 0) ==
-          get(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('collaboratorCount', 0) + 1;
+        validCollaboratorMutation(setId, email, 'add');
       allow delete: if ownsSet(setId) && activeSet(setId) &&
-        getAfter(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('collaboratorCount', 0) ==
-          get(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('collaboratorCount', 0) - 1;
+        validCollaboratorMutation(setId, email, 'remove');
       allow update: if false;
       allow read, write: if false;
     }
@@ -555,6 +589,9 @@ service cloud.firestore {
       allow create: if isApprovedTeacher() &&
         request.resource.data.teacherUid == request.auth.uid &&
         request.resource.data.teacherEmail == request.auth.token.email &&
+        (!('setId' in request.resource.data) ||
+          !exists(/databases/$(database)/documents/quiz_sets/$(request.resource.data.setId)) ||
+          canStartSet(request.resource.data.setId)) &&
         (request.resource.data.status != 'live' ||
           (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
             request.resource.data.get('activationLeaseUntil', null) <=

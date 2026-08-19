@@ -1825,7 +1825,7 @@ const writeMatrix = [
     allowed: {
       create: approvedTeachers,
       update: ['owner'],
-      delete: ['owner']
+      delete: []
     }
   },
   {
@@ -1993,6 +1993,54 @@ rulesTest('승인 목록은 admin만 읽고 쓰며 다른 클라이언트에는 
     }));
     await assertFails(deleteDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
   }
+});
+
+rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서만 바뀐다', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  const target = 'other@school.kr';
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), { collaboratorCount: 1 }));
+  const forged = writeBatch(owner);
+  forged.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 1,
+    collaboratorMutation: { email: target, action: 'add' }
+  }, { merge: true });
+  await assertFails(forged.commit());
+
+  const add = writeBatch(owner);
+  add.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 1,
+    collaboratorMutation: { email: target, action: 'add' }
+  }, { merge: true });
+  add.set(doc(owner, `quiz_sets/set1/collaborators/${target}`), {
+    email: target, addedByUid: actors.owner.uid, addedAt: serverTimestamp()
+  });
+  await assertSucceeds(add.commit());
+
+  const editor = actorFirestore('otherTeacher');
+  await assertSucceeds(updateDoc(doc(editor, 'quiz_sets/set1'), { title: '공동 편집' }));
+  const remove = writeBatch(owner);
+  remove.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 0,
+    collaboratorMutation: { email: target, action: 'remove' }
+  }, { merge: true });
+  remove.delete(doc(owner, `quiz_sets/set1/collaborators/${target}`));
+  await assertSucceeds(remove.commit());
+  await assertFails(updateDoc(doc(editor, 'quiz_sets/set1'), { title: '제거 후 저장' }));
+});
+
+rulesTest('휴지통 원본은 다른 교사의 읽기·새 수업 시작에서 닫힌다', async () => {
+  await resetFirestore();
+  await adminWrite('quiz_sets/set1', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email, trashedAt: Timestamp.fromMillis(1)
+  });
+  const other = actorFirestore('otherTeacher');
+  await assertFails(getDoc(doc(other, 'quiz_sets/set1')));
+  await assertFails(setDoc(doc(other, 'sessions/trash-source'), {
+    setId: 'set1', teacherUid: actors.otherTeacher.uid,
+    teacherEmail: actors.otherTeacher.email, status: 'active'
+  }));
+  await assertFails(deleteDoc(doc(actorFirestore('owner'), 'quiz_sets/set1')));
 });
 
 rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고 자기 admin은 보호한다', async () => {

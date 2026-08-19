@@ -780,6 +780,22 @@ test('공동 편집자 저장 API는 휴지통 세트와 권한 없는 actor를 
   }), /편집할 권한/);
 });
 
+test('휴지통·정리 중인 원본은 사본과 새 수업 시작에 사용할 수 없다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/trash': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', trashedAt: 1 },
+    'quiz_sets/purging': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', purgeStartedAt: 2 }
+  });
+  const store = createStore(fake);
+  const teacher = { uid: 'owner', email: 'owner@school.kr', role: 'teacher' };
+  await assert.rejects(store.copyOwnedQuizSet('trash', 'copy', teacher), /복사할 수/);
+  await assert.rejects(store.startSession('s1', {
+    setId: 'trash', teacherUid: 'owner', teacherEmail: 'owner@school.kr'
+  }, () => 'NEW234'), /수업을 시작할 수/);
+  await assert.rejects(store.startSession('s2', {
+    setId: 'purging', teacherUid: 'owner', teacherEmail: 'owner@school.kr'
+  }, () => 'NEW235'), /수업을 시작할 수/);
+});
+
 test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
   const fake = makeFirestoreFake();
   const store = createStore(fake);
