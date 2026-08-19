@@ -80,6 +80,20 @@ function fakeDb(initial, options = {}) {
   return {
     docs,
     setValue,
+    collectionGroup(name) { return { async get() {
+      await beforeGet('collectionGroup:' + name);
+      const matches = [...docs.entries()].filter(([path]) => {
+        const segments = path.split('/');
+        return segments.length >= 2 && segments.at(-2) === name;
+      });
+      return {
+        docs: matches.map(([path, data]) => ({
+          id: path.split('/').at(-1),
+          ref: { path },
+          data: () => data
+        }))
+      };
+    }}; },
     collection(path) { return path === 'quiz_sets' ? { async get() {
       await beforeGet(path);
       const sets = [...docs.entries()].filter(([key]) => key.startsWith('quiz_sets/') && !key.slice(10).includes('/'));
@@ -196,6 +210,32 @@ test('counter migration detects a same-data gate rewrite within one millisecond'
     db, projectId: 'demo-video-quiz', targetMode: 'emulator', gateId: 'gate-1',
     apply: true, confirmProject: 'demo-video-quiz'
   }), /generation changed/i);
+});
+
+test('counter migration audit fails closed on bounded orphan collaborator and image details', async () => {
+  const initial = {
+    'migration_gates/set_counters': {
+      locked: true, lockId: 'gate-1', projectId: 'demo-video-quiz', targetMode: 'emulator'
+    },
+    'quiz_sets/a': { title: 'A', collaboratorCount: 0, imageCount: 0 },
+    'quiz_sets/ghost/collaborators/x@school.kr': { email: 'x@school.kr' }
+  };
+  for (let index = 0; index < 105; index += 1) {
+    initial[`images/ghost/q/q${String(index).padStart(3, '0')}`] = { data: 'orphan' };
+  }
+  const report = await migration.runCounterBackfill({
+    db: fakeDb(initial), projectId: 'demo-video-quiz', targetMode: 'emulator', gateId: 'gate-1'
+  });
+  assert.equal(report.plannedCount, 0);
+  assert.equal(report.safeToDeployStrictRules, false);
+  assert.equal(report.audit.orphanChildCount, 106);
+  assert.equal(report.audit.orphanCollaboratorCount, 1);
+  assert.equal(report.audit.orphanImageCount, 105);
+  assert.equal(report.audit.orphanChildDetails.length, 100);
+  assert.equal(report.audit.orphanChildDetailsTruncated, true);
+  assert.deepEqual(report.audit.orphanChildDetails[0], {
+    type: 'collaborator', setId: 'ghost', path: 'quiz_sets/ghost/collaborators/x@school.kr'
+  });
 });
 
 test('counter migration final audit read failure carries cumulative fail-closed progress', async () => {

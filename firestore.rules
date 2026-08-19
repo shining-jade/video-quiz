@@ -58,7 +58,26 @@ service cloud.firestore {
 
     function counterMigrationUnlocked() {
       let path = /databases/$(database)/documents/migration_gates/set_counters;
-      return !exists(path) || get(path).data.get('locked', false) == false;
+      return exists(path) && validStoredCounterGateUnlocked(get(path).data);
+    }
+
+    function validStoredCounterGateUnlocked(data) {
+      return data.keys().hasAll([
+          'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid',
+          'unlockedAt', 'unlockedByUid'
+        ]) &&
+        data.keys().hasOnly([
+          'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid',
+          'unlockedAt', 'unlockedByUid'
+        ]) &&
+        data.locked == false &&
+        data.lockId is string && data.lockId.size() > 0 && data.lockId.size() <= 120 &&
+        data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 120 &&
+        data.targetMode in ['production', 'emulator'] &&
+        data.lockedAt is timestamp && data.lockedByUid is string &&
+        data.lockedByUid.size() > 0 &&
+        data.unlockedAt is timestamp && data.unlockedByUid is string &&
+        data.unlockedByUid.size() > 0;
     }
 
     function validCounterGateLock() {
@@ -202,6 +221,7 @@ service cloud.firestore {
             after.get('imageMutation', null) == before.get('imageMutation', null) && ownsSet(setId)) ||
           (before.get('lifecycleState', '') == 'trashed' &&
             after.get('lifecycleState', '') == 'purging' &&
+            counterMigrationUnlocked() &&
             before.get('purgeStartedAt', null) == null &&
             after.get('purgeStartedAt', null) is timestamp &&
             after.purgeStartedAt == request.time &&
@@ -778,6 +798,7 @@ service cloud.firestore {
         ])) &&
         validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
       allow delete: if canPurgeSet(setId) &&
+        counterMigrationUnlocked() &&
         validAuthoritativeCounters(resource.data) &&
         resource.data.get('collaboratorCount', -1) == 0 &&
         resource.data.get('imageCount', -1) == 0;

@@ -47,4 +47,6 @@ test('counter migration 운영 문서는 staged lock migration strict unlock 순
   assert.match(guide, /--target-mode production[\s\S]*--confirm-project video-quiz-65798[\s\S]*--gate-id <LOCK_ID>/);
   assert.match(guide, /safeToDeployStrictRules[^\n]*true/);
   assert.match(guide, /운영 환경에서는 실행하지 않았습니다/);
+  assert.match(guide, /staged[^\n]*배포[^\n]*직후[^\n]*즉시[^\n]*잠금/);
+  assert.match(guide, /gate가 없거나 잠겨 있으면[^\n]*collaborator\/image[^\n]*parent[^\n]*(거부|차단)/);
 });

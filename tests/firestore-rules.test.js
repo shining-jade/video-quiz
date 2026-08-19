@@ -263,6 +263,16 @@ async function seedFirestore() {
         enabled: true,
         role: 'admin'
       }),
+      setDoc(doc(db, 'migration_gates/set_counters'), {
+        locked: false,
+        lockId: 'seed-unlocked-gate',
+        projectId,
+        targetMode: 'emulator',
+        lockedAt: Timestamp.fromMillis(1),
+        lockedByUid: 'admin-uid',
+        unlockedAt: Timestamp.fromMillis(2),
+        unlockedByUid: 'admin-uid'
+      }),
       setDoc(doc(db, 'quiz_sets/set1'), {
         ownerUid: 'owner-uid',
         ownerEmail: 'owner@school.kr',
@@ -2187,6 +2197,83 @@ rulesTest('counter migration gate is admin-only, stale-safe, and blocks child wr
   afterUnlock.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
   afterUnlock.update(doc(owner, 'images/set1/q/0'), { data: 'unlocked-update' });
   await assertSucceeds(afterUnlock.commit());
+});
+
+rulesTest('missing or locked gate fails closed for counters and stale-zero parent deletion until migration unlock', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  const admin = actorFirestore('admin');
+  const gatePath = 'migration_gates/set_counters';
+  await adminWrite(gatePath, undefined);
+
+  await adminWrite('quiz_sets/stale-zero', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'purging', trashedAt: Timestamp.fromMillis(1),
+    purgeStartedAt: Timestamp.fromMillis(2), collaboratorCount: 0, imageCount: 0
+  });
+  await adminWrite('images/stale-zero/q/real', { data: 'orphan-risk' });
+  await adminWrite('quiz_sets/staged-trash', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1), purgeStartedAt: null,
+    collaboratorCount: 0, imageCount: 0
+  });
+
+  const missingAdd = writeBatch(owner);
+  missingAdd.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 2, imageMutation: { key: 'missing-gate', action: 'add' }
+  }, { merge: true });
+  missingAdd.set(doc(owner, 'images/set1/q/missing-gate'), { data: 'blocked' });
+  await assertFails(missingAdd.commit());
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/staged-trash'), {
+    lifecycleState: 'purging', purgeStartedAt: serverTimestamp()
+  }));
+  await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
+  await assertSucceeds(getDoc(doc(owner, 'images/set1/q/0')));
+  await assertSucceeds(getDoc(doc(owner, 'sessions/s1')));
+
+  await adminWrite(gatePath, { locked: false });
+  const malformedAdd = writeBatch(owner);
+  malformedAdd.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 2, imageMutation: { key: 'malformed-gate', action: 'add' }
+  }, { merge: true });
+  malformedAdd.set(doc(owner, 'images/set1/q/malformed-gate'), { data: 'blocked' });
+  await assertFails(malformedAdd.commit());
+  await adminWrite(gatePath, undefined);
+
+  await assertSucceeds(setDoc(doc(admin, gatePath), {
+    locked: true,
+    lockId: 'round6-gate',
+    projectId,
+    targetMode: 'emulator',
+    lockedAt: serverTimestamp(),
+    lockedByUid: actors.admin.uid
+  }));
+  await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/staged-trash'), {
+    lifecycleState: 'purging', purgeStartedAt: serverTimestamp()
+  }));
+
+  await adminWrite('quiz_sets/stale-zero', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    lifecycleState: 'purging', trashedAt: Timestamp.fromMillis(1),
+    purgeStartedAt: Timestamp.fromMillis(2), collaboratorCount: 0, imageCount: 1
+  });
+  const lockedGate = (await getDoc(doc(admin, gatePath))).data();
+  await assertSucceeds(setDoc(doc(admin, gatePath), {
+    ...lockedGate,
+    locked: false,
+    unlockedAt: serverTimestamp(),
+    unlockedByUid: actors.admin.uid
+  }));
+  await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
+
+  const ownerStore = emulatorStore(owner);
+  assert.deepEqual(await ownerStore.continueSetPurge('stale-zero'), {
+    done: false, deleted: 1, parentDeleted: false
+  });
+  assert.deepEqual(await ownerStore.continueSetPurge('stale-zero'), {
+    done: true, deleted: 0, parentDeleted: true
+  });
 });
 
 rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서만 바뀐다', async () => {

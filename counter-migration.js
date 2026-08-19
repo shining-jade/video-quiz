@@ -12,10 +12,16 @@ function counterIssue(data, collaboratorActual, imageActual) {
   return '';
 }
 
-function auditCounterRecords(records) {
+function auditCounterRecords(records, orphanAudit = {}) {
   const audit = {
     totalSets: 0, missingCollaboratorCount: 0, missingImageCount: 0,
     invalidCounterCount: 0, counterMismatchCount: 0, counterMismatchIds: [],
+    orphanChildCount: Number(orphanAudit.orphanChildCount || 0),
+    orphanCollaboratorCount: Number(orphanAudit.orphanCollaboratorCount || 0),
+    orphanImageCount: Number(orphanAudit.orphanImageCount || 0),
+    orphanChildDetails: Array.isArray(orphanAudit.orphanChildDetails)
+      ? orphanAudit.orphanChildDetails.slice(0, 100) : [],
+    orphanChildDetailsTruncated: orphanAudit.orphanChildDetailsTruncated === true,
     safeToDeployStrictRules: false
   };
   for (const record of records || []) {
@@ -33,7 +39,7 @@ function auditCounterRecords(records) {
   }
   audit.safeToDeployStrictRules = audit.missingCollaboratorCount === 0 &&
     audit.missingImageCount === 0 && audit.invalidCounterCount === 0 &&
-    audit.counterMismatchCount === 0;
+    audit.counterMismatchCount === 0 && audit.orphanChildCount === 0;
   return audit;
 }
 
@@ -55,6 +61,40 @@ async function scanSets(db) {
     });
   }
   return records;
+}
+
+async function scanOrphanChildren(db, records) {
+  if (!db || typeof db.collectionGroup !== 'function') {
+    throw new Error('Authoritative collectionGroup orphan audit is required.');
+  }
+  const parentIds = new Set((records || []).map(record => String(record.id || '')));
+  const result = {
+    orphanChildCount: 0,
+    orphanCollaboratorCount: 0,
+    orphanImageCount: 0,
+    orphanChildDetails: [],
+    orphanChildDetailsTruncated: false
+  };
+  async function scanGroup(group, root, type, countField) {
+    const snapshot = await db.collectionGroup(group).get();
+    for (const document of snapshot.docs || []) {
+      const path = String(document && document.ref && document.ref.path || '');
+      const segments = path.split('/');
+      if (segments.length !== 4 || segments[0] !== root || segments[2] !== group) continue;
+      const setId = segments[1];
+      if (parentIds.has(setId)) continue;
+      result.orphanChildCount += 1;
+      result[countField] += 1;
+      if (result.orphanChildDetails.length < 100) {
+        result.orphanChildDetails.push({ type, setId, path });
+      } else {
+        result.orphanChildDetailsTruncated = true;
+      }
+    }
+  }
+  await scanGroup('collaborators', 'quiz_sets', 'collaborator', 'orphanCollaboratorCount');
+  await scanGroup('q', 'images', 'image', 'orphanImageCount');
+  return result;
 }
 
 function planCounterBackfill(records) {
@@ -120,9 +160,10 @@ async function runCounterBackfill({
       : null;
     if (expectedGate) report.gate = expectedGate;
     const initial = await scanSets(db);
+    const initialOrphans = await scanOrphanChildren(db, initial);
     const plan = planCounterBackfill(initial);
     report.plannedCount = plan.length;
-    report.audit = auditCounterRecords(initial);
+    report.audit = auditCounterRecords(initial, initialOrphans);
     if (!apply) {
       if (expectedGate) {
         verifyGateSnapshot(await gateReference.get(), { projectId, targetMode, gateId }, expectedGate);
@@ -167,12 +208,13 @@ async function runCounterBackfill({
       expectedGate
     );
     const after = await scanSets(db);
+    const afterOrphans = await scanOrphanChildren(db, after);
     verifyGateSnapshot(
       await gateReference.get(),
       { projectId, targetMode, gateId },
       expectedGate
     );
-    report.audit = auditCounterRecords(after);
+    report.audit = auditCounterRecords(after, afterOrphans);
     report.safeToDeployStrictRules = report.audit.safeToDeployStrictRules;
     report.status = 'complete';
     return report;

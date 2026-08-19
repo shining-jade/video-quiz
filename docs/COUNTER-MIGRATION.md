@@ -4,7 +4,7 @@
 
 ## 더 안전한 staged 방식
 
-`firebase.counter-migration.json`은 별도의 legacy 허용 Rules를 가리키지 않고 최종 `firestore.rules`를 그대로 사용합니다. 따라서 staged 배포 직후부터 잘못된 legacy counter 쓰기는 fail-closed이고, 잠금 전 짧은 구간에도 strict counter protocol을 지키는 쓰기만 가능합니다.
+`firebase.counter-migration.json`은 별도의 legacy 허용 Rules를 가리키지 않고 최종 `firestore.rules`를 그대로 사용합니다. 따라서 staged 배포 직후부터 잘못된 legacy counter 쓰기는 fail-closed입니다. gate가 없거나 잠겨 있으면 collaborator/image counter 쓰기와 trash→purge 및 parent 영구 삭제를 모두 거부합니다. 세트·이미지·세션 읽기는 계속 가능합니다.
 
 잠금 문서는 `migration_gates/set_counters` 하나입니다. 승인된 Google `admin`만 Rules를 통해 잠그거나 해제할 수 있습니다. 잠긴 동안 세트·이미지·세션 읽기는 유지되지만 collaborator/image create·update·delete와 purge child delete는 모두 거부됩니다.
 
@@ -19,6 +19,8 @@ firebase deploy --only firestore:rules --config firebase.counter-migration.json 
 ```
 
 이 단계는 최종 strict Rules와 같은 파일을 배포하므로 legacy 쓰기 허용 창을 다시 열지 않습니다.
+
+**staged gate Rules 배포 직후 즉시 잠금 단계를 수행해야 합니다.** 배포 성공부터 2단계 잠금 성공까지는 gate가 없는 의도적인 fail-closed 유지보수 구간이며, counter 종속 쓰기와 영구 삭제는 중단됩니다.
 
 ### 2. migration_gates/set_counters 잠금
 
@@ -55,6 +57,7 @@ gate.locked: true
 gate.lockId: <LOCK_ID>
 plannedCount / appliedCount / concurrentlySkipped / concurrentlySkippedCount 존재
 audit의 missing, invalid, mismatch 수가 모두 0
+audit의 orphanChildCount, orphanCollaboratorCount, orphanImageCount가 모두 0
 ```
 
 오류나 gate 변경이 있으면 `safeToDeployStrictRules`는 false이며, partial report의 누적 수치를 보존합니다. 이때 4단계로 넘어가지 말고 같은 잠금을 유지한 채 원인을 해결하고 다시 audit합니다.
