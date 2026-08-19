@@ -473,6 +473,13 @@ body.stage-fallback-open { overflow: hidden; }
   #pl-stage #overlay { border-radius: 16px; padding: 20px; }
   #pl-stage.rank-open #board-overlay { width: calc(100% - 32px); }
 }
+#pl-stage.pl-layout-ultra #overlay { overflow: auto; padding: 10px; }
+#pl-stage.pl-layout-ultra #overlay .ov-top { gap: 7px; margin-bottom: 8px; font-size: 12px; }
+#pl-stage.pl-layout-ultra #overlay .ov-q { font-size: 18px; margin-bottom: 10px; }
+#pl-stage.pl-layout-ultra #overlay .ov-actions {
+  position: sticky; bottom: 0; gap: 6px; padding-top: 8px;
+}
+#pl-stage.pl-layout-ultra #overlay .ov-actions .btn { padding: 8px 10px; font-size: 13px; }
 #overlay .ov-inner { width: 100%; max-width: 960px; color: #fff; }
 #overlay .ov-top { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
 #overlay .ov-q { font-size: clamp(22px, 3.4vw, 38px); font-weight: 800; line-height: 1.35; margin-bottom: 22px; }
@@ -2136,14 +2143,6 @@ function mkHistorySnapshot(state) {
     activeVideo: Number(source.activeVideo) || 0
   };
 }
-#pl-stage.pl-layout-ultra #overlay { overflow: auto; padding: 10px; }
-#pl-stage.pl-layout-ultra #overlay .ov-top { gap: 7px; margin-bottom: 8px; font-size: 12px; }
-#pl-stage.pl-layout-ultra #overlay .ov-q { font-size: 18px; margin-bottom: 10px; }
-#pl-stage.pl-layout-ultra #overlay .ov-actions {
-  position: sticky; bottom: 0; gap: 6px; padding-top: 8px;
-}
-#pl-stage.pl-layout-ultra #overlay .ov-actions .btn { padding: 8px 10px; font-size: 13px; }
-
 function mkSnapshotsEqual(left, right) {
   return !!right && JSON.stringify(left) === JSON.stringify(right);
 }

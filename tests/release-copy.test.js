@@ -1,8 +1,21 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const vm = require('node:vm');
 
 const read = file => fs.readFileSync(file, 'utf8');
+
+test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
+  const html = read('index.html');
+  const inlineScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+    .filter(([, attributes]) => !/\bsrc\s*=|\btype\s*=\s*["']module["']/i.test(attributes))
+    .map(([, , source]) => source);
+
+  assert.ok(inlineScripts.length > 0, '검증할 inline script가 있어야 합니다');
+  inlineScripts.forEach((source, index) => {
+    assert.doesNotThrow(() => new vm.Script(source, { filename: `index-inline-${index}.js` }));
+  });
+});
 
 test('편집기 Ctrl+S는 브라우저 기본 동작 없이 현재 위치에서 저장 완료 알림을 표시한다', () => {
   const html = read('index.html');
