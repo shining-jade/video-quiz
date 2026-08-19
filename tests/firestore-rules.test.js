@@ -2300,6 +2300,7 @@ rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서
 
   const editor = actorFirestore('otherTeacher');
   await assertSucceeds(updateDoc(doc(editor, 'quiz_sets/set1'), { title: '공동 편집' }));
+  await assertFails(updateDoc(doc(editor, 'quiz_sets/set1'), { archived: true }));
   const remove = writeBatch(owner);
   remove.set(doc(owner, 'quiz_sets/set1'), {
     collaboratorCount: 0,

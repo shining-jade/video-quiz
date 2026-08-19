@@ -796,6 +796,7 @@ service cloud.firestore {
           'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'lifecycleState',
           'imageCount', 'imageMutation'
         ])) &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['archived']) || ownsSet(setId)) &&
         validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
       allow delete: if canPurgeSet(setId) &&
         counterMigrationUnlocked() &&

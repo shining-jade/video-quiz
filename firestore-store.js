@@ -651,7 +651,15 @@
 
     async function listTrash(scope) {
       const config = typeof scope === 'string' ? { ownerUid: scope } : (scope || {});
-      return listQuizSets({ ownerUid: config.ownerUid, lifecycleState: config.lifecycleState || 'trashed', allowAdminTrash: config.role === 'admin' });
+      if (config.lifecycleState) {
+        return listQuizSets({ ownerUid: config.ownerUid, lifecycleState: config.lifecycleState, allowAdminTrash: config.role === 'admin' });
+      }
+      const options = { ownerUid: config.ownerUid, allowAdminTrash: config.role === 'admin' };
+      const [trashed, purging] = await Promise.all([
+        listQuizSets({ ...options, lifecycleState: 'trashed' }),
+        listQuizSets({ ...options, lifecycleState: 'purging' })
+      ]);
+      return trashed.concat(purging);
     }
 
     async function listExpiredTrash(scope, limit) {
@@ -924,8 +932,14 @@
       return saveQuizSetWithImages(setId, ownedQuizSet(value, teacher), images);
     }
 
-    function patchQuizSet(setId, value) {
+    async function patchQuizSet(setId, value, actor) {
       const data = withoutDocumentId(value);
+      if (Object.prototype.hasOwnProperty.call(data, 'archived') && actor) {
+        const current = await getQuizSet(setId);
+        if (!current || current.ownerUid !== actor.uid || !(await canEditQuizSet(setId, actor))) {
+          throw new Error('소유자만 세트 숨김 상태를 변경할 수 있습니다.');
+        }
+      }
       if (data.archived === false) data.archived = fieldValue.delete();
       return db.doc('quiz_sets/' + setId).set(data, { merge: true });
     }

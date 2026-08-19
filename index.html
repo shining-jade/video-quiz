@@ -1662,8 +1662,9 @@ function setListRow(s) {
     '<button class="btn sm" onclick="setDuplicate(\'' + esc(s.id) + '\')">⧉ 사본 만들기</button>';
   const trashed = !!(s.trashedAt || s.lifecycleState === 'trashed');
   const purging = !!(s.purgeStartedAt || s.lifecycleState === 'purging');
+  const trashMeta = (trashed || purging) && s.trashedAt && typeof trashDates === 'function' ? trashDates(s) : '';
   const actions = trashed || purging
-    ? (owner ? (purging ? '<span class="tag warn">정리 중… 복원할 수 없습니다</span>' :
+    ? (owner ? (purging ? '<span class="tag warn">정리 중… 복원할 수 없습니다</span><button class="btn sm" onclick="setPurgeRetry(\'' + esc(s.id) + '\')">↻ 정리 재시도</button>' :
         '<button class="btn sm" onclick="setRestoreFromTrash(\'' + esc(s.id) + '\')">↩ 복원</button>' +
         '<button class="btn sm danger" onclick="setPurgeNow(\'' + esc(s.id) + '\')">🗑 영구 삭제</button>') :
         '<span class="tag mute">휴지통</span>')
@@ -1692,6 +1693,7 @@ function setListRow(s) {
           (s.author ? ' · ' + esc(s.author) : '') +
           ' · ' + REVEAL_LABEL[s.settings.revealMode] +
           (s.updatedAt ? ' · ' + fmtDate(s.updatedAt) : '') +
+          (trashMeta ? ' · ' + trashMeta : '') +
         '</div>' +
       '</div>' +
       actions +
@@ -1701,6 +1703,20 @@ function setListRow(s) {
 
 function setCurrentListSet(id) {
   return setList && setList.all && setList.all.find(s => s.id === id);
+}
+
+function uiTrashMillis(value) {
+  if (value && typeof value.toMillis === 'function') return value.toMillis();
+  if (value && value.seconds != null) return Number(value.seconds) * 1000 + Math.floor(Number(value.nanoseconds || 0) / 1e6);
+  if (value instanceof Date) return value.getTime();
+  return Number(value) || 0;
+}
+function trashDates(set) {
+  const deleted = uiTrashMillis(set.trashedAt);
+  if (!deleted) return '';
+  const deadline = deleted + 30 * 24 * 60 * 60 * 1000;
+  const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / (24 * 60 * 60 * 1000)));
+  return '삭제일 ' + fmtDate(deleted) + ' · 자동 삭제 예정 ' + fmtDate(deadline) + ' · 남은 기간 ' + remaining + '일';
 }
 
 function setMoveToTrash(id) {
@@ -1739,7 +1755,15 @@ function setPurgeNow(id) {
   return store.beginSetPurge(id, 'immediate', teacherState).then(function step() {
     return store.continueSetPurge(id).then(result => result && result.done ? result : step());
   }).then(() => { toast('영구 삭제했습니다'); screenTrash(); return true; })
-    .catch(e => { console.error(e); alert('영구 삭제 실패: ' + e.message + '\n현재 상태는 유지되며 휴지통에서 재시도할 수 있습니다.'); return false; });
+    .catch(e => { console.error(e); screenTrash(); alert('영구 삭제가 중단되었습니다: ' + e.message + '\n정리 중 상태로 저장되었으며 휴지통에서 재시도할 수 있습니다.'); return false; });
+}
+
+function setPurgeRetry(id) {
+  const current = setCurrentListSet(id);
+  if (!current || !teacherState || current.ownerUid !== teacherState.uid) return Promise.resolve(false);
+  return store.continueSetPurge(id).then(result => result && result.done ? result : setPurgeRetry(id))
+    .then(() => { toast('정리를 완료했습니다'); screenTrash(); return true; })
+    .catch(e => { screenTrash(); alert('정리 재시도 실패: ' + e.message); return false; });
 }
 
 function openCollaboratorDialog(id) {
@@ -1760,7 +1784,7 @@ function openCollaboratorDialog(id) {
   const close = () => dialog.remove();
   document.getElementById('collab-close').onclick = close;
   const list = document.getElementById('collab-list');
-  const render = items => { list.innerHTML = items.length ? items.map(item => '<div class="row" style="justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)"><span>' + esc(item.email) + '</span><button class="btn sm" data-remove="' + esc(item.email) + '">삭제</button></div>').join('') : '<div class="empty">등록된 공동 편집자가 없습니다.</div>'; list.querySelectorAll('[data-remove]').forEach(button => { button.onclick = () => { if (!confirm(button.dataset.remove + '을(를) 제거할까요?')) return; store.removeCollaborator(id, button.dataset.remove, teacherState).then(load).catch(showError); }; }); };
+  const render = items => { list.innerHTML = items.length ? items.map(item => '<div class="row" style="justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)"><span>' + esc(item.email) + (item.addedAt ? '<small class="hint"> · 추가 ' + esc(fmtDate(uiTrashMillis(item.addedAt))) + '</small>' : '') + '</span><button class="btn sm" data-remove="' + esc(item.email) + '">삭제</button></div>').join('') : '<div class="empty">등록된 공동 편집자가 없습니다.</div>'; list.querySelectorAll('[data-remove]').forEach(button => { button.onclick = () => { if (!confirm(button.dataset.remove + '을(를) 제거할까요?')) return; store.removeCollaborator(id, button.dataset.remove, teacherState).then(load).catch(showError); }; }); };
   const showError = e => { const error = document.getElementById('collab-error'); error.textContent = e.message || '변경하지 못했습니다.'; error.style.display = 'block'; };
   const load = () => store.listCollaborators(id, teacherState).then(render).catch(showError);
   document.getElementById('collab-add').onsubmit = e => { e.preventDefault(); const input = document.getElementById('collab-email'); store.addCollaborator(id, input.value, teacherState).then(() => { input.value = ''; load(); }).catch(showError); };
@@ -1776,7 +1800,7 @@ function screenTrash() {
     if (setList !== state) return;
     state.all = (items || []).map(item => { const s = normSet(item); s.id = item.id; return s; });
     const rows = state.all.length ? state.all.map(setListRow).join('') : '<div class="card"><div class="empty">휴지통이 비어 있습니다.</div></div>';
-    APP().innerHTML = topbar('<a class="btn sm" href="#/sets">📚 세트 목록</a>') + '<div class="wrap"><h1 style="font-size:22px">휴지통</h1><p class="sub">30일은 최소 보관 기간입니다. 무료 운영 방식이라 관리자나 소유자가 접속할 때 자동 정리됩니다.</p>' + rows + '</div>';
+    APP().innerHTML = topbar('<a class="btn sm" href="#/sets">📚 세트 목록</a>') + '<div class="wrap"><h1 style="font-size:22px">휴지통</h1><p class="sub">30일은 최소 보관 기간입니다. 무료 운영 방식이라 관리자나 소유자가 접속할 때 자동 정리됩니다.</p><p class="hint">삭제된 세트와 정리 중인 세트가 모두 표시됩니다. 과거 수업 기록은 보존됩니다.</p>' + rows + '</div>';
   }).catch(e => { if (setList !== state) return; APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">휴지통을 불러오지 못했습니다: ' + esc(e.message) + '</div></div></div>'; });
 }
 
@@ -1785,12 +1809,12 @@ function screenTrash() {
     대신 목록에서 감추는 방식으로 정리한다. 진행 기록과 링크는 그대로 살아 있다. */
 function setArchive(id, on) {
   const current = setList && setList.all.filter(x => x.id === id)[0];
-  if (!canEditSet(current, teacherState)) {
+  if (!current || !teacherState || current.ownerUid !== teacherState.uid) {
     toast('소유한 세트만 숨김 상태를 바꿀 수 있습니다.');
     return;
   }
   if (on && !confirm('이 세트를 목록에서 숨길까요?\n\n기록은 지워지지 않고, 이미 공유한 링크도 계속 열립니다.\n[숨긴 세트도 보기]로 언제든 되돌릴 수 있습니다.')) return;
-  store.patchQuizSet(id, { archived: !!on }).then(() => {
+  store.patchQuizSet(id, { archived: !!on }, teacherState).then(() => {
     const s = setList && setList.all.filter(x => x.id === id)[0];
     if (s) s.archived = on;
     toast(on ? '목록에서 숨겼습니다' : '다시 표시합니다');
@@ -2113,10 +2137,11 @@ function screenMake(setId) {
       if (mk !== state) return;
       const set = normSet(savedSet);
       if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
-      if (!canEditSet(set, teacherState)) {
-        showReadOnly(set);
-        return;
-      }
+      const accessCheck = canEditSet(set, teacherState)
+        ? Promise.resolve(true)
+        : (store.canEditQuizSet ? store.canEditQuizSet(setId, teacherState) : Promise.resolve(false));
+      return accessCheck.then(allowed => {
+        if (!allowed || mk !== state) { if (mk === state) showReadOnly(set); return; }
       state.ownerUid = set.ownerUid;
       state.title = set.title;
       state.author = set.author || state.author;
@@ -2130,16 +2155,19 @@ function screenMake(setId) {
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
         if (mk !== state) return;
-        if (!canEditSet(set, teacherState) || state.ownerUid !== teacherState.uid) {
-          showReadOnly(set);
-          return;
-        }
+        const currentAccess = canEditSet(set, teacherState)
+          ? Promise.resolve(true)
+          : (store.canEditQuizSet ? store.canEditQuizSet(setId, teacherState) : Promise.resolve(false));
+        return currentAccess.then(allowedNow => {
+          if (!allowedNow) { showReadOnly(set); return; }
         state.videos.forEach((video, videoIndex) => {
           video.questions.forEach((q, questionIndex) => {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
           });
         });
         renderMake();
+        });
+      });
       });
     }).catch(e => {
       if (mk !== state) return;
@@ -2816,12 +2844,30 @@ function mkPayload() {
   return { set: out, images: images, ordered: ordered };
 }
 
+function mkHandlePermissionLoss(error) {
+  const state = mk;
+  if (!state) return;
+  const exportNow = typeof confirm === 'function' && confirm('권한이 변경되어 저장하지 못했습니다. 현재 편집 내용을 JSON 파일로 내보낼까요?');
+  if (exportNow) {
+    try {
+      const built = mkPayload();
+      if (typeof downloadBlob === 'function') downloadBlob(safeFileName((built.set && built.set.title) || '영상퀴즈') + '.복구.json', new Blob([JSON.stringify({ set: built.set, images: built.images }, null, 1)], { type: 'application/json;charset=utf-8' }));
+    } catch (e) { console.error(e); }
+  }
+  if (typeof mkClearDraft === 'function') mkClearDraft(state.id);
+  state.readOnly = true;
+  if (typeof toast === 'function') toast('권한이 없어 편집을 종료했습니다. 서버의 최신 내용은 변경되지 않았습니다.');
+  if (typeof go === 'function') go('sets');
+}
+
 function mkSave(forceNew) {
   const state = mk;
   if (!state) return;
   const ownerState = teacherState;
+  const ownerIdentityMismatch = state.id && state.ownerUid && state.ownerUid !== ownerState.uid && !store.canEditQuizSet;
   if (state.readOnly || !AuthCore.isTeacher(ownerState) ||
-      !state.ownerUid || state.ownerUid !== ownerState.uid) {
+      (!state.id && !state.ownerUid) ||
+      (state.id && !state.ownerUid && !store.canEditQuizSet) || ownerIdentityMismatch) {
     state.readOnly = true;
     toast('읽기 전용 세트는 원본을 저장할 수 없습니다. 사본을 만들어 주세요.');
     return;
@@ -2839,8 +2885,13 @@ function mkSave(forceNew) {
   if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
   mkSetSaveStatus('saving');
 
-  const saving = store.saveOwnedQuizSet(id, data, built.images, ownerState);
-  return saving
+  const canSave = state.id && store.canEditQuizSet
+    ? store.canEditQuizSet(state.id, ownerState).then(ok => {
+        if (!ok) throw Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
+        return store.saveQuizSetWithImages(state.id, data, built.images, ownerState);
+      })
+    : store.saveOwnedQuizSet(id, data, built.images, ownerState);
+  return canSave
     .then(() => {
       if (mk !== state) return;
       state.id = id;
@@ -2872,7 +2923,11 @@ function mkSave(forceNew) {
       console.error(e);
       mkSetSaveStatus('failed');
       mkPersistDraft();
-      alert('저장 실패: ' + e.message);
+      if (String(e && e.code || '').indexOf('permission-denied') >= 0 || /permission-denied|권한/.test(String(e && e.message || ''))) {
+        mkHandlePermissionLoss(e);
+      } else {
+        alert('저장 실패: ' + e.message);
+      }
     });
 }
 function mkSaveAsNew() {

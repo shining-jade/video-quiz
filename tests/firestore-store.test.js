@@ -2412,6 +2412,27 @@ test('비소유 세트는 숨김 진입점을 직접 호출해도 저장소를 �
   assert.deepEqual(notices, ['소유한 세트만 숨김 상태를 바꿀 수 있습니다.']);
 });
 
+test('공동 편집자는 서버 재검증 후 공동 편집 저장 API로 저장한다', async () => {
+  const calls = [];
+  const context = {
+    mk: { id: 'set1', ownerUid: 'owner', saved: false, questions: [] },
+    teacherState: { uid: 'editor', email: 'editor@school.kr', role: 'teacher' }, AuthCore: require('../auth-core.js'),
+    mkValidate() { return ''; }, mkPayload() { return { set: { title: '공동 수정', questions: [] }, images: {} }; },
+    rid() { return 'new'; }, SV_TS: {},
+    store: {
+      async canEditQuizSet(id, actor) { calls.push(['check', id, actor.uid]); return true; },
+      async saveQuizSetWithImages(id, value, images, actor) { calls.push(['save', id, value.title, actor.uid]); },
+      async saveOwnedQuizSet() { throw new Error('owner-only API must not be used'); }
+    },
+    toast() {}, normQuestions(value) { return value; }, imgCache: {}, location: { hash: '#/make/set1' },
+    history: { replaceState() {} }, renderMake() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {},
+    $() { return null; }, Date, console, alert(message) { throw new Error(message); }
+  };
+  loadStageFunctions(['mkSave'], context);
+  await context.mkSave(false);
+  assert.deepEqual(calls, [['check', 'set1', 'editor'], ['save', 'set1', '공동 수정', 'editor']]);
+});
+
 test('공동 편집자와 휴지통 상태에 맞는 목록 행 동작을 표시한다', () => {
   const context = {
     PlaylistCore: require('../playlist-core.js'),
@@ -2452,6 +2473,59 @@ test('휴지통 화면은 보관 기간과 복원·입력 확인 영구 삭제�
   loadStageFunctions(['setPurgeNow', 'screenTrash'], context);
   assert.equal(typeof context.screenTrash, 'function');
   assert.equal(typeof context.setPurgeNow, 'function');
+});
+
+test('휴지통 행은 삭제일·30일 자동 삭제일·남은 기간을 표시한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {
+    PlaylistCore: require('../playlist-core.js'), AuthCore: require('../auth-core.js'),
+    REVEAL_LABEL: { timer: '타이머' }, teacherState: { uid: 'owner', email: 'owner@school.kr', role: 'teacher' },
+    esc(value) { return String(value); }, fmtDate(value) { return String(value); }, linkTo(value) { return value; }
+  };
+  loadStageFunctions(['canEditSet', 'uiTrashMillis', 'trashDates', 'setListRow'], context);
+  const deleted = Date.now() - 2 * 24 * 60 * 60 * 1000;
+  const row = context.setListRow({ id: 'old', title: '보관 세트', ownerUid: 'owner', trashedAt: deleted,
+    lifecycleState: 'trashed', settings: { revealMode: 'timer' }, videos: [{ questions: [] }] });
+  assert.match(row, /삭제일/);
+  assert.match(row, /자동 삭제 예정/);
+  assert.match(row, /남은 기간/);
+});
+
+test('휴지통 목록은 trashed와 purging 세트를 함께 반환한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/a': { ownerUid: 'owner', lifecycleState: 'trashed', trashedAt: 1 },
+    'quiz_sets/b': { ownerUid: 'owner', lifecycleState: 'purging', trashedAt: 1, purgeStartedAt: 2 }
+  });
+  const store = createStore(fake);
+  assert.deepEqual((await store.listTrash({ ownerUid: 'owner' })).map(set => set.id).sort(), ['a', 'b']);
+});
+
+test('세트 숨김 상태 변경은 actor를 전달한 경우 소유자만 허용한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'active', collaboratorCount: 0, imageCount: 0 }
+  });
+  const store = createStore(fake);
+  await assert.rejects(() => store.patchQuizSet('set1', { archived: true }, { uid: 'editor', email: 'editor@school.kr', role: 'teacher' }), /소유자만/);
+  await store.patchQuizSet('set1', { archived: true }, { uid: 'owner', email: 'owner@school.kr', role: 'teacher' });
+  assert.equal(fake.value('quiz_sets/set1').archived, true);
+});
+
+test('공동 편집자 저장 권한 상실은 JSON 내보내기 선택 후 초안을 지우고 목록으로 보낸다', async () => {
+  const events = [];
+  const context = {
+    mk: { id: 'set1', ownerUid: 'owner', saved: false, questions: [] },
+    teacherState: { uid: 'editor', email: 'editor@school.kr', role: 'teacher' }, AuthCore: require('../auth-core.js'),
+    mkValidate() { return ''; }, mkPayload() { return { set: { title: '로컬 수정' }, images: {} }; },
+    store: { async canEditQuizSet() { return true; }, async saveQuizSetWithImages() { throw Object.assign(new Error('permission-denied'), { code: 'permission-denied' }); } },
+    toast(message) { events.push(['toast', message]); }, mkSetSaveStatus() {}, mkPersistDraft() {}, mkClearDraft(id) { events.push(['clear', id]); },
+    normQuestions(value) { return value; }, imgCache: {}, location: { hash: '#/make/set1' }, history: { replaceState() {} }, renderMake() {}, $() { return null; },
+    confirm() { return true; }, downloadBlob() { events.push(['export']); }, safeFileName(value) { return value; }, Blob, go(hash) { events.push(['go', hash]); }, console,
+    alert() {}
+  };
+  loadStageFunctions(['mkHandlePermissionLoss', 'mkSave'], context);
+  await context.mkSave(false);
+  assert.deepEqual(events.filter(event => ['export', 'clear', 'go'].includes(event[0])), [['export'], ['clear', 'set1'], ['go', 'sets']]);
+  assert.equal(context.mk.readOnly, true);
 });
 
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
