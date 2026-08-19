@@ -9,27 +9,27 @@
  */
 function clone(value) {
   try {
-    return JSON.parse(JSON.stringify(value));
+    return { success: true, value: JSON.parse(JSON.stringify(value)) };
   } catch (error) {
-    return { ok: false, error };
+    return { success: false, error };
   }
 }
 
 function create(initial, { limit = 50 } = {}) {
   const first = clone(initial);
-  if (first && first.ok === false) {
+  if (!first.success) {
     throw first.error;
   }
 
   const max = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 50);
-  let value = first;
+  let value = first.value;
   let undoStack = [];
   let redoStack = [];
   let lastMeta = null;
 
   function snapshot() {
     const result = clone(value);
-    return result && result.ok === false ? value : result;
+    return result.success ? result.value : value;
   }
 
   function isCoalesced(meta) {
@@ -42,14 +42,14 @@ function create(initial, { limit = 50 } = {}) {
   return {
     record(next, meta = null) {
       const nextSnapshot = clone(next);
-      if (nextSnapshot && nextSnapshot.ok === false) {
-        return nextSnapshot;
+      if (!nextSnapshot.success) {
+        return { ok: false, error: nextSnapshot.error };
       }
       if (!isCoalesced(meta)) {
         undoStack.push(snapshot());
         if (undoStack.length > max) undoStack.shift();
       }
-      value = nextSnapshot;
+      value = nextSnapshot.value;
       redoStack = [];
       lastMeta = meta && typeof meta === 'object' ? { ...meta } : null;
       return snapshot();
@@ -73,8 +73,8 @@ function create(initial, { limit = 50 } = {}) {
 
     reset(saved) {
       const savedSnapshot = clone(saved);
-      if (savedSnapshot && savedSnapshot.ok === false) return savedSnapshot;
-      value = savedSnapshot;
+      if (!savedSnapshot.success) return { ok: false, error: savedSnapshot.error };
+      value = savedSnapshot.value;
       undoStack = [];
       redoStack = [];
       lastMeta = null;

@@ -47,6 +47,15 @@ test('손상된 snapshot은 현재 상태를 유지하고 실패 결과를 반�
   assert.deepEqual(history.current(), { title: '정상' });
 });
 
+test('ok:false/error 필드를 가진 정상 JSON 상태도 손상 snapshot으로 오인하지 않는다', () => {
+  const initial = { ok: false, error: 'valid', title: '초기' };
+  const history = EditorHistoryCore.create(initial);
+  assert.deepEqual(history.current(), initial);
+  const next = { ok: false, error: 'valid', title: '수정' };
+  assert.deepEqual(history.record(next, { key: 'title', at: 1 }), next);
+  assert.deepEqual(history.reset(initial), initial);
+});
+
 test('반환된 snapshot을 바꿔도 내부 이력은 오염되지 않는다', () => {
   const history = EditorHistoryCore.create({ nested: { value: 1 } });
   const current = history.current();
