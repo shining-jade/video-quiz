@@ -4837,10 +4837,23 @@ function plCloseQuestion() {
       : Promise.resolve(false);
   }
 
-  const flight = { questionIndex: questionIndex, generation: generation, promise: null };
+  const flight = {
+    questionIndex: questionIndex, generation: generation, promise: null,
+    playbackStarted: false, overlayHidden: false
+  };
   const stillCurrent = () => pl === state && state.closeFlight === flight &&
     Number(state.live && state.live.q) === questionIndex &&
     (Number(state.liveGeneration) || 0) === generation;
+  const rollbackContinuePlayback = () => {
+    if (flight.playbackStarted) {
+      try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {}
+      flight.playbackStarted = false;
+    }
+    if (pl === state && Number(state.live && state.live.q) === questionIndex &&
+        flight.overlayHidden && typeof plRenderOverlay === 'function') {
+      plRenderOverlay();
+    }
+  };
   state.closeError = '';
 
   const run = async () => {
@@ -4863,8 +4876,12 @@ function plCloseQuestion() {
     await plPushBoard();
     if (!stillCurrent()) return false;
     const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
-    let playbackStarted = false;
     if (!hasQueuedFollowup) {
+      // 재생 probe 동안 overlay를 가역적으로 숨겨 실제 재생 frame과 퀴즈가 겹치지 않게 한다.
+      if (typeof plSetQuizOpen === 'function') {
+        plSetQuizOpen(false);
+        flight.overlayHidden = true;
+      }
       const playback = typeof plContinuePlayback === 'function'
         ? await plContinuePlayback(state)
         : { ok: (() => {
@@ -4874,21 +4891,22 @@ function plCloseQuestion() {
       if (!playback.ok) {
         state.closeError = '동영상 재생을 시작하지 못했습니다. 계속 재생을 다시 시도해 주세요.';
         if (typeof toast === 'function') toast(state.closeError);
+        rollbackContinuePlayback();
         return false;
       }
-      playbackStarted = true;
+      flight.playbackStarted = true;
       if (!stillCurrent()) {
-        try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {}
+        rollbackContinuePlayback();
         return false;
       }
     }
     const closed = await store.closeLive(state.sessionId, identity);
     if (!closed) {
-      if (playbackStarted) { try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {} }
+      rollbackContinuePlayback();
       return false;
     }
     if (pl !== state || state.closeFlight !== flight) {
-      if (playbackStarted) { try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {} }
+      rollbackContinuePlayback();
       return false;
     }
     if (Number(state.live && state.live.q) !== questionIndex &&
@@ -4915,6 +4933,7 @@ function plCloseQuestion() {
   };
 
   flight.promise = run().catch(error => {
+    rollbackContinuePlayback();
     if (pl === state && Number(state.live && state.live.q) === questionIndex) {
       state.closeError = error && error.message ? error.message : String(error);
     }

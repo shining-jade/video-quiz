@@ -9033,7 +9033,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
   assert.equal(context.pl.live.q, -1);
 });
 
-test('계속 재생은 player 시작을 확인한 뒤 overlay·dim을 정리하고 완료 문항을 확정한다', async () => {
+test('계속 재생은 overlay를 가역적으로 숨긴 뒤 player 시작을 확인하고 완료 문항을 확정한다', async () => {
   const order = [];
   const classes = {
     add() {},
@@ -9067,8 +9067,8 @@ test('계속 재생은 player 시작을 확인한 뒤 overlay·dim을 정리하�
   assert.equal(trigger.state()[0], 'completed');
   assert.ok(order.indexOf('overlay') >= 0);
   assert.ok(order.indexOf('class:quiz-open') >= 0);
-  assert.ok(order.indexOf('play') < order.indexOf('overlay'));
-  assert.ok(order.indexOf('play') < order.indexOf('class:quiz-open'));
+  assert.ok(order.indexOf('overlay') < order.indexOf('play'));
+  assert.ok(order.indexOf('class:quiz-open') < order.indexOf('play'));
 });
 
 test('계속 재생이 첫 시도에 실패하면 live·overlay·open 상태를 보존하고 다음 시도에서만 완료한다', async () => {
@@ -9111,6 +9111,41 @@ test('계속 재생이 첫 시도에 실패하면 live·overlay·open 상태를 
   assert.equal(trigger.state()[0], 'completed');
   assert.equal(closes, 1);
   assert.equal(attempts, 2);
+});
+
+test('closeLive rejection 뒤에는 재생을 pause하고 live·overlay·open 상태를 가역적으로 복원한다', async () => {
+  const order = [];
+  const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
+  trigger.advance({ videoIndex: 0, previousTime: 173, currentTime: 174, event: 'tick' });
+  trigger.open(0);
+  const state = {
+    sessionId: 'session1', live: { q: 0, openedAt: 1, liveToken: 'token' },
+    liveGeneration: 0, dueQuestions: [], fired: [true], quizTrigger: trigger,
+    flatQuestions: [{ t: 174, videoIndex: 0 }], set: { settings: {} },
+    player: { playVideo() { order.push('play'); }, pauseVideo() { order.push('pause'); } }
+  };
+  const context = {
+    pl: state, FirestoreCore: core,
+    store: {
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; }, async closeLive() { throw new Error('close offline'); }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; }, plTick() {},
+    plSetQuizOpen(open) { order.push(open ? 'overlay-open' : 'overlay-close'); },
+    plRenderOverlay() { order.push('overlay-restore'); },
+    toast(message) { order.push('toast:' + message); }, console
+  };
+  loadStageFunctions(['plContinuePlayback', 'plCloseQuestion'], context);
+
+  await assert.rejects(context.plCloseQuestion(), /close offline/);
+  assert.equal(order.filter(item => item === 'play').length, 1);
+  assert.equal(order.filter(item => item === 'pause').length, 1);
+  assert.ok(order.indexOf('overlay-close') < order.indexOf('play'));
+  assert.ok(order.indexOf('pause') < order.lastIndexOf('overlay-restore'));
+  assert.equal(state.live.q, 0);
+  assert.equal(trigger.state()[0], 'open');
+  assert.match(state.closeError, /close offline/);
 });
 
 test('계속 재생 시작기는 false·throw·Promise rejection을 모두 재시도 가능한 실패로 반환한다', async () => {
