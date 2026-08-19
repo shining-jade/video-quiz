@@ -91,3 +91,21 @@ test('무효 위치는 입력을 변경하지 않고 이동하지 않는다', ()
   assert.deepEqual(result.videos, videos);
   assert.deepEqual(result.images, images);
 });
+
+test('영상 0의 legacy numeric 이미지 키만 v0qN으로 복원하고 다른 영상에 복제하지 않는다', () => {
+  const moved = core.moveQuestion([
+    { questions: [{ t: 1, id: 'a' }] },
+    { questions: [{ t: 2, id: 'b' }] }
+  ], { '0': 'legacy-a' },
+    { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 1 });
+  assert.equal(moved.images.v0q0, undefined);
+  assert.equal(moved.images.v1q0, undefined);
+  assert.equal(moved.images.v1q1, 'legacy-a');
+});
+
+test('같은 영상의 끝 index로 이동하면 문항이 실제 마지막에 삽입된다', () => {
+  const moved = core.moveQuestion([
+    { questions: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }
+  ], {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 0, questionIndex: 3 });
+  assert.deepEqual(moved.videos[0].questions.map(q => q.id), ['b', 'c', 'a']);
+});

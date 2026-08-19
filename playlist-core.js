@@ -83,13 +83,17 @@
         const canonical = 'v' + videoIndex + 'q' + questionIndex;
         const legacy = String(questionIndex);
         if (Object.prototype.hasOwnProperty.call(images, canonical)) questionImages.set(question, images[canonical]);
-        else if (Object.prototype.hasOwnProperty.call(images, legacy)) questionImages.set(question, images[legacy]);
+        else if (videoIndex === 0 && Object.prototype.hasOwnProperty.call(images, legacy)) {
+          questionImages.set(question, images[legacy]);
+        }
       });
     });
     const movedQuestion = sourceQuestions.splice(from.questionIndex, 1)[0];
-    let targetIndex = Math.min(to.questionIndex, (videos[to.videoIndex].questions || []).length);
+    let targetIndex = to.questionIndex;
     if (from.videoIndex === to.videoIndex && to.questionIndex > from.questionIndex) targetIndex -= 1;
-    targetIndex = Math.max(0, targetIndex);
+    const destinationLength = from.videoIndex === to.videoIndex
+      ? sourceQuestions.length : (videos[to.videoIndex].questions || []).length;
+    targetIndex = Math.max(0, Math.min(targetIndex, destinationLength));
     if (from.videoIndex !== to.videoIndex) {
       const oldDomain = playbackDomain(rawVideos[from.videoIndex]);
       const newDomain = playbackDomain(rawVideos[to.videoIndex]);
