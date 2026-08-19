@@ -73,15 +73,14 @@ async function main(argv = process.argv.slice(2), dependencies) {
     output, JSON.stringify(placeholder, null, 2) + '\n'
   );
   let services;
+  let report;
   try {
     services = await runtime.initialize(options.projectId);
-    const report = await runtime.runLifecycleBackfill({
+    report = await runtime.runLifecycleBackfill({
       db: services.db, projectId: options.projectId,
       apply: options.apply, confirmProject: options.confirmProject
     });
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
-    runtime.writeLine(JSON.stringify(report, null, 2));
-    return report;
   } catch (error) {
     const failure = failedReport(options, error, error && error.partialReport);
     try {
@@ -98,6 +97,8 @@ async function main(argv = process.argv.slice(2), dependencies) {
   } finally {
     if (services && typeof services.close === 'function') await services.close();
   }
+  runtime.writeLine(JSON.stringify(report, null, 2));
+  return report;
 }
 
 if (require.main === module) {

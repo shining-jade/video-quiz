@@ -17,11 +17,16 @@ function fakeDb(initial, hooks = {}) {
   const docs = new Map(Object.entries(initial));
   const commits = [];
   let transactionNumber = 0;
+  let collectionGetNumber = 0;
   return {
     docs,
     commits,
     collection() {
       return { async get() {
+        collectionGetNumber += 1;
+        if (hooks.failCollectionGetAt === collectionGetNumber) {
+          throw new Error('injected final audit failure');
+        }
         return { docs: [...docs.entries()].map(([id, data]) => ({ id, data: () => ({ ...data }) })) };
       } };
     },
@@ -193,6 +198,35 @@ test('lifecycle backfill exposes a fail-closed partial report after a later tran
   assert.equal(db.docs.get('second').lifecycleState, undefined);
 });
 
+test('lifecycle backfill preserves applied and skipped side effects when final audit fails', async () => {
+  const db = fakeDb({ first: { title: 'A' }, second: { title: 'B' } }, {
+    failCollectionGetAt: 2,
+    beforeTransaction({ docs, transactionNumber }) {
+      if (transactionNumber === 2) {
+        docs.set('second', { title: 'B', trashedAt: timestamp(20) });
+      }
+    }
+  });
+
+  await assert.rejects(runLifecycleBackfill({
+    db, projectId: 'demo-video-quiz', apply: true,
+    confirmProject: 'demo-video-quiz', batchSize: 1
+  }), error => {
+    assert.match(error.message, /final audit failure/);
+    assert.equal(error.partialReport.status, 'partial-failure');
+    assert.equal(error.partialReport.appliedCount, 1);
+    assert.equal(error.partialReport.concurrentlySkippedCount, 1);
+    assert.deepEqual(error.partialReport.concurrentlySkipped, [
+      { id: 'second', reason: 'changed-after-scan' }
+    ]);
+    assert.equal(error.partialReport.safeToDeployStrictRules, false);
+    assert.match(error.partialReport.auditError, /final audit failure/);
+    return true;
+  });
+  assert.equal(db.docs.get('first').lifecycleState, 'active');
+  assert.equal(db.docs.get('second').lifecycleState, undefined);
+});
+
 test('lifecycle CLI exposes the repository durable exclusive report reservation protocol', () => {
   const command = require('../scripts/migrate-lifecycle-state.js');
   assert.equal(typeof command.reserveReport, 'function');
@@ -309,4 +343,34 @@ test('lifecycle CLI publishes a valid fail-closed partial report when a later ba
   assert.equal(report.appliedCount, 1);
   assert.equal(report.safeToDeployStrictRules, false);
   assert.match(report.error, /second transaction failed/);
+});
+
+test('lifecycle CLI keeps published success JSON when stdout fails after commit', async () => {
+  const command = require('../scripts/migrate-lifecycle-state.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'lifecycle-cli-stdout-'));
+  const output = path.join(directory, 'audit.json');
+  try {
+    await assert.rejects(command.main([
+      '--project', 'demo-video-quiz', '--output', output
+    ], {
+      reserveReport: command.reserveReport,
+      initialize() { return { db: {}, async close() {} }; },
+      async runLifecycleBackfill() {
+        return {
+          projectId: 'demo-video-quiz', mode: 'dry-run', status: 'complete',
+          appliedCount: 0, safeToDeployStrictRules: false
+        };
+      },
+      writeLine() { throw new Error('injected stdout failure'); }
+    }), error => {
+      assert.match(error.message, /injected stdout failure/);
+      assert.doesNotMatch(error.message, /fail-closed report remains|already published/i);
+      return true;
+    });
+    assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).status, 'complete');
+    assert.equal(fs.existsSync(output + '.reserved'), false);
+    assert.equal(fs.existsSync(output + '.pending'), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

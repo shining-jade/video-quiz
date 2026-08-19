@@ -153,7 +153,17 @@ async function runLifecycleBackfill({ db, projectId, apply = false, confirmProje
     error.partialReport = report;
     throw error;
   }
-  const after = await db.collection('quiz_sets').get();
+  let after;
+  try {
+    after = await db.collection('quiz_sets').get();
+  } catch (error) {
+    report.status = report.appliedCount > 0 ? 'partial-failure' : 'failed';
+    report.safeToDeployStrictRules = false;
+    report.error = String(error && error.message || error);
+    report.auditError = report.error;
+    error.partialReport = report;
+    throw error;
+  }
   report.audit = auditLifecycle(after.docs.map(doc => ({ id: doc.id, data: doc.data() || {} })));
   report.safeToDeployStrictRules = report.audit.missingLifecycleState === 0 &&
     report.audit.invalidLifecycleState === 0 &&
