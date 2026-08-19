@@ -65,6 +65,7 @@ a { color: var(--accent); }
   border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
   box-shadow: var(--shadow);
 }
+.overlay { position:fixed; inset:0; z-index:100; display:flex; align-items:center; justify-content:center; padding:12px; background:rgba(10,15,30,.48); }
 .card > h2 { font-size: 17px; margin-bottom: 4px; }
 .card > .sub { color: var(--ink-2); font-size: 13px; margin-bottom: 16px; }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
@@ -606,6 +607,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="playlist-core.js"></script>
 <script src="teacher-stage.js"></script>
 <script src="auth-core.js"></script>
+<script src="collaboration-trash-core.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
 
@@ -1089,13 +1091,25 @@ function normSet(raw) {
     createdAt: raw.createdAt || 0,
     updatedAt: raw.updatedAt || 0,
     archived: !!raw.archived,
+    trashedAt: raw.trashedAt || null,
+    purgeStartedAt: raw.purgeStartedAt || null,
+    lifecycleState: raw.lifecycleState || (raw.trashedAt ? 'trashed' : 'active'),
+    collaboratorCount: Number.isInteger(raw.collaboratorCount) ? raw.collaboratorCount : 0,
+    collaboratorEmails: Array.isArray(raw.collaboratorEmails) ? raw.collaboratorEmails : [],
     settings: normSettings(raw.settings),
     videos: videos
   };
 }
 
 function canEditSet(set, state) {
-  return !!(set && set.ownerUid && AuthCore.isTeacher(state) && set.ownerUid === state.uid);
+  if (!set || !AuthCore.isTeacher(state) || set.trashedAt || set.purgeStartedAt) return false;
+  if (set.ownerUid && set.ownerUid === state.uid) return true;
+  if (set.isCollaborator === true) return true;
+  const core = typeof CollaborationTrashCore !== 'undefined' ? CollaborationTrashCore : null;
+  const email = core && core.canonicalEmail
+    ? core.canonicalEmail(state.email) : String(state.email || '').trim().toLowerCase();
+  return Array.isArray(set.collaboratorEmails) && set.collaboratorEmails
+    .map(value => String(value).trim().toLowerCase()).includes(email);
 }
 /* ── 문항 이미지 ────────────────────────────────────────────────────────
    Firebase Storage 는 유료 요금제라야 쓸 수 있어서, 브라우저에서 크기를 줄여
@@ -1507,6 +1521,7 @@ function router() {
   switch (name) {
     case 'home':  screenHome(); break;
     case 'sets':  requireTeacher(screenSetList); break;
+    case 'trash': requireTeacher(screenTrash); break;
     case 'make':  requireTeacher(() => screenMake(arg)); break;
     case 'play':  requireTeacher(() => screenPlay(arg)); break;
     case 'join':  screenJoin(arg); break;
@@ -1558,13 +1573,14 @@ function screenHome() {
 let setList = null;
 
 function screenSetList() {
-  setList = { all: [], q: '', showHidden: false };
+  setList = { all: [], q: '', showHidden: false, loadingAccess: true };
   const state = setList;
   onCleanup(() => { if (setList === state) setList = null; });
   APP().innerHTML = topbar('<a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
     '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
 
-  store.listQuizSets().then(all => {
+  const trashPromise = store.listTrash ? store.listTrash({ ownerUid: teacherState && teacherState.uid, role: teacherState && teacherState.role }).catch(() => []) : Promise.resolve([]);
+  Promise.all([store.listQuizSets(), trashPromise]).then(([all, trash]) => {
     if (setList !== state) return;
     state.all = all.map(item => {
       const s = normSet(item);
@@ -1572,7 +1588,12 @@ function screenSetList() {
       s.id = id;
       return s;
     }).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
-    renderSetList();
+    state.trashCount = Array.isArray(trash) ? trash.length : 0;
+    const checks = state.all.map(s => {
+      if (!s.ownerUid || !teacherState || s.ownerUid === teacherState.uid || !store.canEditQuizSet) return Promise.resolve(s);
+      return store.canEditQuizSet(s.id, teacherState).then(ok => { s.isCollaborator = !!ok; return s; }).catch(() => s);
+    });
+    Promise.all(checks).then(() => { if (setList === state) { state.loadingAccess = false; renderSetList(); } });
   }).catch(e => {
     if (setList !== state) return;
     console.error(e);
@@ -1584,11 +1605,13 @@ function renderSetList() {
   if (!setList) return;
   const kw = setList.q.trim().toLowerCase();
   const nHidden = setList.all.filter(s => s.archived).length;
+  const nTrash = Number(setList.trashCount || 0) + setList.all.filter(s => s.trashedAt || s.lifecycleState === 'trashed' || s.purgeStartedAt).length;
   const rows = setList.all
+    .filter(s => !s.trashedAt && s.lifecycleState !== 'trashed' && !s.purgeStartedAt && s.lifecycleState !== 'purging')
     .filter(s => setList.showHidden ? true : !s.archived)
     .filter(s => !kw || (s.title + ' ' + (s.author || '')).toLowerCase().indexOf(kw) >= 0);
 
-  APP().innerHTML = topbar('<a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
+  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/trash">🗑 휴지통' + (nTrash ? ' (' + nTrash + ')' : '') + '</a><a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
@@ -1632,23 +1655,36 @@ function setListRow(s) {
   const videos = PlaylistCore.normalizeVideos(s);
   const questionCount = PlaylistCore.flattenQuestions(videos).length;
   const editable = canEditSet(s, teacherState);
+  const owner = !!(s.ownerUid && teacherState && s.ownerUid === teacherState.uid);
+  const collaborator = !owner && editable;
   const startAndCopy =
     '<a class="btn sm primary" href="#/play/' + esc(s.id) + '">▶ 우리 반 시작하기</a>' +
     '<button class="btn sm" onclick="setDuplicate(\'' + esc(s.id) + '\')">⧉ 사본 만들기</button>';
-  const actions = editable
+  const trashed = !!(s.trashedAt || s.lifecycleState === 'trashed');
+  const purging = !!(s.purgeStartedAt || s.lifecycleState === 'purging');
+  const actions = trashed || purging
+    ? (owner ? (purging ? '<span class="tag warn">정리 중… 복원할 수 없습니다</span>' :
+        '<button class="btn sm" onclick="setRestoreFromTrash(\'' + esc(s.id) + '\')">↩ 복원</button>' +
+        '<button class="btn sm danger" onclick="setPurgeNow(\'' + esc(s.id) + '\')">🗑 영구 삭제</button>') :
+        '<span class="tag mute">휴지통</span>')
+    : editable
     ? (s.archived
       ? '<button class="btn sm" onclick="setArchive(\'' + esc(s.id) + '\', false)">↩ 다시 표시</button>'
       : startAndCopy +
         '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
+        (owner ? '<button class="btn sm" onclick="openCollaboratorDialog(\'' + esc(s.id) + '\')">👥 공동 편집자</button>' : '<span class="tag ok" title="공동 편집 권한">공동 편집</span>') +
         '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')" title="다른 프로젝트로 옮기거나 백업할 때">📤 파일</button>' +
         '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>' +
-        '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>')
+        (owner ? '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
+          '<button class="btn sm danger" onclick="setMoveToTrash(\'' + esc(s.id) + '\')">🗑 휴지통</button>' : ''))
     : startAndCopy;
   return '<div class="card" style="padding:15px;margin-bottom:10px' + (s.archived ? ';opacity:.6' : '') + '">' +
     '<div class="row" style="align-items:center">' +
       '<div style="flex:1 1 260px;min-width:0">' +
         '<div style="font-size:15px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' +
           (s.archived ? '<span class="tag mute" style="margin-right:6px">숨김</span>' : '') +
+          (trashed || purging ? '<span class="tag warn" style="margin-right:6px">' + (purging ? '정리 중' : '휴지통') + '</span>' : '') +
+          (collaborator ? '<span class="tag ok" style="margin-right:6px">공동 편집</span>' : '') +
           (!s.ownerUid ? '<span class="tag mute" style="margin-right:6px">읽기 전용</span>' : '') +
           esc(s.title) + '</div>' +
         '<div style="font-size:12.5px;color:var(--ink-2);margin-top:3px">' +
@@ -1661,6 +1697,87 @@ function setListRow(s) {
       actions +
     '</div>' +
   '</div>';
+}
+
+function setCurrentListSet(id) {
+  return setList && setList.all && setList.all.find(s => s.id === id);
+}
+
+function setMoveToTrash(id) {
+  const current = setCurrentListSet(id);
+  if (!current || !teacherState || current.ownerUid !== teacherState.uid) {
+    toast('소유자만 세트를 휴지통으로 이동할 수 있습니다.'); return Promise.resolve(false);
+  }
+  if (!confirm('「' + current.title + '」을(를) 휴지통으로 이동할까요?\n\n최소 30일 동안 보관되며, 수업 기록은 보존됩니다.')) return Promise.resolve(false);
+  return store.moveSetToTrash(id, teacherState).then(() => {
+    toast('휴지통으로 이동했습니다');
+    if (location.hash === '#/trash') screenTrash(); else screenSetList();
+    return true;
+  }).catch(e => { console.error(e); alert('휴지통 이동 실패: ' + e.message); return false; });
+}
+
+function setRestoreFromTrash(id) {
+  const current = setCurrentListSet(id);
+  if (!current || !teacherState || current.ownerUid !== teacherState.uid) {
+    toast('소유자만 세트를 복원할 수 있습니다.'); return Promise.resolve(false);
+  }
+  if (!confirm('「' + current.title + '」을(를) 복원할까요?')) return Promise.resolve(false);
+  return store.restoreSet(id, teacherState).then(() => {
+    toast('세트를 복원했습니다'); screenSetList(); return true;
+  }).catch(e => { console.error(e); alert('복원 실패: ' + e.message); return false; });
+}
+
+function setPurgeNow(id) {
+  const current = setCurrentListSet(id);
+  if (!current || !teacherState || current.ownerUid !== teacherState.uid) {
+    toast('소유자만 즉시 영구 삭제할 수 있습니다.'); return Promise.resolve(false);
+  }
+  const expected = String(current.title || '').trim();
+  const typed = prompt('영구 삭제는 되돌릴 수 없습니다.\n\n세트 이름을 정확히 입력하세요: ' + expected, '');
+  if (typed !== expected) { if (typed != null) alert('세트 이름이 일치하지 않습니다.'); return Promise.resolve(false); }
+  if (!confirm('정말 영구 삭제할까요? 세트와 이미지·공동 편집자만 삭제되고 과거 수업 기록은 보존됩니다.')) return Promise.resolve(false);
+  return store.beginSetPurge(id, 'immediate', teacherState).then(function step() {
+    return store.continueSetPurge(id).then(result => result && result.done ? result : step());
+  }).then(() => { toast('영구 삭제했습니다'); screenTrash(); return true; })
+    .catch(e => { console.error(e); alert('영구 삭제 실패: ' + e.message + '\n현재 상태는 유지되며 휴지통에서 재시도할 수 있습니다.'); return false; });
+}
+
+function openCollaboratorDialog(id) {
+  const current = setCurrentListSet(id);
+  if (!current || !teacherState || current.ownerUid !== teacherState.uid) {
+    toast('소유자만 공동 편집자를 관리할 수 있습니다.'); return;
+  }
+  const old = document.getElementById('collaborator-dialog'); if (old && old.remove) old.remove();
+  const dialog = document.createElement('div');
+  dialog.id = 'collaborator-dialog'; dialog.className = 'overlay'; dialog.setAttribute('role', 'dialog');
+  dialog.innerHTML = '<div class="card" style="max-width:520px;width:calc(100% - 24px);max-height:80vh;overflow:auto">' +
+    '<div class="row" style="justify-content:space-between;align-items:center"><h2>공동 편집자 관리</h2><button class="btn sm" id="collab-close">닫기</button></div>' +
+    '<p class="sub">승인된 교사는 콘텐츠를 편집하고 수업을 시작할 수 있습니다. 최대 20명입니다.</p>' +
+    '<div id="collab-list">불러오는 중…</div>' +
+    '<form id="collab-add" class="row" style="margin-top:12px"><input id="collab-email" type="email" placeholder="교사 Google 이메일" required style="flex:1 1 240px"><button class="btn primary" type="submit">추가</button></form>' +
+    '<div id="collab-error" class="notice bad" style="display:none;margin-top:10px"></div></div>';
+  document.body.appendChild(dialog);
+  const close = () => dialog.remove();
+  document.getElementById('collab-close').onclick = close;
+  const list = document.getElementById('collab-list');
+  const render = items => { list.innerHTML = items.length ? items.map(item => '<div class="row" style="justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)"><span>' + esc(item.email) + '</span><button class="btn sm" data-remove="' + esc(item.email) + '">삭제</button></div>').join('') : '<div class="empty">등록된 공동 편집자가 없습니다.</div>'; list.querySelectorAll('[data-remove]').forEach(button => { button.onclick = () => { if (!confirm(button.dataset.remove + '을(를) 제거할까요?')) return; store.removeCollaborator(id, button.dataset.remove, teacherState).then(load).catch(showError); }; }); };
+  const showError = e => { const error = document.getElementById('collab-error'); error.textContent = e.message || '변경하지 못했습니다.'; error.style.display = 'block'; };
+  const load = () => store.listCollaborators(id, teacherState).then(render).catch(showError);
+  document.getElementById('collab-add').onsubmit = e => { e.preventDefault(); const input = document.getElementById('collab-email'); store.addCollaborator(id, input.value, teacherState).then(() => { input.value = ''; load(); }).catch(showError); };
+  load();
+}
+
+function screenTrash() {
+  const ownerUid = teacherState && teacherState.uid;
+  const state = { all: [] }; setList = state;
+  onCleanup(() => { if (setList === state) setList = null; });
+  APP().innerHTML = topbar('<a class="btn sm" href="#/sets">📚 세트 목록</a>') + '<div class="wrap"><h1 style="font-size:22px">휴지통</h1><p class="sub">30일은 최소 보관 기간입니다. 무료 운영 방식이라 관리자나 소유자가 접속할 때 자동 정리됩니다.</p><div class="empty">불러오는 중…</div></div>';
+  return store.listTrash({ ownerUid, role: teacherState && teacherState.role }).then(items => {
+    if (setList !== state) return;
+    state.all = (items || []).map(item => { const s = normSet(item); s.id = item.id; return s; });
+    const rows = state.all.length ? state.all.map(setListRow).join('') : '<div class="card"><div class="empty">휴지통이 비어 있습니다.</div></div>';
+    APP().innerHTML = topbar('<a class="btn sm" href="#/sets">📚 세트 목록</a>') + '<div class="wrap"><h1 style="font-size:22px">휴지통</h1><p class="sub">30일은 최소 보관 기간입니다. 무료 운영 방식이라 관리자나 소유자가 접속할 때 자동 정리됩니다.</p>' + rows + '</div>';
+  }).catch(e => { if (setList !== state) return; APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">휴지통을 불러오지 못했습니다: ' + esc(e.message) + '</div></div></div>'; });
 }
 
 /** 세트를 지우는 대신 숨긴다.

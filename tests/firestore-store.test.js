@@ -2412,6 +2412,48 @@ test('비소유 세트는 숨김 진입점을 직접 호출해도 저장소를 �
   assert.deepEqual(notices, ['소유한 세트만 숨김 상태를 바꿀 수 있습니다.']);
 });
 
+test('공동 편집자와 휴지통 상태에 맞는 목록 행 동작을 표시한다', () => {
+  const context = {
+    PlaylistCore: require('../playlist-core.js'),
+    AuthCore: require('../auth-core.js'),
+    REVEAL_LABEL: { timer: '타이머' },
+    teacherState: { uid: 'owner', email: 'owner@school.kr', role: 'teacher' },
+    esc(value) { return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[ch]); },
+    fmtDate() { return ''; },
+    linkTo(value) { return value; }
+  };
+  loadStageFunctions(['canEditSet', 'setListRow'], context);
+  const base = { id: 'set-1', title: '공유 세트', ownerUid: 'owner', ownerEmail: 'owner@school.kr', archived: false,
+    trashedAt: null, purgeStartedAt: null, settings: { revealMode: 'timer' }, videos: [{ questions: [] }] };
+  const owned = context.setListRow(base);
+  assert.match(owned, /공동 편집자/);
+  assert.match(owned, /휴지통/);
+  const collaborator = context.setListRow({ ...base, ownerUid: 'other', collaboratorEmails: ['owner@school.kr'] });
+  assert.match(collaborator, /공동 편집/);
+  assert.match(collaborator, /편집/);
+  assert.doesNotMatch(collaborator, /공동 편집자 관리|휴지통으로 이동/);
+  const other = context.setListRow({ ...base, ownerUid: 'other', collaboratorEmails: [] });
+  assert.match(other, /우리 반 시작하기/);
+  assert.match(other, /사본 만들기/);
+  assert.doesNotMatch(other, /href="#\/make\/|휴지통/);
+  const trashed = context.setListRow({ ...base, trashedAt: 1, lifecycleState: 'trashed' });
+  assert.match(trashed, /휴지통/);
+  assert.match(trashed, /복원/);
+  assert.match(trashed, /영구 삭제/);
+});
+
+test('휴지통 화면은 보관 기간과 복원·입력 확인 영구 삭제를 표시한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {
+    setList: null, teacherState: { uid: 'owner', email: 'owner@school.kr', role: 'teacher' },
+    store: {}, APP() { return { innerHTML: '' }; }, topbar(extra) { return '<nav>' + (extra || '') + '</nav>'; },
+    onCleanup() {}, esc(value) { return String(value); }, fmtDate() { return ''; }, toast() {}, console
+  };
+  loadStageFunctions(['setPurgeNow', 'screenTrash'], context);
+  assert.equal(typeof context.screenTrash, 'function');
+  assert.equal(typeof context.setPurgeNow, 'function');
+});
+
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({
