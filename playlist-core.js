@@ -56,11 +56,22 @@
   }
 
   function playbackDomain(video) {
-    const startValue = video && video.startSec != null ? video.startSec : video && video.start;
-    const endValue = video && video.endSec != null ? video.endSec : video && video.end;
-    const start = Math.max(0, Number(startValue) || 0);
-    const end = endValue == null || endValue === '' ? null : Number(endValue);
-    return { start, end: Number.isFinite(end) ? end : null };
+    const finiteNonNegative = value => {
+      if (value == null || value === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : null;
+    };
+    const normalizedStart = finiteNonNegative(video && video.startSec);
+    const legacyStart = finiteNonNegative(video && video.start);
+    const start = normalizedStart != null ? normalizedStart : (legacyStart != null ? legacyStart : 0);
+    const normalizedEnd = finiteNonNegative(video && video.endSec);
+    const legacyEnd = finiteNonNegative(video && video.end);
+    let end = normalizedEnd != null ? normalizedEnd : legacyEnd;
+    if (end == null) {
+      const duration = finiteNonNegative(video && video.durationSec);
+      if (duration > 0) end = start + duration;
+    }
+    return { start, end: end != null && end > start ? end : null };
   }
 
   function moveQuestion(rawVideos, rawImages, from, to) {

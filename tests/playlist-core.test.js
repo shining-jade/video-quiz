@@ -109,3 +109,22 @@ test('같은 영상의 끝 index로 이동하면 문항이 실제 마지막에 �
   ], {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 0, questionIndex: 3 });
   assert.deepEqual(moved.videos[0].questions.map(q => q.id), ['b', 'c', 'a']);
 });
+
+test('endSec이 null이면 durationSec을 재생구간 길이로 사용해 상대 시각을 옮긴다', () => {
+  const videos = [
+    { startSec: 0, endSec: null, durationSec: 100, questions: [{ t: 50, id: 'middle' }] },
+    { startSec: 200, endSec: null, durationSec: 40, questions: [] }
+  ];
+  const moved = core.moveQuestion(videos, {},
+    { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
+  assert.equal(moved.videos[1].questions[0].t, 220);
+  assert.equal(videos[0].questions[0].t, 50);
+});
+
+test('끝 시각과 duration을 알 수 없거나 유효하지 않으면 목적지 시작시각으로 clamp한다', () => {
+  const moved = core.moveQuestion([
+    { startSec: 10, endSec: null, durationSec: 'unknown', questions: [{ t: 80 }] },
+    { start: 200, end: null, durationSec: -5, questions: [] }
+  ], {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
+  assert.equal(moved.videos[1].questions[0].t, 200);
+});
