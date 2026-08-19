@@ -1670,7 +1670,10 @@ function setListRow(s) {
         '<span class="tag mute">휴지통</span>')
     : editable
     ? (s.archived
-      ? '<button class="btn sm" onclick="setArchive(\'' + esc(s.id) + '\', false)">↩ 다시 표시</button>'
+      ? (owner ? '<button class="btn sm" onclick="setArchive(\'' + esc(s.id) + '\', false)">↩ 다시 표시</button>' :
+          startAndCopy + '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
+          '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')">📤 파일</button>' +
+          '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>')
       : startAndCopy +
         '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
         (owner ? '<button class="btn sm" onclick="openCollaboratorDialog(\'' + esc(s.id) + '\')">👥 공동 편집자</button>' : '<span class="tag ok" title="공동 편집 권한">공동 편집</span>') +
@@ -1781,7 +1784,9 @@ function openCollaboratorDialog(id) {
     '<form id="collab-add" class="row" style="margin-top:12px"><input id="collab-email" type="email" placeholder="교사 Google 이메일" required style="flex:1 1 240px"><button class="btn primary" type="submit">추가</button></form>' +
     '<div id="collab-error" class="notice bad" style="display:none;margin-top:10px"></div></div>';
   document.body.appendChild(dialog);
-  const close = () => dialog.remove();
+  let closed = false;
+  const close = () => { if (closed) return; closed = true; if (dialog.remove) dialog.remove(); };
+  onCleanup(close);
   document.getElementById('collab-close').onclick = close;
   const list = document.getElementById('collab-list');
   const render = items => { list.innerHTML = items.length ? items.map(item => '<div class="row" style="justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)"><span>' + esc(item.email) + (item.addedAt ? '<small class="hint"> · 추가 ' + esc(fmtDate(uiTrashMillis(item.addedAt))) + '</small>' : '') + '</span><button class="btn sm" data-remove="' + esc(item.email) + '">삭제</button></div>').join('') : '<div class="empty">등록된 공동 편집자가 없습니다.</div>'; list.querySelectorAll('[data-remove]').forEach(button => { button.onclick = () => { if (!confirm(button.dataset.remove + '을(를) 제거할까요?')) return; store.removeCollaborator(id, button.dataset.remove, teacherState).then(load).catch(showError); }; }); };
@@ -2085,8 +2090,12 @@ function screenMake(setId) {
   };
   const state = mk;
   const editIdentity = { uid: teacherState && teacherState.uid || '', email: teacherState && teacherState.email || '' };
+  const editRouteToken = typeof location !== 'undefined' ? String(location.hash || '') : '';
+  const editAuthGeneration = typeof teacherAuthVersion === 'number' ? teacherAuthVersion : null;
   let stopAccessWatch = null;
-  const sameEditIdentity = () => !!teacherState && teacherState.uid === editIdentity.uid && teacherState.email === editIdentity.email && AuthCore.isTeacher(teacherState);
+  const sameEditIdentity = () => !!teacherState && teacherState.uid === editIdentity.uid && teacherState.email === editIdentity.email && AuthCore.isTeacher(teacherState) &&
+    (editAuthGeneration === null || teacherAuthVersion === editAuthGeneration) &&
+    (!editRouteToken || !location || String(location.hash || '') === editRouteToken);
   const startAccessWatch = () => {
     if (!setId || !store.subscribeDoc || stopAccessWatch) return;
     let stopped = false, triggered = false;
@@ -2184,7 +2193,8 @@ function screenMake(setId) {
           ? Promise.resolve(true)
           : (store.canEditQuizSet ? store.canEditQuizSet(setId, teacherState) : Promise.resolve(false));
         return currentAccess.then(allowedNow => {
-          if (!allowedNow || !sameEditIdentity()) { showReadOnly(set); return; }
+          if (mk !== state || !sameEditIdentity()) return;
+          if (!allowedNow) { showReadOnly(set); return; }
         state.videos.forEach((video, videoIndex) => {
           video.questions.forEach((q, questionIndex) => {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';

@@ -2577,6 +2577,19 @@ test('편집기 실시간 권한 감시는 휴지통 전환을 한 번만 처리
   assert.ok(stopped.includes('quiz_sets/set1'));
 });
 
+test('숨김 공동 편집자는 편집·시작·파일·링크만 보고 다시 표시 토글은 보지 않는다', () => {
+  const context = {
+    PlaylistCore: require('../playlist-core.js'), AuthCore: require('../auth-core.js'), REVEAL_LABEL: { timer: '타이머' },
+    teacherState: { uid: 'editor', email: 'editor@school.kr', role: 'teacher' },
+    esc(value) { return String(value); }, fmtDate() { return ''; }, linkTo(value) { return value; }
+  };
+  loadStageFunctions(['canEditSet', 'setListRow'], context);
+  const row = context.setListRow({ id: 'hidden', title: '숨김 공유', ownerUid: 'owner', archived: true,
+    collaboratorEmails: ['editor@school.kr'], settings: { revealMode: 'timer' }, videos: [{ questions: [] }] });
+  assert.match(row, /편집|우리 반 시작하기|📤 파일|🔗 링크/);
+  assert.doesNotMatch(row, /다시 표시|휴지통/);
+});
+
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({
