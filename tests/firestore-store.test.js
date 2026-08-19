@@ -2528,6 +2528,55 @@ test('공동 편집자 저장 권한 상실은 JSON 내보내기 선택 후 초�
   assert.equal(context.mk.readOnly, true);
 });
 
+test('공동 편집자의 다른 세트로 복제 저장은 원본 ID를 쓰지 않는다', async () => {
+  const calls = [];
+  const context = {
+    mk: { id: 'source', ownerUid: 'owner', saved: true, questions: [] },
+    teacherState: { uid: 'editor', email: 'editor@school.kr', role: 'teacher' }, AuthCore: require('../auth-core.js'),
+    mkValidate() { return ''; }, mkPayload() { return { set: { title: '복제본', questions: [] }, images: {} }; },
+    rid() { return 'copy-id'; }, SV_TS: {},
+    store: {
+      async canEditQuizSet() { return true; },
+      async saveOwnedQuizSet(id, value, images, actor) { calls.push(['owned', id, actor.uid]); },
+      async saveQuizSetWithImages() { throw new Error('source overwrite'); }
+    }, toast() {}, normQuestions(value) { return value; }, imgCache: {}, location: { hash: '#/make/source' },
+    history: { replaceState() {} }, renderMake() {}, mkSetSaveStatus() {}, mkClearDraft() {}, mkPersistDraft() {}, $() { return null; }, Date, console,
+    alert(message) { throw new Error(message); }
+  };
+  loadStageFunctions(['mkSave'], context);
+  await context.mkSave(true);
+  assert.deepEqual(calls, [['owned', 'copy-id', 'editor']]);
+  assert.equal(context.mk.id, 'copy-id');
+});
+
+test('편집기 실시간 권한 감시는 휴지통 전환을 한 번만 처리하고 구독을 해제한다', async () => {
+  const app = { innerHTML: '' }; const callbacks = []; const stopped = []; let losses = 0;
+  const context = {
+    mk: null, mkPlayer: null, mkPlayerVid: '', mkDraftTimer: null,
+    teacherState: { uid: 'editor', email: 'editor@school.kr', role: 'teacher' }, AuthCore: require('../auth-core.js'),
+    lsGet() { return ''; }, DEFAULT_SETTINGS: {}, blankQuestion(t) { return { t }; },
+    document: { addEventListener() {}, removeEventListener() {} }, window: { addEventListener() {}, removeEventListener() {} },
+    mkHandleSaveShortcut() {}, onCleanup() {}, clearTimeout() {}, every() {}, $() { return null; }, APP() { return app; }, topbar() { return ''; },
+    esc(value) { return String(value); }, normSet(value) { return value; }, mkRestoreDraft() {}, renderMake() {}, toast() {}, console,
+    store: {
+      async getQuizSet() { return { title: '공유', ownerUid: 'owner', ownerEmail: 'owner@school.kr', settings: {}, videos: [{ questions: [] }] }; },
+      async canEditQuizSet() { return true; }, async getImages() { return {}; },
+      subscribeDoc(path, next) { callbacks.push({ path, next }); return () => stopped.push(path); }
+    },
+    mkHandlePermissionLoss() { losses += 1; },
+    setInterval() {}, setTimeout() {}, Date
+  };
+  loadStageFunctions(['canEditSet', 'screenMake'], context);
+  context.screenMake('set1');
+  await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve));
+  const parent = callbacks.find(item => item.path === 'quiz_sets/set1');
+  assert.ok(parent);
+  parent.next({ ownerUid: 'owner', lifecycleState: 'purging', purgeStartedAt: 2 });
+  parent.next({ ownerUid: 'owner', lifecycleState: 'purging', purgeStartedAt: 2 });
+  assert.equal(losses, 1);
+  assert.ok(stopped.includes('quiz_sets/set1'));
+});
+
 test('학생 live 구독은 정확히 한 문서를 구독하고 해제할 수 있다', async () => {
   const { createFirestoreStore } = loadStoreModule();
   const fake = makeFirestoreFake({

@@ -2084,6 +2084,29 @@ function screenMake(setId) {
     ownerUid: teacherState && teacherState.uid || ''
   };
   const state = mk;
+  const editIdentity = { uid: teacherState && teacherState.uid || '', email: teacherState && teacherState.email || '' };
+  let stopAccessWatch = null;
+  const sameEditIdentity = () => !!teacherState && teacherState.uid === editIdentity.uid && teacherState.email === editIdentity.email && AuthCore.isTeacher(teacherState);
+  const startAccessWatch = () => {
+    if (!setId || !store.subscribeDoc || stopAccessWatch) return;
+    let stopped = false, triggered = false;
+    const stops = [];
+    const stop = () => { if (stopped) return; stopped = true; stops.splice(0).forEach(fn => { try { fn(); } catch (e) {} }); stopAccessWatch = null; };
+    const lost = reason => {
+      if (stopped || triggered || mk !== state) return;
+      if (!sameEditIdentity()) { stop(); return; }
+      triggered = true; stop();
+      mkHandlePermissionLoss(Object.assign(new Error(reason || 'permission-denied'), { code: 'permission-denied' }));
+    };
+    stops.push(store.subscribeDoc('quiz_sets/' + setId, value => {
+      if (!value || value.ownerUid !== state.ownerUid || value.trashedAt || value.purgeStartedAt || value.lifecycleState === 'purging' || value.lifecycleState === 'trashed') lost('세트 상태가 변경되었습니다.');
+    }, () => lost('세트 권한을 확인하지 못했습니다.')));
+    if (state.ownerUid !== editIdentity.uid) {
+      const email = String(editIdentity.email).trim().toLowerCase();
+      if (email) stops.push(store.subscribeDoc('quiz_sets/' + setId + '/collaborators/' + email, value => { if (!value) lost('공동 편집 권한이 제거되었습니다.'); }, () => lost('공동 편집 권한을 확인하지 못했습니다.')));
+    }
+    stopAccessWatch = stop;
+  };
   const showReadOnly = set => {
     state.readOnly = true;
     APP().innerHTML = topbar('<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>') +
@@ -2102,6 +2125,7 @@ function screenMake(setId) {
   const saveShortcut = event => { if (mk === state) mkHandleSaveShortcut(event); };
   document.addEventListener('keydown', saveShortcut);
   onCleanup(() => {
+    if (stopAccessWatch) stopAccessWatch();
     document.removeEventListener('keydown', saveShortcut);
     (state.ytCancels || []).forEach(cancel => { try { cancel(); } catch (e) {} });
     state.ytCancels = [];
@@ -2137,11 +2161,12 @@ function screenMake(setId) {
       if (mk !== state) return;
       const set = normSet(savedSet);
       if (!set) { APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">세트를 찾을 수 없습니다.<br><br><a class="btn" href="#/make">새 세트 만들기</a></div></div></div>'; return; }
+      if (!sameEditIdentity()) { showReadOnly(set); return; }
       const accessCheck = canEditSet(set, teacherState)
         ? Promise.resolve(true)
         : (store.canEditQuizSet ? store.canEditQuizSet(setId, teacherState) : Promise.resolve(false));
       return accessCheck.then(allowed => {
-        if (!allowed || mk !== state) { if (mk === state) showReadOnly(set); return; }
+        if (!allowed || mk !== state || !sameEditIdentity()) { if (mk === state) showReadOnly(set); return; }
       state.ownerUid = set.ownerUid;
       state.title = set.title;
       state.author = set.author || state.author;
@@ -2154,18 +2179,19 @@ function screenMake(setId) {
       mkRestoreDraft(set.updatedAt || set.createdAt || 0);
       // 편집 화면에서는 교사가 그림을 봐야 하므로 업로드 이미지를 한 번에 불러온다
       return store.getImages(setId).then(imgs => {
-        if (mk !== state) return;
+        if (mk !== state || !sameEditIdentity()) { if (mk === state) showReadOnly(set); return; }
         const currentAccess = canEditSet(set, teacherState)
           ? Promise.resolve(true)
           : (store.canEditQuizSet ? store.canEditQuizSet(setId, teacherState) : Promise.resolve(false));
         return currentAccess.then(allowedNow => {
-          if (!allowedNow) { showReadOnly(set); return; }
+          if (!allowedNow || !sameEditIdentity()) { showReadOnly(set); return; }
         state.videos.forEach((video, videoIndex) => {
           video.questions.forEach((q, questionIndex) => {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
           });
         });
         renderMake();
+        startAccessWatch();
         });
       });
       });
@@ -2885,7 +2911,9 @@ function mkSave(forceNew) {
   if (nImg) toast('이미지 ' + nImg + '장과 함께 저장 중…');
   mkSetSaveStatus('saving');
 
-  const canSave = state.id && store.canEditQuizSet
+  const canSave = isNew
+    ? store.saveOwnedQuizSet(id, data, built.images, ownerState)
+    : state.id && store.canEditQuizSet
     ? store.canEditQuizSet(state.id, ownerState).then(ok => {
         if (!ok) throw Object.assign(new Error('permission-denied'), { code: 'permission-denied' });
         return store.saveQuizSetWithImages(state.id, data, built.images, ownerState);
