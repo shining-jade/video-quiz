@@ -111,6 +111,28 @@ service cloud.firestore {
         changed.hasOnly(['trashedAt', 'purgeStartedAt', 'lifecycleState', 'contentRevision',
           'collaboratorCount', 'collaboratorMutation', 'imageCount', 'imageMutation']) &&
         ((before.get('lifecycleState', 'active') == 'active' &&
+            after.get('lifecycleState', 'active') == 'active' &&
+            after.get('trashedAt', null) == before.get('trashedAt', null) &&
+            after.get('purgeStartedAt', null) == before.get('purgeStartedAt', null) &&
+            after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
+            after.get('collaboratorMutation', null) == before.get('collaboratorMutation', null) &&
+            after.get('imageMutation', {}).action == 'add' &&
+            after.get('imageMutation', {}).key is string && !exists(imageTarget) &&
+            existsAfter(imageTarget) &&
+            after.get('imageCount', -1) == before.get('imageCount', -1) + 1 &&
+            canEditSetAfter(setId)) ||
+          (before.get('lifecycleState', 'active') == 'active' &&
+            after.get('lifecycleState', 'active') == 'active' &&
+            after.get('trashedAt', null) == before.get('trashedAt', null) &&
+            after.get('purgeStartedAt', null) == before.get('purgeStartedAt', null) &&
+            after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
+            after.get('collaboratorMutation', null) == before.get('collaboratorMutation', null) &&
+            after.get('imageMutation', {}).action == 'remove' &&
+            after.get('imageMutation', {}).key is string && exists(imageTarget) &&
+            !existsAfter(imageTarget) &&
+            after.get('imageCount', -1) == before.get('imageCount', -1) - 1 &&
+            canEditSetAfter(setId)) ||
+          (before.get('lifecycleState', 'active') == 'active' &&
             after.get('lifecycleState', '') == 'trashed' &&
             after.get('trashedAt', null) is timestamp && after.trashedAt == request.time &&
             after.get('purgeStartedAt', null) == null &&

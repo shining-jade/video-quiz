@@ -1,6 +1,19 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const migration = require('../counter-migration.js');
+const cli = require('../scripts/migrate-set-counters.js');
+
+test('counter migration target validation fails closed for stale emulator environment and requires explicit demo emulator', () => {
+  assert.throws(() => cli.validateTarget({ projectId: 'video-quiz-65798', targetMode: 'production' }, {
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080', FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }), /stale/);
+  assert.throws(() => cli.validateTarget({ projectId: 'video-quiz-65798', targetMode: 'emulator' }, {
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080', FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }), /demo/);
+  assert.deepEqual(cli.validateTarget({ projectId: 'demo-video-quiz', targetMode: 'emulator' }, {
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080', FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+  }).targetMode, 'emulator');
+});
 
 function fakeDb(initial) {
   const docs = new Map(Object.entries(initial));

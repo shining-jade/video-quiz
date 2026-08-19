@@ -2110,6 +2110,35 @@ rulesTest('purge counters는 marker·parent-only·wrong-target forge를 거부�
   await assertFails(deleteDoc(doc(admin, 'quiz_sets/set1')));
 });
 
+rulesTest('counter-ready active image add/delete requires one exact parent mutation target', async () => {
+  await resetFirestore();
+  const owner = actorFirestore('owner');
+  await adminWrite('quiz_sets/set1', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email, lifecycleState: 'active',
+    trashedAt: null, purgeStartedAt: null, collaboratorCount: 0, imageCount: 1,
+    contentRevision: Timestamp.fromMillis(1)
+  });
+  await adminWrite('images/set1/q/old', { data: 'old' });
+  const add = writeBatch(owner);
+  add.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 2, imageMutation: { key: 'new', action: 'add' }, contentRevision: serverTimestamp()
+  }, { merge: true });
+  add.set(doc(owner, 'images/set1/q/new'), { data: 'new' });
+  await assertSucceeds(add.commit());
+  const forged = writeBatch(owner);
+  forged.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 3, imageMutation: { key: 'fake', action: 'add' }
+  }, { merge: true });
+  await assertFails(forged.commit());
+  const remove = writeBatch(owner);
+  remove.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 1, imageMutation: { key: 'new', action: 'remove' }, contentRevision: serverTimestamp()
+  }, { merge: true });
+  remove.delete(doc(owner, 'images/set1/q/new'));
+  await assertSucceeds(remove.commit());
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), { imageCount: 2 }));
+});
+
 rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용하고 missing source는 거부한다', async () => {
   await resetFirestore();
   const other = actorFirestore('otherTeacher');
