@@ -13,6 +13,7 @@ const {
   doc,
   getDoc,
   getDocs,
+  limit: queryLimit,
   onSnapshot,
   query,
   runTransaction,
@@ -196,17 +197,23 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
     },
     collection(path) {
       const modularCollection = collection(modularDb, path);
+      const collectionSnapshot = async target => {
+        const snapshot = await getDocs(target);
+        return {
+          docs: snapshot.docs.map(document => ({
+            id: document.id,
+            ref: reference(`${path}/${document.id}`),
+            data: () => document.data()
+          })),
+          empty: snapshot.empty
+        };
+      };
       return {
         path,
-        async get() {
-          const snapshot = await getDocs(modularCollection);
-          return {
-            docs: snapshot.docs.map(document => ({
-              id: document.id,
-              ref: reference(`${path}/${document.id}`),
-              data: () => document.data()
-            }))
-          };
+        get() { return collectionSnapshot(modularCollection); },
+        limit(count) {
+          const limited = query(modularCollection, queryLimit(count));
+          return { get() { return collectionSnapshot(limited); } };
         }
       };
     },
@@ -2048,6 +2055,138 @@ rulesTest('소유자 휴지통 전환·복원과 만료 purge만 허용하고 di
   purgeBatch.delete(doc(admin, 'images/set1/q/purge-me'));
   await assertSucceeds(purgeBatch.commit());
   await assertSucceeds(deleteDoc(doc(admin, 'quiz_sets/set1')));
+});
+
+rulesTest('purging child reads let the real store finish owner/admin purge and deny other actors', async () => {
+  await resetFirestore();
+  const expiredAt = Timestamp.fromMillis(Date.now() - 31 * 86400000);
+  for (const setId of ['owner-purge-store', 'admin-purge-store', 'denied-purge-store']) {
+    await adminWrite(`quiz_sets/${setId}`, {
+      ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+      lifecycleState: 'trashed', trashedAt: expiredAt, purgeStartedAt: null,
+      collaboratorCount: 1, imageCount: 1, contentRevision: Timestamp.fromMillis(1)
+    });
+    await adminWrite(`quiz_sets/${setId}/collaborators/other@school.kr`, {
+      email: actors.otherTeacher.email, addedByUid: actors.owner.uid, addedAt: Timestamp.fromMillis(1)
+    });
+    await adminWrite(`images/${setId}/q/v0q0`, { data: 'purge-image' });
+  }
+
+  const ownerDb = actorFirestore('owner');
+  const ownerStore = emulatorStore(ownerDb);
+  await ownerStore.beginSetPurge('owner-purge-store', 'immediate', actors.owner);
+  assert.deepEqual(await ownerStore.continueSetPurge('owner-purge-store'), {
+    done: false, deleted: 2, parentDeleted: false
+  });
+  assert.deepEqual(await ownerStore.continueSetPurge('owner-purge-store'), {
+    done: true, deleted: 0, parentDeleted: true
+  });
+
+  const adminDb = actorFirestore('admin');
+  const adminStore = emulatorStore(adminDb);
+  await adminStore.beginSetPurge('admin-purge-store', 'expired', { ...actors.admin, role: 'admin' });
+  assert.deepEqual(await adminStore.continueSetPurge('admin-purge-store'), {
+    done: false, deleted: 2, parentDeleted: false
+  });
+  assert.deepEqual(await adminStore.continueSetPurge('admin-purge-store'), {
+    done: true, deleted: 0, parentDeleted: true
+  });
+
+  await ownerStore.beginSetPurge('denied-purge-store', 'immediate', actors.owner);
+  const other = actorFirestore('otherTeacher');
+  await assertFails(getDocs(collection(other, 'quiz_sets/denied-purge-store/collaborators')));
+  await assertFails(getDocs(collection(other, 'images/denied-purge-store/q')));
+});
+
+rulesTest('counter migration gate is admin-only, stale-safe, and blocks child writes without blocking reads', async () => {
+  await resetFirestore();
+  const admin = actorFirestore('admin');
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const gatePath = 'migration_gates/set_counters';
+  const lockedGate = {
+    locked: true,
+    lockId: 'round5-gate-1',
+    projectId,
+    targetMode: 'emulator',
+    lockedAt: serverTimestamp(),
+    lockedByUid: actors.admin.uid
+  };
+
+  await assertFails(setDoc(doc(other, gatePath), {
+    ...lockedGate, lockedByUid: actors.otherTeacher.uid
+  }));
+  await assertSucceeds(setDoc(doc(admin, gatePath), lockedGate));
+  await assertFails(getDoc(doc(owner, gatePath)));
+
+  const imageUpdate = writeBatch(owner);
+  imageUpdate.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
+  imageUpdate.update(doc(owner, 'images/set1/q/0'), { data: 'locked-update' });
+  await assertFails(imageUpdate.commit());
+
+  const imageAdd = writeBatch(owner);
+  imageAdd.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 2, imageMutation: { key: 'new', action: 'add' }
+  }, { merge: true });
+  imageAdd.set(doc(owner, 'images/set1/q/new'), { data: 'locked-add' });
+  await assertFails(imageAdd.commit());
+
+  const imageDelete = writeBatch(owner);
+  imageDelete.set(doc(owner, 'quiz_sets/set1'), {
+    imageCount: 0, imageMutation: { key: '0', action: 'remove' }
+  }, { merge: true });
+  imageDelete.delete(doc(owner, 'images/set1/q/0'));
+  await assertFails(imageDelete.commit());
+
+  const collaboratorAdd = writeBatch(owner);
+  collaboratorAdd.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 1,
+    collaboratorMutation: { email: actors.otherTeacher.email, action: 'add' }
+  }, { merge: true });
+  collaboratorAdd.set(doc(owner, 'quiz_sets/set1/collaborators/other@school.kr'), {
+    email: actors.otherTeacher.email, addedByUid: actors.owner.uid, addedAt: serverTimestamp()
+  });
+  await assertFails(collaboratorAdd.commit());
+
+  await assertSucceeds(getDoc(doc(owner, 'images/set1/q/0')));
+  await assertSucceeds(getDoc(doc(owner, 'sessions/s1')));
+  await assertFails(setDoc(doc(admin, gatePath), {
+    locked: false,
+    lockId: 'stale-gate',
+    projectId,
+    targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(1),
+    lockedByUid: actors.admin.uid,
+    unlockedAt: serverTimestamp(),
+    unlockedByUid: actors.admin.uid
+  }));
+  await assertFails(setDoc(doc(other, gatePath), {
+    locked: false,
+    lockId: 'round5-gate-1',
+    projectId,
+    targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(1),
+    lockedByUid: actors.admin.uid,
+    unlockedAt: serverTimestamp(),
+    unlockedByUid: actors.otherTeacher.uid
+  }));
+
+  const currentGate = (await getDoc(doc(admin, gatePath))).data();
+  await assertSucceeds(setDoc(doc(admin, gatePath), {
+    locked: false,
+    lockId: currentGate.lockId,
+    projectId: currentGate.projectId,
+    targetMode: currentGate.targetMode,
+    lockedAt: currentGate.lockedAt,
+    lockedByUid: currentGate.lockedByUid,
+    unlockedAt: serverTimestamp(),
+    unlockedByUid: actors.admin.uid
+  }));
+
+  const afterUnlock = writeBatch(owner);
+  afterUnlock.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
+  afterUnlock.update(doc(owner, 'images/set1/q/0'), { data: 'unlocked-update' });
+  await assertSucceeds(afterUnlock.commit());
 });
 
 rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서만 바뀐다', async () => {

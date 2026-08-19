@@ -6,11 +6,17 @@ const migration = require('../counter-migration.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
-  const result = { projectId: '', apply: false, confirmProject: '', output: '', targetMode: 'production' };
+  const result = {
+    projectId: '', apply: false, confirmProject: '', output: '',
+    targetMode: 'production', gateId: ''
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const argument = argv[i];
     if (argument === '--apply') { result.apply = true; continue; }
-    const field = { '--project': 'projectId', '--confirm-project': 'confirmProject', '--output': 'output', '--target-mode': 'targetMode' }[argument];
+    const field = {
+      '--project': 'projectId', '--confirm-project': 'confirmProject', '--output': 'output',
+      '--target-mode': 'targetMode', '--gate-id': 'gateId'
+    }[argument];
     if (!field) throw new Error('Unknown argument: ' + argument);
     const value = argv[++i];
     if (!value || value.startsWith('--')) throw new Error(argument + ' requires a value.');
@@ -19,6 +25,7 @@ function parseArgs(argv) {
   if (!result.projectId) throw new Error('--project is required.');
   if (!['production', 'emulator'].includes(result.targetMode)) throw new Error('--target-mode must be production or emulator.');
   if (result.apply && result.confirmProject !== result.projectId) throw new Error('--apply requires an exact --confirm-project.');
+  if (result.apply && !result.gateId) throw new Error('--apply requires an exact --gate-id.');
   return result;
 }
 
@@ -58,14 +65,17 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
   const reservation = dependencies.reserveReport(output, JSON.stringify({
     tool: 'set-counter-migration-cli', schemaVersion: 1, projectId: options.projectId,
     mode: options.apply ? 'apply' : 'dry-run', operation: 'set-counter-backfill',
-    targetMode: target.targetMode, status: 'reserved-fail-closed', safeToDeployStrictRules: false
+    targetMode: target.targetMode, gateId: options.gateId,
+    plannedCount: 0, appliedCount: 0, concurrentlySkipped: [], concurrentlySkippedCount: 0,
+    status: 'reserved-fail-closed', safeToDeployStrictRules: false
   }, null, 2) + '\n');
   let services;
   try {
     services = await dependencies.initialize(options.projectId);
     const report = await dependencies.runCounterBackfill({
       db: services.db, projectId: options.projectId, apply: options.apply,
-      confirmProject: options.confirmProject, targetMode: target.targetMode
+      confirmProject: options.confirmProject, targetMode: target.targetMode,
+      gateId: options.gateId
     });
     report.targetMode = target.targetMode;
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
@@ -75,7 +85,9 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
     const report = error.partialReport || {
       tool: 'set-counter-migration-cli', schemaVersion: 1, projectId: options.projectId,
       mode: options.apply ? 'apply' : 'dry-run', operation: 'set-counter-backfill',
-      targetMode: target.targetMode, status: 'failed', safeToDeployStrictRules: false,
+      targetMode: target.targetMode, gateId: options.gateId,
+      plannedCount: 0, appliedCount: 0, concurrentlySkipped: [], concurrentlySkippedCount: 0,
+      status: 'failed', safeToDeployStrictRules: false,
       error: String(error && error.message || error)
     };
     report.targetMode = target.targetMode;

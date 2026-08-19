@@ -24,3 +24,27 @@ test('사용자 안내는 Google 관리자 역할과 세트 소유권을 정확�
   assert.doesNotMatch(html, /교사도 학생도 아무것도 로그인하지 않습니다/);
   assert.match(readme, /\| ✏️ 편집 \| 소유한 세트 내용을 고칩니다/);
 });
+
+test('counter migration 운영 문서는 staged lock migration strict unlock 순서를 고정한다', () => {
+  const guide = read('docs/COUNTER-MIGRATION.md');
+  const stagedConfig = JSON.parse(read('firebase.counter-migration.json'));
+  assert.equal(stagedConfig.firestore.rules, 'firestore.rules');
+
+  const ordered = [
+    '1. staged gate Rules 배포',
+    '2. migration_gates/set_counters 잠금',
+    '3. counter migration 및 audit',
+    '4. strict counter Rules 재배포',
+    '5. 동일 lockId로 잠금 해제'
+  ];
+  let cursor = -1;
+  for (const marker of ordered) {
+    const next = guide.indexOf(marker);
+    assert.ok(next > cursor, `missing or out-of-order: ${marker}`);
+    cursor = next;
+  }
+  assert.match(guide, /--config firebase\.counter-migration\.json --project video-quiz-65798/);
+  assert.match(guide, /--target-mode production[\s\S]*--confirm-project video-quiz-65798[\s\S]*--gate-id <LOCK_ID>/);
+  assert.match(guide, /safeToDeployStrictRules[^\n]*true/);
+  assert.match(guide, /운영 환경에서는 실행하지 않았습니다/);
+});

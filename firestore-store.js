@@ -554,7 +554,7 @@
         }
         const owner = set.ownerUid === current.uid;
         const admin = current.role === 'admin';
-        const expired = collaboration.trashRetention(set, nowFn()).expired;
+        const expired = collaboration.trashRetention({ trashedAt: trashDateMillis(set) }, nowFn()).expired;
         if (purgeMode === 'immediate' && !owner) {
           throw new Error('즉시 영구 삭제는 소유자만 시작할 수 있습니다.');
         }

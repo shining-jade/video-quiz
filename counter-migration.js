@@ -67,24 +67,79 @@ function planCounterBackfill(records) {
   }));
 }
 
-async function runCounterBackfill({ db, projectId, apply = false, confirmProject = '', batchSize = 20 }) {
+function updateTimeGeneration(snapshot) {
+  const value = snapshot && snapshot.updateTime;
+  if (value && Number.isInteger(value.seconds)) {
+    return String(value.seconds) + ':' + String(Number(value.nanoseconds || 0));
+  }
+  throw new Error('Counter migration gate is missing an exact authoritative server updateTime generation.');
+}
+
+function verifyGateSnapshot(snapshot, { projectId, targetMode, gateId }, expected) {
+  if (!snapshot || !snapshot.exists) throw new Error('Counter migration gate is missing.');
+  const data = snapshot.data() || {};
+  if (data.locked !== true) throw new Error('Counter migration gate must remain locked.');
+  if (data.projectId !== projectId) throw new Error('Counter migration gate project mismatch.');
+  if (data.targetMode !== targetMode) throw new Error('Counter migration gate target mode mismatch.');
+  if (data.lockId !== gateId) throw new Error('Counter migration gate identity mismatch.');
+  const evidence = {
+    path: 'migration_gates/set_counters',
+    locked: true,
+    lockId: data.lockId,
+    projectId: data.projectId,
+    targetMode: data.targetMode,
+    updateTimeGeneration: updateTimeGeneration(snapshot)
+  };
+  if (expected && evidence.updateTimeGeneration !== expected.updateTimeGeneration) {
+    throw new Error('Counter migration gate generation changed.');
+  }
+  return evidence;
+}
+
+async function runCounterBackfill({
+  db, projectId, targetMode = 'production', gateId = '',
+  apply = false, confirmProject = '', batchSize = 20
+}) {
   if (!db || typeof db.collection !== 'function') throw new Error('Admin Firestore DB is required.');
   if (!projectId) throw new Error('projectId is required.');
   if (apply && confirmProject !== projectId) throw new Error('Apply requires an exact project confirmation.');
+  if (!['production', 'emulator'].includes(targetMode)) throw new Error('targetMode must be production or emulator.');
+  if (apply && !gateId) throw new Error('Apply requires an exact counter migration gate identity.');
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 20) throw new Error('batchSize must be between 1 and 20.');
-  const initial = await scanSets(db);
-  const plan = planCounterBackfill(initial);
   const report = {
-    projectId, mode: apply ? 'apply' : 'dry-run', operation: 'set-counter-backfill',
-    plannedCount: plan.length, appliedCount: 0, concurrentlySkipped: [],
+    projectId, targetMode, mode: apply ? 'apply' : 'dry-run', operation: 'set-counter-backfill',
+    plannedCount: 0, appliedCount: 0, concurrentlySkipped: [],
     concurrentlySkippedCount: 0, status: apply ? 'running' : 'complete',
-    safeToDeployStrictRules: false, audit: auditCounterRecords(initial)
+    safeToDeployStrictRules: false,
+    gate: { path: 'migration_gates/set_counters', locked: false, lockId: gateId || '' }
   };
-  if (!apply) return report;
   try {
+    const gateReference = db.doc('migration_gates/set_counters');
+    const expectedGate = gateId
+      ? verifyGateSnapshot(await gateReference.get(), { projectId, targetMode, gateId })
+      : null;
+    if (expectedGate) report.gate = expectedGate;
+    const initial = await scanSets(db);
+    const plan = planCounterBackfill(initial);
+    report.plannedCount = plan.length;
+    report.audit = auditCounterRecords(initial);
+    if (!apply) {
+      if (expectedGate) {
+        verifyGateSnapshot(await gateReference.get(), { projectId, targetMode, gateId }, expectedGate);
+        report.safeToDeployStrictRules = report.audit.safeToDeployStrictRules;
+      } else {
+        report.safeToDeployStrictRules = false;
+      }
+      return report;
+    }
     for (let offset = 0; offset < plan.length; offset += batchSize) {
       for (const item of plan.slice(offset, offset + batchSize)) {
         const result = await db.runTransaction(async transaction => {
+          verifyGateSnapshot(
+            await transaction.get(gateReference),
+            { projectId, targetMode, gateId },
+            expectedGate
+          );
           const parentRef = db.doc('quiz_sets/' + item.id);
           const parentSnapshot = await transaction.get(parentRef);
           if (!parentSnapshot.exists) return { skipped: 'missing-parent' };
@@ -103,21 +158,32 @@ async function runCounterBackfill({ db, projectId, apply = false, confirmProject
         });
         if (result.applied) report.appliedCount += 1;
         else report.concurrentlySkipped.push({ id: item.id, reason: result.skipped });
+        report.concurrentlySkippedCount = report.concurrentlySkipped.length;
       }
     }
+    verifyGateSnapshot(
+      await gateReference.get(),
+      { projectId, targetMode, gateId },
+      expectedGate
+    );
+    const after = await scanSets(db);
+    verifyGateSnapshot(
+      await gateReference.get(),
+      { projectId, targetMode, gateId },
+      expectedGate
+    );
+    report.audit = auditCounterRecords(after);
+    report.safeToDeployStrictRules = report.audit.safeToDeployStrictRules;
+    report.status = 'complete';
+    return report;
   } catch (error) {
+    report.concurrentlySkippedCount = report.concurrentlySkipped.length;
     report.status = report.appliedCount > 0 ? 'partial-failure' : 'failed';
     report.error = String(error && error.message || error);
     report.safeToDeployStrictRules = false;
     error.partialReport = report;
     throw error;
   }
-  report.concurrentlySkippedCount = report.concurrentlySkipped.length;
-  const after = await scanSets(db);
-  report.audit = auditCounterRecords(after);
-  report.safeToDeployStrictRules = report.audit.safeToDeployStrictRules;
-  report.status = 'complete';
-  return report;
 }
 
 module.exports = { auditCounterRecords, planCounterBackfill, runCounterBackfill };
