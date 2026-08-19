@@ -2027,15 +2027,18 @@ rulesTest('소유자 휴지통 전환·복원과 만료 purge만 허용하고 di
   await adminWrite('quiz_sets/set1', {
     ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
     trashedAt: Timestamp.fromMillis(Date.now() - 31 * 86400000), purgeStartedAt: null,
-    collaboratorCount: 0
+    collaboratorCount: 0, imageCount: 1
   });
   await adminWrite('images/set1/q/purge-me', { data: 'image' });
   await assertSucceeds(updateDoc(doc(admin, 'quiz_sets/set1'), {
     purgeStartedAt: serverTimestamp(), lifecycleState: 'purging'
   }));
-  await assertSucceeds(deleteDoc(doc(admin, 'images/set1/q/purge-me')));
-  await assertFails(deleteDoc(doc(admin, 'quiz_sets/set1')));
-  await assertSucceeds(updateDoc(doc(admin, 'quiz_sets/set1'), { purgeChildrenVerified: true }));
+  const purgeBatch = writeBatch(admin);
+  purgeBatch.set(doc(admin, 'quiz_sets/set1'), {
+    imageCount: 0, imageMutation: { key: 'purge-me', action: 'purge-remove' }
+  }, { merge: true });
+  purgeBatch.delete(doc(admin, 'images/set1/q/purge-me'));
+  await assertSucceeds(purgeBatch.commit());
   await assertSucceeds(deleteDoc(doc(admin, 'quiz_sets/set1')));
 });
 
@@ -2085,6 +2088,26 @@ rulesTest('휴지통 원본은 다른 교사의 읽기·새 수업 시작에서 
     teacherEmail: actors.otherTeacher.email, status: 'active'
   }));
   await assertFails(deleteDoc(doc(actorFirestore('owner'), 'quiz_sets/set1')));
+});
+
+rulesTest('purge counters는 marker·parent-only·wrong-target forge를 거부한다', async () => {
+  await resetFirestore();
+  const admin = actorFirestore('admin');
+  await adminWrite('quiz_sets/set1', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email, lifecycleState: 'purging',
+    trashedAt: Timestamp.fromMillis(1), purgeStartedAt: Timestamp.fromMillis(2),
+    collaboratorCount: 0, imageCount: 1
+  });
+  await adminWrite('images/set1/q/real', { data: 'image' });
+  await assertFails(updateDoc(doc(admin, 'quiz_sets/set1'), { purgeChildrenVerified: true }));
+  await assertFails(updateDoc(doc(admin, 'quiz_sets/set1'), { imageCount: 0 }));
+  const wrongTarget = writeBatch(admin);
+  wrongTarget.set(doc(admin, 'quiz_sets/set1'), {
+    imageCount: 0, imageMutation: { key: 'fake', action: 'purge-remove' }
+  }, { merge: true });
+  wrongTarget.delete(doc(admin, 'images/set1/q/real'));
+  await assertFails(wrongTarget.commit());
+  await assertFails(deleteDoc(doc(admin, 'quiz_sets/set1')));
 });
 
 rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용하고 missing source는 거부한다', async () => {

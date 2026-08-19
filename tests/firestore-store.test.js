@@ -162,9 +162,11 @@ function makeFirestoreFake(initial = {}, options = {}) {
   }
 
   function querySnapshot(path, source = documents, filters = []) {
+    const limit = filters.find(filter => filter.type === 'limit');
     const docs = collectionDocs(path, source).filter(document =>
-      filters.every(filter => filter.operator === '==' && document.get(filter.field) === filter.value)
-    );
+      filters.every(filter => filter.type === 'limit' ||
+        filter.operator === '==' && document.get(filter.field) === filter.value)
+    ).slice(0, limit ? limit.value : undefined);
     return {
       docs,
       empty: docs.length === 0,
@@ -256,6 +258,9 @@ function makeFirestoreFake(initial = {}, options = {}) {
       where(field, operator, value) {
         calls.push({ operation: 'where', path, field, operator, value: clone(value) });
         return collectionRef(path, filters.concat({ field, operator, value }));
+      },
+      limit(value) {
+        return collectionRef(path, filters.concat({ type: 'limit', value }));
       },
       onSnapshot(next, error) {
         return addListener(collectionListeners, path, next, error, querySnapshot);

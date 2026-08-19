@@ -538,6 +538,22 @@
         throw new Error('영구 삭제 방식이 올바르지 않습니다.');
       }
       const reference = db.doc('quiz_sets/' + setId);
+      const currentSnapshot = await reference.get();
+      const currentSet = quizSetValue(currentSnapshot);
+      let imageCount = currentSet && Number.isInteger(currentSet.imageCount)
+        ? currentSet.imageCount : null;
+      if (imageCount === null) {
+        const imageSnapshot = await db.collection('images/' + setId + '/q').get();
+        imageCount = imageSnapshot.size;
+      }
+      let collaboratorCount = currentSet && Number.isInteger(currentSet.collaboratorCount)
+        ? currentSet.collaboratorCount : null;
+      if (collaboratorCount === null) {
+        const collaboratorSnapshot = await db.collection(
+          'quiz_sets/' + setId + '/collaborators'
+        ).get();
+        collaboratorCount = collaboratorSnapshot.size;
+      }
       return db.runTransaction(async transaction => {
         const snapshot = await transaction.get(reference);
         const set = quizSetValue(snapshot);
@@ -556,20 +572,42 @@
         }
         transaction.set(reference, {
           purgeStartedAt: fieldValue.serverTimestamp(),
-          lifecycleState: 'purging'
+          lifecycleState: 'purging',
+          imageCount,
+          collaboratorCount
         }, { merge: true });
         return { started: true };
       });
     }
 
-    async function purgeChildren(path, limit) {
-      const snapshot = await db.collection(path).get();
-      const docs = snapshot.docs.slice(0, limit);
-      if (!docs.length) return 0;
-      const batch = db.batch();
-      docs.forEach(document => batch.delete(document.ref));
-      await batch.commit();
-      return docs.length;
+    async function purgeOneChild(setId, type, document) {
+      const parentReference = db.doc('quiz_sets/' + setId);
+      return db.runTransaction(async transaction => {
+        const parentSnapshot = await transaction.get(parentReference);
+        const parent = quizSetValue(parentSnapshot);
+        const childSnapshot = await transaction.get(document.ref);
+        if (!parent || !childSnapshot.exists) return false;
+        if (!parent.purgeStartedAt || parent.lifecycleState !== 'purging') {
+          throw new Error('정리 세트 상태가 변경되어 삭제를 중단했습니다.');
+        }
+        if (type === 'collaborator') {
+          const count = Number.isInteger(parent.collaboratorCount) ? parent.collaboratorCount : 0;
+          if (count < 1) throw new Error('공동 편집자 수가 올바르지 않습니다.');
+          transaction.set(parentReference, {
+            collaboratorCount: count - 1,
+            collaboratorMutation: { email: document.id, action: 'purge-remove' }
+          }, { merge: true });
+        } else {
+          const count = Number.isInteger(parent.imageCount) ? parent.imageCount : 0;
+          if (count < 1) throw new Error('이미지 수가 올바르지 않습니다.');
+          transaction.set(parentReference, {
+            imageCount: count - 1,
+            imageMutation: { key: document.id, action: 'purge-remove' }
+          }, { merge: true });
+        }
+        transaction.delete(document.ref);
+        return true;
+      });
     }
 
     async function continueSetPurge(setId) {
@@ -580,33 +618,38 @@
       if (!set.purgeStartedAt || set.lifecycleState !== 'purging') {
         throw new Error('정리 시작된 세트만 계속 삭제할 수 있습니다.');
       }
-      let deleted = await purgeChildren(
-        'quiz_sets/' + setId + '/collaborators', 200
-      );
+      const collaboratorSnapshot = await db.collection(
+        'quiz_sets/' + setId + '/collaborators'
+      ).limit(200).get();
+      let deleted = 0;
+      for (const document of collaboratorSnapshot.docs) {
+        if (await purgeOneChild(setId, 'collaborator', document)) deleted += 1;
+      }
       if (deleted < 200) {
-        deleted += await purgeChildren('images/' + setId + '/q', 200 - deleted);
+        const imageSnapshot = await db.collection('images/' + setId + '/q')
+          .limit(200 - deleted).get();
+        for (const document of imageSnapshot.docs) {
+          if (await purgeOneChild(setId, 'image', document)) deleted += 1;
+        }
       }
       if (deleted > 0) return { done: false, deleted, parentDeleted: false };
 
       // Both child collections were observed empty. The transaction re-reads the
       // parent and deletes only the same purge generation, with the Rules closing
       // child creation once purgeStartedAt exists.
-      await db.runTransaction(async transaction => {
-        const latestSnapshot = await transaction.get(reference);
-        const latest = quizSetValue(latestSnapshot);
-        if (!latest) return { done: true, parentDeleted: true, deleted: 0 };
-        if (!latest.purgeStartedAt || latest.lifecycleState !== 'purging') {
-          throw new Error('정리 세트 상태가 변경되어 삭제를 중단했습니다.');
-        }
-        transaction.set(reference, { purgeChildrenVerified: true }, { merge: true });
-        return { verified: true };
-      });
+      const collaboratorProbe = await db.collection(
+        'quiz_sets/' + setId + '/collaborators'
+      ).limit(1).get();
+      const imageProbe = await db.collection('images/' + setId + '/q').limit(1).get();
+      if (!collaboratorProbe.empty || !imageProbe.empty) {
+        return { done: false, deleted: 0, parentDeleted: false };
+      }
       const result = await db.runTransaction(async transaction => {
         const latestSnapshot = await transaction.get(reference);
         const latest = quizSetValue(latestSnapshot);
         if (!latest) return { done: true, parentDeleted: true, deleted: 0 };
         if (!latest.purgeStartedAt || latest.lifecycleState !== 'purging' ||
-            latest.purgeChildrenVerified !== true) {
+            latest.collaboratorCount !== 0 || latest.imageCount !== 0) {
           throw new Error('정리 세트 검증 상태가 변경되어 삭제를 중단했습니다.');
         }
         transaction.delete(reference);

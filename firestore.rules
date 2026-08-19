@@ -104,7 +104,8 @@ service cloud.firestore {
       let after = request.resource.data;
       let changed = after.diff(before).affectedKeys();
       return before.ownerUid == after.ownerUid && before.ownerEmail == after.ownerEmail &&
-        changed.hasOnly(['trashedAt', 'purgeStartedAt', 'lifecycleState', 'contentRevision', 'purgeChildrenVerified']) &&
+        changed.hasOnly(['trashedAt', 'purgeStartedAt', 'lifecycleState', 'contentRevision',
+          'collaboratorCount', 'collaboratorMutation', 'imageCount', 'imageMutation']) &&
         ((before.get('lifecycleState', 'active') == 'active' &&
             after.get('lifecycleState', '') == 'trashed' &&
             after.get('trashedAt', null) is timestamp && after.trashedAt == request.time &&
@@ -124,8 +125,33 @@ service cloud.firestore {
           (before.get('lifecycleState', '') == 'purging' &&
             after.get('lifecycleState', '') == 'purging' &&
             before.get('purgeStartedAt', null) == after.get('purgeStartedAt', null) &&
-            after.get('purgeChildrenVerified', false) == true &&
-            canPurgeSet(setId)));
+            canPurgeSet(setId) &&
+            ((after.get('collaboratorMutation', {}).action == 'purge-remove' &&
+              after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) - 1) ||
+             (after.get('imageMutation', {}).action == 'purge-remove' &&
+              after.get('imageCount', -1) == before.get('imageCount', -1) - 1))));
+    }
+
+    function validPurgeCollaboratorDelete(setId, email) {
+      let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
+      let childPath = /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email);
+      return canPurgeSet(setId) && exists(childPath) && !existsAfter(childPath) &&
+        get(parentPath).data.get('collaboratorCount', -1) is int &&
+        getAfter(parentPath).data.get('collaboratorCount', -1) ==
+          get(parentPath).data.get('collaboratorCount', -1) - 1 &&
+        getAfter(parentPath).data.get('collaboratorMutation', {}).email == email &&
+        getAfter(parentPath).data.get('collaboratorMutation', {}).action == 'purge-remove';
+    }
+
+    function validPurgeImageDelete(setId, key) {
+      let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
+      let childPath = /databases/$(database)/documents/images/$(setId)/q/$(key);
+      return canPurgeSet(setId) && exists(childPath) && !existsAfter(childPath) &&
+        get(parentPath).data.get('imageCount', -1) is int &&
+        getAfter(parentPath).data.get('imageCount', -1) ==
+          get(parentPath).data.get('imageCount', -1) - 1 &&
+        getAfter(parentPath).data.get('imageMutation', {}).key == key &&
+        getAfter(parentPath).data.get('imageMutation', {}).action == 'purge-remove';
     }
 
     function activeSetAfter(setId) {
@@ -598,7 +624,8 @@ service cloud.firestore {
         ])) &&
         validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
       allow delete: if canPurgeSet(setId) &&
-        resource.data.get('purgeChildrenVerified', false) == true;
+        resource.data.get('collaboratorCount', -1) == 0 &&
+        resource.data.get('imageCount', -1) == 0;
       allow read, write: if false;
     }
 
@@ -611,7 +638,8 @@ service cloud.firestore {
         validCollaboratorData(email) &&
         validCollaboratorMutation(setId, email, 'add');
       allow delete: if (ownsSet(setId) && activeSet(setId) &&
-        validCollaboratorMutation(setId, email, 'remove')) || canPurgeSet(setId);
+        validCollaboratorMutation(setId, email, 'remove')) ||
+        validPurgeCollaboratorDelete(setId, email);
       allow update: if false;
       allow read, write: if false;
     }
@@ -619,7 +647,7 @@ service cloud.firestore {
     match /images/{setId}/q/{questionIndex} {
       allow get, list: if isApprovedTeacher() && activeSet(setId);
       allow create, update: if changesSetContentRevisionAfter(setId);
-      allow delete: if changesSetContentRevisionAfter(setId) || canPurgeSet(setId);
+      allow delete: if changesSetContentRevisionAfter(setId) || validPurgeImageDelete(setId, questionIndex);
       allow read, write: if false;
     }
 
