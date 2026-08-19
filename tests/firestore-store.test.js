@@ -745,6 +745,41 @@ test('allowance API rejects non-admin, invalid role, empty email and stale auth 
   assert.equal(fake.value('teacher_allowlist/x@school.kr'), undefined);
 });
 
+test('공동 편집자는 승인된 교사만 소유자 트랜잭션으로 추가·조회·삭제한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', collaboratorCount: 0 },
+    'teacher_allowlist/editor@school.kr': { enabled: true, role: 'teacher' },
+    'teacher_allowlist/disabled@school.kr': { enabled: false, role: 'teacher' }
+  });
+  const store = createStore(fake);
+  const owner = { uid: 'owner', email: 'owner@school.kr', role: 'teacher' };
+  const editor = { uid: 'editor', email: 'editor@school.kr', role: 'teacher' };
+  await assert.rejects(store.addCollaborator('set1', 'disabled@school.kr', owner), /unapproved/);
+  await store.addCollaborator('set1', 'EDITOR@School.KR', owner);
+  assert.equal(fake.value('quiz_sets/set1').collaboratorCount, 1);
+  assert.equal(fake.value('quiz_sets/set1/collaborators/editor@school.kr').email, 'editor@school.kr');
+  assert.equal(await store.canEditQuizSet('set1', editor), true);
+  assert.deepEqual((await store.listCollaborators('set1', owner)).map(item => item.email), ['editor@school.kr']);
+  await assert.rejects(store.addCollaborator('set1', 'other@school.kr', editor), /소유자/);
+  assert.equal(await store.removeCollaborator('set1', 'EDITOR@School.KR', owner), true);
+  assert.equal(fake.value('quiz_sets/set1').collaboratorCount, 0);
+  assert.equal(await store.canEditQuizSet('set1', editor), false);
+});
+
+test('공동 편집자 저장 API는 휴지통 세트와 권한 없는 actor를 거부한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/trash': { ownerUid: 'owner', ownerEmail: 'owner@school.kr', trashedAt: 1 },
+    'quiz_sets/active': { ownerUid: 'owner', ownerEmail: 'owner@school.kr' }
+  });
+  const store = createStore(fake);
+  await assert.rejects(store.saveQuizSet('active', { title: 'x' }, {
+    uid: 'other', email: 'other@school.kr', role: 'admin'
+  }), /편집할 권한/);
+  await assert.rejects(store.replaceImages('trash', {}, {
+    uid: 'owner', email: 'owner@school.kr', role: 'teacher'
+  }), /편집할 권한/);
+});
+
 test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
   const fake = makeFirestoreFake();
   const store = createStore(fake);

@@ -2,10 +2,13 @@
   const core = typeof module === 'object' && module.exports
     ? require('./firestore-core.js')
     : root.FirestoreCore;
-  const api = factory(core);
+  const collaboration = typeof module === 'object' && module.exports
+    ? require('./collaboration-trash-core.js')
+    : root.CollaborationTrashCore;
+  const api = factory(core, collaboration);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (core) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, collaboration) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
   const SAFE_REQUEST_BYTES = 8_000_000;
@@ -430,11 +433,121 @@
       return snapshot.docs.map(quizSetValue);
     }
 
+    function actorEmail(actor) {
+      return collaboration.canonicalEmail(actor && actor.email);
+    }
+
+    function activeSet(value) {
+      return !!value && !value.trashedAt && !value.purgeStartedAt;
+    }
+
+    async function canEditQuizSet(setId, actor) {
+      const set = await getQuizSet(setId);
+      if (!set || !activeSet(set) || !actor || !actor.uid) return false;
+      if (set.ownerUid === actor.uid) return true;
+      const email = actorEmail(actor);
+      if (!email) return false;
+      const collaborator = await db.doc(
+        'quiz_sets/' + setId + '/collaborators/' + email
+      ).get({ source: 'server' });
+      return collaborator.exists && (actor.role === 'teacher' || actor.role === 'admin');
+    }
+
+    async function listCollaborators(setId, actor) {
+      const allowed = await canEditQuizSet(setId, actor);
+      if (!allowed) throw new Error('공동 편집자 목록을 볼 권한이 없습니다.');
+      const snapshot = await db.collection('quiz_sets/' + setId + '/collaborators').get();
+      return snapshot.docs.map(document => ({ ...document.data(), email: document.id }));
+    }
+
+    async function addCollaborator(setId, email, actor) {
+      const current = actor || {};
+      const normalizedEmail = collaboration.canonicalEmail(email);
+      if (!current.uid || !current.email || !normalizedEmail) {
+        throw new Error('공동 편집자를 추가할 권한이 없습니다.');
+      }
+      const setReference = db.doc('quiz_sets/' + setId);
+      const collaboratorReference = db.doc(
+        'quiz_sets/' + setId + '/collaborators/' + normalizedEmail
+      );
+      const allowanceReference = db.doc('teacher_allowlist/' + normalizedEmail);
+      const [setSnapshot, allowanceSnapshot, collaboratorsSnapshot] = await Promise.all([
+        setReference.get({ source: 'server' }),
+        allowanceReference.get({ source: 'server' }),
+        db.collection('quiz_sets/' + setId + '/collaborators').get()
+      ]);
+      const set = quizSetValue(setSnapshot);
+      const allowance = allowanceData(allowanceSnapshot);
+      const existing = collaboratorsSnapshot.docs.map(document => document.id);
+      const validation = collaboration.validateCollaboratorChange({
+        ownerEmail: set && set.ownerEmail,
+        email: normalizedEmail,
+        enabled: allowance && allowance.enabled === true &&
+          ['teacher', 'admin'].includes(allowance.role),
+        existing
+      });
+      if (!set || set.ownerUid !== current.uid || !activeSet(set)) {
+        throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
+      }
+      if (validation.code) throw new Error('공동 편집자 추가가 거부되었습니다: ' + validation.code);
+      const result = await db.runTransaction(async transaction => {
+        const latestSnapshot = await transaction.get(setReference);
+        const latest = quizSetValue(latestSnapshot);
+        const target = await transaction.get(allowanceReference);
+        const existingTarget = await transaction.get(collaboratorReference);
+        if (!latest || latest.ownerUid !== current.uid || !activeSet(latest)) {
+          throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
+        }
+        const targetAllowance = allowanceData(target);
+        if (!targetAllowance || targetAllowance.enabled !== true ||
+            !['teacher', 'admin'].includes(targetAllowance.role)) {
+          throw new Error('승인된 교사만 공동 편집자로 추가할 수 있습니다.');
+        }
+        if (existingTarget.exists) throw new Error('이미 공동 편집자로 등록되어 있습니다.');
+        const count = Number.isInteger(latest.collaboratorCount) ? latest.collaboratorCount : 0;
+        if (count < 0 || count >= 20) throw new Error('공동 편집자는 최대 20명까지 추가할 수 있습니다.');
+        transaction.set(collaboratorReference, {
+          email: normalizedEmail,
+          addedByUid: current.uid,
+          addedAt: fieldValue.serverTimestamp()
+        });
+        transaction.set(setReference, { collaboratorCount: count + 1 }, { merge: true });
+        return normalizedEmail;
+      });
+      return result;
+    }
+
+    async function removeCollaborator(setId, email, actor) {
+      const current = actor || {};
+      const normalizedEmail = collaboration.canonicalEmail(email);
+      const setReference = db.doc('quiz_sets/' + setId);
+      const collaboratorReference = db.doc(
+        'quiz_sets/' + setId + '/collaborators/' + normalizedEmail
+      );
+      return db.runTransaction(async transaction => {
+        const setSnapshot = await transaction.get(setReference);
+        const collaboratorSnapshot = await transaction.get(collaboratorReference);
+        const set = quizSetValue(setSnapshot);
+        if (!set || set.ownerUid !== current.uid || !activeSet(set)) {
+          throw new Error('소유자만 활성 세트의 공동 편집자를 관리할 수 있습니다.');
+        }
+        if (!collaboratorSnapshot.exists) return false;
+        const count = Number.isInteger(set.collaboratorCount) ? set.collaboratorCount : 0;
+        if (count < 1) throw new Error('공동 편집자 수가 올바르지 않습니다.');
+        transaction.delete(collaboratorReference);
+        transaction.set(setReference, { collaboratorCount: count - 1 }, { merge: true });
+        return true;
+      });
+    }
+
     function getQuizSet(setId) {
       return db.doc('quiz_sets/' + setId).get().then(quizSetValue);
     }
 
-    function saveQuizSet(setId, value) {
+    async function saveQuizSet(setId, value, actor) {
+      if (actor && !(await canEditQuizSet(setId, actor))) {
+        throw new Error('퀴즈 세트를 편집할 권한이 없습니다.');
+      }
       return db.doc('quiz_sets/' + setId).set(withoutDocumentId(value));
     }
 
@@ -460,7 +573,10 @@
     const sameRevision = (left, right) =>
       JSON.stringify(stableValue(left)) === JSON.stringify(stableValue(right));
 
-    async function saveQuizSetWithImages(setId, value, images) {
+    async function saveQuizSetWithImages(setId, value, images, actor) {
+      if (actor && !(await canEditQuizSet(setId, actor))) {
+        throw new Error('퀴즈 세트를 편집할 권한이 없습니다.');
+      }
       const path = 'images/' + setId + '/q';
       const next = normalizedImages(images);
       const storedSet = withContentRevision(value);
@@ -542,7 +658,10 @@
       throw new Error('퀴즈 세트가 계속 변경되어 같은 리비전의 세션 스냅샷을 만들지 못했습니다.');
     }
 
-    async function replaceImages(setId, images) {
+    async function replaceImages(setId, images, actor) {
+      if (actor && !(await canEditQuizSet(setId, actor))) {
+        throw new Error('퀴즈 세트 이미지를 편집할 권한이 없습니다.');
+      }
       const path = 'images/' + setId + '/q';
       const next = normalizedImages(images);
       const revisionPatch = { contentRevision: fieldValue.serverTimestamp() };
@@ -1214,6 +1333,10 @@
       disableTeacherAllowance,
       listQuizSets,
       getQuizSet,
+      listCollaborators,
+      addCollaborator,
+      removeCollaborator,
+      canEditQuizSet,
       saveQuizSet,
       saveQuizSetWithImages,
       saveOwnedQuizSet,
