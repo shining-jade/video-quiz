@@ -28,6 +28,19 @@ test('편집기에는 undo/redo와 문항 제목 버블의 드래그·키보드 
   assert.match(html, /다음 영상/);
 });
 
+test('전체화면 퀴즈는 stage 기준의 안전 영역과 본문 내부 스크롤 계약을 가진다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /function plLayoutMode\(rect\)/);
+  assert.match(html, /function plApplyStageLayout\(\)/);
+  assert.match(html, /--quiz-max-w:\s*min\(920px,\s*calc\(100% - 32px\)\)/);
+  assert.match(html, /--quiz-max-h:\s*calc\(100% - 128px\)/);
+  assert.match(html, /#pl-stage #overlay\s*\{[^}]*width:\s*var\(--quiz-max-w\)[^}]*max-height:\s*var\(--quiz-max-h\)[^}]*overflow:\s*hidden/s);
+  assert.match(html, /#pl-stage #overlay \.quiz-body\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
+  assert.match(html, /window\.addEventListener\('orientationchange', applyLayout\)/);
+  assert.match(html, /window\.removeEventListener\('orientationchange', applyLayout\)/);
+});
+
 test('편집기 단축키와 경로 종료 처리는 이전 화면의 listener가 남지 않게 정리한다', () => {
   const html = read('index.html');
 

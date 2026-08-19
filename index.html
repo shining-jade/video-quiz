@@ -306,7 +306,11 @@ textarea { resize: vertical; min-height: 62px; }
 .player-box { position: relative; width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 10px; overflow: hidden; }
 .player-box > div, .player-box iframe { width: 100%; height: 100%; border: 0; }
 
-#pl-stage { position: relative; }
+#pl-stage {
+  position: relative;
+  --quiz-max-w: min(920px, calc(100% - 32px));
+  --quiz-max-h: calc(100% - 128px);
+}
 #pl-stage .pl-stage-tools { display: none; }
 #pl-stage .pl-stage-status {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
@@ -315,8 +319,9 @@ textarea { resize: vertical; min-height: 62px; }
 #pl-stage:fullscreen,
 #pl-stage.fullscreen-fallback {
   width: 100vw; height: 100vh; box-sizing: border-box; padding: 20px;
-  background: #000; color: #fff; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 12px;
+  background: #000; color: #fff; display: grid;
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  align-items: center; justify-items: center; gap: 10px;
 }
 #pl-stage.fullscreen-fallback { position: fixed; inset: 0; z-index: 1000; }
 body.stage-fallback-open { overflow: hidden; }
@@ -324,7 +329,7 @@ body.stage-fallback-open { overflow: hidden; }
 #pl-stage.fullscreen-fallback .player-box {
   width: var(--pl-player-width, min(92vw, calc((100vh - 176px) * 16 / 9)));
   height: var(--pl-player-height, min(calc(92vw * 9 / 16), calc(100vh - 176px)));
-  aspect-ratio: 16 / 9; margin: auto; max-height: none; border-radius: 0; flex: none;
+  aspect-ratio: 16 / 9; margin: 0 auto; max-height: none; border-radius: 0; flex: none;
 }
 #pl-stage.quiz-open .player-box { filter: brightness(.42); }
 #pl-stage.rank-open .player-box { filter: brightness(.42); }
@@ -433,8 +438,23 @@ body.stage-fallback-open { overflow: hidden; }
   box-shadow: 0 24px 80px rgba(0,0,0,.5); z-index: 200; padding: 26px 30px; overflow-y: auto;
 }
 #pl-stage.quiz-open #overlay {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(64vw, 960px);
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
 }
+#pl-stage #overlay {
+  width: var(--quiz-max-w); max-height: var(--quiz-max-h); overflow: hidden;
+  display: flex; flex-direction: column;
+}
+#pl-stage #overlay .ov-inner {
+  display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; max-height: 100%;
+}
+#pl-stage #overlay .quiz-body {
+  min-height: 0; overflow: auto; overscroll-behavior: contain; padding-right: 3px;
+}
+#pl-stage #overlay .ov-top,
+#pl-stage #overlay .ov-actions { flex: none; }
+#pl-stage #overlay .ov-actions { margin-bottom: 0; padding-top: 16px; }
+#pl-stage #overlay .ov-q { font-size: clamp(20px, 3.4vw, 38px); }
+#pl-stage #overlay .q-img { max-height: min(34vh, 260px); }
 /* iframe을 옮기거나 다시 만들지 않고 같은 영상 위에 중앙 카드를 겹친다. */
 @media (max-width: 900px) {
   #pl-stage:fullscreen .player-box,
@@ -442,7 +462,7 @@ body.stage-fallback-open { overflow: hidden; }
     width: var(--pl-player-width, min(92vw, calc((100vh - 252px) * 16 / 9)));
     height: var(--pl-player-height, min(calc(92vw * 9 / 16), calc(100vh - 252px)));
   }
-  #pl-stage.quiz-open #overlay { width: calc(100% - 32px); }
+  #pl-stage #overlay { border-radius: 16px; padding: 20px; }
   #pl-stage.rank-open #board-overlay { width: calc(100% - 32px); }
 }
 #overlay .ov-inner { width: 100%; max-width: 960px; color: #fff; }
@@ -3536,23 +3556,20 @@ function screenPlay(setId) {
   const state = pl;
   const fullscreenChange = () => { if (pl === state) plHandleFullscreenChange(); };
   const stageKeydown = event => { if (pl === state) plHandleStageKeydown(event); };
-  const clampQr = () => { if (pl === state) plClampQrBubble(); };
-  const applyGeometry = () => {
-    if (pl === state && typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
+  const applyLayout = () => {
+    if (pl !== state) return;
+    if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
+    plClampQrBubble();
   };
   document.addEventListener('fullscreenchange', fullscreenChange);
   document.addEventListener('keydown', stageKeydown);
-  window.addEventListener('resize', clampQr);
-  if (typeof plApplyStagePlayerGeometry === 'function') {
-    window.addEventListener('resize', applyGeometry);
-  }
+  window.addEventListener('resize', applyLayout);
+  window.addEventListener('orientationchange', applyLayout);
   onCleanup(() => {
     document.removeEventListener('fullscreenchange', fullscreenChange);
     document.removeEventListener('keydown', stageKeydown);
-    window.removeEventListener('resize', clampQr);
-    if (typeof plApplyStagePlayerGeometry === 'function') {
-      window.removeEventListener('resize', applyGeometry);
-    }
+    window.removeEventListener('resize', applyLayout);
+    window.removeEventListener('orientationchange', applyLayout);
     (state.ytCancels || []).forEach(cancel => { try { cancel(); } catch (e) {} });
     state.ytCancels = [];
     try { state.player && state.player.destroy(); } catch (e) {}
@@ -3990,7 +4007,7 @@ function renderPlayRun() {
     else $('#pl-qr').style.display = 'none';
   } catch (e) { $('#pl-qr').style.display = 'none'; }
   plRenderQList();
-  if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
+  if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
   if (typeof plRenderTimeline === 'function') plRenderTimeline(true);
   plRenderStageControls();
 
@@ -4101,7 +4118,7 @@ async function plEnterStageFullscreen() {
   }
   if (pl !== state) return;
   state.isStageFullscreen = true;
-  if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
+  if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
   plClampQrBubble();
 }
 
@@ -4120,6 +4137,7 @@ function plResetStageFullscreenUI() {
   const stage = document.getElementById('pl-stage');
   if (stage) stage.classList.remove('fullscreen-fallback');
   document.body.classList.remove('stage-fallback-open');
+  if (typeof plClearStageLayout === 'function') plClearStageLayout();
   if (pl) {
     pl.isStageFullscreen = false;
     pl.stageFallback = false;
@@ -4150,7 +4168,7 @@ function plHandleFullscreenChange() {
   const stage = document.getElementById('pl-stage');
   if (document.fullscreenElement === stage) {
     if (pl) pl.isStageFullscreen = true;
-    if (typeof plApplyStagePlayerGeometry === 'function') plApplyStagePlayerGeometry();
+    if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
     plClampQrBubble();
     return;
   }
@@ -4323,7 +4341,42 @@ function plStagePlayerGeometry(viewportWidth, viewportHeight, reservedHeight) {
   return { width: playerWidth, height: playerWidth * 9 / 16 };
 }
 
+function plLayoutMode(rect) {
+  const width = Math.max(0, Number(rect && rect.width) || 0);
+  const height = Math.max(0, Number(rect && rect.height) || 0);
+  const compact = width < 900 || height < 720;
+  return {
+    compact,
+    overlayMaxWidth: Math.max(280, Math.min(920, width - 32)),
+    overlayMaxHeight: Math.max(240, height - 128)
+  };
+}
+
+function plApplyStageLayout() {
+  const stage = document.getElementById('pl-stage');
+  if (!stage || !stage.style || typeof window === 'undefined') return null;
+  const rect = stage.getBoundingClientRect ? stage.getBoundingClientRect() : {};
+  const width = Number(rect.width) || Number(window.innerWidth) || 0;
+  const height = Number(rect.height) || Number(window.innerHeight) || 0;
+  const layout = plLayoutMode({ width, height });
+  const player = plStagePlayerGeometry(width, height, layout.compact ? 252 : 176);
+  stage.style.setProperty('--quiz-max-w', layout.overlayMaxWidth + 'px');
+  stage.style.setProperty('--quiz-max-h', layout.overlayMaxHeight + 'px');
+  stage.style.setProperty('--pl-layout-compact', layout.compact ? '1' : '0');
+  stage.style.setProperty('--pl-player-width', player.width + 'px');
+  stage.style.setProperty('--pl-player-height', player.height + 'px');
+  return layout;
+}
+
+function plClearStageLayout() {
+  const stage = document.getElementById('pl-stage');
+  if (!stage || !stage.style || !stage.style.removeProperty) return;
+  ['--quiz-max-w', '--quiz-max-h', '--pl-layout-compact', '--pl-player-width', '--pl-player-height']
+    .forEach(name => stage.style.removeProperty(name));
+}
+
 function plApplyStagePlayerGeometry() {
+  if (typeof plApplyStageLayout === 'function') return plApplyStageLayout();
   const stage = document.getElementById('pl-stage');
   if (!stage || !stage.style || typeof window === 'undefined') return;
   const reservedHeight = window.innerWidth < 900 ? 252 : 176;
@@ -5096,6 +5149,7 @@ function plSetQuizOpen(open) {
   if (open) {
     if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(true);
     else stage.classList.add('quiz-open');
+    if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
     return stage;
   }
   if (pl) pl.quizTimerGeneration = (Number(pl.quizTimerGeneration) || 0) + 1;
@@ -5104,6 +5158,7 @@ function plSetQuizOpen(open) {
   if (overlay && overlay.remove) overlay.remove();
   if (typeof plRenderCenteredOverlay === 'function') plRenderCenteredOverlay(false);
   else stage.classList.remove('quiz-open');
+  if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
   return stage;
 }
 
@@ -5179,20 +5234,22 @@ function plRenderOverlay() {
       '<div style="flex:1"></div>' +
       '<div class="quiz-timer" id="ov-timer" style="display:none"><div class="quiz-timer-track"><i></i></div><strong class="quiz-timer-number" id="ov-timer-n">–</strong></div>' +
     '</div>' +
-    (hasImage(q) ? '<img class="q-img" id="ov-img" alt="문항 이미지">' : '') +
-    '<div class="ov-q">' + esc(q.text) + '</div>' +
-    (q.explain ? '<div class="ov-explain-top" id="ov-explain-top" style="display:none">💡 ' + esc(q.explain) + '</div>' : '') +
-    (isTextType(q)
-      ? '<div id="ov-textwrap"></div>'
-      : '<div class="ov-choices" id="ov-choices">' +
-          q.choices.map((c, j) =>
-            '<div class="ov-choice" data-c="' + j + '">' +
-              '<span class="bar"></span>' +
-              '<span class="lt">' + (type === 'ox' ? ['O', 'X'][j] : LETTERS[j]) + '</span>' +
-              '<span>' + esc(c) + '</span>' +
-              '<span class="cnt" data-cnt="' + j + '"></span>' +
-            '</div>').join('') +
-        '</div>') +
+    '<div class="quiz-body">' +
+      (hasImage(q) ? '<img class="q-img" id="ov-img" alt="문항 이미지">' : '') +
+      '<div class="ov-q">' + esc(q.text) + '</div>' +
+      (q.explain ? '<div class="ov-explain-top" id="ov-explain-top" style="display:none">💡 ' + esc(q.explain) + '</div>' : '') +
+      (isTextType(q)
+        ? '<div id="ov-textwrap"></div>'
+        : '<div class="ov-choices" id="ov-choices">' +
+            q.choices.map((c, j) =>
+              '<div class="ov-choice" data-c="' + j + '">' +
+                '<span class="bar"></span>' +
+                '<span class="lt">' + (type === 'ox' ? ['O', 'X'][j] : LETTERS[j]) + '</span>' +
+                '<span>' + esc(c) + '</span>' +
+                '<span class="cnt" data-cnt="' + j + '"></span>' +
+              '</div>').join('') +
+          '</div>') +
+    '</div>' +
     '<div class="ov-actions">' +
       (pl.closeError ? '<div class="notice bad" role="alert">종료 저장 실패: ' +
         esc(pl.closeError) + ' · 다시 시도해 주세요.</div>' : '') +

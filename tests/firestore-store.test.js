@@ -5695,8 +5695,8 @@ test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리
   cleanup();
 
   assert.deepEqual([...listeners.keys()].sort(), ['fullscreenchange', 'keydown']);
-  assert.deepEqual([...windowListeners.keys()], ['resize']);
-  assert.deepEqual(removed.sort(), ['fullscreenchange', 'keydown', 'resize']);
+  assert.deepEqual([...windowListeners.keys()].sort(), ['orientationchange', 'resize']);
+  assert.deepEqual(removed.sort(), ['fullscreenchange', 'keydown', 'orientationchange', 'resize']);
   assert.equal(bodyClasses.has('stage-fallback-open'), false);
   assert.equal(context.pl, null);
 });
@@ -5944,9 +5944,52 @@ test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 
   assert.match(html, /#pl-stage\.quiz-open \.player-box\s*\{[^}]*filter:\s*brightness\(\.42\)/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*width:/s);
-  assert.match(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*top:\s*50%[^}]*transform:\s*translate\(-50%,\s*-50%\)[^}]*width:\s*min\(64vw,\s*960px\)/s);
-  assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*#pl-stage\.quiz-open #overlay\s*\{[^}]*width:\s*calc\(100% - 32px\)/);
+  assert.match(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*top:\s*50%[^}]*transform:\s*translate\(-50%,\s*-50%\)/s);
+  assert.match(html, /#pl-stage #overlay\s*\{[^}]*width:\s*var\(--quiz-max-w\)[^}]*max-height:\s*var\(--quiz-max-h\)/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*left:\s*53vw/s);
+});
+
+test('overlay geometry는 작은 stage의 타임라인 여백과 넓은 화면의 중앙 최대 폭을 함께 지킨다', () => {
+  const stageVars = new Map();
+  const stage = {
+    getBoundingClientRect() { return { width: 1024, height: 640 }; },
+    style: {
+      setProperty(name, value) { stageVars.set(name, value); },
+      removeProperty(name) { stageVars.delete(name); }
+    },
+    classList: { remove() {} }
+  };
+  const bodyClasses = new Set(['stage-fallback-open']);
+  const ctx = loadStageFunctions([
+    'plStagePlayerGeometry', 'plLayoutMode', 'plApplyStageLayout', 'plClearStageLayout',
+    'plResetStageFullscreenUI'
+  ], {
+    pl: { isStageFullscreen: true, stageFallback: true },
+    window: { innerWidth: 1024, innerHeight: 640 },
+    document: {
+      fullscreenElement: null,
+      getElementById(id) { return id === 'pl-stage' ? stage : null; },
+      body: { classList: { remove(name) { bodyClasses.delete(name); } } }
+    }
+  });
+
+  const compact = ctx.plLayoutMode({ width: 1024, height: 640 });
+  const wide = ctx.plLayoutMode({ width: 1920, height: 1080 });
+  assert.equal(compact.compact, true);
+  assert.equal(compact.overlayMaxWidth, 920);
+  assert.equal(compact.overlayMaxHeight, 512);
+  assert.equal(wide.compact, false);
+  assert.equal(wide.overlayMaxWidth, 920);
+  assert.equal(wide.overlayMaxHeight, 952);
+
+  ctx.plApplyStageLayout();
+  assert.equal(stageVars.get('--quiz-max-w'), '920px');
+  assert.equal(stageVars.get('--quiz-max-h'), '512px');
+  assert.equal(stageVars.get('--pl-layout-compact'), '1');
+
+  ctx.plResetStageFullscreenUI();
+  assert.equal(stageVars.size, 0);
+  assert.equal(bodyClasses.has('stage-fallback-open'), false);
 });
 
 test('중앙 문제·순위 카드 위에서 교사 도구와 QR을 조작하고 타임라인은 흐름을 유지한다', () => {
