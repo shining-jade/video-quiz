@@ -5961,7 +5961,7 @@ test('overlay geometry는 작은 stage의 타임라인 여백과 넓은 화면�
   };
   const bodyClasses = new Set(['stage-fallback-open']);
   const ctx = loadStageFunctions([
-    'plStagePlayerGeometry', 'plLayoutMode', 'plApplyStageLayout', 'plClearStageLayout',
+    'plStagePlayerGeometry', 'plLayoutMode', 'plStageTimelineSafeBottom', 'plApplyStageLayout', 'plClearStageLayout',
     'plResetStageFullscreenUI'
   ], {
     pl: { isStageFullscreen: true, stageFallback: true },
@@ -5990,6 +5990,42 @@ test('overlay geometry는 작은 stage의 타임라인 여백과 넓은 화면�
   ctx.plResetStageFullscreenUI();
   assert.equal(stageVars.size, 0);
   assert.equal(bodyClasses.has('stage-fallback-open'), false);
+});
+
+test('초소형 stage와 실제 타임라인 높이도 퀴즈 안전 영역 밖으로 넘지 않는다', () => {
+  const stageVars = new Map();
+  let timelineHeight = 180;
+  const stage = {
+    getBoundingClientRect() { return { width: 1024, height: 640 }; },
+    style: { setProperty(name, value) { stageVars.set(name, value); } }
+  };
+  const timeline = { getBoundingClientRect() { return { height: timelineHeight }; } };
+  const ctx = loadStageFunctions([
+    'plStagePlayerGeometry', 'plLayoutMode', 'plStageTimelineSafeBottom', 'plApplyStageLayout'
+  ], {
+    window: { innerWidth: 1024, innerHeight: 640 },
+    document: {
+      getElementById(id) {
+        return id === 'pl-stage' ? stage : id === 'pl-quiz-timeline' ? timeline : null;
+      }
+    }
+  });
+
+  for (const rect of [{ width: 240, height: 200 }, { width: 320, height: 240 }]) {
+    const layout = ctx.plLayoutMode(rect);
+    assert.ok(layout.overlayMaxWidth <= rect.width);
+    assert.ok(layout.overlayMaxHeight <= rect.height - layout.safeBottom);
+    assert.ok(layout.overlayMaxHeight >= 0);
+  }
+
+  ctx.plApplyStageLayout();
+  assert.equal(stageVars.get('--quiz-safe-bottom'), '212px');
+  assert.equal(stageVars.get('--quiz-max-h'), '428px');
+
+  timelineHeight = 0;
+  ctx.plApplyStageLayout();
+  assert.equal(stageVars.get('--quiz-safe-bottom'), '128px');
+  assert.equal(stageVars.get('--quiz-max-h'), '512px');
 });
 
 test('중앙 문제·순위 카드 위에서 교사 도구와 QR을 조작하고 타임라인은 흐름을 유지한다', () => {

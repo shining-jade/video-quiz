@@ -33,8 +33,10 @@ test('전체화면 퀴즈는 stage 기준의 안전 영역과 본문 내부 스�
 
   assert.match(html, /function plLayoutMode\(rect\)/);
   assert.match(html, /function plApplyStageLayout\(\)/);
+  assert.match(html, /function plStageTimelineSafeBottom\(stageHeight, timeline\)/);
+  assert.match(html, /--quiz-safe-bottom/);
   assert.match(html, /--quiz-max-w:\s*min\(920px,\s*calc\(100% - 32px\)\)/);
-  assert.match(html, /--quiz-max-h:\s*calc\(100% - 128px\)/);
+  assert.match(html, /--quiz-max-h:\s*calc\(100% - var\(--quiz-safe-bottom\)\)/);
   assert.match(html, /#pl-stage #overlay\s*\{[^}]*width:\s*var\(--quiz-max-w\)[^}]*max-height:\s*var\(--quiz-max-h\)[^}]*overflow:\s*hidden/s);
   assert.match(html, /#pl-stage #overlay \.quiz-body\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
   assert.match(html, /window\.addEventListener\('orientationchange', applyLayout\)/);

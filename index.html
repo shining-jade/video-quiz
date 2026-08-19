@@ -309,7 +309,8 @@ textarea { resize: vertical; min-height: 62px; }
 #pl-stage {
   position: relative;
   --quiz-max-w: min(920px, calc(100% - 32px));
-  --quiz-max-h: calc(100% - 128px);
+  --quiz-safe-bottom: 128px;
+  --quiz-max-h: calc(100% - var(--quiz-safe-bottom));
 }
 #pl-stage .pl-stage-tools { display: none; }
 #pl-stage .pl-stage-status {
@@ -4344,12 +4345,30 @@ function plStagePlayerGeometry(viewportWidth, viewportHeight, reservedHeight) {
 function plLayoutMode(rect) {
   const width = Math.max(0, Number(rect && rect.width) || 0);
   const height = Math.max(0, Number(rect && rect.height) || 0);
+  const safeBottom = Math.min(height, Math.max(0,
+    Number.isFinite(Number(rect && rect.safeBottom)) ? Number(rect.safeBottom) : 128
+  ));
+  const horizontalInset = Math.min(16, width / 2);
   const compact = width < 900 || height < 720;
   return {
     compact,
-    overlayMaxWidth: Math.max(280, Math.min(920, width - 32)),
-    overlayMaxHeight: Math.max(240, height - 128)
+    safeBottom,
+    overlayMaxWidth: Math.max(0, Math.min(920, width - horizontalInset * 2)),
+    overlayMaxHeight: Math.max(0, height - safeBottom)
   };
+}
+
+function plStageTimelineSafeBottom(stageHeight, timeline) {
+  const height = Math.max(0, Number(stageHeight) || 0);
+  let measuredHeight = 0;
+  try {
+    const rect = timeline && timeline.getBoundingClientRect ? timeline.getBoundingClientRect() : null;
+    measuredHeight = Number(rect && rect.height);
+  } catch (e) {}
+  if (!Number.isFinite(measuredHeight) || measuredHeight <= 0 || measuredHeight > height) {
+    return Math.min(height, 128);
+  }
+  return Math.min(height, Math.max(128, measuredHeight + 32));
 }
 
 function plApplyStageLayout() {
@@ -4358,10 +4377,13 @@ function plApplyStageLayout() {
   const rect = stage.getBoundingClientRect ? stage.getBoundingClientRect() : {};
   const width = Number(rect.width) || Number(window.innerWidth) || 0;
   const height = Number(rect.height) || Number(window.innerHeight) || 0;
-  const layout = plLayoutMode({ width, height });
+  const timeline = document.getElementById('pl-quiz-timeline');
+  const safeBottom = plStageTimelineSafeBottom(height, timeline);
+  const layout = plLayoutMode({ width, height, safeBottom });
   const player = plStagePlayerGeometry(width, height, layout.compact ? 252 : 176);
   stage.style.setProperty('--quiz-max-w', layout.overlayMaxWidth + 'px');
   stage.style.setProperty('--quiz-max-h', layout.overlayMaxHeight + 'px');
+  stage.style.setProperty('--quiz-safe-bottom', layout.safeBottom + 'px');
   stage.style.setProperty('--pl-layout-compact', layout.compact ? '1' : '0');
   stage.style.setProperty('--pl-player-width', player.width + 'px');
   stage.style.setProperty('--pl-player-height', player.height + 'px');
@@ -4371,7 +4393,7 @@ function plApplyStageLayout() {
 function plClearStageLayout() {
   const stage = document.getElementById('pl-stage');
   if (!stage || !stage.style || !stage.style.removeProperty) return;
-  ['--quiz-max-w', '--quiz-max-h', '--pl-layout-compact', '--pl-player-width', '--pl-player-height']
+  ['--quiz-max-w', '--quiz-max-h', '--quiz-safe-bottom', '--pl-layout-compact', '--pl-player-width', '--pl-player-height']
     .forEach(name => stage.style.removeProperty(name));
 }
 
@@ -4468,6 +4490,7 @@ function plRenderTimeline(force) {
     '<span class="pl-timeline-next"></span>' +
     '<span class="pl-timeline-announcement" aria-live="polite">' + announcement + '</span>';
   plUpdateTimeline(now, domain);
+  if (typeof plApplyStageLayout === 'function') plApplyStageLayout();
   return true;
 }
 
