@@ -4805,6 +4805,22 @@ function plReveal() {
     FirestoreStore.publicAnswer(question)
   );
 }
+
+/** 재생 시작은 close 확정 전에 확인한다. false/throw/rejection은 재시도 가능한 실패다. */
+async function plContinuePlayback(state) {
+  if (!state || !state.player || typeof state.player.playVideo !== 'function') {
+    return { ok: false, error: new Error('재생기를 찾을 수 없습니다.') };
+  }
+  try {
+    const result = state.player.playVideo();
+    const settled = result && typeof result.then === 'function' ? await result : result;
+    if (settled === false) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };
+  }
+}
+
 function plCloseQuestion() {
   const state = pl;
   if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
@@ -4846,9 +4862,35 @@ function plCloseQuestion() {
     if (!stillCurrent()) return false;
     await plPushBoard();
     if (!stillCurrent()) return false;
+    const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
+    let playbackStarted = false;
+    if (!hasQueuedFollowup) {
+      const playback = typeof plContinuePlayback === 'function'
+        ? await plContinuePlayback(state)
+        : { ok: (() => {
+          try { return !state.player || !state.player.playVideo || state.player.playVideo() !== false; }
+          catch (error) { return false; }
+        })() };
+      if (!playback.ok) {
+        state.closeError = '동영상 재생을 시작하지 못했습니다. 계속 재생을 다시 시도해 주세요.';
+        if (typeof toast === 'function') toast(state.closeError);
+        return false;
+      }
+      playbackStarted = true;
+      if (!stillCurrent()) {
+        try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {}
+        return false;
+      }
+    }
     const closed = await store.closeLive(state.sessionId, identity);
-    if (!closed) return false;
-    if (pl !== state || state.closeFlight !== flight) return false;
+    if (!closed) {
+      if (playbackStarted) { try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {} }
+      return false;
+    }
+    if (pl !== state || state.closeFlight !== flight) {
+      if (playbackStarted) { try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {} }
+      return false;
+    }
     if (Number(state.live && state.live.q) !== questionIndex &&
         Number(state.live && state.live.q) !== -1) return false;
     if (Number(state.live && state.live.q) === questionIndex) {
@@ -4869,7 +4911,6 @@ function plCloseQuestion() {
     }
     if (typeof plTick === 'function') plTick();
     if (state.transitionUntil || state.playlistDone) return true;
-    try { state.player.playVideo(); } catch (e) {}
     return true;
   };
 

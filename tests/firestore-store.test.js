@@ -3798,7 +3798,7 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
   assert.deepEqual(order, ['grade-start']);
   resolveGrade();
   await Promise.all([firstGrade, secondGrade, closing]);
-  assert.deepEqual(order, ['grade-start', 'grade-end', 'board', 'live-close', 'play']);
+  assert.deepEqual(order, ['grade-start', 'grade-end', 'board', 'play', 'live-close']);
 });
 
 test('grade failure keeps the frozen question and queue retryable until grading succeeds', async () => {
@@ -6032,8 +6032,8 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   await context.plCloseQuestion();
 
   assert.equal(calls.filter(call => call === 'board').length, 1);
-  assert.deepEqual(clone(calls[2]), ['live', 'session-a', { q: 0, openedAt: undefined }]);
-  assert.equal(calls[3], 'play');
+  assert.equal(calls[2], 'play');
+  assert.deepEqual(clone(calls[3]), ['live', 'session-a', { q: 0, openedAt: undefined }]);
 });
 
 test('정답 공개 전 교사 오버레이는 제출 인원만 보이고 정답과 보기별 수를 숨긴다', () => {
@@ -9033,7 +9033,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
   assert.equal(context.pl.live.q, -1);
 });
 
-test('계속 재생은 overlay와 dim을 먼저 정리한 뒤 player를 재생하고 완료 문항을 확정한다', async () => {
+test('계속 재생은 player 시작을 확인한 뒤 overlay·dim을 정리하고 완료 문항을 확정한다', async () => {
   const order = [];
   const classes = {
     add() {},
@@ -9067,8 +9067,58 @@ test('계속 재생은 overlay와 dim을 먼저 정리한 뒤 player를 재생�
   assert.equal(trigger.state()[0], 'completed');
   assert.ok(order.indexOf('overlay') >= 0);
   assert.ok(order.indexOf('class:quiz-open') >= 0);
-  assert.ok(order.indexOf('overlay') < order.indexOf('play'));
-  assert.ok(order.indexOf('class:quiz-open') < order.indexOf('play'));
+  assert.ok(order.indexOf('play') < order.indexOf('overlay'));
+  assert.ok(order.indexOf('play') < order.indexOf('class:quiz-open'));
+});
+
+test('계속 재생이 첫 시도에 실패하면 live·overlay·open 상태를 보존하고 다음 시도에서만 완료한다', async () => {
+  let attempts = 0;
+  let closes = 0;
+  const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
+  trigger.advance({ videoIndex: 0, previousTime: 173, currentTime: 174, event: 'tick' });
+  trigger.open(0);
+  const state = {
+    sessionId: 'session1', live: { q: 0, openedAt: 1, liveToken: 'token' },
+    liveGeneration: 0, dueQuestions: [], fired: [true], quizTrigger: trigger,
+    flatQuestions: [{ t: 174, videoIndex: 0 }], set: { settings: {} },
+    player: {
+      playVideo() {
+        attempts += 1;
+        if (attempts === 1) throw new Error('autoplay blocked');
+      }
+    }
+  };
+  const context = {
+    pl: state, FirestoreCore: core,
+    store: {
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; }, async closeLive() { closes += 1; return true; }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; }, plTick() {}, plRenderOverlay() {},
+    console
+  };
+  loadStageFunctions(['plContinuePlayback', 'plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), false);
+  assert.equal(state.live.q, 0);
+  assert.equal(trigger.state()[0], 'open');
+  assert.equal(closes, 0);
+  assert.match(state.closeError, /재생/);
+
+  assert.equal(await context.plCloseQuestion(), true);
+  assert.equal(state.live.q, -1);
+  assert.equal(trigger.state()[0], 'completed');
+  assert.equal(closes, 1);
+  assert.equal(attempts, 2);
+});
+
+test('계속 재생 시작기는 false·throw·Promise rejection을 모두 재시도 가능한 실패로 반환한다', async () => {
+  const ctx = loadStageFunctions(['plContinuePlayback'], {});
+  assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { return false; } } })).ok, false);
+  assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { throw new Error('blocked'); } } })).ok, false);
+  assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { return Promise.reject(new Error('async')); } } })).ok, false);
+  assert.equal((await ctx.plContinuePlayback({ player: { playVideo() {} } })).ok, true);
 });
 
 test('player tick은 quiz trigger가 준 문항만 queue하고 완료 직후 같은 시각을 다시 넣지 않는다', () => {
