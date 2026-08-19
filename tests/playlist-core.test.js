@@ -50,3 +50,44 @@ test('returns the next video start time or a completed playback state', () => {
     done: true, videoIndex: 1, startSec: null
   });
 });
+
+test('문항을 다른 영상으로 옮기면 상대 시각과 canonical 이미지 키가 함께 이동한다', () => {
+  const videos = [
+    { startSec: 10, endSec: 110, questions: [{ t: 60, q: '중간' }] },
+    { startSec: 200, endSec: 240, questions: [] }
+  ];
+  const moved = core.moveQuestion(videos, { v0q0: 'data:image/png;base64,A' },
+    { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
+  assert.equal(moved.videos[1].questions[0].t, 220);
+  assert.equal(moved.images.v1q0, 'data:image/png;base64,A');
+  assert.equal(moved.images.v0q0, undefined);
+  assert.equal(videos[0].questions[0].t, 60);
+});
+
+test('같은 영상 아래로 이동할 때 제거 후 목적지 index를 보정한다', () => {
+  const moved = core.moveQuestion([
+    { questions: [{ t: 1, id: 'a' }, { t: 2, id: 'b' }, { t: 3, id: 'c' }] }
+  ], {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 0, questionIndex: 2 });
+  assert.deepEqual(moved.videos[0].questions.map(q => q.id), ['b', 'a', 'c']);
+});
+
+test('빈 재생구간은 목적지 시작시각으로 안전하게 clamp하고, 동일位置는 no-op이다', () => {
+  const videos = [
+    { startSec: 10, endSec: 10, questions: [{ t: 10, id: 'a' }] },
+    { startSec: 200, endSec: null, questions: [] }
+  ];
+  const moved = core.moveQuestion(videos, {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 1, questionIndex: 0 });
+  assert.equal(moved.videos[1].questions[0].t, 200);
+  const same = core.moveQuestion(videos, {}, { videoIndex: 0, questionIndex: 0 }, { videoIndex: 0, questionIndex: 0 });
+  assert.equal(same.moved, false);
+  assert.deepEqual(same.videos, videos);
+});
+
+test('무효 위치는 입력을 변경하지 않고 이동하지 않는다', () => {
+  const videos = [{ questions: [{ t: 1, id: 'a' }] }];
+  const images = { v0q0: 'img' };
+  const result = core.moveQuestion(videos, images, { videoIndex: 4, questionIndex: 0 }, { videoIndex: 0, questionIndex: 0 });
+  assert.equal(result.moved, false);
+  assert.deepEqual(result.videos, videos);
+  assert.deepEqual(result.images, images);
+});

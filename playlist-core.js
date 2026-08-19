@@ -50,5 +50,66 @@
       : { done: false, videoIndex: next, startSec: n(videos[next].startSec) };
   }
 
-  return { normalizeVideos, flattenQuestions, timelineRatio, validateVideo, nextPlaybackState };
+  function clone(value) {
+    if (value == null) return value;
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function playbackDomain(video) {
+    const startValue = video && video.startSec != null ? video.startSec : video && video.start;
+    const endValue = video && video.endSec != null ? video.endSec : video && video.end;
+    const start = Math.max(0, Number(startValue) || 0);
+    const end = endValue == null || endValue === '' ? null : Number(endValue);
+    return { start, end: Number.isFinite(end) ? end : null };
+  }
+
+  function moveQuestion(rawVideos, rawImages, from, to) {
+    const videos = clone(Array.isArray(rawVideos) ? rawVideos : []);
+    const images = clone(rawImages && typeof rawImages === 'object' && !Array.isArray(rawImages) ? rawImages : {});
+    const validPosition = position => position && Number.isInteger(position.videoIndex) &&
+      Number.isInteger(position.questionIndex) && position.videoIndex >= 0 && position.questionIndex >= 0;
+    if (!validPosition(from) || !validPosition(to) || !videos[from.videoIndex] || !videos[to.videoIndex]) {
+      return { videos, images, moved: false };
+    }
+    const sourceQuestions = Array.isArray(videos[from.videoIndex].questions)
+      ? videos[from.videoIndex].questions : [];
+    if (from.questionIndex >= sourceQuestions.length ||
+        (from.videoIndex === to.videoIndex && from.questionIndex === to.questionIndex)) {
+      return { videos, images, moved: false };
+    }
+    const questionImages = new WeakMap();
+    videos.forEach((video, videoIndex) => {
+      (video && video.questions || []).forEach((question, questionIndex) => {
+        const canonical = 'v' + videoIndex + 'q' + questionIndex;
+        const legacy = String(questionIndex);
+        if (Object.prototype.hasOwnProperty.call(images, canonical)) questionImages.set(question, images[canonical]);
+        else if (Object.prototype.hasOwnProperty.call(images, legacy)) questionImages.set(question, images[legacy]);
+      });
+    });
+    const movedQuestion = sourceQuestions.splice(from.questionIndex, 1)[0];
+    let targetIndex = Math.min(to.questionIndex, (videos[to.videoIndex].questions || []).length);
+    if (from.videoIndex === to.videoIndex && to.questionIndex > from.questionIndex) targetIndex -= 1;
+    targetIndex = Math.max(0, targetIndex);
+    if (from.videoIndex !== to.videoIndex) {
+      const oldDomain = playbackDomain(rawVideos[from.videoIndex]);
+      const newDomain = playbackDomain(rawVideos[to.videoIndex]);
+      const span = oldDomain.end != null ? oldDomain.end - oldDomain.start : 0;
+      const newSpan = newDomain.end != null ? newDomain.end - newDomain.start : 0;
+      const ratio = span > 0 && Number.isFinite(Number(movedQuestion.t))
+        ? Math.max(0, Math.min(1, (Number(movedQuestion.t) - oldDomain.start) / span)) : 0;
+      movedQuestion.t = Math.round(newDomain.start + (newSpan > 0 ? ratio * newSpan : 0));
+    }
+    videos[to.videoIndex].questions = Array.isArray(videos[to.videoIndex].questions)
+      ? videos[to.videoIndex].questions : [];
+    videos[to.videoIndex].questions.splice(targetIndex, 0, movedQuestion);
+    const normalizedImages = {};
+    videos.forEach((video, videoIndex) => (video.questions || []).forEach((question, questionIndex) => {
+      if (question && typeof question === 'object' && questionImages.has(question)) {
+        normalizedImages['v' + videoIndex + 'q' + questionIndex] = questionImages.get(question);
+      }
+    }));
+    return { videos, images: normalizedImages, moved: true };
+  }
+
+  return { normalizeVideos, flattenQuestions, timelineRatio, validateVideo, nextPlaybackState, moveQuestion };
 });
