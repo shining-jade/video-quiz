@@ -538,22 +538,6 @@
         throw new Error('영구 삭제 방식이 올바르지 않습니다.');
       }
       const reference = db.doc('quiz_sets/' + setId);
-      const currentSnapshot = await reference.get();
-      const currentSet = quizSetValue(currentSnapshot);
-      let imageCount = currentSet && Number.isInteger(currentSet.imageCount)
-        ? currentSet.imageCount : null;
-      if (imageCount === null) {
-        const imageSnapshot = await db.collection('images/' + setId + '/q').get();
-        imageCount = imageSnapshot.size;
-      }
-      let collaboratorCount = currentSet && Number.isInteger(currentSet.collaboratorCount)
-        ? currentSet.collaboratorCount : null;
-      if (collaboratorCount === null) {
-        const collaboratorSnapshot = await db.collection(
-          'quiz_sets/' + setId + '/collaborators'
-        ).get();
-        collaboratorCount = collaboratorSnapshot.size;
-      }
       return db.runTransaction(async transaction => {
         const snapshot = await transaction.get(reference);
         const set = quizSetValue(snapshot);
@@ -561,6 +545,11 @@
           throw new Error('휴지통에 있는 세트만 영구 삭제할 수 있습니다.');
         }
         if (set.purgeStartedAt) return { started: false, purgeStartedAt: purgeDateMillis(set) };
+        if (!Number.isInteger(set.collaboratorCount) || set.collaboratorCount < 0 ||
+            set.collaboratorCount > 20 || !Number.isInteger(set.imageCount) ||
+            set.imageCount < 0) {
+          throw new Error('영구 삭제 전에 세트 문서의 authoritative counter migration이 필요합니다.');
+        }
         const owner = set.ownerUid === current.uid;
         const admin = current.role === 'admin';
         const expired = collaboration.trashRetention(set, nowFn()).expired;
@@ -572,9 +561,7 @@
         }
         transaction.set(reference, {
           purgeStartedAt: fieldValue.serverTimestamp(),
-          lifecycleState: 'purging',
-          imageCount,
-          collaboratorCount
+          lifecycleState: 'purging'
         }, { merge: true });
         return { started: true };
       });
@@ -777,6 +764,10 @@
     const ownedQuizSet = (value, teacher) => ({
       ...withoutDocumentId(value),
       lifecycleState: withoutDocumentId(value).lifecycleState || 'active',
+      imageCount: Number.isInteger(withoutDocumentId(value).imageCount)
+        ? withoutDocumentId(value).imageCount : 0,
+      collaboratorCount: Number.isInteger(withoutDocumentId(value).collaboratorCount)
+        ? withoutDocumentId(value).collaboratorCount : 0,
       ownerUid: teacher && teacher.uid || '',
       ownerEmail: teacher && teacher.email || ''
     });
@@ -813,6 +804,8 @@
         db.doc('quiz_sets/' + setId).get(),
         db.collection(path).get().then(collectionValue)
       ]);
+      let counterReady = parentSnapshot.exists &&
+        Number.isInteger((parentSnapshot.data() || {}).imageCount);
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)
@@ -830,6 +823,62 @@
         }
       });
       assertRequestAllowed(requestEstimate(storedSet, next, estimateOptions));
+      if (!parentSnapshot.exists && Number.isInteger(storedSet.imageCount)) {
+        await db.doc('quiz_sets/' + setId).set({
+          ...withoutDocumentId(storedSet), imageCount: 0
+        }, { merge: true });
+        counterReady = true;
+      }
+      if (counterReady) {
+        const parentReference = db.doc('quiz_sets/' + setId);
+        let count = parentSnapshot.exists ? Number(parentSnapshot.data().imageCount) : 0;
+        const operations = [];
+        Object.entries(current).forEach(([questionIndex]) => {
+          if (!Object.prototype.hasOwnProperty.call(next, questionIndex) &&
+              questionIndex === imageKey(questionIndex)) {
+            operations.push({ key: questionIndex, action: 'remove' });
+          }
+        });
+        Object.entries(next).forEach(([questionIndex]) => {
+          operations.push({
+            key: questionIndex,
+            action: Object.prototype.hasOwnProperty.call(current, questionIndex)
+              ? 'update' : 'add',
+            data: next[questionIndex]
+          });
+        });
+        let first = true;
+        for (const operation of operations) {
+          const childReference = db.doc(path + '/' + operation.key);
+          await db.runTransaction(async transaction => {
+            const latestParent = await transaction.get(parentReference);
+            const latestChild = await transaction.get(childReference);
+            const latest = quizSetValue(latestParent) || {};
+            let nextCount = Number.isInteger(latest.imageCount) ? latest.imageCount : count;
+            if (operation.action === 'add' && !latestChild.exists) nextCount += 1;
+            if (operation.action === 'remove' && latestChild.exists) nextCount -= 1;
+            const patch = {};
+            if (first) {
+              const base = withoutDocumentId(storedSet);
+              delete base.imageCount;
+              delete base.imageMutation;
+              Object.assign(patch, base);
+            }
+            patch.imageCount = nextCount;
+            patch.contentRevision = fieldValue.serverTimestamp();
+            if (operation.action !== 'update') {
+              patch.imageMutation = { key: operation.key, action: operation.action };
+            }
+            transaction.set(parentReference, patch, { merge: true });
+            if (operation.action === 'remove') transaction.delete(childReference);
+            else transaction.set(childReference, { data: operation.data });
+            count = nextCount;
+            first = false;
+          });
+        }
+        if (first) await parentReference.set({ ...withoutDocumentId(storedSet), imageCount: count }, { merge: true });
+        return;
+      }
       const batch = db.batch();
       batch.set(db.doc('quiz_sets/' + setId), storedSet);
       deletes.forEach(questionIndex => batch.delete(db.doc(path + '/' + questionIndex)));
@@ -898,6 +947,12 @@
         db.doc('quiz_sets/' + setId).get(),
         db.collection(path).get().then(collectionValue)
       ]);
+      if (parentSnapshot.exists && Number.isInteger((parentSnapshot.data() || {}).imageCount)) {
+        await saveQuizSetWithImages(setId, {
+          ...(parentSnapshot.data() || {}), contentRevision: fieldValue.serverTimestamp()
+        }, images, actor);
+        return;
+      }
       const deletes = Object.keys(current).filter(questionIndex =>
         questionIndex !== imageKey(questionIndex) ||
         !Object.prototype.hasOwnProperty.call(next, questionIndex)

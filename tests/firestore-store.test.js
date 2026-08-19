@@ -520,15 +520,14 @@ test('휴지통 purge는 collaborators/images를 200개 이하 batch로 지우�
   const initial = {
     'quiz_sets/set-purge': {
       ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
-      trashedAt: 1, purgeStartedAt: null
+      trashedAt: 1, purgeStartedAt: null, collaboratorCount: 0, imageCount: 201
     },
     'sessions/keep': { teacherUid: 'owner' },
     'sessions/keep/snapshot/set': { title: 'keep' }
   };
   for (let index = 0; index < 201; index += 1) {
-    initial['quiz_sets/set-purge/collaborators/e' + index + '@school.kr'] = { email: 'e' + index + '@school.kr' };
+    initial['images/set-purge/q/v0q' + index] = { data: 'image' };
   }
-  initial['images/set-purge/q/v0q0'] = { data: 'image' };
   const fake = makeFirestoreFake(initial, { committedServerMillis: 100 });
   const store = createStore(fake);
   await store.beginSetPurge('set-purge', 'immediate', { uid: 'owner', role: 'teacher' });
@@ -538,7 +537,7 @@ test('휴지통 purge는 collaborators/images를 200개 이하 batch로 지우�
   assert.equal(fake.has('quiz_sets/set-purge'), true);
   const second = await store.continueSetPurge('set-purge');
   assert.equal(second.done, false);
-  assert.equal(second.deleted, 2);
+  assert.equal(second.deleted, 1);
   const completed = await store.continueSetPurge('set-purge');
   assert.equal(completed.parentDeleted, true);
   assert.equal(fake.has('quiz_sets/set-purge'), false);
@@ -553,7 +552,7 @@ test('purge는 30일 경계 전 admin을 거부하고 경계 후에만 시작한
   const fake = makeFirestoreFake({
     'quiz_sets/set-expired': {
       ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
-      trashedAt: 1, purgeStartedAt: null
+      trashedAt: 1, purgeStartedAt: null, collaboratorCount: 0, imageCount: 0
     }
   }, { committedServerMillis: 1 + 30 * 86400000 - 1 });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1 + 30 * 86400000 - 1);
@@ -564,7 +563,7 @@ test('purge는 30일 경계 전 admin을 거부하고 경계 후에만 시작한
   const exactFake = makeFirestoreFake({
     'quiz_sets/set-expired': {
       ownerUid: 'owner', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
-      trashedAt: 1, purgeStartedAt: null
+      trashedAt: 1, purgeStartedAt: null, collaboratorCount: 0, imageCount: 0
     }
   }, { committedServerMillis: 1 + 30 * 86400000 });
   const exactStore = createFirestoreStore(exactFake.db, exactFake.fieldValue, () => 1 + 30 * 86400000);
