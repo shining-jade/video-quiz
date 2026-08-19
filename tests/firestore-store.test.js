@@ -698,6 +698,53 @@ test('승인 프로브는 교사 보호 문서가 거부되면 미승인으로 �
   ]).probeTeacherAllowance('admin@school.kr'), { enabled: true, role: 'admin' });
 });
 
+test('allowance API canonicalizes email and writes audited admin changes', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+  const admin = { uid: 'admin-uid', email: 'ADMIN@School.KR', role: 'admin', authGeneration: 7 };
+
+  await store.upsertTeacherAllowance(' New@School.KR ', 'teacher', admin);
+  const stored = fake.value('teacher_allowlist/new@school.kr');
+  assert.equal(stored.enabled, true);
+  assert.equal(stored.role, 'teacher');
+  assert.equal(stored.updatedByUid, 'admin-uid');
+  assert.equal(stored.updatedAt.toMillis(), 50_000);
+
+  const allowances = await store.listTeacherAllowances(admin);
+  assert.deepEqual(allowances['admin@school.kr'], { enabled: true, role: 'admin' });
+  assert.equal(allowances['new@school.kr'].role, 'teacher');
+
+  await store.disableTeacherAllowance('new@school.kr', admin);
+  assert.equal(fake.value('teacher_allowlist/new@school.kr').enabled, false);
+  await assert.rejects(
+    store.disableTeacherAllowance('ADMIN@School.KR', admin),
+    /자기 계정/
+  );
+});
+
+test('allowance API rejects non-admin, invalid role, empty email and stale auth generation before writes', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+  await assert.rejects(store.upsertTeacherAllowance('x@school.kr', 'owner', {
+    uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
+  }), /역할/);
+  await assert.rejects(store.upsertTeacherAllowance('', 'teacher', {
+    uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
+  }), /이메일/);
+  await assert.rejects(store.upsertTeacherAllowance('x@school.kr', 'teacher', {
+    uid: 'teacher-uid', email: 'teacher@school.kr', role: 'teacher'
+  }), /관리자/);
+  await assert.rejects(store.upsertTeacherAllowance('x@school.kr', 'teacher', {
+    uid: 'admin-uid', email: 'admin@school.kr', role: 'admin',
+    authGeneration: 2, currentAuthGeneration: 3
+  }), /로그인/);
+  assert.equal(fake.value('teacher_allowlist/x@school.kr'), undefined);
+});
+
 test('새 세트와 사본은 현재 교사를 소유자로 기록한다', async () => {
   const fake = makeFirestoreFake();
   const store = createStore(fake);

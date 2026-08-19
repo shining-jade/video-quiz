@@ -1977,19 +1977,73 @@ rulesTest('역할별 create/update/delete 권한 매트릭스를 지킨다', asy
   }
 });
 
-rulesTest('승인 목록은 모든 클라이언트의 get/list/create/update/delete를 거부한다', async () => {
+rulesTest('승인 목록은 admin만 읽고 쓰며 다른 클라이언트에는 비공개다', async () => {
   for (const actorName of actorNames) {
     await resetFirestore();
     const db = actorFirestore(actorName);
-    await assertFails(getDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
-    await assertFails(getDocs(collection(db, 'teacher_allowlist')));
-    await assertFails(setDoc(doc(db, `teacher_allowlist/new-${actorName}@school.kr`), {
-      enabled: true,
-      role: 'teacher'
+    const allowed = actorName === 'admin';
+    await expectPermission(allowed, getDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
+    await expectPermission(allowed, getDocs(collection(db, 'teacher_allowlist')));
+    const createRequest = setDoc(doc(db, `teacher_allowlist/new-${actorName}@school.kr`), {
+      enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: actors[actorName].uid
+    });
+    await expectPermission(allowed, createRequest);
+    await expectPermission(allowed, updateDoc(doc(db, 'teacher_allowlist/owner@school.kr'), {
+      enabled: false, updatedAt: serverTimestamp(), updatedByUid: actors[actorName].uid
     }));
-    await assertFails(updateDoc(doc(db, 'teacher_allowlist/owner@school.kr'), { enabled: false }));
     await assertFails(deleteDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
   }
+});
+
+rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고 자기 admin은 보호한다', async () => {
+  await resetFirestore();
+  const admin = actorFirestore('admin');
+  await assertSucceeds(getDoc(doc(admin, 'teacher_allowlist/admin@school.kr')));
+  await assertSucceeds(getDocs(collection(admin, 'teacher_allowlist')));
+  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
+    enabled: true,
+    role: 'teacher',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+  await assertSucceeds(updateDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
+    enabled: false,
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/bad-role@school.kr'), {
+    enabled: true,
+    role: 'owner',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/extra@school.kr'), {
+    enabled: true,
+    role: 'teacher',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid',
+    extra: true
+  }));
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/mismatch@school.kr'), {
+    enabled: true,
+    role: 'teacher',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'other-uid'
+  }));
+  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/admin@school.kr'), {
+    enabled: false,
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/admin@school.kr'), {
+    role: 'teacher',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+  await assertFails(deleteDoc(doc(admin, 'teacher_allowlist/new@school.kr')));
+  await assertFails(setDoc(doc(actorFirestore('owner'), 'teacher_allowlist/blocked@school.kr'), {
+    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'owner-uid'
+  }));
 });
 
 rulesTest('승인 문서만으로는 비Google·미검증·비활성 계정에 교사 권한을 주지 않는다', async () => {

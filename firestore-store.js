@@ -342,6 +342,89 @@
       }
     }
 
+    const canonicalTeacherEmail = email => String(email == null ? '' : email).trim().toLowerCase();
+
+    function allowanceData(snapshot) {
+      if (!snapshot || !snapshot.exists) return null;
+      const data = snapshot.data() || {};
+      return {
+        enabled: data.enabled === true,
+        role: data.role === 'admin' ? 'admin' : 'teacher',
+        ...(data.updatedAt == null ? {} : { updatedAt: timestampMillis(data.updatedAt) }),
+        ...(data.updatedByUid == null ? {} : { updatedByUid: data.updatedByUid })
+      };
+    }
+
+    async function requireCurrentAdmin(actor) {
+      const value = actor || {};
+      const email = canonicalTeacherEmail(value.email);
+      if (!value.uid || !email || value.role !== 'admin') {
+        throw new Error('관리자 계정만 승인 교사 목록을 변경할 수 있습니다.');
+      }
+      if (value.authGeneration != null && value.currentAuthGeneration != null &&
+          value.authGeneration !== value.currentAuthGeneration) {
+        throw new Error('로그인 상태가 변경되어 다시 시도해 주세요.');
+      }
+      const snapshot = await db.doc('teacher_allowlist/' + email).get({ source: 'server' });
+      const allowance = allowanceData(snapshot);
+      if (!allowance || allowance.enabled !== true || allowance.role !== 'admin') {
+        throw new Error('현재 계정의 관리자 승인이 더 이상 유효하지 않습니다.');
+      }
+      return { ...value, email, allowance };
+    }
+
+    function validateAllowanceRole(role) {
+      if (role !== 'teacher' && role !== 'admin') {
+        throw new Error('역할은 teacher 또는 admin이어야 합니다.');
+      }
+    }
+
+    async function listTeacherAllowances(actor) {
+      await requireCurrentAdmin(actor);
+      const snapshot = await db.collection('teacher_allowlist').get();
+      return Object.fromEntries(snapshot.docs.map(document => [
+        canonicalTeacherEmail(document.id), allowanceData(document)
+      ]));
+    }
+
+    async function upsertTeacherAllowance(email, role, actor) {
+      const current = await requireCurrentAdmin(actor);
+      const normalizedEmail = canonicalTeacherEmail(email);
+      if (!normalizedEmail || !normalizedEmail.includes('@')) {
+        throw new Error('유효한 이메일을 입력해 주세요.');
+      }
+      validateAllowanceRole(role);
+      if (normalizedEmail === current.email && role !== 'admin') {
+        throw new Error('현재 관리자 계정은 자기 계정을 teacher로 낮출 수 없습니다.');
+      }
+      await db.doc('teacher_allowlist/' + normalizedEmail).set({
+        enabled: true,
+        role,
+        updatedAt: fieldValue.serverTimestamp(),
+        updatedByUid: current.uid
+      }, { merge: true });
+      return db.doc('teacher_allowlist/' + normalizedEmail).get({ source: 'server' })
+        .then(allowanceData);
+    }
+
+    async function disableTeacherAllowance(email, actor) {
+      const current = await requireCurrentAdmin(actor);
+      const normalizedEmail = canonicalTeacherEmail(email);
+      if (!normalizedEmail || !normalizedEmail.includes('@')) {
+        throw new Error('유효한 이메일을 입력해 주세요.');
+      }
+      if (normalizedEmail === current.email) {
+        throw new Error('현재 관리자 계정은 자기 계정을 비활성화할 수 없습니다.');
+      }
+      await db.doc('teacher_allowlist/' + normalizedEmail).set({
+        enabled: false,
+        updatedAt: fieldValue.serverTimestamp(),
+        updatedByUid: current.uid
+      }, { merge: true });
+      return db.doc('teacher_allowlist/' + normalizedEmail).get({ source: 'server' })
+        .then(allowanceData);
+    }
+
     async function listQuizSets() {
       const snapshot = await db.collection('quiz_sets').get();
       return snapshot.docs.map(quizSetValue);
@@ -1126,6 +1209,9 @@
 
     return {
       probeTeacherAllowance,
+      listTeacherAllowances,
+      upsertTeacherAllowance,
+      disableTeacherAllowance,
       listQuizSets,
       getQuizSet,
       saveQuizSet,

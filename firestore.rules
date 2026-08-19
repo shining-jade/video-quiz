@@ -36,6 +36,22 @@ service cloud.firestore {
       return isApprovedTeacher() && allowance().data.role == 'admin';
     }
 
+    function validAllowanceDocument() {
+      return request.resource.data.keys().hasOnly([
+          'enabled', 'role', 'updatedAt', 'updatedByUid'
+        ]) &&
+        request.resource.data.enabled is bool &&
+        request.resource.data.role in ['teacher', 'admin'] &&
+        request.resource.data.updatedAt is timestamp &&
+        request.resource.data.updatedByUid == request.auth.uid;
+    }
+
+    function protectsCurrentAdmin(email) {
+      return email == request.auth.token.email &&
+        resource.data.get('role', null) == 'admin' &&
+        (!request.resource.data.enabled || request.resource.data.role != 'admin');
+    }
+
     function ownsSet(setId) {
       return isApprovedTeacher() &&
         exists(/databases/$(database)/documents/quiz_sets/$(setId)) &&
@@ -412,6 +428,11 @@ service cloud.firestore {
     }
 
     match /teacher_allowlist/{email} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && validAllowanceDocument();
+      allow update: if isAdmin() && validAllowanceDocument() &&
+        !protectsCurrentAdmin(email);
+      allow delete: if false;
       allow read, write: if false;
     }
 
