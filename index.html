@@ -311,6 +311,8 @@ textarea { resize: vertical; min-height: 62px; }
   --quiz-max-w: min(920px, calc(100% - 32px));
   --quiz-safe-bottom: 128px;
   --quiz-max-h: calc(100% - var(--quiz-safe-bottom));
+  --quiz-center-y: 50%;
+  --quiz-actions-min-h: 56px;
 }
 #pl-stage .pl-stage-tools { display: none; }
 #pl-stage .pl-stage-status {
@@ -439,21 +441,26 @@ body.stage-fallback-open { overflow: hidden; }
   box-shadow: 0 24px 80px rgba(0,0,0,.5); z-index: 200; padding: 26px 30px; overflow-y: auto;
 }
 #pl-stage.quiz-open #overlay {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  position: absolute; left: 50%; top: var(--quiz-center-y); transform: translate(-50%, -50%);
 }
 #pl-stage #overlay {
-  width: var(--quiz-max-w); max-height: var(--quiz-max-h); overflow: hidden;
+  width: var(--quiz-max-w); max-height: var(--quiz-max-h); overflow: auto;
+  overscroll-behavior: contain;
   display: flex; flex-direction: column;
 }
 #pl-stage #overlay .ov-inner {
-  display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; max-height: 100%;
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+  flex: 1 1 auto; min-height: 0; max-height: 100%;
 }
 #pl-stage #overlay .quiz-body {
   min-height: 0; overflow: auto; overscroll-behavior: contain; padding-right: 3px;
 }
 #pl-stage #overlay .ov-top,
 #pl-stage #overlay .ov-actions { flex: none; }
-#pl-stage #overlay .ov-actions { margin-bottom: 0; padding-top: 16px; }
+#pl-stage #overlay .ov-actions {
+  min-height: var(--quiz-actions-min-h); margin-bottom: 0; padding-top: 16px;
+  background: rgba(18,22,42,.96); position: relative; z-index: 1;
+}
 #pl-stage #overlay .ov-q { font-size: clamp(20px, 3.4vw, 38px); }
 #pl-stage #overlay .q-img { max-height: min(34vh, 260px); }
 /* iframe을 옮기거나 다시 만들지 않고 같은 영상 위에 중앙 카드를 겹친다. */
@@ -2129,6 +2136,13 @@ function mkHistorySnapshot(state) {
     activeVideo: Number(source.activeVideo) || 0
   };
 }
+#pl-stage.pl-layout-ultra #overlay { overflow: auto; padding: 10px; }
+#pl-stage.pl-layout-ultra #overlay .ov-top { gap: 7px; margin-bottom: 8px; font-size: 12px; }
+#pl-stage.pl-layout-ultra #overlay .ov-q { font-size: 18px; margin-bottom: 10px; }
+#pl-stage.pl-layout-ultra #overlay .ov-actions {
+  position: sticky; bottom: 0; gap: 6px; padding-top: 8px;
+}
+#pl-stage.pl-layout-ultra #overlay .ov-actions .btn { padding: 8px 10px; font-size: 13px; }
 
 function mkSnapshotsEqual(left, right) {
   return !!right && JSON.stringify(left) === JSON.stringify(right);
@@ -4345,17 +4359,48 @@ function plStagePlayerGeometry(viewportWidth, viewportHeight, reservedHeight) {
 function plLayoutMode(rect) {
   const width = Math.max(0, Number(rect && rect.width) || 0);
   const height = Math.max(0, Number(rect && rect.height) || 0);
-  const safeBottom = Math.min(height, Math.max(0,
+  const defaultBottom = height - Math.min(height, Math.max(0,
     Number.isFinite(Number(rect && rect.safeBottom)) ? Number(rect.safeBottom) : 128
   ));
+  const usableTop = Math.min(height, Math.max(0, Number(rect && rect.usableTop) || 0));
+  const usableBottom = Math.min(height, Math.max(usableTop,
+    Number.isFinite(Number(rect && rect.usableBottom)) ? Number(rect.usableBottom) : defaultBottom
+  ));
+  const usableHeight = Math.max(0, usableBottom - usableTop);
   const horizontalInset = Math.min(16, width / 2);
   const compact = width < 900 || height < 720;
   return {
     compact,
-    safeBottom,
+    ultraCompact: usableHeight < 176,
+    safeBottom: Math.max(0, height - usableBottom),
+    usableTop,
+    usableBottom,
+    usableHeight,
+    overlayCenterY: usableTop + usableHeight / 2,
     overlayMaxWidth: Math.max(0, Math.min(920, width - horizontalInset * 2)),
-    overlayMaxHeight: Math.max(0, height - safeBottom)
+    overlayMaxHeight: usableHeight,
+    actionVisibleHeight: Math.min(56, usableHeight)
   };
+}
+
+function plStageUsableQuizRect(stageRect, timelineRect) {
+  const stageTop = Number(stageRect && stageRect.top) || 0;
+  const height = Math.max(0, Number(stageRect && stageRect.height) || 0);
+  const stageBottom = stageTop + height;
+  const inset = Math.min(16, height / 2);
+  const timelineTop = Number(timelineRect && timelineRect.top);
+  const hasTimelineTop = Number.isFinite(timelineTop) &&
+    timelineTop > stageTop + inset && timelineTop <= stageBottom;
+  if (!hasTimelineTop) {
+    return { top: 0, bottom: height, height, hasTimelineTop: false, fallback: false };
+  }
+  const bottom = Math.min(stageBottom - inset, timelineTop - 12);
+  if (bottom <= stageTop + inset) {
+    return { top: 0, bottom: height, height, hasTimelineTop: true, fallback: true };
+  }
+  const top = inset;
+  const localBottom = Math.max(top, bottom - stageTop);
+  return { top, bottom: localBottom, height: localBottom - top, hasTimelineTop: true, fallback: false };
 }
 
 function plStageTimelineSafeBottom(stageHeight, timeline) {
@@ -4379,22 +4424,33 @@ function plApplyStageLayout() {
   const height = Number(rect.height) || Number(window.innerHeight) || 0;
   const timeline = document.getElementById('pl-quiz-timeline');
   const safeBottom = plStageTimelineSafeBottom(height, timeline);
-  const layout = plLayoutMode({ width, height, safeBottom });
+  let timelineRect = null;
+  try { timelineRect = timeline && timeline.getBoundingClientRect ? timeline.getBoundingClientRect() : null; }
+  catch (e) {}
+  const usable = plStageUsableQuizRect(rect, timelineRect);
+  const usableTop = usable.hasTimelineTop ? usable.top : 0;
+  const usableBottom = usable.hasTimelineTop ? usable.bottom : Math.max(0, height - safeBottom);
+  const layout = plLayoutMode({ width, height, usableTop, usableBottom });
   const player = plStagePlayerGeometry(width, height, layout.compact ? 252 : 176);
   stage.style.setProperty('--quiz-max-w', layout.overlayMaxWidth + 'px');
   stage.style.setProperty('--quiz-max-h', layout.overlayMaxHeight + 'px');
   stage.style.setProperty('--quiz-safe-bottom', layout.safeBottom + 'px');
+  stage.style.setProperty('--quiz-center-y', layout.overlayCenterY + 'px');
+  stage.style.setProperty('--quiz-actions-min-h', layout.actionVisibleHeight + 'px');
   stage.style.setProperty('--pl-layout-compact', layout.compact ? '1' : '0');
   stage.style.setProperty('--pl-player-width', player.width + 'px');
   stage.style.setProperty('--pl-player-height', player.height + 'px');
+  if (stage.classList && stage.classList.toggle) stage.classList.toggle('pl-layout-ultra', layout.ultraCompact);
   return layout;
 }
 
 function plClearStageLayout() {
   const stage = document.getElementById('pl-stage');
   if (!stage || !stage.style || !stage.style.removeProperty) return;
-  ['--quiz-max-w', '--quiz-max-h', '--quiz-safe-bottom', '--pl-layout-compact', '--pl-player-width', '--pl-player-height']
+  ['--quiz-max-w', '--quiz-max-h', '--quiz-safe-bottom', '--quiz-center-y', '--quiz-actions-min-h',
+    '--pl-layout-compact', '--pl-player-width', '--pl-player-height']
     .forEach(name => stage.style.removeProperty(name));
+  if (stage.classList && stage.classList.remove) stage.classList.remove('pl-layout-ultra');
 }
 
 function plApplyStagePlayerGeometry() {

@@ -5944,7 +5944,7 @@ test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 
   assert.match(html, /#pl-stage\.quiz-open \.player-box\s*\{[^}]*filter:\s*brightness\(\.42\)/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*width:/s);
-  assert.match(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*top:\s*50%[^}]*transform:\s*translate\(-50%,\s*-50%\)/s);
+  assert.match(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*position:\s*absolute[^}]*left:\s*50%[^}]*top:\s*var\(--quiz-center-y\)[^}]*transform:\s*translate\(-50%,\s*-50%\)/s);
   assert.match(html, /#pl-stage #overlay\s*\{[^}]*width:\s*var\(--quiz-max-w\)[^}]*max-height:\s*var\(--quiz-max-h\)/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open #overlay\s*\{[^}]*left:\s*53vw/s);
 });
@@ -5961,7 +5961,8 @@ test('overlay geometry는 작은 stage의 타임라인 여백과 넓은 화면�
   };
   const bodyClasses = new Set(['stage-fallback-open']);
   const ctx = loadStageFunctions([
-    'plStagePlayerGeometry', 'plLayoutMode', 'plStageTimelineSafeBottom', 'plApplyStageLayout', 'plClearStageLayout',
+    'plStagePlayerGeometry', 'plLayoutMode', 'plStageUsableQuizRect', 'plStageTimelineSafeBottom',
+    'plApplyStageLayout', 'plClearStageLayout',
     'plResetStageFullscreenUI'
   ], {
     pl: { isStageFullscreen: true, stageFallback: true },
@@ -6001,7 +6002,8 @@ test('초소형 stage와 실제 타임라인 높이도 퀴즈 안전 영역 밖�
   };
   const timeline = { getBoundingClientRect() { return { height: timelineHeight }; } };
   const ctx = loadStageFunctions([
-    'plStagePlayerGeometry', 'plLayoutMode', 'plStageTimelineSafeBottom', 'plApplyStageLayout'
+    'plStagePlayerGeometry', 'plLayoutMode', 'plStageUsableQuizRect',
+    'plStageTimelineSafeBottom', 'plApplyStageLayout'
   ], {
     window: { innerWidth: 1024, innerHeight: 640 },
     document: {
@@ -6026,6 +6028,43 @@ test('초소형 stage와 실제 타임라인 높이도 퀴즈 안전 영역 밖�
   ctx.plApplyStageLayout();
   assert.equal(stageVars.get('--quiz-safe-bottom'), '128px');
   assert.equal(stageVars.get('--quiz-max-h'), '512px');
+});
+
+test('퀴즈는 타임라인 실제 top 앞의 usable rect 중앙에 놓이고 겹치지 않는다', () => {
+  const ctx = loadStageFunctions(['plLayoutMode', 'plStageUsableQuizRect'], {});
+  const stage = { top: 100, left: 20, width: 1024, height: 640 };
+  const timeline = { top: 560, left: 20, width: 1024, height: 80 };
+  const usable = ctx.plStageUsableQuizRect(stage, timeline);
+  const layout = ctx.plLayoutMode({
+    width: stage.width, height: stage.height,
+    usableTop: usable.top, usableBottom: usable.bottom
+  });
+  const overlay = {
+    top: layout.overlayCenterY - layout.overlayMaxHeight / 2,
+    bottom: layout.overlayCenterY + layout.overlayMaxHeight / 2
+  };
+
+  assert.equal(usable.top, 16);
+  assert.equal(usable.bottom, 448);
+  assert.equal(layout.overlayMaxHeight, usable.height);
+  assert.equal(overlay.top, usable.top);
+  assert.equal(overlay.bottom, usable.bottom);
+  assert.ok(overlay.bottom <= timeline.top - stage.top - 12);
+});
+
+test('240x200 ultra-small usable rect은 actions의 클릭 가능한 행을 남긴다', () => {
+  const ctx = loadStageFunctions(['plLayoutMode', 'plStageUsableQuizRect'], {});
+  const stage = { top: 0, left: 0, width: 240, height: 200 };
+  const timeline = { top: 150, left: 0, width: 240, height: 50 };
+  const usable = ctx.plStageUsableQuizRect(stage, timeline);
+  const layout = ctx.plLayoutMode({
+    width: stage.width, height: stage.height,
+    usableTop: usable.top, usableBottom: usable.bottom
+  });
+
+  assert.equal(layout.overlayMaxHeight, usable.height);
+  assert.ok(layout.actionVisibleHeight >= Math.min(56, usable.height));
+  assert.ok(layout.actionVisibleHeight > 0);
 });
 
 test('중앙 문제·순위 카드 위에서 교사 도구와 QR을 조작하고 타임라인은 흐름을 유지한다', () => {
