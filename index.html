@@ -283,6 +283,16 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-timeline { position: relative; height: 38px; margin: 0 8px 16px; border-radius: 8px; background: var(--accent-2); border: 1px solid #d4d8ff; }
 .mk-timeline::before { content: ''; position: absolute; left: 8px; right: 8px; top: 18px; height: 2px; background: #b7bef7; }
 .mk-q-dot { position: absolute; top: 8px; transform: translateX(-50%); width: 20px; height: 20px; border: 2px solid #fff; border-radius: 50%; background: var(--accent); color: #fff; padding: 0; font-size: 10px; font-weight: 800; cursor: ew-resize; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+.mk-question-bubbles { display: grid; gap: 6px; margin: 0 0 14px; }
+.mk-question-bubble { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid #d4d8ff; border-radius: 9px; background: #fff; color: var(--ink); cursor: grab; text-align: left; }
+.mk-question-bubble:active { cursor: grabbing; }
+.mk-question-bubble.drop-target { border-color: var(--accent); background: var(--accent-2); }
+.mk-question-bubble b { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--accent); color: #fff; font-size: 11px; }
+.mk-question-bubble span { overflow: hidden; flex: 1; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 650; }
+.mk-question-bubble time { flex: none; color: var(--ink-2); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.mk-question-move-tools { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.mk-save-toast { position: fixed; z-index: 9999; right: 20px; bottom: 20px; max-width: min(360px, calc(100vw - 40px)); padding: 10px 14px; border-radius: 10px; background: #1c2030; color: #fff; box-shadow: 0 8px 28px rgba(20,25,45,.24); font-size: 13px; font-weight: 700; opacity: 0; pointer-events: none; transform: translateY(8px); transition: opacity .16s, transform .16s; }
+.mk-save-toast.show { opacity: 1; transform: translateY(0); }
 .mk-add-video { border: 2px dashed var(--line); background: transparent; padding: 18px; }
 
 @media (max-width: 900px) {
@@ -604,6 +614,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="firestore-core.js"></script>
 <script src="firestore-store.js"></script>
 <script src="editor-draft.js"></script>
+<script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
 <script src="teacher-stage.js"></script>
 <script src="auth-core.js"></script>
@@ -2083,6 +2094,95 @@ let mkPlayer = null;    // 미리보기 플레이어
 let mkPlayerVid = '';   // 현재 플레이어에 로드된 영상 ID
 let mkDraftTimer = null;
 
+function mkHistorySnapshot(state) {
+  const source = state || mk || {};
+  return {
+    title: String(source.title || ''),
+    author: String(source.author || ''),
+    settings: JSON.parse(JSON.stringify(source.settings || {})),
+    videos: JSON.parse(JSON.stringify(source.videos || [])),
+    activeVideo: Number(source.activeVideo) || 0
+  };
+}
+
+function mkHistoryRecord(key) {
+  const state = mk;
+  if (!state || !state.history) return false;
+  const next = mkHistorySnapshot(state);
+  const current = state.history.current();
+  if (JSON.stringify(next) === JSON.stringify(current)) return false;
+  state.history.record(next, { key: String(key || 'edit'), at: Date.now(), coalesceMs: 600 });
+  mkUpdateHistoryControls();
+  return true;
+}
+
+function mkResetHistory() {
+  const state = mk;
+  if (!state || typeof EditorHistoryCore === 'undefined') return;
+  const snapshot = mkHistorySnapshot(state);
+  if (!state.history) state.history = EditorHistoryCore.create(snapshot, { limit: 50 });
+  else state.history.reset(snapshot);
+  mkUpdateHistoryControls();
+}
+
+function mkUpdateHistoryControls() {
+  const state = mk;
+  if (!state || !state.history || typeof document === 'undefined') return;
+  const undo = document.getElementById('mk-undo');
+  const redo = document.getElementById('mk-redo');
+  if (undo) undo.disabled = !state.history.canUndo();
+  if (redo) redo.disabled = !state.history.canRedo();
+}
+
+function mkRestoreHistory(snapshot) {
+  const state = mk;
+  if (!state || !snapshot) return;
+  state.title = String(snapshot.title || '');
+  state.author = String(snapshot.author || '');
+  state.settings = normSettings(snapshot.settings);
+  state.videos = PlaylistCore.normalizeVideos({ videos: snapshot.videos || [] });
+  state.activeVideo = Math.max(0, Math.min(Number(snapshot.activeVideo) || 0, state.videos.length - 1));
+  state.saved = false;
+  mkSetSaveStatus('dirty');
+  mkPersistDraft();
+  renderMake();
+}
+
+function mkUndo() {
+  const state = mk;
+  if (!state || !state.history || !state.history.canUndo()) return false;
+  mkRestoreHistory(state.history.undo());
+  return true;
+}
+
+function mkRedo() {
+  const state = mk;
+  if (!state || !state.history || !state.history.canRedo()) return false;
+  mkRestoreHistory(state.history.redo());
+  return true;
+}
+
+function mkHistoryKeyFromEvent(event) {
+  const target = event && event.target;
+  if (!target) return 'edit';
+  if (target.id) return target.id;
+  if (target.dataset && target.dataset.questionTime) return 'question-time:' + target.dataset.questionTime;
+  const card = target.closest && target.closest('[id^="mk-q-"]');
+  return (card && card.id ? card.id : target.type || target.tagName || 'edit');
+}
+
+function mkShowSaveToast(message) {
+  const el = document.getElementById('mk-save-toast');
+  if (!el) return;
+  el.textContent = message || '저장 완료';
+  el.classList.add('show');
+  clearTimeout(mk && mk.saveToastTimer);
+  const state = mk;
+  state.saveToastTimer = setTimeout(() => {
+    if (mk === state) el.classList.remove('show');
+  }, 2600);
+}
+
 function mkSetSaveStatus(state, detail) {
   const el = $('#mk-save-status');
   if (!el) return;
@@ -2104,9 +2204,10 @@ function mkClearDraft(setId) {
   EditorDraft.clear(localStorage, setId === undefined ? (mk && mk.id) : setId);
 }
 
-function mkMarkDirty() {
+function mkMarkDirty(key) {
   const state = mk;
   if (!state) return;
+  if (typeof mkHistoryRecord === 'function') mkHistoryRecord(key);
   state.saved = false;
   mkSetSaveStatus('dirty');
   clearTimeout(state.draftTimer);
@@ -2116,9 +2217,21 @@ function mkMarkDirty() {
 }
 
 function mkHandleSaveShortcut(event) {
-  if (!mk || !event || String(event.key).toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) return;
+  if (!mk || !event || event.isComposing || String(event.key).toLowerCase() !== 's' || (!event.ctrlKey && !event.metaKey)) return;
   event.preventDefault();
   return mkSave(false);
+}
+
+function mkHandleHistoryShortcut(event) {
+  if (!mk || !event || event.isComposing || (!event.ctrlKey && !event.metaKey)) return;
+  const key = String(event.key || '').toLowerCase();
+  if (key === 'z') {
+    event.preventDefault();
+    if (event.shiftKey) mkRedo(); else mkUndo();
+  } else if (key === 'y') {
+    event.preventDefault();
+    mkRedo();
+  }
 }
 
 function mkRestoreDraft(savedAt) {
@@ -2209,9 +2322,12 @@ function screenMake(setId) {
     player: null,
     draftTimer: null,
     ytCancels: [],
+    history: null,
+    saveToastTimer: null,
     ownerUid: teacherState && teacherState.uid || ''
   };
   const state = mk;
+  if (typeof mkResetHistory === 'function') mkResetHistory();
   const editIdentity = { uid: teacherState && teacherState.uid || '', email: teacherState && teacherState.email || '' };
   const editRouteToken = typeof location !== 'undefined' ? String(location.hash || '') : '';
   const editAuthGeneration = typeof teacherAuthVersion === 'number' ? teacherAuthVersion : null;
@@ -2254,7 +2370,11 @@ function screenMake(setId) {
   };
   mkPlayer = null;
   mkPlayerVid = '';
-  const saveShortcut = event => { if (mk === state) mkHandleSaveShortcut(event); };
+  const saveShortcut = event => {
+    if (mk !== state) return;
+    mkHandleSaveShortcut(event);
+    if (!event.defaultPrevented) mkHandleHistoryShortcut(event);
+  };
   document.addEventListener('keydown', saveShortcut);
   onCleanup(() => {
     if (stopAccessWatch) stopAccessWatch();
@@ -2266,6 +2386,7 @@ function screenMake(setId) {
     state.player = null;
     if (mkPlayer === ownPlayer) mkPlayer = null;
     clearTimeout(state.draftTimer);
+    clearTimeout(state.saveToastTimer);
     if (mkDraftTimer === state.draftTimer) mkDraftTimer = null;
     state.draftTimer = null;
     if (mk !== state) return;
@@ -2323,6 +2444,7 @@ function screenMake(setId) {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
           });
         });
+        if (typeof mkResetHistory === 'function') mkResetHistory();
         renderMake();
         startAccessWatch();
         });
@@ -2334,6 +2456,7 @@ function screenMake(setId) {
     });
   } else {
     mkRestoreDraft(0);
+    if (typeof mkResetHistory === 'function') mkResetHistory();
     renderMake();
   }
 }
@@ -2357,8 +2480,20 @@ function renderMake() {
       '<button type="button" class="mk-q-dot" style="left:' +
         (PlaylistCore.timelineRatio(q.t, domain.start, domain.end) * 100) + '%" ' +
         'onpointerdown="mkStartQuestionDrag(event,' + videoIndex + ',' + questionIndex + ')" ' +
-        'title="' + (questionIndex + 1) + '번 · ' + esc(fmtTime(q.t)) + '">' + (questionIndex + 1) + '</button>'
+      'title="' + (questionIndex + 1) + '번 · ' + esc(fmtTime(q.t)) + '">' + (questionIndex + 1) + '</button>'
     ).join('');
+    const bubbles = video.questions.map((q, questionIndex) => {
+      const title = String(q.text || '').trim() || '질문을 입력하세요';
+      const label = '문항 ' + (questionIndex + 1) + ' 이동: ' + title;
+      return '<button type="button" class="mk-question-bubble" draggable="true" ' +
+        'data-video="' + videoIndex + '" data-question="' + questionIndex + '" ' +
+        'aria-label="' + esc(label) + '" title="끌어서 순서를 바꾸거나 화살표 키로 이동" ' +
+        'ondragstart="mkQuestionDragStart(event,' + videoIndex + ',' + questionIndex + ')" ' +
+        'ondragover="mkQuestionDragOver(event)" ondragleave="mkQuestionDragLeave(event)" ' +
+        'ondrop="mkQuestionDrop(event,' + videoIndex + ',' + questionIndex + ')" ' +
+        'onkeydown="mkQuestionBubbleKeydown(event,' + videoIndex + ',' + questionIndex + ')">' +
+        '<b>' + (questionIndex + 1) + '</b><span>' + esc(title) + '</span><time>' + esc(fmtTime(q.t)) + '</time></button>';
+    }).join('');
     const questions = video.questions.length ? video.questions.map((q, questionIndex) =>
       '<div class="q-card" id="mk-q-' + videoIndex + '-' + questionIndex + '">' +
         '<div class="q-head"><div class="q-no">' + (questionIndex + 1) + '</div>' +
@@ -2369,6 +2504,8 @@ function renderMake() {
           '<div class="spacer"></div>' +
           '<button class="btn sm ghost" onclick="mkMove(' + videoIndex + ',' + questionIndex + ',-1)" ' + (questionIndex === 0 ? 'disabled' : '') + '>↑</button>' +
           '<button class="btn sm ghost" onclick="mkMove(' + videoIndex + ',' + questionIndex + ',1)" ' + (questionIndex === video.questions.length - 1 ? 'disabled' : '') + '>↓</button>' +
+          '<span class="mk-question-move-tools"><button class="btn sm ghost" onclick="mkMoveQuestion(' + videoIndex + ',' + questionIndex + ',' + (videoIndex - 1) + ',9999)" ' + (videoIndex === 0 ? 'disabled' : '') + '>이전 영상</button>' +
+          '<button class="btn sm ghost" onclick="mkMoveQuestion(' + videoIndex + ',' + questionIndex + ',' + (videoIndex + 1) + ',9999)" ' + (videoIndex === mk.videos.length - 1 ? 'disabled' : '') + '>다음 영상</button></span>' +
           '<button class="btn sm danger" onclick="mkDelQuestion(' + videoIndex + ',' + questionIndex + ')">삭제</button></div>' +
         '<div class="field"><label class="f">문항 유형</label><select onchange="mkSetType(' + videoIndex + ',' + questionIndex + ',this.value)">' +
           Object.keys(QTYPES).map(k => '<option value="' + k + '"' + (qType(q) === k ? ' selected' : '') + '>' + QTYPES[k] + '</option>').join('') +
@@ -2400,7 +2537,8 @@ function renderMake() {
         '<div class="mk-range-track"><input data-range-slider="' + videoIndex + '-start" aria-label="영상 ' + (videoIndex + 1) + ' 시작" type="range" min="0" max="' + domain.max + '" value="' + domain.start + '" oninput="mkSetRange(' + videoIndex + ',\'start\',Number(this.value))">' +
         '<input data-range-slider="' + videoIndex + '-end" aria-label="영상 ' + (videoIndex + 1) + ' 종료" type="range" min="0" max="' + domain.max + '" value="' + domain.end + '" oninput="mkSetRange(' + videoIndex + ',\'end\',Number(this.value))"></div>' +
         '<div class="mk-timeline" data-timeline-video="' + videoIndex + '">' + dots + '</div></div>' +
-        '<div><h3 style="margin-bottom:4px">문항</h3><div class="sub">시각은 원본 YouTube 영상 기준입니다. 점을 끌어 옮길 수도 있습니다.</div>' +
+        '<div><h3 style="margin-bottom:4px">문항</h3><div class="sub">시각은 원본 YouTube 영상 기준입니다. 제목 버블을 끌거나 화살표 키로 순서를 바꿀 수 있습니다.</div>' +
+          '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + '</div>' +
           questions + '<button class="btn" onclick="mkAddQuestion(' + videoIndex + ')">＋ 문항 추가</button> ' +
           '<button class="btn ghost sm" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button></div></div>' +
     '</section>';
@@ -2421,8 +2559,11 @@ function renderMake() {
       '<div class="card" id="mk-settings"></div>' +
       '<div class="mk-video-list">' + videoCards +
         '<button class="mk-add-video card btn block" onclick="mkAddVideo()">＋ 다음 YouTube 영상 추가</button></div>' +
+      '<div class="mk-save-toast" id="mk-save-toast" role="status" aria-live="polite">저장 완료</div>' +
       '<div class="card" id="mk-save-card">' +
         '<div class="row" style="align-items:center">' +
+          '<button class="btn" id="mk-undo" onclick="mkUndo()" ' + (!mk.history || !mk.history.canUndo() ? 'disabled' : '') + '>↶ 실행 취소</button>' +
+          '<button class="btn" id="mk-redo" onclick="mkRedo()" ' + (!mk.history || !mk.history.canRedo() ? 'disabled' : '') + '>↷ 다시 실행</button>' +
           '<button class="btn primary lg" onclick="mkSave()">' + (mk.id ? '변경 사항 저장' : '세트 저장하고 링크 만들기') + '</button>' +
           (mk.id ? '<button class="btn" onclick="mkSaveAsNew()">다른 세트로 복제 저장</button>' : '') +
           '<div class="spacer" style="flex:1"></div>' +
@@ -2432,12 +2573,15 @@ function renderMake() {
       '</div>' +
     '</div>';
 
-  $('#mk-title').oninput = e => { mk.title = e.target.value; mkMarkDirty(); };
-  $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); mkMarkDirty(); };
+  $('#mk-title').oninput = e => { mk.title = e.target.value; mkMarkDirty('title'); };
+  $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); mkMarkDirty('author'); };
   mkRenderSettings();
   mkSyncVideo(mk.activeVideo);
   const app = APP();
-  if (app) { app.oninput = mkMarkDirty; app.onchange = mkMarkDirty; }
+  if (app) {
+    app.oninput = event => mkMarkDirty(mkHistoryKeyFromEvent(event));
+    app.onchange = event => mkMarkDirty(mkHistoryKeyFromEvent(event));
+  }
   if (mk.id) mkShowShare();
 }
 
@@ -2864,14 +3008,82 @@ function mkDelQuestion(videoIndex, i) {
   renderMake();
 }
 function mkMove(videoIndex, i, d) {
-  const questions = mk.videos[videoIndex].questions;
+  const questions = mk.videos[videoIndex] && mk.videos[videoIndex].questions;
   const j = i + d;
-  if (j < 0 || j >= questions.length) return;
-  const tmp = questions[i];
-  questions[i] = questions[j];
-  questions[j] = tmp;
-  mkMarkDirty();
+  if (!questions || j < 0 || j >= questions.length) return false;
+  return mkMoveQuestion(videoIndex, i, videoIndex, d < 0 ? j : j + 1);
+}
+
+function mkQuestionImageMap(videos) {
+  const images = {};
+  (videos || []).forEach((video, videoIndex) => (video.questions || []).forEach((question, questionIndex) => {
+    if (question && question.imgUp && question._img) images['v' + videoIndex + 'q' + questionIndex] = question._img;
+  }));
+  return images;
+}
+
+function mkMoveQuestion(fromVi, fromQi, toVi, toQi) {
+  const state = mk;
+  if (!state || !state.videos[fromVi] || !state.videos[toVi]) return false;
+  const destination = state.videos[toVi].questions || [];
+  const targetIndex = Math.max(0, Math.min(Number(toQi) || 0, destination.length));
+  const result = PlaylistCore.moveQuestion(state.videos, mkQuestionImageMap(state.videos),
+    { videoIndex: Number(fromVi), questionIndex: Number(fromQi) },
+    { videoIndex: Number(toVi), questionIndex: targetIndex });
+  if (!result.moved) return false;
+  state.videos = result.videos;
+  state.videos.forEach((video, videoIndex) => (video.questions || []).forEach((question, questionIndex) => {
+    if (question.imgUp) question._img = result.images['v' + videoIndex + 'q' + questionIndex] || '';
+  }));
+  state.activeVideo = Math.max(0, Math.min(state.activeVideo, state.videos.length - 1));
+  mkMarkDirty('question-move');
   renderMake();
+  return true;
+}
+
+function mkQuestionDragStart(event, videoIndex, questionIndex) {
+  if (!event || !event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-video-quiz-question',
+    JSON.stringify({ videoIndex: Number(videoIndex), questionIndex: Number(questionIndex) }));
+}
+
+function mkQuestionDragOver(event) {
+  if (!event) return;
+  event.preventDefault();
+  if (event.currentTarget && event.currentTarget.classList) event.currentTarget.classList.add('drop-target');
+}
+
+function mkQuestionDragLeave(event) {
+  if (event && event.currentTarget && event.currentTarget.classList) event.currentTarget.classList.remove('drop-target');
+}
+
+function mkQuestionDrop(event, toVi, toQi) {
+  if (!event || !event.dataTransfer) return false;
+  event.preventDefault();
+  if (event.currentTarget && event.currentTarget.classList) event.currentTarget.classList.remove('drop-target');
+  let from;
+  try { from = JSON.parse(event.dataTransfer.getData('application/x-video-quiz-question')); } catch (e) { return false; }
+  if (!from) return false;
+  return mkMoveQuestion(from.videoIndex, from.questionIndex, Number(toVi), Number(toQi));
+}
+
+function mkQuestionBubbleKeydown(event, videoIndex, questionIndex) {
+  if (!event || event.isComposing) return;
+  const key = String(event.key || '');
+  let moved = false;
+  if (key === 'ArrowUp') {
+    event.preventDefault();
+    moved = event.altKey
+      ? mkMoveQuestion(videoIndex, questionIndex, videoIndex - 1, 9999)
+      : mkMoveQuestion(videoIndex, questionIndex, videoIndex, questionIndex - 1);
+  } else if (key === 'ArrowDown') {
+    event.preventDefault();
+    moved = event.altKey
+      ? mkMoveQuestion(videoIndex, questionIndex, videoIndex + 1, 9999)
+      : mkMoveQuestion(videoIndex, questionIndex, videoIndex, questionIndex + 2);
+  }
+  return moved;
 }
 function mkSortQuestions(videoIndex) {
   mk.videos[videoIndex].questions.sort((a, b) => a.t - b.t);
@@ -3073,11 +3285,13 @@ function mkSave(forceNew) {
       if (location.hash !== '#/make/' + id) {
         history.replaceState(null, '', '#/make/' + id);
       }
+      if (typeof mkResetHistory === 'function') mkResetHistory();
       toast(isNew ? '세트를 저장했습니다' : '변경 사항을 저장했습니다');
-      renderMake();
       mkSetSaveStatus('saved', new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }));
-      const card = $('#mk-save-card');
-      if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (typeof mkShowSaveToast === 'function') mkShowSaveToast('저장 완료');
+      // 기존 세트는 화면을 다시 만들지 않아 커서·스크롤 위치를 그대로 유지한다.
+      if (isNew) renderMake();
+      else if (typeof mkUpdateHistoryControls === 'function') mkUpdateHistoryControls();
     })
     .catch(e => {
       if (mk !== state) return;

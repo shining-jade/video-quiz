@@ -446,6 +446,37 @@ function loadStageFunctions(names, context) {
   return context;
 }
 
+test('편집기 문항 이동은 PlaylistCore를 한 번 호출해 영상 사이 이동과 이미지 키를 함께 반영한다', () => {
+  let calls = 0;
+  const base = require('../playlist-core.js');
+  const context = {
+    mk: {
+      activeVideo: 0,
+      videos: [
+        { startSec: 0, endSec: 100, questions: [
+          { text: '첫 문항', t: 50, imgUp: true, _img: 'data:image/a' }
+        ] },
+        { startSec: 100, endSec: 300, questions: [
+          { text: '둘째 문항', t: 150 }
+        ] }
+      ]
+    },
+    PlaylistCore: {
+      moveQuestion(...args) { calls += 1; return base.moveQuestion(...args); }
+    },
+    mkMarkDirty() {},
+    renderMake() {}
+  };
+  loadStageFunctions(['mkQuestionImageMap', 'mkMoveQuestion'], context);
+
+  assert.equal(context.mkMoveQuestion(0, 0, 1, 1), true);
+  assert.equal(calls, 1);
+  assert.equal(context.mk.videos[0].questions.length, 0);
+  assert.equal(context.mk.videos[1].questions[1].text, '첫 문항');
+  assert.equal(context.mk.videos[1].questions[1].t, 200);
+  assert.equal(context.mk.videos[1].questions[1]._img, 'data:image/a');
+});
+
 test('browser Firestore store exposes no legacy owner probe or migration write API', () => {
   const store = loadStoreModule().createFirestoreStore({}, { serverTimestamp() {} }, Date.now);
 

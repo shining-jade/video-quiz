@@ -4,6 +4,38 @@ const fs = require('node:fs');
 
 const read = file => fs.readFileSync(file, 'utf8');
 
+test('편집기 Ctrl+S는 브라우저 기본 동작 없이 현재 위치에서 저장 완료 알림을 표시한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /function mkHandleSaveShortcut\(event\)[\s\S]*?event\.preventDefault\(\)/);
+  assert.match(html, /String\(event\.key\)\.toLowerCase\(\) !== 's'/);
+  assert.match(html, /event\.isComposing/);
+  assert.match(html, /\.mk-save-toast\s*\{[^}]*position:\s*fixed[\s\S]*?저장 완료/);
+  assert.doesNotMatch(html, /function mkSave\(forceNew\)[\s\S]*?mk-save-card[\s\S]*?scrollIntoView/);
+});
+
+test('편집기에는 undo/redo와 문항 제목 버블의 드래그·키보드 이동 대체가 있다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /function mkUndo\(\)/);
+  assert.match(html, /function mkRedo\(\)/);
+  assert.match(html, /mk-question-bubble/);
+  assert.match(html, /draggable="true"/);
+  assert.match(html, /function mkMoveQuestion\(fromVi, fromQi, toVi, toQi\)/);
+  assert.match(html, /PlaylistCore\.moveQuestion\(/);
+  assert.match(html, /function mkQuestionBubbleKeydown\(event, videoIndex, questionIndex\)/);
+  assert.match(html, /이전 영상/);
+  assert.match(html, /다음 영상/);
+});
+
+test('편집기 단축키와 경로 종료 처리는 이전 화면의 listener가 남지 않게 정리한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /document\.removeEventListener\('keydown', saveShortcut\)/);
+  assert.match(html, /if \(mk !== state\) return/);
+  assert.match(html, /editRouteToken/);
+});
+
 test('README는 자동 검증과 아직 닫힌 프로덕션 배포 게이트를 구분한다', () => {
   const readme = read('README.md');
 
