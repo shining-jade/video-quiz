@@ -122,7 +122,7 @@ test('admin approval atomically updates request and allowance', async () => {
   }));
   await store.decideTeacherRequest('teacher-a', 3, { status: 'approved' }, admin);
   assert.equal(read('teacher_access_requests/teacher-a').status, 'approved');
-  assert.deepEqual(read('config/teacher_allowances/teacher-a'), {
+  assert.deepEqual(read('teacher_allowances/teacher-a'), {
     uid: 'teacher-a', emailCanonical: 'teacher@school.kr', status: 'active', enabled: true,
     approvedByUid: 'admin-a'
   });
@@ -131,7 +131,7 @@ test('admin approval atomically updates request and allowance', async () => {
 test('stale revision or changed email commits nothing', async () => {
   await assert.rejects(store.decideTeacherRequest('teacher-a', 2, { status: 'approved' }, admin));
   assert.equal(read('teacher_access_requests/teacher-a').status, 'pending');
-  assert.equal(read('config/teacher_allowances/teacher-a'), undefined);
+  assert.equal(read('teacher_allowances/teacher-a'), undefined);
 });
 ```
 
