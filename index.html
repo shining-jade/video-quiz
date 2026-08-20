@@ -336,8 +336,19 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-question-preview-card .preview-result.bad { background:rgba(255,107,120,.14); color:#ffadb5; }
 .mk-question-preview-card .preview-result.manual { background:rgba(255,255,255,.1); }
 .mk-question-preview-card .preview-explanation { margin-top:12px; padding:14px 16px; border:1px solid rgba(255,210,80,.55); border-radius:12px; background:rgba(255,210,80,.1); }
+.mk-question-preview-card .preview-explanation-img { display:block; max-width:100%; max-height:300px; object-fit:contain; margin:12px auto 0; border-radius:10px; }
 .mk-question-preview-card textarea { min-height:110px; background:#fff; color:#1c2030; }
 .mk-question-preview-card .preview-actions { display:flex; justify-content:flex-end; margin-top:22px; }
+.mk-preview-modes { display:flex; justify-content:center; gap:6px; margin-bottom:14px; }
+.mk-question-preview-card.mobile { width:390px; max-width:94vw; padding:18px; border-radius:24px; background:#f4f5f8; color:var(--ink); border:8px solid #202434; }
+.mk-question-preview-card.mobile .preview-q { font-size:22px; line-height:1.4; }
+.mk-question-preview-card.mobile .preview-choice { border-color:var(--line-2); background:#fff; padding:13px; font-size:15px; }
+.mk-question-preview-card.mobile .preview-choice b { background:#eceef4; color:var(--ink); }
+.mk-question-preview-card.mobile .preview-choice.selected { border-color:var(--accent); background:var(--accent-2); }
+.mk-question-preview-card.mobile .preview-choice.correct { border-color:var(--ok); background:var(--ok-bg); }
+.mk-question-preview-card.mobile .preview-choice.wrong { border-color:var(--bad); background:var(--bad-bg); }
+.mk-question-preview-card.mobile .preview-explanation { color:#6b4c00; background:#fff8df; }
+.mk-question-preview-card.mobile .preview-actions { position:sticky; bottom:-18px; padding:12px 0 4px; background:#f4f5f8; }
 
 @keyframes qflash { 0%,100% { box-shadow: 0 0 0 0 rgba(67,56,202,0); } 30% { box-shadow: 0 0 0 4px rgba(67,56,202,.35); } }
 .q-card.flash { animation: qflash 1s ease; }
@@ -2180,6 +2191,7 @@ let mkPlayerVid = '';   // 현재 플레이어에 로드된 영상 ID
 let mkQuestionPreviewState = null;
 let mkQuestionPreviewTimer = null;
 let mkQuestionPreviewRequest = 0;
+let mkQuestionPreviewMode = 'teacher';
 let mkDraftTimer = null;
 
 function mkHistorySnapshot(state) {
@@ -2824,6 +2836,7 @@ function mkPreviewRender() {
   const type = q.type || 'choice';
   const isResult = state.phase === 'result';
   const image = q._img || q.imgUrl || '';
+  const explanationImage = q._explainImg || q.explainImgUrl || '';
   let answerArea = '';
   if (type === 'short' || type === 'long') {
     answerArea = '<textarea id="mk-preview-text" placeholder="답을 입력하세요" ' +
@@ -2849,10 +2862,16 @@ function mkPreviewRender() {
     const resultClass = state.correct === true ? 'ok' : state.correct === false ? 'bad' : 'manual';
     result = '<div class="preview-result ' + resultClass + '">' + message + '</div>' +
       '<div class="preview-explanation"><b>해설</b><br>' +
-      esc(state.explanation || '등록된 해설이 없습니다.') + '</div>';
+      esc(state.explanation || '등록된 해설이 없습니다.') + '</div>' +
+      (explanationImage ? '<img class="preview-explanation-img" src="' + esc(explanationImage) + '" alt="해설 이미지">' : '');
   }
   dialog.setAttribute('aria-label', '문항 ' + state.number + ' 퀴즈 미리보기');
-  dialog.innerHTML = '<div class="mk-question-preview-card">' +
+  const cardClass = mkQuestionPreviewMode === 'mobile'
+    ? 'mk-question-preview-card mobile' : 'mk-question-preview-card';
+  dialog.innerHTML = '<div class="' + cardClass + '">' +
+    '<div class="mk-preview-modes" aria-label="미리보기 화면 선택">' +
+      '<button type="button" class="btn sm' + (mkQuestionPreviewMode === 'teacher' ? ' primary' : '') + '" onclick="mkPreviewSetMode(\'teacher\')">교사용 크게 보기</button>' +
+      '<button type="button" class="btn sm' + (mkQuestionPreviewMode === 'mobile' ? ' primary' : '') + '" onclick="mkPreviewSetMode(\'mobile\')">학생 모바일 보기</button></div>' +
     '<div class="preview-top"><span class="tag">문항 ' + state.number + '</span>' +
     '<span class="tag mute">실제 흐름 미리보기</span></div>' +
     (image ? '<img class="q-img" src="' + esc(image) + '" alt="문항 이미지">' : '') +
@@ -2867,6 +2886,11 @@ function mkPreviewRender() {
   const first = dialog.querySelector('button.preview-choice, textarea, .preview-actions button');
   if (first && first.focus) first.focus();
   return true;
+}
+
+function mkPreviewSetMode(mode) {
+  mkQuestionPreviewMode = mode === 'mobile' ? 'mobile' : 'teacher';
+  return mkPreviewRender();
 }
 
 function mkPreviewSelect(index) {
@@ -2936,6 +2960,7 @@ function mkOpenQuestionPreview(videoIndex, questionIndex) {
   if (!video.videoId) { toast('먼저 유튜브 주소를 입력해 주세요.'); return false; }
   mkCloseQuestionPreview();
   const request = ++mkQuestionPreviewRequest;
+  mkQuestionPreviewMode = 'teacher';
   const number = mk.videos.slice(0, videoIndex)
     .reduce((count, item) => count + ((item && item.questions) || []).length, 0) + questionIndex + 1;
   const question = JSON.parse(JSON.stringify(q));

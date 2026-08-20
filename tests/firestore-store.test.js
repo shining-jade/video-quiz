@@ -5778,6 +5778,27 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
   ]);
 });
 
+test('미리보기 화면 모드는 교사용과 학생 모바일 사이를 같은 답안 상태로 전환한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    mkQuestionPreviewMode: 'teacher',
+    mkQuestionPreviewState: { phase: 'question', answer: 1 }
+  };
+  context.mkPreviewRender = () => {
+    calls.push([context.mkQuestionPreviewMode, context.mkQuestionPreviewState.answer]);
+    return true;
+  };
+  vm.runInNewContext(extractFunction(html, 'mkPreviewSetMode'), context);
+
+  assert.equal(context.mkPreviewSetMode('mobile'), true);
+  assert.equal(context.mkQuestionPreviewMode, 'mobile');
+  assert.equal(context.mkQuestionPreviewState.answer, 1);
+  assert.deepEqual(clone(calls), [['mobile', 1]]);
+  assert.equal(context.mkPreviewSetMode('teacher'), true);
+  assert.deepEqual(clone(calls[1]), ['teacher', 1]);
+});
+
 test('학생 문항 view는 공개 전 해설 이미지를 숨기고 공개 뒤에만 합친다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {};
