@@ -5849,6 +5849,73 @@ test('문항 이미지는 저장된 그림이 있어도 기본 접힘이고 펼�
   assert.match(expanded, /접기/);
 });
 
+test('표시된 문제·해설 이미지는 실제 현재 주소와 설명으로 공통 확대창을 연다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const context = {
+    document: { fullscreenElement: null, getElementById() { return null; } },
+    imageLightbox: { open(src, alt) { calls.push({ src, alt }); return true; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'openImageLightbox'), context);
+
+  const opened = context.openImageLightbox({
+    currentSrc: 'https://cdn.example.com/rendered.jpg',
+    src: 'https://example.com/fallback.jpg',
+    alt: '해설 이미지'
+  });
+
+  assert.equal(opened, true);
+  assert.deepEqual(calls, [{ src: 'https://cdn.example.com/rendered.jpg', alt: '해설 이미지' }]);
+});
+
+test('네이티브 전체화면에서는 확대창을 전체화면 요소 안에 배치한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const root = {};
+  const fullscreen = { appended: null, appendChild(node) { this.appended = node; } };
+  const context = {
+    document: {
+      fullscreenElement: fullscreen,
+      getElementById(id) { return id === 'image-lightbox' ? root : null; }
+    },
+    imageLightbox: { open() { return true; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'openImageLightbox'), context);
+
+  assert.equal(context.openImageLightbox({ src: 'image.jpg', alt: '문항 이미지' }), true);
+  assert.equal(fullscreen.appended, root);
+});
+
+test('확대창 상태가 열리면 이미지와 설명을 표시하고 닫히면 원본을 비운다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const elements = {
+    'image-lightbox': { hidden: true },
+    'image-lightbox-img': { src: '', alt: '' },
+    'image-lightbox-caption': { textContent: '' },
+    'image-lightbox-close': { focusCalls: 0, focus() { this.focusCalls += 1; } }
+  };
+  const body = { appended: null, appendChild(node) { this.appended = node; } };
+  const returnFocus = { calls: 0, focus() { this.calls += 1; } };
+  const context = {
+    imageLightboxReturnFocus: returnFocus,
+    document: { body, getElementById(id) { return elements[id]; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'renderImageLightbox'), context);
+
+  context.renderImageLightbox({ open: true, src: 'data:image/png;base64,abc', alt: '문항 이미지' });
+  assert.equal(elements['image-lightbox'].hidden, false);
+  assert.equal(elements['image-lightbox-img'].src, 'data:image/png;base64,abc');
+  assert.equal(elements['image-lightbox-img'].alt, '문항 이미지');
+  assert.equal(elements['image-lightbox-caption'].textContent, '문항 이미지');
+  assert.equal(elements['image-lightbox-close'].focusCalls, 1);
+
+  context.renderImageLightbox({ open: false, src: '', alt: '' });
+  assert.equal(elements['image-lightbox'].hidden, true);
+  assert.equal(elements['image-lightbox-img'].src, '');
+  assert.equal(body.appended, elements['image-lightbox']);
+  assert.equal(returnFocus.calls, 1);
+  assert.equal(context.imageLightboxReturnFocus, null);
+});
+
 test('학생 문항 view는 공개 전 해설 이미지를 숨기고 공개 뒤에만 합친다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {};

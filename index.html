@@ -705,12 +705,31 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
   display: block; max-width: 100%; max-height: 280px; object-fit: contain;
   margin: 10px auto 16px; border-radius: 10px;
 }
+img[data-lightbox] { cursor: zoom-in; }
+img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.image-lightbox {
+  position: fixed; inset: 0; z-index: 10000; padding: 24px;
+  display: grid; place-items: center; background: rgba(6, 10, 24, .9);
+}
+.image-lightbox[hidden] { display: none; }
+.image-lightbox-panel { position: relative; max-width: 96vw; max-height: 94vh; display: grid; gap: 10px; justify-items: center; }
+.image-lightbox img { display: block; max-width: 96vw; max-height: calc(94vh - 58px); object-fit: contain; border-radius: 12px; box-shadow: 0 18px 60px rgba(0,0,0,.5); }
+.image-lightbox-close { position: absolute; top: 8px; right: 8px; min-width: 44px; min-height: 44px; border: 0; border-radius: 999px; background: rgba(0,0,0,.72); color: #fff; font-size: 24px; cursor: pointer; }
+.image-lightbox-caption { color: #fff; font-size: 14px; text-align: center; }
+@media (max-width: 600px) { .image-lightbox { padding: 10px; } .image-lightbox img { max-width: 98vw; max-height: calc(96vh - 58px); } }
 </style>
 </head>
 <body>
 
 <div id="app"></div>
 <div id="toast"></div>
+<div id="image-lightbox" class="image-lightbox" role="dialog" aria-modal="true" aria-label="이미지 크게 보기" hidden onclick="if(event.target===this) closeImageLightbox()">
+  <div class="image-lightbox-panel">
+    <button id="image-lightbox-close" class="image-lightbox-close" type="button" aria-label="확대 이미지 닫기" onclick="closeImageLightbox()">×</button>
+    <img id="image-lightbox-img" alt="">
+    <div id="image-lightbox-caption" class="image-lightbox-caption"></div>
+  </div>
+</div>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
@@ -721,6 +740,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
 <script src="choice-order-core.js"></script>
+<script src="image-lightbox-core.js"></script>
 <script src="quiz-trigger-core.js"></script>
 <script src="quiz-preview-core.js"></script>
 <script src="teacher-stage.js"></script>
@@ -760,6 +780,50 @@ function serverNow() { return store.serverNow(); }
 const $  = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 const APP = () => document.getElementById('app');
+let imageLightboxReturnFocus = null;
+
+function renderImageLightbox(state) {
+  const root = document.getElementById('image-lightbox');
+  const image = document.getElementById('image-lightbox-img');
+  const caption = document.getElementById('image-lightbox-caption');
+  const close = document.getElementById('image-lightbox-close');
+  if (!root || !image || !caption) return;
+  root.hidden = !state.open;
+  image.src = state.open ? state.src : '';
+  image.alt = state.open ? state.alt : '';
+  caption.textContent = state.open ? state.alt : '';
+  if (state.open && close && typeof close.focus === 'function') close.focus();
+  if (!state.open) {
+    if (document.body && root.parentNode !== document.body) document.body.appendChild(root);
+    const returnFocus = imageLightboxReturnFocus;
+    imageLightboxReturnFocus = null;
+    if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
+  }
+}
+const imageLightbox = ImageLightboxCore.create(renderImageLightbox);
+function openImageLightbox(image) {
+  if (!image) return false;
+  imageLightboxReturnFocus = image;
+  const root = document.getElementById('image-lightbox');
+  if (root && document.fullscreenElement && root.parentNode !== document.fullscreenElement) {
+    document.fullscreenElement.appendChild(root);
+  }
+  return imageLightbox.open(image.currentSrc || image.src, image.alt || '이미지');
+}
+function closeImageLightbox() { return imageLightbox.close(); }
+document.addEventListener('click', event => {
+  const image = event.target && event.target.closest && event.target.closest('img[data-lightbox]');
+  if (image) openImageLightbox(image);
+});
+document.addEventListener('keydown', event => {
+  const image = event.target && event.target.closest && event.target.closest('img[data-lightbox]');
+  if (image && (event.key === 'Enter' || event.key === ' ')) {
+    event.preventDefault();
+    openImageLightbox(image);
+    return;
+  }
+  imageLightbox.keydown(event.key);
+});
 
 /** 혼동하기 쉬운 0/O/1/I 를 뺀 문자셋 — 학생이 코드를 손으로 입력하기 때문 */
 const IDCHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -2882,12 +2946,12 @@ function mkPreviewRender() {
     result = '<div class="preview-result ' + resultClass + '">' + message + '</div>' +
       '<div class="preview-explanation"><b>해설</b><br>' +
       esc(state.explanation || '등록된 해설이 없습니다.') + '</div>' +
-      (explanationImage ? '<img class="preview-explanation-img" src="' + esc(explanationImage) + '" alt="해설 이미지">' : '');
+      (explanationImage ? '<img class="preview-explanation-img" data-lightbox tabindex="0" role="button" aria-label="해설 이미지 크게 보기" src="' + esc(explanationImage) + '" alt="해설 이미지">' : '');
   }
   const card = mode => '<div class="mk-question-preview-card ' + mode + '">' +
       '<div class="preview-top"><span class="tag">문항 ' + state.number + '</span>' +
       '<span class="tag mute">실제 흐름 미리보기</span></div>' +
-      (image ? '<img class="q-img" src="' + esc(image) + '" alt="문항 이미지">' : '') +
+      (image ? '<img class="q-img" data-lightbox tabindex="0" role="button" aria-label="문항 이미지 크게 보기" src="' + esc(image) + '" alt="문항 이미지">' : '') +
       '<div class="preview-q">' + esc(String(q.text || '').trim() || '질문을 입력하세요') + '</div>' +
       answerArea + result + '<div class="preview-actions">' +
       (isResult
@@ -3341,7 +3405,7 @@ function mkImageField(q, videoIndex, i) {
   return '<div class="field"><div class="row" style="align-items:center"><label class="f" style="margin:0">이미지 (선택)</label><span class="spacer"></span>' +
     '<button type="button" class="btn sm ghost" onclick="mkToggleImage(' + videoIndex + ',' + i + ')">접기</button></div>' +
     (src
-      ? '<div class="img-box"><img src="' + esc(src) + '" alt="문항 이미지" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'">' +
+      ? '<div class="img-box"><img data-lightbox tabindex="0" role="button" aria-label="문항 이미지 크게 보기" src="' + esc(src) + '" alt="문항 이미지" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'">' +
           '<div class="img-bad" style="display:none">⚠ 이미지를 불러오지 못했습니다. 주소를 확인하세요.</div>' +
           '<button class="btn sm danger" onclick="mkClearImage(' + videoIndex + ',' + i + ')">이미지 제거</button>' +
           '<span class="hint" style="margin:0">' + (q.imgUp ? '업로드한 그림 (' + Math.round((q._img || '').length / 1024) + 'KB)' : '외부 주소') + '</span>' +
@@ -3374,7 +3438,7 @@ function mkExplanationField(q, videoIndex, questionIndex) {
       'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].explain=this.value">' + esc(q.explain) + '</textarea>' +
     '<label class="f" style="margin-top:12px">해설 이미지 (선택)</label>' +
     (src
-      ? '<div class="img-box"><img src="' + esc(src) + '" alt="해설 이미지">' +
+      ? '<div class="img-box"><img data-lightbox tabindex="0" role="button" aria-label="해설 이미지 크게 보기" src="' + esc(src) + '" alt="해설 이미지">' +
           '<button type="button" class="btn sm danger" onclick="mkClearExplanationImage(' + videoIndex + ',' + questionIndex + ')">이미지 제거</button></div>'
       : '<div class="row" style="align-items:center"><label class="btn sm" style="margin:0">📁 파일 올리기' +
           '<input type="file" accept="image/*" style="display:none" onchange="mkUploadExplanationImage(' + videoIndex + ',' + questionIndex + ',this)"></label>' +
@@ -5827,10 +5891,10 @@ function plRenderOverlay() {
       '<div class="quiz-timer" id="ov-timer" style="display:none"><div class="quiz-timer-track"><i></i></div><strong class="quiz-timer-number" id="ov-timer-n">–</strong></div>' +
     '</div>' +
     '<div class="quiz-body">' +
-      (hasImage(q) ? '<img class="q-img" id="ov-img" alt="문항 이미지">' : '') +
+      (hasImage(q) ? '<img class="q-img" data-lightbox tabindex="0" role="button" aria-label="문항 이미지 크게 보기" id="ov-img" alt="문항 이미지">' : '') +
       '<div class="ov-q">' + esc(q.text) + '</div>' +
       (publicAnswer.explain ? '<div class="ov-explain-top" id="ov-explain-top" style="display:none">💡 ' + esc(publicAnswer.explain) + '</div>' : '') +
-      (publicAnswer.explainImage ? '<img class="ov-explain-img" id="ov-explain-img" style="display:none" src="' + esc(publicAnswer.explainImage) + '" alt="해설 이미지">' : '') +
+      (publicAnswer.explainImage ? '<img class="ov-explain-img" data-lightbox tabindex="0" role="button" aria-label="해설 이미지 크게 보기" id="ov-explain-img" style="display:none" src="' + esc(publicAnswer.explainImage) + '" alt="해설 이미지">' : '') +
       (isTextType(q)
         ? '<div id="ov-textwrap"></div>'
         : '<div class="ov-choices" id="ov-choices">' +
@@ -6348,11 +6412,11 @@ function stRender() {
       '</div>' +
       (t ? '<div class="quiz-timer ' + esc(t.phase) + '" id="st-timer"><div class="quiz-timer-track"><i style="width:' + (t.ratio * 100) + '%"></i></div><strong class="quiz-timer-number" id="st-left">' + Math.ceil(t.left) + '초</strong></div>' : '') +
       banner +
-      (hasImage(q) ? '<img class="stu-q-img" id="st-img" alt="문항 이미지">' : '') +
+      (hasImage(q) ? '<img class="stu-q-img" data-lightbox tabindex="0" role="button" aria-label="문항 이미지 크게 보기" id="st-img" alt="문항 이미지">' : '') +
       '<div class="stu-q">' + esc(q.text) + '</div>' +
       // 해설은 공개 직후 가장 먼저 눈에 들어와야 하므로 보기 위쪽에 크게 놓는다
       (revealed && q.explain ? '<div class="stu-explain-top">💡 ' + esc(q.explain) + '</div>' : '') +
-      (revealed && q.explainImage ? '<img class="stu-explain-img" src="' + esc(q.explainImage) + '" alt="해설 이미지">' : '') +
+      (revealed && q.explainImage ? '<img class="stu-explain-img" data-lightbox tabindex="0" role="button" aria-label="해설 이미지 크게 보기" src="' + esc(q.explainImage) + '" alt="해설 이미지">' : '') +
       stAnswerUI(q, i, my, revealed, locked) +
       '<div class="privacy-note">입력한 학년·반·번호·이름과 응답이 저장됩니다.</div>' +
     '</div>');
