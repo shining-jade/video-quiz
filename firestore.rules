@@ -255,6 +255,35 @@ service cloud.firestore {
       return exists(path) && validStoredCounterGateUnlocked(get(path).data);
     }
 
+    function validStoredSessionCounterGate(data) {
+      return data.keys().hasAll([
+          'complete', 'projectId', 'environment', 'rulesVersion',
+          'preflightNonEndedLegacyCount', 'verifiedAt', 'updatedAt', 'completedByUid'
+        ]) &&
+        data.keys().hasOnly([
+          'complete', 'projectId', 'environment', 'rulesVersion',
+          'preflightNonEndedLegacyCount', 'verifiedAt', 'updatedAt', 'completedByUid'
+        ]) &&
+        data.complete == true &&
+        data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 120 &&
+        data.environment in ['production', 'emulator'] &&
+        data.rulesVersion == 'session-counters-v1' &&
+        data.preflightNonEndedLegacyCount == 0 &&
+        data.verifiedAt is timestamp && data.updatedAt is timestamp &&
+        data.updatedAt == data.verifiedAt &&
+        data.completedByUid is string && data.completedByUid.size() > 0 &&
+        data.completedByUid.size() <= 128;
+    }
+
+    function sessionCounterMigrationComplete() {
+      let path = /databases/$(database)/documents/migration_gates/session_counters;
+      return exists(path) && validStoredSessionCounterGate(get(path).data);
+    }
+
+    function legacySessionCounterCompatibilityOpen() {
+      return !sessionCounterMigrationComplete();
+    }
+
     function validStoredCounterGateUnlocked(data) {
       return data.keys().hasAll([
           'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid',
@@ -874,11 +903,16 @@ service cloud.firestore {
 
     function validAtomicSessionEndLive(sessionId) {
       let sessionPath = /databases/$(database)/documents/sessions/$(sessionId);
+      let sessionAfter = getAfter(sessionPath).data;
       return exists(sessionPath) &&
         existsAfter(sessionPath) &&
-        getAfter(sessionPath).data.get('status', null) == 'ended' &&
-        getAfter(sessionPath).data.get('actualParticipants', -1) ==
-          getAfter(sessionPath).data.get('registeredStudentCount', -2) &&
+        sessionAfter.get('status', null) == 'ended' &&
+        (sessionHasCounterFields(sessionAfter)
+          ? validSessionCounter(sessionAfter) &&
+            sessionAfter.actualParticipants == sessionAfter.registeredStudentCount
+          : legacySessionCounterCompatibilityOpen() &&
+            legacySessionWithoutCounters(sessionAfter) &&
+            !('actualParticipants' in sessionAfter)) &&
         validEndedLiveData(request.resource.data);
     }
 
@@ -938,6 +972,17 @@ service cloud.firestore {
             data.lastStudentUid.size() <= 128);
     }
 
+    function sessionHasCounterFields(data) {
+      return data.keys().hasAll(['registeredStudentCount', 'studentCountRevision']);
+    }
+
+    function legacySessionWithoutCounters(data) {
+      return !('registeredStudentCount' in data) &&
+        !('studentCountRevision' in data) && !('lastStudentUid' in data) &&
+        !('actualParticipants' in data) &&
+        !('classPlanId' in data) && !('classPlanRevision' in data);
+    }
+
     function validSessionCreateCounter() {
       return request.resource.data.registeredStudentCount == 0 &&
         request.resource.data.studentCountRevision == 0 &&
@@ -994,6 +1039,37 @@ service cloud.firestore {
         request.resource.data.actualParticipants == resource.data.registeredStudentCount &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['actualParticipants']) &&
         existsAfter(livePath) && validEndedLiveData(getAfter(livePath).data);
+    }
+
+    function validLegacySessionEnd(sessionId) {
+      let livePath = /databases/$(database)/documents/sessions/$(sessionId)/meta/live;
+      return resource.data.status in ['active', 'live'] &&
+        request.resource.data.status == 'ended' &&
+        request.resource.data.endedAt == request.time &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'endedAt'
+        ]) && existsAfter(livePath) && validEndedLiveData(getAfter(livePath).data);
+    }
+
+    function validLegacySessionTransition(sessionId) {
+      return legacySessionCounterCompatibilityOpen() &&
+        legacySessionWithoutCounters(resource.data) &&
+        legacySessionWithoutCounters(request.resource.data) &&
+        (validSessionActivation() || validSessionHeartbeat() ||
+          validSessionAbortTransition() || validLegacySessionEnd(sessionId));
+    }
+
+    function validOwnedSessionUpdate(sessionId) {
+      return ownsSession(sessionId) &&
+        (sessionHasCounterFields(resource.data)
+          ? sessionHasCounterFields(request.resource.data) &&
+            validSessionCounter(resource.data) && validSessionCounter(request.resource.data) && (
+              validSessionActivation() || validSessionHeartbeat() ||
+              validSessionAbortTransition() || validSessionEnd(sessionId) ||
+              validSessionEndRepair(sessionId) || validSessionPlanAttach(sessionId) ||
+              validSessionPlanFinish(sessionId)
+            )
+          : validLegacySessionTransition(sessionId));
     }
 
     function validStudentCounterIncrement(sessionId) {
@@ -1288,11 +1364,17 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /migration_gates/session_counters {
+      allow get: if isApprovedTeacher() || isAdmin();
+      allow list, create, update, delete: if false;
+      allow read, write: if false;
+    }
+
     match /class_plans_private/{planId} {
       allow get: if isAdmin() ||
         (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid);
       allow list: if isAdmin() && request.query.limit != null && request.query.limit <= 100 &&
-        resource.data.plannedStartAt >= request.time - duration.value(1441, 'm') &&
+        resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
         resource.data.plannedStartAt < request.time + duration.value(32, 'd');
       allow create: if validClassPlanCreate(planId);
       allow update: if validClassPlanUpdate(planId);
@@ -1304,7 +1386,7 @@ service cloud.firestore {
       allow get: if isApprovedTeacher() && validClassPlanPublic(resource.data, planId);
       allow list: if isApprovedTeacher() && request.query.limit != null &&
         request.query.limit <= 100 &&
-        resource.data.plannedStartAt >= request.time - duration.value(1441, 'm') &&
+        resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
         resource.data.plannedStartAt < request.time + duration.value(32, 'd');
       allow create: if validClassPlanCreate(planId);
       allow update: if validClassPlanUpdate(planId);
@@ -1406,16 +1488,14 @@ service cloud.firestore {
               request.time + duration.value(120, 's')));
       allow update: if request.resource.data.teacherUid == resource.data.teacherUid &&
         request.resource.data.teacherEmail == resource.data.teacherEmail &&
-        (validStudentCounterIncrement(sessionId) || (ownsSession(sessionId) &&
-          validSessionCounter(resource.data) && validSessionCounter(request.resource.data) && (
-          validSessionActivation() || validSessionHeartbeat() ||
-          validSessionAbortTransition() || validSessionEnd(sessionId) ||
-          validSessionEndRepair(sessionId) || validSessionPlanAttach(sessionId) ||
-          validSessionPlanFinish(sessionId)
-        )));
+        (validStudentCounterIncrement(sessionId) || validOwnedSessionUpdate(sessionId));
       allow delete: if !('classPlanId' in resource.data) &&
         !('classPlanRevision' in resource.data) &&
-        (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted'));
+        (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted' &&
+          (sessionHasCounterFields(resource.data)
+            ? validSessionCounter(resource.data)
+            : legacySessionCounterCompatibilityOpen() &&
+              legacySessionWithoutCounters(resource.data))));
       allow read, write: if false;
 
       match /meta/allocation {

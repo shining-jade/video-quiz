@@ -590,7 +590,7 @@ rulesTest('class-planning: public/private get and bounded list follow the role p
   await assertSucceeds(getDocs(query(
     collection(owner, 'class_plans_public'),
     where('plannedStartAt', '>=', Timestamp.fromMillis(
-      transportBoundaryNow - 24 * 60 * 60 * 1000
+      transportBoundaryNow - (24 * 60 + 7) * 60 * 1000
     )),
     where('plannedStartAt', '<', Timestamp.fromMillis(transportBoundaryNow + 60 * 60 * 1000)),
     orderBy('plannedStartAt', 'asc'), queryLimit(20)
@@ -599,7 +599,9 @@ rulesTest('class-planning: public/private get and bounded list follow the role p
   await assertFails(getDocs(query(collection(owner, 'class_plans_public'), queryLimit(20))));
   await assertFails(getDocs(query(
     collection(owner, 'class_plans_public'),
-    where('plannedStartAt', '>=', Timestamp.fromMillis(Date.now() - 25 * 60 * 60 * 1000)),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(
+      Date.now() - (24 * 60 + 9) * 60 * 1000
+    )),
     where('plannedStartAt', '<', Timestamp.fromMillis(Date.now() + 60 * 60 * 1000)),
     orderBy('plannedStartAt', 'asc'), queryLimit(20)
   )));
@@ -1247,6 +1249,131 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
     assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/old-allocation'))).exists(), false);
     assert.equal((await getDoc(doc(actorFirestore('owner'), 'sessions/new-allocation'))).exists(), true);
     assert.equal((await getDoc(doc(actorFirestore('owner'), 'codes/REASN2'))).data().sessionId, 'new-allocation');
+  });
+});
+
+rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동안 열고 완료 뒤 strict로 닫는다', async t => {
+  const gatePath = 'migration_gates/session_counters';
+  const gateTime = Timestamp.fromMillis(10_000);
+  const completeGate = {
+    complete: true,
+    projectId,
+    environment: 'emulator',
+    rulesVersion: 'session-counters-v1',
+    preflightNonEndedLegacyCount: 0,
+    verifiedAt: gateTime,
+    updatedAt: gateTime,
+    completedByUid: actors.admin.uid
+  };
+  const seedLegacy = async (sessionId, code, status = 'live') => {
+    await adminWrite(`sessions/${sessionId}`, {
+      code, setId: 'set1', teacherUid: actors.owner.uid,
+      teacherEmail: actors.owner.email, status,
+      activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+    });
+    await adminWrite(`codes/${code}`, { sessionId });
+    await adminWrite(`sessions/${sessionId}/meta/live`, {
+      q: -1, openedAt: 0, revealed: false, limitSec: 0
+    });
+    await adminWrite(`sessions/${sessionId}/meta/allocation`, {
+      token: `${sessionId}-allocation-token`, ownerUid: actors.owner.uid
+    });
+  };
+
+  await t.test('gate 전 legacy heartbeat와 safe end는 actual 없이 가능하고 신규 join은 거부된다', async () => {
+    await resetFirestore();
+    await seedLegacy('legacy-live', 'LEGA12');
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+
+    assert.equal(await ownerStore.renewSessionActivationLease(
+      'legacy-live', 'LEGA12', actors.owner.uid, 'legacy-live-allocation-token'
+    ), true);
+    await assertFails(setDoc(doc(actorFirestore('anonymous'),
+      'sessions/legacy-live/students/new-student-uid'), {
+      uid: 'new-student-uid', grade: 1, klass: 1, num: 1, name: '신규 학생'
+    }));
+    await ownerStore.endSession('legacy-live');
+
+    const ended = (await getDoc(doc(actorFirestore('owner'), 'sessions/legacy-live'))).data();
+    assert.equal(ended.status, 'ended');
+    assert.equal(ended.actualParticipants, undefined);
+    assert.equal((await getDoc(doc(actorFirestore('owner'),
+      'sessions/legacy-live/meta/live'))).data().status, 'ended');
+  });
+
+  await t.test('gate 전 legacy allocating recovery는 안전 정리할 수 있다', async () => {
+    await resetFirestore();
+    await seedLegacy('legacy-allocating', 'LEGA13', 'allocating');
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    const result = await ownerStore.recoverPendingSessionAllocation({
+      sessionId: 'legacy-allocating', code: 'LEGA13', ownerUid: actors.owner.uid,
+      ownerEmail: actors.owner.email, token: 'legacy-allocating-allocation-token'
+    });
+
+    assert.deepEqual(result, { complete: true, cleaned: true });
+    assert.equal((await getDoc(doc(actorFirestore('owner'),
+      'sessions/legacy-allocating'))).exists(), false);
+
+    await seedLegacy('legacy-stale-live', 'LEGA16');
+    const stale = await adminRead('sessions/legacy-stale-live');
+    await adminWrite('sessions/legacy-stale-live', {
+      ...stale, activationLeaseUntil: Timestamp.fromMillis(Date.now() - 1_000)
+    });
+    assert.deepEqual(await ownerStore.recoverPendingSessionAllocation({
+      sessionId: 'legacy-stale-live', code: 'LEGA16', ownerUid: actors.owner.uid,
+      ownerEmail: actors.owner.email, token: 'legacy-stale-live-allocation-token'
+    }), { complete: true, cleaned: true });
+    assert.equal((await getDoc(doc(actorFirestore('owner'),
+      'sessions/legacy-stale-live'))).exists(), false);
+  });
+
+  await t.test('gate는 client write를 거부하고 exact preflight shape가 아니면 아직 완료로 취급하지 않는다', async () => {
+    await resetFirestore();
+    for (const actorName of ['owner', 'admin']) {
+      await assertFails(setDoc(doc(actorFirestore(actorName), gatePath), completeGate));
+    }
+    await adminWrite(gatePath, { ...completeGate, preflightNonEndedLegacyCount: 1 });
+    await seedLegacy('legacy-malformed-gate', 'LEGA14');
+    assert.equal(await emulatorStore(actorFirestore('owner')).renewSessionActivationLease(
+      'legacy-malformed-gate', 'LEGA14', actors.owner.uid,
+      'legacy-malformed-gate-allocation-token'
+    ), true);
+  });
+
+  await t.test('gate 완료 뒤 missing counter 경로는 거부하고 migrated session 경로는 유지된다', async () => {
+    await resetFirestore();
+    await adminWrite(gatePath, completeGate);
+    await seedLegacy('legacy-after-gate', 'LEGA15');
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    await assert.rejects(ownerStore.renewSessionActivationLease(
+      'legacy-after-gate', 'LEGA15', actors.owner.uid,
+      'legacy-after-gate-allocation-token'
+    ));
+    await assert.rejects(ownerStore.endSession('legacy-after-gate'));
+    await assert.rejects(ownerStore.abortSessionAllocation(
+      'legacy-after-gate', 'LEGA15', actors.owner.uid,
+      'legacy-after-gate-allocation-token'
+    ), /정리.*실패/);
+
+    await adminWrite('sessions/migrated-after-gate', {
+      code: 'MIGR15', setId: 'set1', teacherUid: actors.owner.uid,
+      teacherEmail: actors.owner.email, status: 'live',
+      registeredStudentCount: 0, studentCountRevision: 0,
+      activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+    });
+    await adminWrite('codes/MIGR15', { sessionId: 'migrated-after-gate' });
+    await adminWrite('sessions/migrated-after-gate/meta/live', {
+      q: -1, openedAt: 0, revealed: false, limitSec: 0
+    });
+    await adminWrite('sessions/migrated-after-gate/meta/allocation', {
+      token: 'migrated-after-gate-token', ownerUid: actors.owner.uid
+    });
+    assert.equal(await ownerStore.renewSessionActivationLease(
+      'migrated-after-gate', 'MIGR15', actors.owner.uid, 'migrated-after-gate-token'
+    ), true);
+    await ownerStore.endSession('migrated-after-gate');
+    assert.equal((await getDoc(doc(actorFirestore('owner'),
+      'sessions/migrated-after-gate'))).data().actualParticipants, 0);
   });
 });
 

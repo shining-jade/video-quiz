@@ -1382,6 +1382,31 @@ function storedClassPlanPair(patch = {}) {
   return { storedPrivate, storedPublic };
 }
 
+test('12:00:45 serverNow에서 12:00 기본 계획의 24시간 겹침 조회를 허용한다', async () => {
+  const now = Date.UTC(2026, 7, 20, 12, 0, 45);
+  const start = Date.UTC(2026, 7, 19, 12, 0, 0);
+  const end = Date.UTC(2026, 7, 20, 13, 0, 0);
+  const fake = makeFirestoreFake();
+
+  assert.deepEqual(await createStore(fake, () => now).listPublicPlans(start, end, 100), {});
+});
+
+test('class plan query horizon은 UI 5분 past·1분 절삭·2분 jitter를 넘으면 거부한다', async () => {
+  const now = Date.UTC(2026, 7, 20, 12, 0, 0);
+  const store = createStore(makeFirestoreFake(), () => now);
+  const horizon = (24 * 60 + 8) * 60_000;
+
+  await assert.doesNotReject(store.listPublicPlans(now - horizon, now + 60_000, 100));
+  await assert.rejects(
+    store.listPublicPlans(now - horizon - 1, now + 60_000, 100),
+    /과거 horizon/
+  );
+  await assert.rejects(
+    store.listPublicPlans(now + 24 * 60 * 60_000, now + 32 * 24 * 60 * 60_000, 100),
+    /미래 horizon/
+  );
+});
+
 test('class plan create atomically writes one exact private/public projection pair', async () => {
   const fake = makeFirestoreFake({
     'teacher_allowances/teacher-a': activeTeacherAllowance()
@@ -1523,7 +1548,7 @@ test('class plan public/admin queries require a bounded ordered server-time wind
   await assert.rejects(store.listPublicPlans(25_000, 9_000, 20), /window|기간|범위/);
   await assert.rejects(store.listAdminPlans(9_000, 25_000, 101), /limit/);
   await assert.rejects(store.listPublicPlans(
-    1_000 - 24 * 60 * 60 * 1000 - 1, 2_000, 20
+    1_000 - (24 * 60 + 8) * 60 * 1000 - 1, 2_000, 20
   ), /server|과거|horizon|범위/);
   await assert.rejects(store.listPublicPlans(
     1_000 + 2 * 24 * 60 * 60 * 1000,
@@ -4675,6 +4700,72 @@ test('attached live allocation abort는 server pair를 확인해 거부하고 am
   assert.equal(fake.value('sessions/attached').status, 'live');
 });
 
+test('end와 plan finish 사이 reload 복구는 reciprocal live plan을 끝낸 뒤 complete를 반환한다', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'ended-attached', actualStartedAtMs: 12_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 12_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 12_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'sessions/ended-attached': {
+      code: 'ENDED2', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr',
+      setId: 'set-a', status: 'ended', endedAt: { toMillis: () => 20_000 },
+      actualParticipants: 0, registeredStudentCount: 0, studentCountRevision: 0,
+      classPlanId: 'plan-a', classPlanRevision: 2
+    },
+    'sessions/ended-attached/meta/allocation': {
+      token: 'ended-attached-token', ownerUid: 'teacher-a'
+    }
+  }, { committedServerMillis: 21_000 });
+
+  const result = await createStore(fake).recoverPendingSessionAllocation({
+    sessionId: 'ended-attached', code: 'ENDED2', ownerUid: 'teacher-a',
+    ownerEmail: 'teacher@school.kr', token: 'ended-attached-token',
+    planId: 'plan-a', planRevision: 1, setId: 'set-a', attachStatus: 'attached'
+  });
+
+  assert.deepEqual(result, {
+    complete: true, ended: true, finished: true, planRevision: 3
+  });
+  assert.equal(fake.value('class_plans_private/plan-a').status, 'ended');
+  assert.equal(fake.value('class_plans_public/plan-a').actualParticipants, 0);
+  assert.equal(fake.value('sessions/ended-attached').classPlanRevision, 3);
+});
+
+test('ended reciprocal plan finish 실패는 복구를 complete로 오인하지 않고 재시도 상태를 보존한다', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'ended-attached', actualStartedAtMs: 12_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 12_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 12_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'sessions/ended-attached': {
+      code: 'ENDED2', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr',
+      setId: 'set-a', status: 'ended', endedAt: { toMillis: () => 20_000 },
+      actualParticipants: 0, registeredStudentCount: 0, studentCountRevision: 0,
+      classPlanId: 'plan-a', classPlanRevision: 2
+    }
+  }, { failTransactionAt: 1, failTransactionMessage: 'planned finish failure' });
+
+  await assert.rejects(createStore(fake).recoverPendingSessionAllocation({
+    sessionId: 'ended-attached', code: 'ENDED2', ownerUid: 'teacher-a',
+    ownerEmail: 'teacher@school.kr', token: 'ended-attached-token',
+    planId: 'plan-a', planRevision: 1, setId: 'set-a', attachStatus: 'attached'
+  }), /planned finish failure/);
+  assert.equal(fake.value('class_plans_private/plan-a').status, 'live');
+  assert.equal(fake.value('sessions/ended-attached').classPlanRevision, 2);
+});
+
 test('학생 최초 join만 parent counter와 exact pair로 증가하고 재가입 프로필 수정은 증가시키지 않는다', async () => {
   const fake = makeFirestoreFake({
     'sessions/a': {
@@ -4735,11 +4826,36 @@ test('세션 종료는 student query 결과가 아니라 paired parent counter�
   ), false);
 });
 
-test('counter 없는 legacy session 종료는 추정하지 않고 fail closed로 live를 보존한다', async () => {
+test('migration gate 전 counter 없는 legacy session은 actual을 만들지 않고 atomic 안전 종료한다', async () => {
   const fake = makeFirestoreFake({
-    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
     'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     'sessions/a/students/student-1': { uid: 'student-1' }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').status, 'ended');
+  assert.equal(fake.value('sessions/a').actualParticipants, undefined);
+  assert.equal(fake.value('sessions/a/meta/live').status, 'ended');
+  assert.equal(fake.calls().some(call =>
+    call.operation === 'getCollection' && call.path === 'sessions/a/students'
+  ), false);
+});
+
+test('migration gate 완료 뒤 counter 없는 legacy session 종료는 fail closed한다', async () => {
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt: new Date(10_000), updatedAt: new Date(10_000), completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
   });
 
   await assert.rejects(createStore(fake).endSession('a'), /counter|migration|집계/);
@@ -6085,6 +6201,32 @@ test('우리 반 시작하기는 수업계획 입력과 로컬 경고 확인 dia
   assert.match(html, /id="pl-plan-ack"/);
   assert.match(html, /경고 확인 후 진행/);
   assert.match(html, /onclick="plOpenClassPlanDialog\(\)"/);
+});
+
+test('datetime-local 기본값은 server 12:00:45를 같은 로컬 분의 12:00으로 절삭한다', () => {
+  const start = { value: '' };
+  const end = { value: '' };
+  const dialog = { showModal() { this.opened = true; } };
+  const elements = {
+    '#pl-plan-dialog': dialog,
+    '#pl-plan-start': start,
+    '#pl-plan-end': end,
+    '#pl-plan-warning': { textContent: '' }
+  };
+  const serverMillis = new Date(2026, 7, 20, 12, 0, 45).getTime();
+  const context = {
+    pl: {}, teacherState: { status: 'teacher', role: 'teacher' },
+    AuthCore: require('../auth-core.js'),
+    $(selector) { return elements[selector] || null; },
+    store: { serverNow() { return serverMillis; } },
+    serverNow() { throw new Error('store serverNow를 사용해야 한다'); }
+  };
+  loadStageFunctions(['plOpenClassPlanDialog'], context);
+
+  assert.equal(context.plOpenClassPlanDialog(), true);
+  assert.equal(start.value, '2026-08-20T12:00');
+  assert.equal(end.value, '2026-08-20T12:50');
+  assert.equal(dialog.opened, true);
 });
 
 test('겹침 조회 실패는 현황 확인 불가를 표시하지만 로컬 확인 뒤 계획 진행을 허용한다', async () => {
@@ -8963,7 +9105,7 @@ test('a persisted Google session remains in the teacher UI state', async () => {
   assert.equal(context.teacherState.status, 'teacher');
 });
 
-test('pending allocation queue는 auth 교체를 무시하고 원 소유자 재로그인·reload·retry로 복구한다', async () => {
+test('ended plan finish 실패 pending은 auth 교체·reload에도 보존되고 원 소유자 retry 뒤 삭제된다', async () => {
   const values = new Map();
   const localStorage = {
     getItem(key) { return values.has(key) ? values.get(key) : null; },
@@ -8974,7 +9116,8 @@ test('pending allocation queue는 auth 교체를 무시하고 원 소유자 재�
   values.set(key, JSON.stringify([{
     sessionId: 'pending-session', code: 'PEND12', ownerUid: 'owner-user',
     ownerEmail: 'owner@school.kr', token: 'pending-token-1234', createdAt: 1,
-    recoverAfter: 2
+    recoverAfter: 2, planId: 'plan-a', planRevision: 2, setId: 'set-a',
+    attachStatus: 'attached'
   }]));
   let failRecovery = true;
   const calls = [];
@@ -8991,8 +9134,8 @@ test('pending allocation queue는 auth 교체를 무시하고 원 소유자 재�
       async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; },
       async recoverPendingSessionAllocation(record) {
         calls.push(record.ownerUid);
-        if (failRecovery) throw new Error('planned cleanup failure');
-        return { complete: true, cleaned: true };
+        if (failRecovery) throw new Error('planned finish failure');
+        return { complete: true, ended: true, finished: true, planRevision: 3 };
       }
     }
   };
@@ -9015,12 +9158,12 @@ test('pending allocation queue는 auth 교체를 무시하고 원 소유자 재�
 
   await context.applyTeacherUser(googleUser('owner-user', 'owner@school.kr'));
   assert.deepEqual(calls, ['owner-user']);
-  assert.match(context.pendingAllocationRead()[0].lastError, /planned cleanup failure/);
+  assert.match(context.pendingAllocationRead()[0].lastError, /planned finish failure/);
   assert.match(context.teacherAuthMarkup(), /정리 재시도/);
 
   const reloadContext = { PENDING_ALLOCATION_KEY: key, localStorage };
   loadStageFunctions(['pendingAllocationRead'], reloadContext);
-  assert.match(reloadContext.pendingAllocationRead()[0].lastError, /planned cleanup failure/);
+  assert.match(reloadContext.pendingAllocationRead()[0].lastError, /planned finish failure/);
 
   failRecovery = false;
   await context.retryPendingAllocations();

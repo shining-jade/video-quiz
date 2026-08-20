@@ -716,8 +716,14 @@
     }
 
     const CLASS_PLAN_WINDOW_MAX_MS = 31 * 24 * 60 * 60 * 1000;
-    const CLASS_PLAN_QUERY_PAST_MS = 24 * 60 * 60 * 1000;
+    // UI allows a five-minute past start. Keep a further minute for
+    // datetime-local truncation and two minutes for client/server transport.
+    const CLASS_PLAN_QUERY_PAST_MS = (24 * 60 + 8) * 60 * 1000;
     const CLASS_PLAN_QUERY_FUTURE_MS = 32 * 24 * 60 * 60 * 1000;
+    const SESSION_COUNTER_GATE_KEYS = [
+      'complete', 'projectId', 'environment', 'rulesVersion',
+      'preflightNonEndedLegacyCount', 'verifiedAt', 'updatedAt', 'completedByUid'
+    ];
     const classPlanPrivateBaseKeys = [
       'planId', 'ownerUid', 'ownerEmailCanonical', 'ownerDisplayName',
       'setId', 'setTitleSnapshot', 'className', 'plannedStartAt', 'plannedEndAt',
@@ -739,6 +745,25 @@
         throw new Error('ClassPlanningCore가 준비되지 않았습니다.');
       }
       return value;
+    }
+
+    function validSessionCounterMigrationGate(data) {
+      const value = data || {};
+      const keys = Object.keys(value).sort();
+      const exactKeys = [...SESSION_COUNTER_GATE_KEYS].sort();
+      const verifiedAt = value.verifiedAt instanceof Date
+        ? value.verifiedAt.getTime() : timestampMillis(value.verifiedAt);
+      const updatedAt = value.updatedAt instanceof Date
+        ? value.updatedAt.getTime() : timestampMillis(value.updatedAt);
+      return JSON.stringify(keys) === JSON.stringify(exactKeys) &&
+        value.complete === true && typeof value.projectId === 'string' &&
+        value.projectId.length > 0 && value.projectId.length <= 120 &&
+        ['production', 'emulator'].includes(value.environment) &&
+        value.rulesVersion === 'session-counters-v1' &&
+        value.preflightNonEndedLegacyCount === 0 &&
+        Number.isSafeInteger(verifiedAt) && verifiedAt === updatedAt &&
+        typeof value.completedByUid === 'string' && value.completedByUid.length > 0 &&
+        value.completedByUid.length <= 128;
     }
 
     function assertPlanId(value) {
@@ -1045,7 +1070,7 @@
       if (start < now - CLASS_PLAN_QUERY_PAST_MS) {
         throw new Error('class plan 조회 시작은 server-time 과거 horizon 안이어야 합니다.');
       }
-      if (end > now + CLASS_PLAN_QUERY_FUTURE_MS) {
+      if (end >= now + CLASS_PLAN_QUERY_FUTURE_MS) {
         throw new Error('class plan 조회 끝은 server-time 미래 horizon 안이어야 합니다.');
       }
       return { start, end, count };
@@ -2469,7 +2494,42 @@
           (pending.code && session.code !== pending.code)) {
         return { complete: false, ignored: true };
       }
-      if (session.status === 'ended') return { complete: true, ended: true };
+      if (session.status === 'ended') {
+        if (session.classPlanId === undefined && session.classPlanRevision === undefined) {
+          return { complete: true, ended: true };
+        }
+        if (!pending.planId || pending.planId !== session.classPlanId ||
+            !['attaching', 'attached'].includes(pending.attachStatus) ||
+            !Number.isSafeInteger(session.classPlanRevision)) {
+          return { complete: false, ignored: true };
+        }
+        const privateSnapshot = await db.doc(
+          'class_plans_private/' + pending.planId
+        ).get({ source: 'server' });
+        const publicSnapshot = await db.doc(
+          'class_plans_public/' + pending.planId
+        ).get({ source: 'server' });
+        if (!privateSnapshot.exists || !publicSnapshot.exists) {
+          return { complete: false, ignored: true };
+        }
+        const plan = assertClassPlanPair(
+          privateSnapshot.data(), publicSnapshot.data(), true
+        ).privateValue;
+        if (plan.sessionId !== pending.sessionId ||
+            !['live', 'ended'].includes(plan.status) ||
+            plan.revision !== session.classPlanRevision) {
+          return { complete: false, ignored: true };
+        }
+        const finished = await finishClassPlan(pending.planId, pending.sessionId, {
+          expectedRevision: session.classPlanRevision
+        });
+        return {
+          complete: true,
+          ended: true,
+          finished: true,
+          planRevision: finished.revision
+        };
+      }
       const allocationSnapshot = await db.doc(
         'sessions/' + pending.sessionId + '/meta/allocation'
       ).get();
@@ -2532,9 +2592,11 @@
     async function endSession(sessionId) {
       const sessionRef = db.doc('sessions/' + sessionId);
       const liveRef = db.doc('sessions/' + sessionId + '/meta/live');
+      const migrationGateRef = db.doc('migration_gates/session_counters');
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionRef);
         const liveSnapshot = await transaction.get(liveRef);
+        const migrationGateSnapshot = await transaction.get(migrationGateRef);
         if (!sessionSnapshot.exists || !liveSnapshot.exists) {
           throw new Error('종료할 session 또는 live 문서가 없습니다.');
         }
@@ -2542,10 +2604,34 @@
         const live = liveSnapshot.data() || {};
         const count = session.registeredStudentCount;
         const revision = session.studentCountRevision;
-        if (!Number.isSafeInteger(count) || count < 0 || revision !== count ||
-            (count === 0 && session.lastStudentUid !== undefined) ||
-            (count > 0 && (typeof session.lastStudentUid !== 'string' || !session.lastStudentUid))) {
-          throw new Error('session student counter migration이 필요합니다.');
+        const validCounter = Number.isSafeInteger(count) && count >= 0 && revision === count &&
+          (count === 0 && session.lastStudentUid === undefined ||
+            count > 0 && typeof session.lastStudentUid === 'string' &&
+              Boolean(session.lastStudentUid));
+        if (!validCounter) {
+          if (migrationGateSnapshot.exists &&
+              validSessionCounterMigrationGate(migrationGateSnapshot.data())) {
+            throw new Error('session student counter migration이 완료되어 legacy 종료가 닫혔습니다.');
+          }
+          if (session.registeredStudentCount !== undefined ||
+              session.studentCountRevision !== undefined || session.lastStudentUid !== undefined ||
+              session.actualParticipants !== undefined || session.classPlanId !== undefined ||
+              session.classPlanRevision !== undefined) {
+            throw new Error('session student counter migration이 필요합니다.');
+          }
+          if (session.status === 'ended' && live.status === 'ended') {
+            return { endedAt: session.endedAt, legacy: true };
+          }
+          if (!['active', 'live'].includes(session.status)) {
+            throw new Error('종료할 수 없는 legacy session 상태입니다.');
+          }
+          transaction.set(sessionRef, {
+            status: 'ended', endedAt: fieldValue.serverTimestamp()
+          }, { merge: true });
+          transaction.set(liveRef, {
+            q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
+          });
+          return { legacy: true };
         }
         if (session.status === 'ended' && live.status === 'ended' &&
             session.actualParticipants === count) {
