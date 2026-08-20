@@ -12394,3 +12394,133 @@ test('close freezes writes, reloads the accepted revision, grades it, then persi
     'freeze', 'read-responses', 'read-grades', 'grade:2', 'board:1', 'close'
   ]);
 });
+
+test('approved teacher dashboard shows today\'s schedule and counts without identities', async () => {
+  const panel = { innerHTML: '', isConnected: true };
+  let publicReads = 0;
+  const plans = {
+    a: {
+      planId: 'a', className: '2학년 1반', setTitleSnapshot: '분수',
+      plannedStartAt: Date.UTC(2026, 7, 20, 1), plannedEndAt: Date.UTC(2026, 7, 20, 2),
+      expectedStudents: 35, actualParticipants: 24, status: 'live', warningLevel: 'caution',
+      ownerUid: 'teacher-a-uid', ownerEmailCanonical: 'teacher-a@school.kr', ownerDisplayName: '김교사'
+    },
+    b: {
+      planId: 'b', className: '2학년 2반', setTitleSnapshot: '분수',
+      plannedStartAt: Date.UTC(2026, 7, 20, 1, 30), plannedEndAt: Date.UTC(2026, 7, 20, 2, 30),
+      expectedStudents: 50, actualParticipants: 0, status: 'planned', warningLevel: 'caution',
+      ownerUid: 'teacher-b-uid', ownerEmailCanonical: 'teacher-b@school.kr', ownerDisplayName: '박교사'
+    }
+  };
+  const teacher = { uid: 'teacher-a-uid', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
+  const context = {
+    teacherDashboard: null, teacherState: teacher, teacherAuthVersion: 7,
+    location: { hash: '#/' }, ClassPlanningCore: require('../class-planning-core.js'),
+    AuthCore: require('../auth-core.js'),
+    document: {
+      body: { contains() { return true; } },
+      getElementById(id) { return id === 'teacher-dashboard' ? panel : null; }
+    },
+    onCleanup() {},
+    store: {
+      serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
+      async listPublicPlans() { publicReads += 1; return plans; }
+    }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard'], context);
+
+  await context.startTeacherDashboard(teacher);
+
+  assert.match(panel.innerHTML, /현재 진행 1개/);
+  assert.match(panel.innerHTML, /실제 참여 24명/);
+  assert.match(panel.innerHTML, /예상 동시 참여 85명/);
+  assert.match(panel.innerHTML, /노랑/);
+  assert.doesNotMatch(panel.innerHTML, /teacher-a@school\.kr|teacher-b@school\.kr|teacher-a-uid|teacher-b-uid|김교사|박교사/);
+  await context.startTeacherDashboard(teacher);
+  assert.equal(publicReads, 1);
+  context.renderTeacherDashboard({ a: { ...plans.a, status: 'ended' } }, teacher, false);
+  assert.match(panel.innerHTML, /현재 진행 0개/);
+  assert.match(panel.innerHTML, /실제 참여 0명/);
+});
+
+test('admin dashboard alone renders teacher identity and stale dashboard work cannot restore A after A to B', async () => {
+  const panel = { innerHTML: '', isConnected: true };
+  let resolvePlans;
+  const admin = { uid: 'admin-a', email: 'admin@school.kr', role: 'admin', status: 'admin' };
+  const teacherB = { uid: 'teacher-b', email: 'teacher-b@school.kr', role: 'teacher', status: 'teacher' };
+  const context = {
+    teacherDashboard: null, teacherState: admin, teacherAuthVersion: 3,
+    location: { hash: '#/' }, ClassPlanningCore: require('../class-planning-core.js'),
+    AuthCore: require('../auth-core.js'),
+    document: {
+      body: { contains() { return true; } },
+      getElementById(id) { return id === 'teacher-dashboard' ? panel : null; }
+    },
+    onCleanup() {},
+    store: {
+      serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
+      async probeTeacherAllowance() { return { enabled: true, role: 'admin' }; },
+      listAdminPlans() { return new Promise(resolve => { resolvePlans = resolve; }); }
+    }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard'], context);
+
+  const loadingA = context.startTeacherDashboard(admin);
+  await new Promise(resolve => setImmediate(resolve));
+  context.teacherState = teacherB;
+  context.teacherAuthVersion = 4;
+  resolvePlans({ a: {
+    planId: 'a', className: '3학년 1반', setTitleSnapshot: '과학',
+    plannedStartAt: Date.UTC(2026, 7, 20, 1), plannedEndAt: Date.UTC(2026, 7, 20, 2),
+    expectedStudents: 30, status: 'planned', ownerDisplayName: '박교사', ownerEmailCanonical: 'teacher-b@school.kr'
+  } });
+  await loadingA;
+  assert.equal(panel.innerHTML, '');
+
+  context.teacherState = admin;
+  context.teacherAuthVersion = 5;
+  context.store.listAdminPlans = async () => ({ a: {
+    planId: 'a', className: '3학년 1반', setTitleSnapshot: '과학',
+    plannedStartAt: Date.UTC(2026, 7, 20, 1), plannedEndAt: Date.UTC(2026, 7, 20, 2),
+    expectedStudents: 30, status: 'planned', ownerDisplayName: '박교사', ownerEmailCanonical: 'teacher-b@school.kr'
+  } });
+  await context.startTeacherDashboard(admin);
+  assert.match(panel.innerHTML, /박교사/);
+  assert.match(panel.innerHTML, /teacher-b@school\.kr/);
+});
+
+test('teacher dashboard stops outside protected home and exposes one explicit retry after a query failure', async () => {
+  const panel = { innerHTML: '', isConnected: true };
+  let calls = 0;
+  const teacher = { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
+  const context = {
+    teacherDashboard: null, teacherState: teacher, teacherAuthVersion: 2,
+    location: { hash: '#/' }, ClassPlanningCore: require('../class-planning-core.js'),
+    AuthCore: require('../auth-core.js'),
+    document: {
+      body: { contains() { return true; } },
+      getElementById(id) { return id === 'teacher-dashboard' ? panel : null; }
+    },
+    onCleanup() {},
+    store: {
+      serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
+      async listPublicPlans() {
+        calls += 1;
+        if (calls === 1) throw new Error('offline');
+        return {};
+      }
+    }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard', 'retryTeacherDashboard'], context);
+
+  await context.startTeacherDashboard(teacher);
+  assert.match(panel.innerHTML, /현황을 불러오지 못했습니다/);
+  assert.match(panel.innerHTML, /retryTeacherDashboard/);
+  assert.equal(calls, 1);
+  await context.retryTeacherDashboard();
+  assert.match(panel.innerHTML, /오늘의 수업 현황/);
+  assert.equal(calls, 2);
+  context.location.hash = '#/join';
+  await context.retryTeacherDashboard();
+  assert.equal(calls, 2);
+});

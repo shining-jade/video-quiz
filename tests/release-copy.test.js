@@ -27,6 +27,19 @@ test('교사 신청과 관리자 승인 화면의 inline handlers are included i
   assert.match(html, /공용 계정을 쓰지 않고/);
 });
 
+test('교사 홈 현황판은 역할별 조회와 재시도 진입점을 포함한다', () => {
+  const html = read('index.html');
+
+  ['startTeacherDashboard', 'stopTeacherDashboard', 'renderTeacherDashboard', 'retryTeacherDashboard'].forEach(name => {
+    assert.match(html, new RegExp('function ' + name + '\\('));
+  });
+  assert.match(html, /id="teacher-dashboard"/);
+  assert.match(html, /listPublicPlans/);
+  assert.match(html, /listAdminPlans/);
+  assert.match(html, /probeTeacherAllowance/);
+  assert.match(html, /혼잡도는 수업 운영을 돕는 안내/);
+});
+
 test('편집기 Ctrl+S는 브라우저 기본 동작 없이 현재 위치에서 저장 완료 알림을 표시한다', () => {
   const html = read('index.html');
 
