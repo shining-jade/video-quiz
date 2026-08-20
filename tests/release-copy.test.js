@@ -137,13 +137,14 @@ test('정답 공개 화면은 해설 글 아래에 해설 이미지를 표시한
   assert.match(html, /FirestoreStore\.publicAnswer\(question, explainImage\)/);
 });
 
-test('편집기 미리보기는 교사용과 학생 모바일 화면을 전환해 같은 퀴즈를 조작한다', () => {
+test('편집기 미리보기는 교사용과 학생 모바일 화면을 나란히 열어 같은 퀴즈를 조작한다', () => {
   const html = read('index.html');
 
-  assert.match(html, /교사용 크게 보기/);
-  assert.match(html, /학생 모바일 보기/);
-  assert.match(html, /function mkPreviewSetMode\(mode\)/);
-  assert.match(html, /mk-question-preview-card mobile/);
+  assert.match(html, /class="mk-preview-grid"/);
+  assert.match(html, /교사용 화면/);
+  assert.match(html, /학생 모바일 화면/);
+  assert.doesNotMatch(html, /function mkPreviewSetMode\(mode\)/);
+  assert.match(html, /card\('mobile'\)/);
   assert.match(html, /class="preview-explanation"[\s\S]*?class="preview-explanation-img"/);
   assert.match(html, /\.mk-question-preview-card\.mobile\s*\{[^}]*width:\s*390px/s);
 });

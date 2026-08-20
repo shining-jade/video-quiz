@@ -2316,7 +2316,8 @@ test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한�
     mk: {
       id: null, title: '세트', author: '', settings: {}, activeVideo: 0, saved: false,
       videos: [
-        { videoId: 'a', videoUrl: 'a', startSec: 10, endSec: 60, durationSec: 90, questions: [] },
+        { videoId: 'a', videoUrl: 'a', startSec: 10, endSec: 60, durationSec: 90,
+          questions: [{ type: 'choice', t: 20, text: '한 줄 질문', choices: [], explain: '', limitSec: null }] },
         { videoId: 'b', videoUrl: 'b', startSec: 0, endSec: null, durationSec: null, questions: [] }
       ]
     },
@@ -2341,6 +2342,7 @@ test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한�
   assert.match(app.innerHTML, /class="mk-video-card[^\"]*" data-video-index="1"/);
   assert.match(app.innerHTML, /다음 YouTube 영상 추가/);
   assert.equal((app.innerHTML.match(/id="mk-player-wrap"/g) || []).length, 1);
+  assert.match(app.innerHTML, /class="mk-question-text"[^>]*rows="2"[^>]*>한 줄 질문<\/textarea>/);
 });
 
 test('문항 제목 버블은 영상 전체 번호와 빈 영상·마지막 삽입 dropzone을 렌더링한다', () => {
@@ -5780,25 +5782,55 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
   ]);
 });
 
-test('미리보기 화면 모드는 교사용과 학생 모바일 사이를 같은 답안 상태로 전환한다', () => {
+test('미리보기는 교사용과 학생 모바일 카드를 한 화면에 같은 답안 상태로 렌더링한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  const calls = [];
+  const dialog = {
+    innerHTML: '',
+    setAttribute() {},
+    querySelector() { return null; }
+  };
   const context = {
-    mkQuestionPreviewMode: 'teacher',
-    mkQuestionPreviewState: { phase: 'question', answer: 1 }
+    mkQuestionPreviewState: {
+      phase: 'question', number: 1, answer: 1,
+      question: { type: 'choice', text: '질문', choices: ['가', '나'], answer: 0 }
+    },
+    document: {
+      getElementById() { return dialog; },
+      createElement() { throw new Error('dialog already exists'); },
+      body: { appendChild() {} }
+    },
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    LETTERS: ['①', '②'],
+    esc(value) { return String(value); },
+    mkPreviewChoiceIsCorrect(question, index) { return Number(question.answer) === index; },
+    mkCloseQuestionPreview() {}
   };
-  context.mkPreviewRender = () => {
-    calls.push([context.mkQuestionPreviewMode, context.mkQuestionPreviewState.answer]);
-    return true;
-  };
-  vm.runInNewContext(extractFunction(html, 'mkPreviewSetMode'), context);
+  vm.runInNewContext(extractFunction(html, 'mkPreviewRender'), context);
 
-  assert.equal(context.mkPreviewSetMode('mobile'), true);
-  assert.equal(context.mkQuestionPreviewMode, 'mobile');
-  assert.equal(context.mkQuestionPreviewState.answer, 1);
-  assert.deepEqual(clone(calls), [['mobile', 1]]);
-  assert.equal(context.mkPreviewSetMode('teacher'), true);
-  assert.deepEqual(clone(calls[1]), ['teacher', 1]);
+  assert.equal(context.mkPreviewRender(), true);
+  assert.match(dialog.innerHTML, /mk-preview-grid/);
+  assert.match(dialog.innerHTML, /교사용 화면/);
+  assert.match(dialog.innerHTML, /학생 모바일 화면/);
+  assert.match(dialog.innerHTML, /mk-question-preview-card teacher/);
+  assert.match(dialog.innerHTML, /mk-question-preview-card mobile/);
+  assert.equal((dialog.innerHTML.match(/preview-choice selected/g) || []).length, 2);
+  assert.doesNotMatch(dialog.innerHTML, /mk-preview-modes|교사용 크게 보기|학생 모바일 보기/);
+});
+
+test('한쪽 미리보기의 서술형 입력은 반대쪽 입력과 같은 답안 상태로 동기화된다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const teacherInput = { value: '새 답' };
+  const studentInput = { value: '' };
+  const context = {
+    mkQuestionPreviewState: { phase: 'question', question: { type: 'long' }, answer: '' },
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    document: { querySelectorAll() { return [teacherInput, studentInput]; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'mkPreviewSetText'), context);
+
+  assert.equal(context.mkPreviewSetText('새 답', teacherInput), true);
+  assert.equal(context.mkQuestionPreviewState.answer, '새 답');
+  assert.equal(studentInput.value, '새 답');
 });
 
 test('학생 문항 view는 공개 전 해설 이미지를 숨기고 공개 뒤에만 합친다', () => {
