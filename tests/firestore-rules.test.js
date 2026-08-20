@@ -1115,7 +1115,7 @@ rulesTest('teacher-deletion: own request, immediate denial, safe live end, hold-
   }));
   const readiness = await ownerStore.getTeacherDeletionReadiness('owner-uid');
   assert.equal(readiness.ownedSetCount > 0, true);
-  assert.equal(readiness.liveSessionCount > 0, true);
+  assert.equal(readiness.blockingSessionCount > 0, true);
 
   await ownerStore.endSession('deletion-live').catch(error => {
     throw new Error('safe-end stage: ' + error.message, { cause: error });
@@ -1176,6 +1176,75 @@ rulesTest('teacher-deletion: cancellation closes at the exact request.time bound
   await assertFails(updateDoc(doc(teacher, `teacher_allowances/${uid}`), {
     revision: 2.5, updatedAt: serverTimestamp(), updatedByUid: uid
   }));
+});
+
+rulesTest('teacher-deletion fix: pending owner safely resolves orphan allocation and admin exact-revision cancellation cannot be forged', async () => {
+  const uid = 'deletion-recovery-uid';
+  const email = 'deletion-recovery@school.kr';
+  const requestedAt = Timestamp.fromMillis(Date.now());
+  const purgeEligibleAt = Timestamp.fromMillis(requestedAt.toMillis() + 30 * 24 * 60 * 60 * 1000);
+  await adminWrite(`teacher_allowances/${uid}`, {
+    uid, emailCanonical: email, displayName: '복구 교사',
+    status: 'deletion_pending', enabled: false, role: 'teacher', administrativeHold: false,
+    revision: 7, approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
+    deletionRequestedAt: requestedAt, purgeEligibleAt,
+    updatedAt: requestedAt, updatedByUid: uid
+  });
+  await adminWrite(`teacher_allowlist/${email}`, { enabled: false, role: 'teacher' });
+  await adminWrite('sessions/deletion-orphan', {
+    teacherUid: uid, teacherEmail: email, setId: 'set1', code: 'DEL123',
+    status: 'allocating', registeredStudentCount: 0, studentCountRevision: 0,
+    createdAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('codes/DEL123', { sessionId: 'deletion-orphan', createdAt: Timestamp.fromMillis(1) });
+  await adminWrite('sessions/deletion-orphan/meta/allocation', {
+    token: 'deletion-orphan-allocation-token', ownerUid: uid
+  });
+  await adminWrite('sessions/deletion-orphan/meta/live', liveQuestion(0));
+  await adminWrite('sessions/deletion-orphan/meta/board', { scores: {} });
+
+  const ownerStore = emulatorStore(googleContext(uid, email));
+  const otherStore = emulatorStore(actorFirestore('otherTeacher'));
+  const adminStore = emulatorStore(actorFirestore('admin'));
+  const readiness = await ownerStore.getTeacherDeletionReadiness(uid);
+  assert.deepEqual(readiness.blockingSessions.map(item => [item.sessionId, item.status]), [
+    ['deletion-orphan', 'allocating']
+  ]);
+  assert.equal(await ownerStore.resolveTeacherDeletionSession(uid, 'deletion-orphan'), true);
+  assert.equal((await adminRead('sessions/deletion-orphan')).status, 'aborted');
+  assert.equal((await adminRead('codes/DEL123')).sessionId, 'deletion-orphan');
+
+  await assert.rejects(otherStore.adminCancelTeacherDeletion(uid, 7, {
+    uid: 'other-uid', email: 'other@school.kr', role: 'admin',
+    authGeneration: 1, currentAuthGeneration: 1
+  }));
+  await assert.rejects(otherStore.cancelTeacherDeletion(uid));
+  const pendingList = await adminStore.listDeletionPendingTeachers(50, requestAdminIdentity);
+  assert.equal(pendingList[uid].revision, 7);
+  await assert.rejects(adminStore.adminCancelTeacherDeletion(uid, 6, requestAdminIdentity));
+  const cancelled = await adminStore.adminCancelTeacherDeletion(uid, 7, requestAdminIdentity);
+  assert.equal(cancelled.status, 'active');
+  assert.equal(cancelled.revision, 8);
+  assert.equal(cancelled.updatedByUid, 'admin-uid');
+
+  const heldUid = 'deletion-held-uid';
+  const heldEmail = 'deletion-held@school.kr';
+  await adminWrite(`teacher_allowances/${heldUid}`, {
+    uid: heldUid, emailCanonical: heldEmail, displayName: '중지 유지 교사',
+    status: 'deletion_pending', enabled: false, role: 'teacher', administrativeHold: true,
+    revision: 4, approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
+    deletionRequestedAt: requestedAt, purgeEligibleAt,
+    suspendedAt: requestedAt, suspendedByUid: 'admin-uid', suspensionReason: 'hold',
+    updatedAt: requestedAt, updatedByUid: 'admin-uid'
+  });
+  await adminWrite(`teacher_allowlist/${heldEmail}`, { enabled: false, role: 'teacher' });
+  const heldCancelled = await adminStore.adminCancelTeacherDeletion(
+    heldUid, 4, requestAdminIdentity
+  );
+  assert.equal(heldCancelled.status, 'suspended');
+  assert.equal(heldCancelled.enabled, false);
+  assert.equal(heldCancelled.administrativeHold, true);
+  assert.equal(heldCancelled.revision, 5);
 });
 
 rulesTest('미승인 계정과 학생은 원본 세트를 읽지 못한다', async () => {

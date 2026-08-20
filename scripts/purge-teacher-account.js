@@ -98,7 +98,7 @@ function stateFingerprint(state) {
     profileExists: !!(state && state.profileExists),
     legacyAllowanceExists: !!(state && state.legacyAllowanceExists),
     ownedSetIds: [...(state && state.ownedSetIds || [])].sort(),
-    liveSessionIds: [...(state && state.liveSessionIds || [])].sort(),
+    blockingSessionIds: [...(state && state.blockingSessionIds || [])].sort(),
     authUserExists: !!(state && state.authUserExists),
     auditEvent: state && state.auditEvent || null
   }));
@@ -115,7 +115,7 @@ function publicAudit(state, eligibility) {
     eligible: eligibility.eligible,
     blockers: [...eligibility.blockers],
     ownedSetCount: Array.isArray(state.ownedSetIds) ? state.ownedSetIds.length : null,
-    liveSessionCount: Array.isArray(state.liveSessionIds) ? state.liveSessionIds.length : null,
+    blockingSessionCount: Array.isArray(state.blockingSessionIds) ? state.blockingSessionIds.length : null,
     revision: eligibility.revision,
     deletionRequestedAtMs: eligibility.deletionRequestedAtMs,
     purgeEligibleAtMs: eligibility.purgeEligibleAtMs,
@@ -136,7 +136,7 @@ function remainingState(state) {
     profileExists: !!(state && state.profileExists),
     legacyAllowanceExists: !!(state && state.legacyAllowanceExists),
     ownedSetCount: Array.isArray(state && state.ownedSetIds) ? state.ownedSetIds.length : null,
-    liveSessionCount: Array.isArray(state && state.liveSessionIds) ? state.liveSessionIds.length : null,
+    blockingSessionCount: Array.isArray(state && state.blockingSessionIds) ? state.blockingSessionIds.length : null,
     authUserExists: state && typeof state.authUserExists === 'boolean' ? state.authUserExists : null,
     auditEventStatus: state && state.auditEvent && state.auditEvent.status || null
   };
@@ -160,6 +160,47 @@ async function auditAfterAmbiguity(adapter, uid, identity) {
   }
 }
 
+function exactRecoveryEvent(event, options, requiredStatus) {
+  const opId = eventId(options.uid);
+  return !!event && event.eventId === opId && event.operationId === opId &&
+    event.targetUid === options.uid && event.projectId === options.projectId &&
+    event.environment === options.environment && event.mode === options.mode &&
+    event.status === requiredStatus && event.result === requiredStatus &&
+    Number.isSafeInteger(event.allowanceRevision) && event.allowanceRevision > 0 &&
+    Number.isSafeInteger(event.deletionRequestedAtMs) &&
+    Number.isSafeInteger(event.purgeEligibleAtMs) &&
+    event.purgeEligibleAtMs === event.deletionRequestedAtMs + deletionCore.DAYS_30_MS &&
+    Number.isSafeInteger(event.proofAtMs) && event.proofAtMs >= event.purgeEligibleAtMs;
+}
+
+function cleanFirestoreState(state) {
+  return !!state && !state.allowance && !state.requestExists && !state.profileExists &&
+    !state.legacyAllowanceExists && Array.isArray(state.ownedSetIds) &&
+    state.ownedSetIds.length === 0 && Array.isArray(state.blockingSessionIds) &&
+    state.blockingSessionIds.length === 0;
+}
+
+function validServerTimeProof(proof, expected) {
+  return !!proof && proof.opId === expected.opId && proof.targetUid === expected.uid &&
+    proof.projectId === expected.projectId && proof.environment === expected.environment &&
+    proof.mode === expected.mode && proof.allowanceRevision === expected.revision &&
+    proof.deletionRequestedAtMs === expected.deletionRequestedAtMs &&
+    proof.purgeEligibleAtMs === expected.purgeEligibleAtMs &&
+    Number.isSafeInteger(proof.proofAtMs) && Number.isSafeInteger(proof.updateTimeMs) &&
+    proof.proofAtMs === proof.updateTimeMs;
+}
+
+async function cleanupProof(adapter, report, proof) {
+  if (!proof || typeof adapter.cleanupServerTimeProof !== 'function') return;
+  try {
+    await adapter.cleanupServerTimeProof(proof);
+    report.stages.push({ name: 'server-time-proof-cleanup', status: 'complete' });
+  } catch (error) {
+    report.stages.push({ name: 'server-time-proof-cleanup', status: 'ambiguous' });
+    report.proofCleanupError = safeError(error);
+  }
+}
+
 async function runTeacherPurge({ adapter, options, nowMs }) {
   const report = baseReport(options, nowMs);
   let initial;
@@ -173,73 +214,126 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
     return report;
   }
 
-  const recoveryEvent = initial.auditEvent &&
-    initial.auditEvent.eventId === eventId(options.uid) &&
-    initial.auditEvent.targetUid === options.uid &&
-    ['firestore_purged', 'complete'].includes(initial.auditEvent.status) ? initial.auditEvent : null;
-  const validEnumerations = Array.isArray(initial.ownedSetIds) && Array.isArray(initial.liveSessionIds);
-  const validRecoveryEvent = recoveryEvent &&
-    Number.isSafeInteger(recoveryEvent.allowanceRevision) && recoveryEvent.allowanceRevision > 0 &&
-    Number.isSafeInteger(recoveryEvent.deletionRequestedAtMs) &&
-    Number.isSafeInteger(recoveryEvent.purgeEligibleAtMs) &&
-    recoveryEvent.purgeEligibleAtMs ===
-      recoveryEvent.deletionRequestedAtMs + deletionCore.DAYS_30_MS &&
-    nowMs >= recoveryEvent.purgeEligibleAtMs;
-  const recoveredFirestore = !initial.allowance && validRecoveryEvent && validEnumerations &&
-    !initial.requestExists && !initial.profileExists && !initial.legacyAllowanceExists &&
-    initial.ownedSetIds.length === 0 && initial.liveSessionIds.length === 0;
+  const completeRetry = cleanFirestoreState(initial) && initial.authUserExists === false &&
+    exactRecoveryEvent(initial.auditEvent, options, 'complete');
+  if (completeRetry) {
+    report.status = 'complete';
+    report.safeToPurge = true;
+    report.stages.push({ name: 'completed-audit-retry', status: 'recovered' });
+    report.remaining = remainingState(initial);
+    return report;
+  }
+  if (initial.auditEvent && initial.auditEvent.status === 'complete') {
+    report.status = 'refused';
+    report.error = 'Completed audit event does not match the exact UID, operation, and result.';
+    report.stages.push({ name: 'completed-audit-retry', status: 'mismatch' });
+    report.remaining = remainingState(initial);
+    return report;
+  }
+
+  const recoveredFirestore = cleanFirestoreState(initial) &&
+    exactRecoveryEvent(initial.auditEvent, options, 'firestore_purged');
 
   let eligibility;
   let expected;
   if (recoveredFirestore) {
     eligibility = {
-      eligible: true, blockers: [], ownedSetCount: 0, liveSessionCount: 0,
-      revision: recoveryEvent.allowanceRevision,
-      deletionRequestedAtMs: recoveryEvent.deletionRequestedAtMs,
-      purgeEligibleAtMs: recoveryEvent.purgeEligibleAtMs, remainingMs: 0,
+      eligible: true, blockers: [], ownedSetCount: 0, blockingSessionCount: 0,
+      revision: initial.auditEvent.allowanceRevision,
+      deletionRequestedAtMs: initial.auditEvent.deletionRequestedAtMs,
+      purgeEligibleAtMs: initial.auditEvent.purgeEligibleAtMs, remainingMs: 0,
       uid: options.uid
     };
     expected = {
-      uid: options.uid, revision: recoveryEvent.allowanceRevision,
-      deletionRequestedAtMs: recoveryEvent.deletionRequestedAtMs,
-      purgeEligibleAtMs: recoveryEvent.purgeEligibleAtMs,
-      eventId: eventId(options.uid)
+      uid: options.uid, revision: initial.auditEvent.allowanceRevision,
+      deletionRequestedAtMs: initial.auditEvent.deletionRequestedAtMs,
+      purgeEligibleAtMs: initial.auditEvent.purgeEligibleAtMs,
+      proofAtMs: initial.auditEvent.proofAtMs,
+      opId: eventId(options.uid), eventId: eventId(options.uid),
+      projectId: options.projectId, environment: options.environment, mode: options.mode
     };
   } else {
-    eligibility = deletionCore.auditEligibility({
+    const structuralEligibility = deletionCore.auditEligibility({
       allowance: initial.allowance,
       ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
-      liveSessionCount: Array.isArray(initial.liveSessionIds) ? initial.liveSessionIds.length : -1
-    }, nowMs);
-    if (eligibility.eligible && eligibility.uid !== options.uid) {
-      eligibility = deletionCore.auditEligibility({
-        allowance: null,
-        ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
-        liveSessionCount: Array.isArray(initial.liveSessionIds) ? initial.liveSessionIds.length : -1
-      }, nowMs);
+      blockingSessionCount: Array.isArray(initial.blockingSessionIds)
+        ? initial.blockingSessionIds.length : -1
+    }, initial.allowance && initial.allowance.purgeEligibleAtMs);
+    if (structuralEligibility.blockers.includes('invalid_state') ||
+        structuralEligibility.uid !== options.uid) {
+      const refusedEligibility = structuralEligibility.uid === options.uid
+        ? structuralEligibility
+        : deletionCore.auditEligibility({
+          allowance: null,
+          ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
+          blockingSessionCount: Array.isArray(initial.blockingSessionIds)
+            ? initial.blockingSessionIds.length : -1
+        }, initial.allowance && initial.allowance.purgeEligibleAtMs);
+      report.audit = publicAudit(initial, refusedEligibility);
+      report.status = 'refused';
+      report.stages.push({
+        name: 'eligibility', status: 'refused', blockers: [...refusedEligibility.blockers]
+      });
+      report.remaining = remainingState(initial);
+      return report;
     }
     expected = initial.allowance && {
       uid: options.uid, emailCanonical: initial.allowance.emailCanonical,
       revision: initial.allowance.revision,
-      deletionRequestedAtMs: eligibility.deletionRequestedAtMs,
-      purgeEligibleAtMs: eligibility.purgeEligibleAtMs,
-      eventId: eventId(options.uid)
+      deletionRequestedAtMs: initial.allowance.deletionRequestedAtMs,
+      purgeEligibleAtMs: initial.allowance.purgeEligibleAtMs,
+      opId: eventId(options.uid), eventId: eventId(options.uid),
+      projectId: options.projectId, environment: options.environment, mode: options.mode
     };
+    let proof = null;
+    try {
+      if (!expected || typeof adapter.createServerTimeProof !== 'function') {
+        throw new Error('Exact server-time proof adapter is unavailable.');
+      }
+      proof = await adapter.createServerTimeProof(expected);
+      report.stages.push({ name: 'server-time-proof', status: 'complete' });
+      if (!validServerTimeProof(proof, expected)) throw new Error('Server-time proof identity is forged or stale.');
+      expected.proofAtMs = proof.proofAtMs;
+    } catch (error) {
+      report.stages.push({ name: 'server-time-proof', status: 'failed' });
+      report.error = safeError(error);
+      await cleanupProof(adapter, report, proof && expected
+        ? { ...expected, proofAtMs: proof.proofAtMs } : null);
+      report.remaining = remainingState(initial);
+      return report;
+    }
+    eligibility = deletionCore.auditEligibility({
+      allowance: initial.allowance,
+      ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
+      blockingSessionCount: Array.isArray(initial.blockingSessionIds)
+        ? initial.blockingSessionIds.length : -1
+    }, proof.proofAtMs);
+    if (eligibility.uid !== options.uid) {
+      eligibility = deletionCore.auditEligibility({
+        allowance: null,
+        ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
+        blockingSessionCount: Array.isArray(initial.blockingSessionIds)
+          ? initial.blockingSessionIds.length : -1
+      }, proof.proofAtMs);
+    }
+    report.audit = publicAudit(initial, eligibility);
+    if (!eligibility.eligible) {
+      report.status = 'refused';
+      report.stages.push({ name: 'eligibility', status: 'refused', blockers: [...eligibility.blockers] });
+      await cleanupProof(adapter, report, expected);
+      report.remaining = remainingState(initial);
+      return report;
+    }
+    report.stages.push({ name: 'eligibility', status: 'complete' });
+    if (options.mode === 'dry-run') {
+      report.status = 'dry-run-eligible';
+      report.safeToPurge = true;
+      await cleanupProof(adapter, report, expected);
+      report.remaining = remainingState(initial);
+      return report;
+    }
   }
   report.audit = publicAudit(initial, eligibility);
-  if (!eligibility.eligible) {
-    report.status = 'refused';
-    report.stages.push({ name: 'eligibility', status: 'refused', blockers: [...eligibility.blockers] });
-    report.remaining = remainingState(initial);
-    return report;
-  }
-  report.stages.push({ name: 'eligibility', status: 'complete' });
-  if (options.mode === 'dry-run') {
-    report.status = 'dry-run-eligible';
-    report.safeToPurge = true;
-    report.remaining = remainingState(initial);
-    return report;
-  }
 
   if (!recoveredFirestore) {
     let repeated;
@@ -249,12 +343,14 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
       report.stages.push({ name: 'authoritative-re-audit', status: 'ambiguous' });
       report.error = safeError(error);
       report.remaining = remainingState(null);
+      await cleanupProof(adapter, report, expected);
       return report;
     }
     if (stateFingerprint(initial) !== stateFingerprint(repeated)) {
       report.stages.push({ name: 'authoritative-re-audit', status: 'changed' });
       report.error = 'Authoritative re-audit changed before mutation.';
       report.remaining = remainingState(repeated);
+      await cleanupProof(adapter, report, expected);
       return report;
     }
     report.stages.push({ name: 'authoritative-re-audit', status: 'complete' });
@@ -266,6 +362,7 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
       report.stages.push({ name: 'firestore-transaction', status: 'ambiguous' });
       report.error = safeError(error);
       report.remaining = remainingState(observed);
+      await cleanupProof(adapter, report, expected);
       return report;
     }
   } else {
@@ -311,7 +408,7 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
   report.remaining = remaining;
   const clean = remaining.allowanceExists === false && remaining.requestExists === false &&
     remaining.profileExists === false && remaining.legacyAllowanceExists === false &&
-    remaining.ownedSetCount === 0 && remaining.liveSessionCount === 0 &&
+    remaining.ownedSetCount === 0 && remaining.blockingSessionCount === 0 &&
     remaining.authUserExists === false && remaining.auditEventStatus === 'complete';
   if (!clean) {
     report.stages.push({ name: 'final-audit', status: 'failed' });
@@ -348,6 +445,7 @@ function productionDependencies() {
       const db = getFirestore(app);
       const auth = getAuth(app);
       const auditRef = uid => db.doc('teacher_account_audits/' + eventId(uid));
+      const proofRef = uid => db.doc('teacher_purge_operations/' + eventId(uid));
       return {
         async audit(uid, identity) {
           const allowanceRef = db.doc('teacher_allowances/' + uid);
@@ -356,7 +454,7 @@ function productionDependencies() {
             db.doc('teacher_profiles/' + uid).get(), auditRef(uid).get(),
             db.collection('quiz_sets').where('ownerUid', '==', uid).get(),
             db.collection('sessions').where('teacherUid', '==', uid)
-              .where('status', 'in', ['active', 'live']).get()
+              .where('status', 'in', ['allocating', 'active', 'live']).get()
           ]);
           const allowance = normalizeAllowance(allowanceSnap);
           const email = allowance && allowance.emailCanonical || identity && identity.emailCanonical;
@@ -372,15 +470,61 @@ function productionDependencies() {
             allowanceRevision: rawEvent.allowanceRevision,
             deletionRequestedAtMs: deletionCore.timestampMillis(rawEvent.deletionRequestedAt),
             purgeEligibleAtMs: deletionCore.timestampMillis(rawEvent.purgeEligibleAt),
-            status: rawEvent.status
+            proofAtMs: deletionCore.timestampMillis(rawEvent.proofAt),
+            operationId: rawEvent.operationId, projectId: rawEvent.projectId,
+            environment: rawEvent.environment, mode: rawEvent.mode,
+            status: rawEvent.status, result: rawEvent.result
           };
           return {
             allowance, requestExists: requestSnap.exists, profileExists: profileSnap.exists,
             legacyAllowanceExists: legacySnap ? legacySnap.exists : false,
             ownedSetIds: setsSnap.docs.map(doc => doc.id),
-            liveSessionIds: sessionsSnap.docs.map(doc => doc.id),
+            blockingSessionIds: sessionsSnap.docs.map(doc => doc.id),
             authUserExists, auditEvent
           };
+        },
+        async createServerTimeProof(expected) {
+          const ref = proofRef(expected.uid);
+          await ref.set({
+            opId: expected.opId,
+            targetUid: expected.uid,
+            projectId: expected.projectId,
+            environment: expected.environment,
+            mode: expected.mode,
+            allowanceRevision: expected.revision,
+            deletionRequestedAt: Timestamp.fromMillis(expected.deletionRequestedAtMs),
+            purgeEligibleAt: Timestamp.fromMillis(expected.purgeEligibleAtMs),
+            proofAt: FieldValue.serverTimestamp()
+          });
+          const snapshot = await ref.get();
+          const data = snapshot.exists ? snapshot.data() || {} : {};
+          return {
+            opId: data.opId,
+            targetUid: data.targetUid,
+            projectId: data.projectId,
+            environment: data.environment,
+            mode: data.mode,
+            allowanceRevision: data.allowanceRevision,
+            deletionRequestedAtMs: deletionCore.timestampMillis(data.deletionRequestedAt),
+            purgeEligibleAtMs: deletionCore.timestampMillis(data.purgeEligibleAt),
+            proofAtMs: deletionCore.timestampMillis(data.proofAt),
+            updateTimeMs: deletionCore.timestampMillis(snapshot.updateTime)
+          };
+        },
+        async cleanupServerTimeProof(expected) {
+          const ref = proofRef(expected.uid || expected.targetUid);
+          await db.runTransaction(async transaction => {
+            const snapshot = await transaction.get(ref);
+            if (!snapshot.exists) return;
+            const data = snapshot.data() || {};
+            if (data.opId !== expected.opId || data.targetUid !== (expected.uid || expected.targetUid) ||
+                data.projectId !== expected.projectId || data.environment !== expected.environment ||
+                data.mode !== expected.mode || data.allowanceRevision !== expected.revision ||
+                deletionCore.timestampMillis(data.proofAt) !== expected.proofAtMs) {
+              throw new Error('Server-time proof changed before cleanup.');
+            }
+            transaction.delete(ref);
+          });
         },
         async purgeFirestore(expected) {
           const allowanceRef = db.doc('teacher_allowances/' + expected.uid);
@@ -388,21 +532,31 @@ function productionDependencies() {
           const profileRef = db.doc('teacher_profiles/' + expected.uid);
           const legacyRef = db.doc('teacher_allowlist/' + expected.emailCanonical);
           const eventRef = auditRef(expected.uid);
+          const operationRef = proofRef(expected.uid);
           await db.runTransaction(async transaction => {
-            const [allowanceSnap, requestSnap, profileSnap, legacySnap, eventSnap, setsSnap, sessionsSnap] = await Promise.all([
+            const [allowanceSnap, requestSnap, profileSnap, legacySnap, eventSnap, operationSnap, setsSnap, sessionsSnap] = await Promise.all([
               transaction.get(allowanceRef), transaction.get(requestRef), transaction.get(profileRef),
-              transaction.get(legacyRef), transaction.get(eventRef),
+              transaction.get(legacyRef), transaction.get(eventRef), transaction.get(operationRef),
               transaction.get(db.collection('quiz_sets').where('ownerUid', '==', expected.uid).limit(1)),
               transaction.get(db.collection('sessions').where('teacherUid', '==', expected.uid)
-                .where('status', 'in', ['active', 'live']).limit(1))
+                .where('status', 'in', ['allocating', 'active', 'live']).limit(1))
             ]);
             const allowance = normalizeAllowance(allowanceSnap);
+            const operation = operationSnap.exists ? operationSnap.data() || {} : null;
+            const operationProofAtMs = operation && deletionCore.timestampMillis(operation.proofAt);
             if (!allowance || allowance.uid !== expected.uid ||
                 allowance.emailCanonical !== expected.emailCanonical ||
                 allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
                 allowance.role !== 'teacher' || allowance.revision !== expected.revision ||
                 allowance.deletionRequestedAtMs !== expected.deletionRequestedAtMs ||
                 allowance.purgeEligibleAtMs !== expected.purgeEligibleAtMs ||
+                !operation || operation.opId !== expected.opId ||
+                operation.targetUid !== expected.uid || operation.projectId !== expected.projectId ||
+                operation.environment !== expected.environment || operation.mode !== expected.mode ||
+                operation.allowanceRevision !== expected.revision ||
+                deletionCore.timestampMillis(operation.deletionRequestedAt) !== expected.deletionRequestedAtMs ||
+                deletionCore.timestampMillis(operation.purgeEligibleAt) !== expected.purgeEligibleAtMs ||
+                operationProofAtMs !== expected.proofAtMs || operationProofAtMs < expected.purgeEligibleAtMs ||
                 !setsSnap.empty || !sessionsSnap.empty || eventSnap.exists) {
               throw new Error('Authoritative Firestore transaction re-read changed.');
             }
@@ -413,12 +567,17 @@ function productionDependencies() {
             if (requestSnap.exists) transaction.delete(requestRef);
             if (profileSnap.exists) transaction.delete(profileRef);
             if (legacySnap.exists) transaction.delete(legacyRef);
+            transaction.delete(operationRef);
             transaction.create(eventRef, {
               type: 'teacher_account_purged', targetUid: expected.uid,
+              operationId: expected.opId, projectId: expected.projectId,
+              environment: expected.environment, mode: expected.mode,
               allowanceRevision: expected.revision,
               deletionRequestedAt: Timestamp.fromMillis(expected.deletionRequestedAtMs),
               purgeEligibleAt: Timestamp.fromMillis(expected.purgeEligibleAtMs),
-              status: 'firestore_purged', firestorePurgedAt: FieldValue.serverTimestamp(),
+              proofAt: Timestamp.fromMillis(expected.proofAtMs),
+              status: 'firestore_purged', result: 'firestore_purged',
+              firestorePurgedAt: FieldValue.serverTimestamp(),
               actor: 'admin-cli'
             });
           });
@@ -434,12 +593,18 @@ function productionDependencies() {
             const snapshot = await transaction.get(ref);
             const data = snapshot.exists ? snapshot.data() : null;
             if (!data || data.targetUid !== expected.uid ||
+                data.operationId !== expected.opId || data.projectId !== expected.projectId ||
+                data.environment !== expected.environment || data.mode !== expected.mode ||
                 data.allowanceRevision !== expected.revision ||
-                data.status !== 'firestore_purged') {
+                deletionCore.timestampMillis(data.proofAt) !== expected.proofAtMs) {
               throw new Error('Purge audit event changed before completion.');
             }
+            if (data.status === 'complete' && data.result === 'complete') return;
+            if (data.status !== 'firestore_purged' || data.result !== 'firestore_purged') {
+              throw new Error('Purge audit event result changed before completion.');
+            }
             transaction.update(ref, {
-              status: 'complete', authDeletedAt: FieldValue.serverTimestamp(),
+              status: 'complete', result: 'complete', authDeletedAt: FieldValue.serverTimestamp(),
               completedAt: FieldValue.serverTimestamp()
             });
           });

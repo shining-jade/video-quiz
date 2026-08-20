@@ -8,6 +8,7 @@ const { reserveReport } = require('../scripts/migrate-legacy-ownership.js');
 const {
   parseCliArgs,
   validateTarget,
+  eventId,
   runTeacherPurge,
   main
 } = require('../scripts/purge-teacher-account.js');
@@ -30,7 +31,7 @@ function pendingAllowance(overrides = {}) {
 function auditState(overrides = {}) {
   return {
     allowance: pendingAllowance(), requestExists: true, profileExists: true,
-    legacyAllowanceExists: true, ownedSetIds: [], liveSessionIds: [],
+    legacyAllowanceExists: true, ownedSetIds: [], blockingSessionIds: [],
     authUserExists: true, auditEvent: null,
     ...overrides
   };
@@ -43,10 +44,32 @@ function clone(value) {
 function fakeAdapter(initial = auditState(), options = {}) {
   let state = clone(initial);
   let auditIndex = 0;
+  let proof = null;
   const calls = [];
   return {
     calls,
     state: () => clone(state),
+    async createServerTimeProof(expected) {
+      calls.push(['createServerTimeProof', clone(expected)]);
+      proof = {
+        opId: expected.opId,
+        targetUid: expected.uid,
+        projectId: expected.projectId,
+        environment: expected.environment,
+        mode: expected.mode,
+        allowanceRevision: expected.revision,
+        deletionRequestedAtMs: expected.deletionRequestedAtMs,
+        purgeEligibleAtMs: expected.purgeEligibleAtMs,
+        proofAtMs: options.proofAtMs === undefined ? NOW : options.proofAtMs,
+        updateTimeMs: options.proofAtMs === undefined ? NOW : options.proofAtMs
+      };
+      return clone(options.forgedProof ? { ...proof, ...options.forgedProof } : proof);
+    },
+    async cleanupServerTimeProof(expectedProof) {
+      calls.push(['cleanupServerTimeProof', clone(expectedProof)]);
+      if (proof && expectedProof && proof.opId === expectedProof.opId) proof = null;
+      return true;
+    },
     async audit(uid, identity) {
       calls.push(['audit', uid, identity && identity.emailCanonical]);
       if (options.auditErrorAt === auditIndex) {
@@ -59,7 +82,14 @@ function fakeAdapter(initial = auditState(), options = {}) {
     },
     async purgeFirestore(expected) {
       calls.push(['purgeFirestore', clone(expected)]);
+      if (!proof || proof.opId !== expected.opId || proof.proofAtMs !== expected.proofAtMs) {
+        throw new Error('server-time proof changed');
+      }
       if (options.raceAtMutation) throw new Error('authoritative transaction re-read changed');
+      if (options.allocationRaceAtMutation) {
+        state.blockingSessionIds = ['new-allocating'];
+        throw new Error('blocking session appeared before mutation');
+      }
       state.allowance = null;
       state.requestExists = false;
       state.profileExists = false;
@@ -67,10 +97,14 @@ function fakeAdapter(initial = auditState(), options = {}) {
       state.auditEvent = {
         eventId: expected.eventId, type: 'teacher_account_purged',
         targetUid: expected.uid, allowanceRevision: expected.revision,
+        operationId: expected.opId, result: 'firestore_purged',
+        projectId: expected.projectId, environment: expected.environment, mode: expected.mode,
+        proofAtMs: expected.proofAtMs,
         deletionRequestedAtMs: expected.deletionRequestedAtMs,
         purgeEligibleAtMs: expected.purgeEligibleAtMs,
         status: 'firestore_purged'
       };
+      proof = null;
       if (options.firestoreAmbiguous) throw new Error('injected Firestore ambiguity');
     },
     async deleteAuthUser(uid) {
@@ -82,6 +116,7 @@ function fakeAdapter(initial = auditState(), options = {}) {
       calls.push(['completeAuditEvent', expected.eventId]);
       if (!state.auditEvent) throw new Error('missing audit event');
       state.auditEvent.status = 'complete';
+      state.auditEvent.result = 'complete';
     }
   };
 }
@@ -131,20 +166,21 @@ test('dry-run performs authoritative audit and no mutations', async () => {
   });
   assert.equal(report.status, 'dry-run-eligible');
   assert.equal(report.safeToPurge, true);
-  assert.deepEqual(adapter.calls.map(call => call[0]), ['audit']);
+  assert.deepEqual(adapter.calls.map(call => call[0]), [
+    'audit', 'createServerTimeProof', 'cleanupServerTimeProof'
+  ]);
   assert.equal(report.audit.ownedSetCount, 0);
-  assert.equal(report.audit.liveSessionCount, 0);
+  assert.equal(report.audit.blockingSessionCount, 0);
   assert.equal(JSON.stringify(report).includes('teacher@school.kr'), false);
   assert.equal(JSON.stringify(report).includes('private'), false);
 });
 
 test('apply refuses blockers, malformed state, and a transaction re-read race before writes', async t => {
   await t.test('blockers', async () => {
-    const adapter = fakeAdapter(auditState({ ownedSetIds: ['set-private'], liveSessionIds: ['session-private'] }));
+    const adapter = fakeAdapter(auditState({ ownedSetIds: ['set-private'], blockingSessionIds: ['session-private'] }));
     const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
     assert.equal(report.status, 'refused');
-    assert.deepEqual(report.audit.blockers, ['owned_sets', 'live_sessions']);
-    assert.deepEqual(adapter.calls.map(call => call[0]), ['audit']);
+    assert.deepEqual(report.audit.blockers, ['owned_sets', 'blocking_sessions']);
     assert.equal(JSON.stringify(report).includes('set-private'), false);
   });
   await t.test('malformed timestamp', async () => {
@@ -152,14 +188,14 @@ test('apply refuses blockers, malformed state, and a transaction re-read race be
     const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
     assert.equal(report.status, 'refused');
     assert.ok(report.audit.blockers.includes('invalid_state'));
-    assert.deepEqual(adapter.calls.map(call => call[0]), ['audit']);
+    assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
   });
   await t.test('wrong allowance UID', async () => {
     const adapter = fakeAdapter(auditState({ allowance: pendingAllowance({ uid: 'teacher-b' }) }));
     const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
     assert.equal(report.status, 'refused');
     assert.ok(report.audit.blockers.includes('invalid_state'));
-    assert.deepEqual(adapter.calls.map(call => call[0]), ['audit']);
+    assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
   });
   await t.test('re-audit race', async () => {
     const first = auditState();
@@ -168,6 +204,30 @@ test('apply refuses blockers, malformed state, and a transaction re-read race be
     const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
     assert.equal(report.status, 'failed');
     assert.match(report.error, /re-audit|changed/i);
+    assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
+  });
+  await t.test('allocating race inside transaction', async () => {
+    const adapter = fakeAdapter(auditState(), { allocationRaceAtMutation: true });
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW + 9_999 });
+    assert.equal(report.status, 'failed');
+    assert.equal(report.remaining.blockingSessionCount, 1);
+    assert.equal(adapter.calls.some(call => call[0] === 'deleteAuthUser'), false);
+  });
+});
+
+test('server-time proof denies exactly one millisecond early and rejects forged proof identity', async t => {
+  await t.test('one millisecond early', async () => {
+    const adapter = fakeAdapter(auditState(), { proofAtMs: NOW - 1 });
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW + 99_999 });
+    assert.equal(report.status, 'refused');
+    assert.deepEqual(report.audit.blockers, ['waiting_period']);
+    assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
+  });
+  await t.test('forged target', async () => {
+    const adapter = fakeAdapter(auditState(), { forgedProof: { targetUid: 'teacher-b' } });
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
+    assert.equal(report.status, 'failed');
+    assert.match(report.error, /proof|target|identity/i);
     assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
   });
 });
@@ -198,7 +258,8 @@ test('successful apply records a non-sensitive event, verifies final state, and 
   assert.equal(report.status, 'complete');
   assert.equal(report.safeToPurge, true);
   assert.deepEqual(adapter.calls.map(call => call[0]), [
-    'audit', 'audit', 'purgeFirestore', 'deleteAuthUser', 'completeAuditEvent', 'audit'
+    'audit', 'createServerTimeProof', 'audit', 'purgeFirestore',
+    'deleteAuthUser', 'completeAuditEvent', 'audit'
   ]);
   const event = adapter.state().auditEvent;
   assert.equal(event.status, 'complete');
@@ -207,14 +268,46 @@ test('successful apply records a non-sensitive event, verifies final state, and 
 
   const recovery = fakeAdapter({
     allowance: null, requestExists: false, profileExists: false,
-    legacyAllowanceExists: false, ownedSetIds: [], liveSessionIds: [],
-    authUserExists: true, auditEvent: { ...event, status: 'firestore_purged' }
+    legacyAllowanceExists: false, ownedSetIds: [], blockingSessionIds: [],
+    authUserExists: true, auditEvent: {
+      ...event, status: 'firestore_purged', result: 'firestore_purged'
+    }
   });
   const recovered = await runTeacherPurge({ recovery, adapter: recovery, options: applyOptions(), nowMs: NOW + 1 });
   assert.equal(recovered.status, 'complete');
   assert.deepEqual(recovery.calls.map(call => call[0]), [
     'audit', 'deleteAuthUser', 'completeAuditEvent', 'audit'
   ]);
+});
+
+test('completed audit retry is idempotent only for the exact same operation and result', async t => {
+  const completeEvent = {
+    eventId: eventId('teacher-a'), operationId: eventId('teacher-a'),
+    type: 'teacher_account_purged', targetUid: 'teacher-a', allowanceRevision: 8,
+    deletionRequestedAtMs: REQUESTED_AT, purgeEligibleAtMs: NOW,
+    proofAtMs: NOW, projectId: 'demo-video-quiz', environment: 'emulator', mode: 'apply',
+    status: 'complete', result: 'complete'
+  };
+  const completedState = auditState({
+    allowance: null, requestExists: false, profileExists: false,
+    legacyAllowanceExists: false, ownedSetIds: [], blockingSessionIds: [],
+    authUserExists: false, auditEvent: completeEvent
+  });
+  await t.test('exact completed retry performs no destructive mutation', async () => {
+    const adapter = fakeAdapter(completedState);
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW + 1 });
+    assert.equal(report.status, 'complete');
+    assert.deepEqual(adapter.calls.map(call => call[0]), ['audit']);
+  });
+  await t.test('mismatched completed result is denied', async () => {
+    const adapter = fakeAdapter(auditState({
+      ...completedState,
+      auditEvent: { ...completeEvent, result: 'different' }
+    }));
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW + 1 });
+    assert.equal(report.status, 'refused');
+    assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
+  });
 });
 
 test('main validates and reserves output before Admin initialization, never overwrites, and publishes stdout failures', async t => {
@@ -259,5 +352,41 @@ test('main validates and reserves output before Admin initialization, never over
     assert.equal(report.status, 'failed');
     assert.match(report.error, /stdout unavailable/);
     assert.equal(report.safeToPurge, false);
+  });
+  await t.test('report publication failure retries from completed audit without destructive mutation', async () => {
+    const adapter = fakeAdapter();
+    const baseArgs = [
+      '--project', 'demo-video-quiz', '--environment', 'emulator', '--uid', 'teacher-a',
+      '--mode', 'apply', '--confirm-project', 'demo-video-quiz', '--confirm-uid', 'teacher-a'
+    ];
+    await assert.rejects(main([
+      ...baseArgs, '--output', path.join(directory, 'publish-failed.json')
+    ], {
+      environment: env,
+      now: () => new Date(NOW).toISOString(),
+      reserveReport() {
+        return {
+          failClosedPath: path.join(directory, 'publish-failed.json.reserved'),
+          commit() { throw new Error('report publication failed'); }
+        };
+      },
+      initialize: async () => adapter,
+      writeLine() {}
+    }), /report publication failed/);
+    const destructiveCalls = adapter.calls.filter(call =>
+      ['purgeFirestore', 'deleteAuthUser'].includes(call[0])).length;
+
+    const code = await main([
+      ...baseArgs, '--output', path.join(directory, 'publish-retry.json')
+    ], {
+      environment: env,
+      reserveReport,
+      now: () => new Date(NOW + 1).toISOString(),
+      initialize: async () => adapter,
+      writeLine() {}
+    });
+    assert.equal(code, 0);
+    assert.equal(adapter.calls.filter(call =>
+      ['purgeFirestore', 'deleteAuthUser'].includes(call[0])).length, destructiveCalls);
   });
 });

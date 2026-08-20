@@ -813,20 +813,141 @@
       return getOwnTeacherAllowance(exactUid);
     }
 
+    async function adminCancelTeacherDeletion(uid, expectedRevision, adminIdentity) {
+      const exactUid = assertUid(uid);
+      const expected = assertExpectedRevision(expectedRevision);
+      const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      await db.runTransaction(async transaction => {
+        const admin = await requireTransactionAdmin(transaction, adminIdentity);
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = assertDeletionTeacherAllowance(allowanceSnapshot, exactUid);
+        const revision = allowanceRevision(allowance);
+        const requestedAtMs = timestampMillis(allowance.deletionRequestedAt);
+        const purgeEligibleAtMs = timestampMillis(allowance.purgeEligibleAt);
+        if (revision !== expected) throw new Error('teacher allowance revision이 변경되었습니다.');
+        if (allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
+            requestedAtMs === null || purgeEligibleAtMs === null ||
+            purgeEligibleAtMs !== requestedAtMs + 30 * 24 * 60 * 60 * 1000) {
+          throw new Error('정확한 deletion_pending 탈퇴 요청만 관리자가 철회할 수 있습니다.');
+        }
+        const held = allowance.administrativeHold === true;
+        const legacyRef = db.doc('teacher_allowlist/' + allowance.emailCanonical);
+        const legacySnapshot = await transaction.get(legacyRef);
+        if (!legacySnapshot.exists || (legacySnapshot.data() || {}).role !== 'teacher') {
+          throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
+        }
+        const deletion = deleteFieldValue();
+        const update = {
+          status: held ? 'suspended' : 'active',
+          enabled: !held,
+          revision: revision + 1,
+          deletionRequestedAt: deletion,
+          purgeEligibleAt: deletion,
+          updatedAt: fieldValue.serverTimestamp(),
+          updatedByUid: admin.uid
+        };
+        if (!held) {
+          update.suspendedAt = deletion;
+          update.suspendedByUid = deletion;
+          update.suspensionReason = deletion;
+        }
+        transaction.update(allowanceRef, update);
+        if (!held) {
+          transaction.set(legacyRef, {
+            enabled: true,
+            role: 'teacher',
+            updatedAt: fieldValue.serverTimestamp(),
+            updatedByUid: admin.uid
+          });
+        }
+      });
+      const saved = await allowanceRef.get({ source: 'server' });
+      return teacherAllowanceValue(saved);
+    }
+
+    async function listDeletionPendingTeachers(limit, adminIdentity) {
+      const count = limit == null ? 50 : Number(limit);
+      if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
+        throw new Error('탈퇴 대기 조회 limit 개수는 1~100이어야 합니다.');
+      }
+      await requireCurrentAdmin(adminIdentity);
+      const snapshot = await db.collection('teacher_allowances')
+        .where('status', '==', 'deletion_pending').limit(count).get({ source: 'server' });
+      const values = {};
+      snapshot.docs.forEach(document => {
+        const normalizedSnapshot = {
+          exists: true,
+          id: document.id,
+          data: () => document.data() || {}
+        };
+        assertDeletionTeacherAllowance(normalizedSnapshot, document.id);
+        values[document.id] = teacherAllowanceValue(normalizedSnapshot);
+      });
+      return values;
+    }
+
     async function getTeacherDeletionReadiness(uid) {
       const exactUid = assertUid(uid);
       const maximum = 101;
       const [sets, sessions] = await Promise.all([
         db.collection('quiz_sets').where('ownerUid', '==', exactUid).limit(maximum).get({ source: 'server' }),
         db.collection('sessions').where('teacherUid', '==', exactUid)
-          .where('status', 'in', ['active', 'live']).limit(maximum).get({ source: 'server' })
+          .where('status', 'in', ['allocating', 'active', 'live']).limit(maximum).get({ source: 'server' })
       ]);
+      const blockingSessions = sessions.docs.slice(0, 100).map(document => {
+        const value = document.data() || {};
+        if (value.teacherUid !== exactUid || !['allocating', 'active', 'live'].includes(value.status)) {
+          throw new Error('정리 대상 세션 신원이 일치하지 않습니다.');
+        }
+        return {
+          sessionId: document.id,
+          status: value.status,
+          code: typeof value.code === 'string' ? value.code : '',
+          label: typeof value.label === 'string' ? value.label : ''
+        };
+      });
       return {
         ownedSetCount: Math.min(sets.docs.length, 100),
-        liveSessionCount: Math.min(sessions.docs.length, 100),
+        blockingSessionCount: Math.min(sessions.docs.length, 100),
+        blockingSessions,
         ownedSetLimitReached: sets.docs.length > 100,
-        liveSessionLimitReached: sessions.docs.length > 100
+        blockingSessionLimitReached: sessions.docs.length > 100
       };
+    }
+
+    async function resolveTeacherDeletionSession(uid, sessionId) {
+      const exactUid = assertUid(uid);
+      if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 128 || sessionId.includes('/')) {
+        throw new Error('유효한 session ID가 필요합니다.');
+      }
+      const exactSessionId = sessionId;
+      const sessionRef = db.doc('sessions/' + exactSessionId);
+      const snapshot = await sessionRef.get({ source: 'server' });
+      if (!snapshot.exists) throw new Error('정리 대상 세션을 찾을 수 없습니다.');
+      const session = snapshot.data() || {};
+      if (session.teacherUid !== exactUid || !['allocating', 'active', 'live'].includes(session.status)) {
+        throw new Error('정리 대상 세션 소유권 또는 상태가 일치하지 않습니다.');
+      }
+      if (session.status === 'allocating') {
+        return db.runTransaction(async transaction => {
+          const allowanceSnapshot = await transaction.get(db.doc('teacher_allowances/' + exactUid));
+          const allowance = assertDeletionTeacherAllowance(allowanceSnapshot, exactUid);
+          const currentSnapshot = await transaction.get(sessionRef);
+          const current = currentSnapshot.exists ? currentSnapshot.data() || {} : null;
+          if (allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
+              !current || current.teacherUid !== exactUid || current.status !== 'allocating' ||
+              current.classPlanId !== undefined || current.classPlanRevision !== undefined) {
+            throw new Error('고아 세션 할당 상태가 변경되었습니다.');
+          }
+          transaction.set(sessionRef, {
+            status: 'aborted',
+            abortedAt: fieldValue.serverTimestamp()
+          }, { merge: true });
+          return true;
+        });
+      }
+      await endSession(exactSessionId);
+      return true;
     }
 
     async function suspendTeacher(uid, reason, adminIdentity) {
@@ -2724,15 +2845,10 @@
 
           return db.runTransaction(async transaction => {
             const sessionSnapshot = await transaction.get(sessionReference);
-            const codeSnapshot = await transaction.get(codeReference);
-            const mapping = codeSnapshot.exists ? codeSnapshot.data() || {} : null;
-            if (!sessionSnapshot.exists) {
-              return !mapping || mapping.sessionId !== sessionId;
-            }
+            if (!sessionSnapshot.exists) return true;
             const session = sessionSnapshot.data() || {};
             if (session.teacherUid !== teacherUid || session.code !== code ||
                 session.status !== 'aborted') return false;
-            if (mapping && mapping.sessionId === sessionId) transaction.delete(codeReference);
             transaction.delete(sessionReference);
             return true;
           });
@@ -2949,7 +3065,10 @@
       getOwnTeacherAllowance,
       requestTeacherDeletion,
       cancelTeacherDeletion,
+      adminCancelTeacherDeletion,
+      listDeletionPendingTeachers,
       getTeacherDeletionReadiness,
+      resolveTeacherDeletionSession,
       listPendingTeacherRequests,
       decideTeacherRequest,
       suspendTeacher,

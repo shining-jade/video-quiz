@@ -113,11 +113,11 @@ test('purge eligibility denies one millisecond early and any ownership or live-s
   const requestedAt = Date.UTC(2026, 7, 20);
   const pending = core.request(allowance(), requestedAt);
 
-  assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 0, liveSessionCount: 0 }, requestedAt + DAYS_30_MS - 1).eligible, false);
-  assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 1, liveSessionCount: 0 }, requestedAt + DAYS_30_MS).eligible, false);
-  assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 0, liveSessionCount: 1 }, requestedAt + DAYS_30_MS).eligible, false);
+  assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 0, blockingSessionCount: 0 }, requestedAt + DAYS_30_MS - 1).eligible, false);
+  assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 1, blockingSessionCount: 0 }, requestedAt + DAYS_30_MS).eligible, false);
+  assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 0, blockingSessionCount: 1 }, requestedAt + DAYS_30_MS).eligible, false);
   assert.deepEqual(
-    core.auditEligibility({ allowance: pending, ownedSetCount: 0, liveSessionCount: 0 }, requestedAt + DAYS_30_MS),
+    core.auditEligibility({ allowance: pending, ownedSetCount: 0, blockingSessionCount: 0 }, requestedAt + DAYS_30_MS),
     {
       eligible: true,
       blockers: [],
@@ -125,23 +125,37 @@ test('purge eligibility denies one millisecond early and any ownership or live-s
       purgeEligibleAtMs: requestedAt + DAYS_30_MS,
       remainingMs: 0,
       ownedSetCount: 0,
-      liveSessionCount: 0,
+      blockingSessionCount: 0,
       revision: 8,
       uid: 'teacher-a'
     }
   );
 });
 
+test('purge eligibility treats allocating, active, and live sessions as one blocking count', () => {
+  const requestedAt = Date.UTC(2026, 7, 20);
+  const pending = core.request(allowance(), requestedAt);
+  const result = core.auditEligibility({
+    allowance: pending,
+    ownedSetCount: 0,
+    blockingSessionCount: 3
+  }, requestedAt + DAYS_30_MS);
+
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.blockers, ['blocking_sessions']);
+  assert.equal(result.blockingSessionCount, 3);
+});
+
 test('purge audit fails closed for malformed status, timestamp, revision, counts, UID, or email', () => {
   const pending = core.request(allowance(), 10_000);
   const cases = [
-    { allowance: { ...pending, status: 'active' }, ownedSetCount: 0, liveSessionCount: 0 },
-    { allowance: { ...pending, purgeEligibleAtMs: pending.purgeEligibleAtMs + 1 }, ownedSetCount: 0, liveSessionCount: 0 },
-    { allowance: { ...pending, revision: 1.5 }, ownedSetCount: 0, liveSessionCount: 0 },
-    { allowance: { ...pending, uid: '' }, ownedSetCount: 0, liveSessionCount: 0 },
-    { allowance: { ...pending, emailCanonical: 'Teacher@School.KR' }, ownedSetCount: 0, liveSessionCount: 0 },
-    { allowance: pending, ownedSetCount: -1, liveSessionCount: 0 },
-    { allowance: pending, ownedSetCount: 0, liveSessionCount: 1.5 }
+    { allowance: { ...pending, status: 'active' }, ownedSetCount: 0, blockingSessionCount: 0 },
+    { allowance: { ...pending, purgeEligibleAtMs: pending.purgeEligibleAtMs + 1 }, ownedSetCount: 0, blockingSessionCount: 0 },
+    { allowance: { ...pending, revision: 1.5 }, ownedSetCount: 0, blockingSessionCount: 0 },
+    { allowance: { ...pending, uid: '' }, ownedSetCount: 0, blockingSessionCount: 0 },
+    { allowance: { ...pending, emailCanonical: 'Teacher@School.KR' }, ownedSetCount: 0, blockingSessionCount: 0 },
+    { allowance: pending, ownedSetCount: -1, blockingSessionCount: 0 },
+    { allowance: pending, ownedSetCount: 0, blockingSessionCount: 1.5 }
   ];
   for (const value of cases) {
     const result = core.auditEligibility(value, pending.purgeEligibleAtMs);
@@ -365,12 +379,14 @@ test('store cancellation recovers the safely disabled phase-one state before tim
   assert.equal(fake.read('teacher_allowlist/teacher@school.kr').enabled, true);
 });
 
-test('store deletion readiness returns only exact own-set and active/live-session counts', async () => {
+test('store deletion readiness returns exact own sets and allocating/active/live session identities', async () => {
   const fake = firestoreFake({
     'quiz_sets/own-active': { ownerUid: 'teacher-a', lifecycleState: 'active', title: 'private-title' },
     'quiz_sets/own-trash': { ownerUid: 'teacher-a', lifecycleState: 'trashed', title: 'private-trash' },
     'quiz_sets/other': { ownerUid: 'teacher-b', lifecycleState: 'active', title: 'other-private' },
     'sessions/live': { teacherUid: 'teacher-a', status: 'live', label: 'own-live' },
+    'sessions/allocating': { teacherUid: 'teacher-a', status: 'allocating', code: 'ABC123', label: 'recover-me' },
+    'sessions/active': { teacherUid: 'teacher-a', status: 'active', code: 'ABC124', label: 'legacy-live' },
     'sessions/ended': { teacherUid: 'teacher-a', status: 'ended', label: 'old' },
     'sessions/other': { teacherUid: 'teacher-b', status: 'live', label: 'other-live' }
   });
@@ -378,17 +394,55 @@ test('store deletion readiness returns only exact own-set and active/live-sessio
 
   assert.deepEqual(await store.getTeacherDeletionReadiness('teacher-a'), {
     ownedSetCount: 2,
-    liveSessionCount: 1,
+    blockingSessionCount: 3,
+    blockingSessions: [
+      { sessionId: 'live', status: 'live', code: '', label: 'own-live' },
+      { sessionId: 'allocating', status: 'allocating', code: 'ABC123', label: 'recover-me' },
+      { sessionId: 'active', status: 'active', code: 'ABC124', label: 'legacy-live' }
+    ],
     ownedSetLimitReached: false,
-    liveSessionLimitReached: false
+    blockingSessionLimitReached: false
   });
   assert.deepEqual(fake.calls().filter(call => call.operation === 'query').map(call => call.filters), [
     [{ field: 'ownerUid', operator: '==', value: 'teacher-a' }],
     [
       { field: 'teacherUid', operator: '==', value: 'teacher-a' },
-      { field: 'status', operator: 'in', value: ['active', 'live'] }
+      { field: 'status', operator: 'in', value: ['allocating', 'active', 'live'] }
     ]
   ]);
+});
+
+test('admin cancellation uses exact target and revision and preserves an administrative hold', async () => {
+  const requestedAt = { toMillis: () => 10_000, toDate: () => new Date(10_000) };
+  const purgeAt = { toMillis: () => 10_000 + DAYS_30_MS, toDate: () => new Date(10_000 + DAYS_30_MS) };
+  const fake = firestoreFake({
+    'teacher_allowances/admin-a': storedAllowance({
+      uid: 'admin-a', emailCanonical: 'admin@school.kr', role: 'admin',
+      status: 'active', enabled: true, revision: 2
+    }),
+    'teacher_allowances/teacher-a': storedAllowance({
+      status: 'deletion_pending', enabled: false, administrativeHold: true, revision: 9,
+      deletionRequestedAt: requestedAt, purgeEligibleAt: purgeAt,
+      suspendedAt: requestedAt, suspendedByUid: 'admin-a', suspensionReason: 'independent-hold'
+    }),
+    'teacher_allowlist/teacher@school.kr': { enabled: false, role: 'teacher' }
+  }, { committedAt: 20_000 });
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 19_000);
+  const actor = {
+    uid: 'admin-a', email: 'admin@school.kr', role: 'admin',
+    authGeneration: 3, currentAuthGeneration: 3
+  };
+
+  await assert.rejects(store.adminCancelTeacherDeletion('teacher-a', 8, actor), /revision|변경/);
+  const result = await store.adminCancelTeacherDeletion('teacher-a', 9, actor);
+
+  assert.equal(result.status, 'suspended');
+  assert.equal(result.enabled, false);
+  assert.equal(result.administrativeHold, true);
+  assert.equal(result.revision, 10);
+  assert.equal(result.updatedByUid, 'admin-a');
+  assert.equal(Object.hasOwn(result, 'deletionRequestedAt'), false);
+  assert.equal(Object.hasOwn(result, 'purgeEligibleAt'), false);
 });
 
 function extractFunction(source, name) {
@@ -436,7 +490,20 @@ test('deletion UI requires typed acknowledgment, preserves safe pending state on
     setTeacherAllowance(value) { context.teacherState = { uid: value.uid, status: value.status, role: '' }; },
     store: {
       async getTeacherDeletionReadiness() {
-        return { ownedSetCount: 2, liveSessionCount: 1, ownedSetLimitReached: false, liveSessionLimitReached: false };
+        return {
+          ownedSetCount: 2,
+          blockingSessionCount: 2,
+          blockingSessions: [
+            { sessionId: 'alloc-a', status: 'allocating', code: 'ABC123', label: '복구할 반' },
+            { sessionId: 'live-a', status: 'live', code: 'ABC124', label: '종료할 반' }
+          ],
+          ownedSetLimitReached: false,
+          blockingSessionLimitReached: false
+        };
+      },
+      async resolveTeacherDeletionSession(uid, sessionId) {
+        if (uid !== 'teacher-a' || sessionId !== 'alloc-a') throw new Error('wrong target');
+        return { complete: true, status: 'aborted' };
       },
       async requestTeacherDeletion() {
         throw new Error('settlement failed after safe disable');
@@ -452,12 +519,13 @@ test('deletion UI requires typed acknowledgment, preserves safe pending state on
   vm.createContext(context);
   for (const name of [
     'teacherDeletionScreenIsCurrent', 'renderTeacherDeletion', 'screenTeacherDeletion',
-    'requestTeacherDeletion', 'cancelTeacherDeletion'
+    'requestTeacherDeletion', 'cancelTeacherDeletion', 'resolveTeacherDeletionSession'
   ]) vm.runInContext(extractFunction(html, name), context);
 
   await context.screenTeacherDeletion();
   assert.match(app.innerHTML, /소유 세트 2개/);
-  assert.match(app.innerHTML, /진행 중 세션 1개/);
+  assert.match(app.innerHTML, /정리 필요 세션 2개/);
+  assert.doesNotMatch(app.innerHTML, /할당 정리|안전 종료/);
   assert.doesNotMatch(app.innerHTML, /teacher-b|other-private|other-live/);
 
   const wrong = { value: '탈퇴', disabled: false };
@@ -468,4 +536,63 @@ test('deletion UI requires typed acknowledgment, preserves safe pending state on
   assert.equal(await context.requestTeacherDeletion(exact), false);
   assert.equal(context.teacherState.status, 'deletion_pending');
   assert.match(app.innerHTML, /안전하게 중지|정리 시각|다시 확인/);
+  assert.match(app.innerHTML, /복구할 반/);
+  assert.match(app.innerHTML, /할당 정리/);
+  assert.match(app.innerHTML, /종료할 반/);
+  assert.match(app.innerHTML, /안전 종료/);
+
+  context.teacherDeletionScreen.readiness = {
+    ownedSetCount: 0,
+    blockingSessionCount: 1,
+    blockingSessions: [{ sessionId: 'alloc-a', status: 'allocating', code: 'ABC123', label: '복구할 반' }]
+  };
+  assert.equal(await context.resolveTeacherDeletionSession('alloc-a'), true);
+  assert.equal(context.teacherDeletionScreen.readiness.blockingSessionCount, 0);
+});
+
+test('admin deletion UI submits the exact pending target and revision and removes only that row', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const body = { innerHTML: '' };
+  const calls = [];
+  const state = {
+    adm: { tab: 'requests' }, body, uid: 'admin-a', authGeneration: 5,
+    requests: {}, deletions: {
+      'teacher-a': {
+        uid: 'teacher-a', emailCanonical: 'teacher@school.kr', displayName: '김교사',
+        status: 'deletion_pending', revision: 9, administrativeHold: true
+      }
+    },
+    loading: false, inFlight: null, message: '', error: '', loadError: ''
+  };
+  const context = {
+    Promise,
+    teacherAuthVersion: 5,
+    teacherUser: { uid: 'admin-a' },
+    teacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin', status: 'teacher' },
+    adm: state.adm,
+    adminTeacherRequestScreen: state,
+    location: { hash: '#/admin' },
+    AuthCore: { isAdmin: value => value && value.role === 'admin' },
+    $: selector => selector === '#adm-body' ? body : null,
+    esc: value => String(value),
+    store: {
+      async adminCancelTeacherDeletion(uid, revision, actor) {
+        calls.push({ uid, revision, actorUid: actor.uid });
+        return { status: 'suspended', revision: revision + 1 };
+      }
+    }
+  };
+  vm.createContext(context);
+  for (const name of [
+    'adminTeacherRequestScreenIsCurrent', 'renderAdminTeacherRequests',
+    'adminCancelTeacherDeletionRequest'
+  ]) vm.runInContext(extractFunction(html, name), context);
+
+  assert.equal(context.renderAdminTeacherRequests(), true);
+  assert.match(body.innerHTML, /김교사/);
+  assert.match(body.innerHTML, /관리자 철회/);
+  assert.equal(await context.adminCancelTeacherDeletionRequest('teacher-a', 8), false);
+  assert.equal(await context.adminCancelTeacherDeletionRequest('teacher-a', 9), true);
+  assert.deepEqual(calls, [{ uid: 'teacher-a', revision: 9, actorUid: 'admin-a' }]);
+  assert.equal(Object.hasOwn(state.deletions, 'teacher-a'), false);
 });

@@ -330,8 +330,10 @@ service cloud.firestore {
       let before = resource.data;
       let after = request.resource.data;
       let held = before.administrativeHold == true;
-      return verifiedEmail() && request.auth.uid == uid &&
-        before.uid == uid && before.emailCanonical == request.auth.token.email &&
+      let ownCancellation = verifiedEmail() && request.auth.uid == uid &&
+        before.emailCanonical == request.auth.token.email;
+      return (ownCancellation || isAdmin()) &&
+        before.uid == uid && canonicalAllowanceId(before.emailCanonical) &&
         before.role == 'teacher' &&
         before.status == 'deletion_pending' && before.enabled == false &&
         before.revision is int && before.revision > 0 &&
@@ -1265,6 +1267,14 @@ service cloud.firestore {
             request.resource.data.status == 'ended');
     }
 
+    function validDeletionPendingSessionAbort(sessionId) {
+      return ownsSessionForSafeDeletionEnd(sessionId) &&
+        sessionHasCounterFields(resource.data) &&
+        sessionHasCounterFields(request.resource.data) &&
+        validSessionCounter(resource.data) && validSessionCounter(request.resource.data) &&
+        validSessionAbortTransition();
+    }
+
     function validStudentCounterIncrement(sessionId) {
       let studentPath = /databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid);
       return anonymousStudent() && resource.data.status in ['active', 'live'] &&
@@ -1703,8 +1713,8 @@ service cloud.firestore {
           (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
       allow list: if isAdmin() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid) ||
-        (isDeletionPendingTeacher() && resource.data.teacherUid == request.auth.uid &&
-          resource.data.status in ['active', 'live'] && request.query.limit != null &&
+          (isDeletionPendingTeacher() && resource.data.teacherUid == request.auth.uid &&
+          resource.data.status in ['allocating', 'active', 'live'] && request.query.limit != null &&
           request.query.limit <= 101);
       allow create: if isApprovedTeacher() &&
         request.resource.data.teacherUid == request.auth.uid &&
@@ -1728,6 +1738,9 @@ service cloud.firestore {
         !request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'registeredStudentCount', 'studentCountRevision', 'lastStudentUid'
         ]) && (validDeletionPendingSessionEnd(sessionId) || validOwnedSessionUpdate(sessionId));
+      allow update: if request.resource.data.teacherUid == resource.data.teacherUid &&
+        request.resource.data.teacherEmail == resource.data.teacherEmail &&
+        validDeletionPendingSessionAbort(sessionId);
       allow delete: if !('classPlanId' in resource.data) &&
         !('classPlanRevision' in resource.data) &&
         (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted' &&

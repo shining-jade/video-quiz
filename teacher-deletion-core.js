@@ -122,6 +122,9 @@
 
   function invalidAudit(value) {
     const allowance = value && value.allowance || {};
+    const blockingSessionCount = Number.isSafeInteger(value && value.blockingSessionCount)
+      ? value.blockingSessionCount
+      : Number.isSafeInteger(value && value.liveSessionCount) ? value.liveSessionCount : null;
     return {
       eligible: false,
       blockers: ['invalid_state'],
@@ -129,7 +132,7 @@
       purgeEligibleAtMs: null,
       remainingMs: null,
       ownedSetCount: Number.isSafeInteger(value && value.ownedSetCount) ? value.ownedSetCount : null,
-      liveSessionCount: Number.isSafeInteger(value && value.liveSessionCount) ? value.liveSessionCount : null,
+      blockingSessionCount,
       revision: Number.isSafeInteger(allowance.revision) ? allowance.revision : null,
       uid: typeof allowance.uid === 'string' ? allowance.uid : ''
     };
@@ -142,14 +145,16 @@
       const allowance = commonAllowance(value.allowance);
       const times = pendingAllowance(allowance);
       revision(allowance.revision, true);
+      const blockingSessionCount = value.blockingSessionCount === undefined
+        ? value.liveSessionCount : value.blockingSessionCount;
       if (now === null || !Number.isSafeInteger(value.ownedSetCount) || value.ownedSetCount < 0 ||
-          !Number.isSafeInteger(value.liveSessionCount) || value.liveSessionCount < 0) {
+          !Number.isSafeInteger(blockingSessionCount) || blockingSessionCount < 0) {
         return invalidAudit(value);
       }
       const blockers = [];
       if (now < times.purgeEligibleAtMs) blockers.push('waiting_period');
       if (value.ownedSetCount > 0) blockers.push('owned_sets');
-      if (value.liveSessionCount > 0) blockers.push('live_sessions');
+      if (blockingSessionCount > 0) blockers.push('blocking_sessions');
       return {
         eligible: blockers.length === 0,
         blockers,
@@ -157,7 +162,7 @@
         purgeEligibleAtMs: times.purgeEligibleAtMs,
         remainingMs: Math.max(0, times.purgeEligibleAtMs - now),
         ownedSetCount: value.ownedSetCount,
-        liveSessionCount: value.liveSessionCount,
+        blockingSessionCount,
         revision: allowance.revision,
         uid: allowance.uid
       };
