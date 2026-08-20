@@ -4865,6 +4865,28 @@ test('migration gate 완료 뒤 counter 없는 legacy session 종료는 fail clo
   assert.equal(fake.value('sessions/a/meta/live').status, undefined);
 });
 
+test('Date와 Firebase Timestamp가 섞인 gate는 같은 millis여도 legacy safe end를 유지한다', async () => {
+  const { Timestamp } = require('firebase/firestore');
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt: new Date(10_000), updatedAt: new Timestamp(10, 0),
+      completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').status, 'ended');
+  assert.equal(fake.value('sessions/a').actualParticipants, undefined);
+  assert.equal(fake.value('sessions/a/meta/live').status, 'ended');
+});
+
 test('raw numeric gate timestamps는 완료로 오인하지 않고 legacy session을 안전 종료한다', async () => {
   const fake = makeFirestoreFake({
     'migration_gates/session_counters': {
@@ -4911,14 +4933,69 @@ test('millis가 불일치하는 timestamp-shaped gate는 완료로 오인하지 
   assert.equal(fake.value('sessions/a').actualParticipants, undefined);
 });
 
-test('실제 Firebase Timestamp exact gate는 strict migration 완료를 활성화한다', async () => {
-  const { Timestamp } = require('firebase/firestore');
-  const verifiedAt = new Timestamp(10, 123_456_789);
+test('SDK를 흉내 낸 coherent Timestamp class도 완료 gate brand로 인정하지 않는다', async () => {
+  class Timestamp {
+    constructor() { this.seconds = 10; this.nanoseconds = 0; }
+    toMillis() { return 10_000; }
+    toDate() { return new Date(10_000); }
+    isEqual(other) {
+      return other && other.seconds === this.seconds &&
+        other.nanoseconds === this.nanoseconds;
+    }
+  }
+  const forged = new Timestamp();
   const fake = makeFirestoreFake({
     'migration_gates/session_counters': {
       complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
       rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
-      verifiedAt, updatedAt: verifiedAt, completedByUid: 'admin-uid'
+      verifiedAt: forged, updatedAt: forged, completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').status, 'ended');
+  assert.equal(fake.value('sessions/a').actualParticipants, undefined);
+});
+
+test('toMillis가 충돌해도 nanos가 다른 실제 Firebase Timestamp gate는 legacy safe end를 유지한다', async () => {
+  const { Timestamp } = require('firebase/firestore');
+  const verifiedAt = new Timestamp(253_402_300_799, 1);
+  const updatedAt = new Timestamp(253_402_300_799, 2);
+  assert.equal(verifiedAt.toMillis(), updatedAt.toMillis());
+  assert.equal(verifiedAt.isEqual(updatedAt), false);
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt, updatedAt, completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').status, 'ended');
+  assert.equal(fake.value('sessions/a').actualParticipants, undefined);
+  assert.equal(fake.value('sessions/a/meta/live').status, 'ended');
+});
+
+test('동일 nanos의 별도 Firebase Timestamp exact gate는 strict migration 완료를 활성화한다', async () => {
+  const { Timestamp } = require('firebase/firestore');
+  const verifiedAt = new Timestamp(10, 123_456_789);
+  const updatedAt = new Timestamp(10, 123_456_789);
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt, updatedAt, completedByUid: 'admin-uid'
     },
     'sessions/a': {
       setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'

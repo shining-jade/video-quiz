@@ -11,10 +11,15 @@
   const classPlanning = typeof module === 'object' && module.exports
     ? require('./class-planning-core.js')
     : root.ClassPlanningCore;
-  const api = factory(core, collaboration, teacherAccess, classPlanning);
+  const firestoreTimestamp = typeof module === 'object' && module.exports
+    ? require('firebase/firestore').Timestamp
+    : root.firebase && root.firebase.firestore && root.firebase.firestore.Timestamp;
+  const api = factory(core, collaboration, teacherAccess, classPlanning, firestoreTimestamp);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, collaboration, teacherAccess, classPlanning) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (
+  core, collaboration, teacherAccess, classPlanning, FirestoreTimestamp
+) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
   const SAFE_REQUEST_BYTES = 8_000_000;
@@ -751,42 +756,43 @@
       const value = data || {};
       const keys = Object.keys(value).sort();
       const exactKeys = [...SESSION_COUNTER_GATE_KEYS].sort();
-      const exactTimestampMillis = timestamp => {
+      const exactGateTimestamp = timestamp => {
         if (timestamp instanceof Date) {
           const millis = timestamp.getTime();
-          return Number.isSafeInteger(millis) ? millis : null;
+          return Number.isSafeInteger(millis) ? { kind: 'date', millis } : null;
         }
-        if (!timestamp || typeof timestamp !== 'object') return null;
-        const prototype = Object.getPrototypeOf(timestamp);
-        if (!prototype || !prototype.constructor ||
-            prototype.constructor.name !== 'Timestamp' ||
-            typeof prototype.toMillis !== 'function' ||
-            typeof prototype.toDate !== 'function' ||
-            typeof prototype.isEqual !== 'function') return null;
+        if (typeof FirestoreTimestamp !== 'function' ||
+            !(timestamp instanceof FirestoreTimestamp)) return null;
+        if (!Object.prototype.hasOwnProperty.call(timestamp, 'seconds') ||
+            !Object.prototype.hasOwnProperty.call(timestamp, 'nanoseconds') ||
+            typeof FirestoreTimestamp.prototype.isEqual !== 'function') return null;
         const seconds = timestamp.seconds;
         const nanoseconds = timestamp.nanoseconds;
         if (!Number.isSafeInteger(seconds) || seconds < -62135596800 ||
             seconds > 253402300799 || !Number.isInteger(nanoseconds) ||
             nanoseconds < 0 || nanoseconds >= 1_000_000_000) return null;
-        const expected = seconds * 1000 + nanoseconds / 1_000_000;
-        let actual;
-        try {
-          actual = timestamp.toMillis();
-        } catch (error) {
-          return null;
-        }
-        return Number.isFinite(actual) && Math.abs(actual) <= Number.MAX_SAFE_INTEGER &&
-          actual === expected ? actual : null;
+        return { kind: 'timestamp', seconds, nanoseconds, value: timestamp };
       };
-      const verifiedAt = exactTimestampMillis(value.verifiedAt);
-      const updatedAt = exactTimestampMillis(value.updatedAt);
+      const sameExactGateTimestamp = (left, right) => {
+        if (!left || !right || left.kind !== right.kind) return false;
+        if (left.kind === 'date') return left.millis === right.millis;
+        if (left.seconds !== right.seconds || left.nanoseconds !== right.nanoseconds) return false;
+        try {
+          return FirestoreTimestamp.prototype.isEqual.call(left.value, right.value) === true &&
+            FirestoreTimestamp.prototype.isEqual.call(right.value, left.value) === true;
+        } catch (error) {
+          return false;
+        }
+      };
+      const verifiedAt = exactGateTimestamp(value.verifiedAt);
+      const updatedAt = exactGateTimestamp(value.updatedAt);
       return JSON.stringify(keys) === JSON.stringify(exactKeys) &&
         value.complete === true && typeof value.projectId === 'string' &&
         value.projectId.length > 0 && value.projectId.length <= 120 &&
         ['production', 'emulator'].includes(value.environment) &&
         value.rulesVersion === 'session-counters-v1' &&
         value.preflightNonEndedLegacyCount === 0 &&
-        verifiedAt !== null && verifiedAt === updatedAt &&
+        sameExactGateTimestamp(verifiedAt, updatedAt) &&
         typeof value.completedByUid === 'string' && value.completedByUid.length > 0 &&
         value.completedByUid.length <= 128;
     }
