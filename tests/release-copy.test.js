@@ -85,6 +85,18 @@ test('편집 문항은 저장 전 실제 퀴즈 모양 미리보기를 열 수 �
   assert.match(html, /setAttribute\('role',\s*'dialog'\)/);
 });
 
+test('문항 미리보기는 영상 3초 전 재생부터 제출·해설·계속 재생까지 실제 흐름을 제공한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /<script src="quiz-preview-core\.js"><\/script>/);
+  assert.match(html, /function mkOpenQuestionPreview\(videoIndex, questionIndex\)[\s\S]*?mkPlayer[\s\S]*?seekTo\([\s\S]*?startAt[\s\S]*?playVideo/);
+  assert.match(html, /function mkPreviewTick\(\)[\s\S]*?getCurrentTime[\s\S]*?QuizPreviewCore\.advance[\s\S]*?pauseVideo/);
+  assert.match(html, /function mkPreviewSubmit\(\)[\s\S]*?QuizPreviewCore\.submit/);
+  assert.match(html, /function mkPreviewContinue\(\)[\s\S]*?QuizPreviewCore\.continuePlayback[\s\S]*?playVideo/);
+  assert.match(html, /정답입니다|아쉽지만 오답입니다/);
+  assert.match(html, /해설/);
+});
+
 test('문항 미리보기는 다른 화면으로 이동할 때 남지 않는다', () => {
   const html = read('index.html');
   assert.match(html, /function router\(\) \{[\s\S]*?mkCloseQuestionPreview\(\);[\s\S]*?runCleanups\(\);/);

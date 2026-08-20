@@ -316,6 +316,16 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-question-preview-card .preview-choices { display:grid; gap:10px; }
 .mk-question-preview-card .preview-choice { display:flex; gap:12px; align-items:center; padding:14px 16px; border:2px solid rgba(255,255,255,.22); border-radius:12px; background:rgba(255,255,255,.04); }
 .mk-question-preview-card .preview-choice b { display:grid; place-items:center; width:34px; height:34px; flex:none; border-radius:9px; background:rgba(255,255,255,.16); }
+.mk-question-preview-card button.preview-choice { width:100%; color:inherit; text-align:left; cursor:pointer; }
+.mk-question-preview-card .preview-choice.selected { border-color:#8b83ff; background:rgba(99,91,255,.22); }
+.mk-question-preview-card .preview-choice.correct { border-color:#34d17f; background:rgba(52,209,127,.16); }
+.mk-question-preview-card .preview-choice.wrong { border-color:#ff6b78; background:rgba(255,107,120,.14); }
+.mk-question-preview-card .preview-result { margin-top:18px; padding:14px 16px; border-radius:12px; font-weight:800; }
+.mk-question-preview-card .preview-result.ok { background:rgba(52,209,127,.16); color:#8ff0bb; }
+.mk-question-preview-card .preview-result.bad { background:rgba(255,107,120,.14); color:#ffadb5; }
+.mk-question-preview-card .preview-result.manual { background:rgba(255,255,255,.1); }
+.mk-question-preview-card .preview-explanation { margin-top:12px; padding:14px 16px; border:1px solid rgba(255,210,80,.55); border-radius:12px; background:rgba(255,210,80,.1); }
+.mk-question-preview-card textarea { min-height:110px; background:#fff; color:#1c2030; }
 .mk-question-preview-card .preview-actions { display:flex; justify-content:flex-end; margin-top:22px; }
 
 @keyframes qflash { 0%,100% { box-shadow: 0 0 0 0 rgba(67,56,202,0); } 30% { box-shadow: 0 0 0 4px rgba(67,56,202,.35); } }
@@ -670,6 +680,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
 <script src="quiz-trigger-core.js"></script>
+<script src="quiz-preview-core.js"></script>
 <script src="teacher-stage.js"></script>
 <script src="auth-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
@@ -2149,6 +2160,9 @@ function setDuplicate(id) {
 let mk = null;          // 편집 중인 세트 상태
 let mkPlayer = null;    // 미리보기 플레이어
 let mkPlayerVid = '';   // 현재 플레이어에 로드된 영상 ID
+let mkQuestionPreviewState = null;
+let mkQuestionPreviewTimer = null;
+let mkQuestionPreviewRequest = 0;
 let mkDraftTimer = null;
 
 function mkHistorySnapshot(state) {
@@ -2740,7 +2754,7 @@ function mkQuestionPreviewHtml(q, number) {
   const type = qType(q);
   const choices = Array.isArray(q && q.choices) ? q.choices : [];
   const typeLabel = QTYPES[type] ? QTYPES[type].split(' —')[0] : '문항';
-  const answerArea = (type === 'short' || type === 'essay')
+  const answerArea = (type === 'short' || type === 'long')
     ? '<div class="preview-choice"><span>학생 답안 입력 영역</span></div>'
     : '<div class="preview-choices">' + choices.map((choice, index) =>
         '<div class="preview-choice"><b>' +
@@ -2754,31 +2768,190 @@ function mkQuestionPreviewHtml(q, number) {
 }
 
 function mkCloseQuestionPreview() {
+  mkQuestionPreviewRequest++;
+  if (mkQuestionPreviewTimer) clearInterval(mkQuestionPreviewTimer);
+  mkQuestionPreviewTimer = null;
   const preview = document.getElementById('mk-question-preview');
   if (preview && preview.remove) preview.remove();
+  const state = mkQuestionPreviewState;
+  mkQuestionPreviewState = null;
+  if (!state || !state.player) return;
+  try {
+    state.player.seekTo(state.originalTime, true);
+    if (state.originalWasPlaying) state.player.playVideo();
+    else state.player.pauseVideo();
+  } catch (e) {}
+}
+
+function mkPreviewChoiceIsCorrect(question, index) {
+  return question.type === 'multi'
+    ? (question.answers || []).indexOf(index) >= 0
+    : Number(question.answer) === index;
+}
+
+function mkPreviewRender() {
+  const state = mkQuestionPreviewState;
+  if (!state || (state.phase !== 'question' && state.phase !== 'result')) return false;
+  let dialog = document.getElementById('mk-question-preview');
+  if (!dialog) {
+    dialog = document.createElement('div');
+    dialog.id = 'mk-question-preview';
+    dialog.className = 'overlay';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    document.body.appendChild(dialog);
+  }
+  const q = state.question;
+  const type = q.type || 'choice';
+  const isResult = state.phase === 'result';
+  const image = q._img || q.imgUrl || '';
+  let answerArea = '';
+  if (type === 'short' || type === 'long') {
+    answerArea = '<textarea id="mk-preview-text" placeholder="답을 입력하세요" ' +
+      (isResult ? 'disabled' : 'oninput="mkPreviewSetText(this.value)"') + '>' +
+      esc(state.answer == null ? '' : state.answer) + '</textarea>';
+  } else {
+    const choices = Array.isArray(q.choices) ? q.choices : [];
+    answerArea = '<div class="preview-choices">' + choices.map((choice, index) => {
+      const selected = type === 'multi'
+        ? (state.answer || []).indexOf(index) >= 0 : Number(state.answer) === index;
+      const correct = isResult && mkPreviewChoiceIsCorrect(q, index);
+      const wrong = isResult && selected && !correct;
+      return '<button type="button" class="preview-choice' + (selected ? ' selected' : '') +
+        (correct ? ' correct' : '') + (wrong ? ' wrong' : '') + '" ' +
+        (isResult ? 'disabled' : 'onclick="mkPreviewSelect(' + index + ')"') + '><b>' +
+        (type === 'ox' ? (['O', 'X'][index] || '') : (LETTERS[index] || index + 1)) +
+        '</b><span>' + esc(choice || '보기 ' + (index + 1)) + '</span></button>';
+    }).join('') + '</div>';
+  }
+  let result = '';
+  if (isResult) {
+    const message = state.correct === true ? '정답입니다.'
+      : state.correct === false ? '아쉽지만 오답입니다.' : '서술형 답안을 확인했습니다.';
+    const resultClass = state.correct === true ? 'ok' : state.correct === false ? 'bad' : 'manual';
+    result = '<div class="preview-result ' + resultClass + '">' + message + '</div>' +
+      '<div class="preview-explanation"><b>해설</b><br>' +
+      esc(state.explanation || '등록된 해설이 없습니다.') + '</div>';
+  }
+  dialog.setAttribute('aria-label', '문항 ' + state.number + ' 퀴즈 미리보기');
+  dialog.innerHTML = '<div class="mk-question-preview-card">' +
+    '<div class="preview-top"><span class="tag">문항 ' + state.number + '</span>' +
+    '<span class="tag mute">실제 흐름 미리보기</span></div>' +
+    (image ? '<img class="q-img" src="' + esc(image) + '" alt="문항 이미지">' : '') +
+    '<div class="preview-q">' + esc(String(q.text || '').trim() || '질문을 입력하세요') + '</div>' +
+    answerArea + result + '<div class="preview-actions">' +
+    (isResult
+      ? '<button class="btn primary" onclick="mkPreviewContinue()">▶ 계속 재생</button>'
+      : '<button class="btn primary" onclick="mkPreviewSubmit()">제출</button>') +
+    '<button class="btn" onclick="mkCloseQuestionPreview()">미리보기 종료</button></div></div>';
+  dialog.onclick = event => { if (event.target === dialog) mkCloseQuestionPreview(); };
+  dialog.onkeydown = event => { if (event.key === 'Escape') mkCloseQuestionPreview(); };
+  const first = dialog.querySelector('button.preview-choice, textarea, .preview-actions button');
+  if (first && first.focus) first.focus();
+  return true;
+}
+
+function mkPreviewSelect(index) {
+  const state = mkQuestionPreviewState;
+  if (!state || state.phase !== 'question') return false;
+  if (state.question.type === 'multi') {
+    const answer = (state.answer || []).slice();
+    const at = answer.indexOf(index);
+    if (at >= 0) answer.splice(at, 1); else answer.push(index);
+    mkQuestionPreviewState = QuizPreviewCore.select(state, answer);
+  } else {
+    mkQuestionPreviewState = QuizPreviewCore.select(state, index);
+  }
+  return mkPreviewRender();
+}
+
+function mkPreviewSetText(value) {
+  if (!mkQuestionPreviewState || mkQuestionPreviewState.phase !== 'question') return false;
+  mkQuestionPreviewState = QuizPreviewCore.select(mkQuestionPreviewState, value);
+  return true;
+}
+
+function mkPreviewSubmit() {
+  const state = mkQuestionPreviewState;
+  if (!state || state.phase !== 'question') return false;
+  const input = document.getElementById('mk-preview-text');
+  if (input) mkQuestionPreviewState = QuizPreviewCore.select(state, input.value);
+  mkQuestionPreviewState = QuizPreviewCore.submit(mkQuestionPreviewState);
+  return mkPreviewRender();
+}
+
+function mkPreviewContinue() {
+  const state = mkQuestionPreviewState;
+  if (!state || state.phase !== 'result') return false;
+  mkQuestionPreviewState = QuizPreviewCore.continuePlayback(state);
+  if (mkQuestionPreviewTimer) clearInterval(mkQuestionPreviewTimer);
+  mkQuestionPreviewTimer = null;
+  const preview = document.getElementById('mk-question-preview');
+  if (preview && preview.remove) preview.remove();
+  mkQuestionPreviewState = null;
+  try {
+    state.player.seekTo(state.targetTime + .05, true);
+    state.player.playVideo();
+  } catch (e) { toast('영상을 계속 재생하지 못했습니다: ' + e.message); return false; }
+  return true;
+}
+
+function mkPreviewTick() {
+  const state = mkQuestionPreviewState;
+  if (!state || state.phase !== 'video' || !state.player) return false;
+  let currentTime = state.startAt;
+  try { currentTime = state.player.getCurrentTime(); } catch (e) {}
+  const timedOut = Date.now() - state.startedAt > Math.max(5000, (state.targetTime - state.startAt + 2) * 1000);
+  const next = QuizPreviewCore.advance(state, timedOut ? state.targetTime : currentTime);
+  if (next === state) return false;
+  mkQuestionPreviewState = next;
+  if (mkQuestionPreviewTimer) clearInterval(mkQuestionPreviewTimer);
+  mkQuestionPreviewTimer = null;
+  try { state.player.pauseVideo(); } catch (e) {}
+  return mkPreviewRender();
 }
 
 function mkOpenQuestionPreview(videoIndex, questionIndex) {
   const video = mk && mk.videos && mk.videos[videoIndex];
   const q = video && video.questions && video.questions[questionIndex];
   if (!q) return false;
+  if (!video.videoId) { toast('먼저 유튜브 주소를 입력해 주세요.'); return false; }
   mkCloseQuestionPreview();
+  const request = ++mkQuestionPreviewRequest;
   const number = mk.videos.slice(0, videoIndex)
     .reduce((count, item) => count + ((item && item.questions) || []).length, 0) + questionIndex + 1;
-  const dialog = document.createElement('div');
-  dialog.id = 'mk-question-preview';
-  dialog.className = 'overlay';
-  dialog.setAttribute('role', 'dialog');
-  dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-label', '문항 ' + number + ' 퀴즈 미리보기');
-  dialog.innerHTML = '<div class="mk-question-preview-card">' +
-    mkQuestionPreviewHtml(q, number) +
-    '<div class="preview-actions"><button class="btn primary" onclick="mkCloseQuestionPreview()">닫기</button></div></div>';
-  dialog.addEventListener('click', event => { if (event.target === dialog) mkCloseQuestionPreview(); });
-  dialog.addEventListener('keydown', event => { if (event.key === 'Escape') mkCloseQuestionPreview(); });
-  document.body.appendChild(dialog);
-  const close = dialog.querySelector('button');
-  if (close && close.focus) close.focus();
+  const question = JSON.parse(JSON.stringify(q));
+  if (videoIndex !== mk.activeVideo) {
+    mk.activeVideo = videoIndex;
+    renderMake();
+  }
+  const begin = attempt => {
+    if (request !== mkQuestionPreviewRequest) return;
+    if ((!mkPlayer || !mkPlayer.seekTo || !mkPlayer.playVideo) && attempt < 60) {
+      setTimeout(() => begin(attempt + 1), 100);
+      return;
+    }
+    if (!mkPlayer || !mkPlayer.seekTo || !mkPlayer.playVideo) {
+      toast('영상 플레이어가 준비되지 않았습니다. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+    let originalTime = 0, originalWasPlaying = false;
+    try {
+      originalTime = Number(mkPlayer.getCurrentTime()) || 0;
+      originalWasPlaying = !!(mkPlayer.getPlayerState && mkPlayer.getPlayerState() === 1);
+    } catch (e) {}
+    const state = QuizPreviewCore.create(question, { startSec: video.startSec });
+    mkQuestionPreviewState = Object.assign(state, {
+      number, videoIndex, questionIndex, player: mkPlayer,
+      originalTime, originalWasPlaying, startedAt: Date.now()
+    });
+    mkPlayer.seekTo(mkQuestionPreviewState.startAt, true);
+    mkPlayer.playVideo();
+    toast('문항 ' + number + '의 3초 전부터 재생합니다. 문항 시각에 퀴즈가 열립니다.');
+    mkQuestionPreviewTimer = setInterval(mkPreviewTick, 100);
+    mkPreviewTick();
+  };
+  begin(0);
   return true;
 }
 

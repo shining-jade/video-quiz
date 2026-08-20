@@ -5583,6 +5583,72 @@ test('문항 미리보기 HTML은 현재 편집값의 질문과 보기를 즉시
   assert.match(html, /②[\s\S]*둘째/);
 });
 
+test('흐름형 문항 미리보기는 3초 전 영상을 재생하고 문항 시각에 멈춘다', () => {
+  const calls = [];
+  let currentTime = 7;
+  const player = {
+    seekTo(value) { calls.push(['seek', value]); currentTime = value; },
+    playVideo() { calls.push(['play']); },
+    pauseVideo() { calls.push(['pause']); },
+    getCurrentTime() { return currentTime; },
+    getPlayerState() { return 2; }
+  };
+  const context = {
+    mk: { activeVideo: 0, videos: [{ videoId: 'video', startSec: 0, questions: [
+      { type: 'choice', t: 10, text: '질문', choices: ['가', '나'], answer: 1 }
+    ] }] },
+    mkPlayer: player,
+    mkQuestionPreviewState: null,
+    mkQuestionPreviewTimer: null,
+    mkQuestionPreviewRequest: 0,
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    Date: { now() { return 1000; } },
+    document: { getElementById() { return null; } },
+    mkCloseQuestionPreview() {},
+    mkPreviewRender() { calls.push(['render']); return true; },
+    renderMake() {}, toast() {},
+    setTimeout(callback) { callback(); return 1; },
+    setInterval() { return 2; }, clearInterval() {}
+  };
+  loadStageFunctions(['mkOpenQuestionPreview', 'mkPreviewTick'], context);
+
+  assert.equal(context.mkOpenQuestionPreview(0, 0), true);
+  assert.deepEqual(calls.slice(0, 2), [['seek', 7], ['play']]);
+  currentTime = 10;
+  assert.equal(context.mkPreviewTick(), true);
+  assert.equal(context.mkQuestionPreviewState.phase, 'question');
+  assert.deepEqual(calls.slice(-2), [['pause'], ['render']]);
+});
+
+test('흐름형 문항 미리보기는 제출을 채점하고 해설 뒤 계속 재생한다', () => {
+  const calls = [];
+  const context = {
+    mkQuestionPreviewState: Object.assign(
+      require('../quiz-preview-core.js').select(
+        require('../quiz-preview-core.js').advance(
+          require('../quiz-preview-core.js').create({
+            type: 'choice', t: 10, answer: 1, explain: '정답 해설'
+          }), 10
+        ), 1
+      ),
+      { player: { seekTo(value) { calls.push(['seek', value]); }, playVideo() { calls.push(['play']); } } }
+    ),
+    mkQuestionPreviewTimer: null,
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    document: { getElementById() { return null; } },
+    mkPreviewRender() { calls.push(['render']); return true; },
+    clearInterval() {}, toast() {}
+  };
+  loadStageFunctions(['mkPreviewSubmit', 'mkPreviewContinue'], context);
+
+  assert.equal(context.mkPreviewSubmit(), true);
+  assert.equal(context.mkQuestionPreviewState.phase, 'result');
+  assert.equal(context.mkQuestionPreviewState.correct, true);
+  assert.equal(context.mkQuestionPreviewState.explanation, '정답 해설');
+  assert.equal(context.mkPreviewContinue(), true);
+  assert.deepEqual(calls.slice(-2), [['seek', 10.05], ['play']]);
+});
+
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let message = '';
