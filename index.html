@@ -47,6 +47,7 @@ a { color: var(--accent); }
    ══════════════════════════════════════════════════════════ */
 .wrap { max-width: 980px; margin: 0 auto; padding: 20px 16px 80px; }
 .wrap.wide { max-width: 1400px; }
+.wrap.editor-wide { max-width: 1680px; padding-left: 20px; padding-right: 20px; }
 .topbar {
   display: flex; align-items: center; gap: 12px;
   padding: 12px 16px; background: var(--panel);
@@ -276,12 +277,16 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-video-card.active { border-color: var(--accent); }
 .mk-video-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .mk-video-head h2 { margin: 0; flex: 1 1 180px; }
-.mk-video-body { display: grid; grid-template-columns: minmax(360px, .9fr) minmax(0, 1.1fr); gap: 18px; align-items: start; }
+.mk-video-body { display: grid; grid-template-columns: minmax(480px, 1fr) minmax(640px, 1.25fr); gap: 24px; align-items: start; }
 .mk-video-left { position: sticky; top: 68px; max-height: calc(100vh - 88px); overflow: auto; min-width: 0; padding-right: 4px; }
 .mk-video-preview { min-width: 0; }
 .mk-question-navigator { position: static; max-height: none; overflow: visible; margin-top: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #f8f8ff; }
 .mk-question-navigator h3 { margin-bottom: 4px; }
 .mk-question-editor { min-width: 0; }
+.mk-question-editor .q-card { padding: 20px; margin-bottom: 16px; background: #fff; }
+.mk-question-editor .q-head { flex-wrap: wrap; row-gap: 7px; }
+.mk-question-editor textarea { min-height: 92px; font-size: 15px; line-height: 1.55; }
+.mk-question-editor .choice-row input[type="text"] { min-height: 44px; font-size: 15px; }
 .mk-range-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .mk-range-track { position: relative; height: 42px; margin: 4px 8px 10px; }
 .mk-range-track::before { content: ''; position: absolute; left: 0; right: 0; top: 19px; height: 5px; border-radius: 4px; background: #dfe2ea; }
@@ -305,16 +310,16 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-save-toast.show { opacity: 1; transform: translateY(0); }
 .mk-add-video { border: 2px dashed var(--line); background: transparent; padding: 18px; }
 
-@media (max-width: 900px) {
+@media (max-width: 1180px) {
   .mk-video-body { grid-template-columns: 1fr; }
   .mk-video-left { position: static; max-height: none; overflow: visible; padding-right: 0; }
   .mk-question-navigator { position: static; max-height: none; overflow: visible; }
 }
-.mk-question-preview-card { width: min(900px, 96vw); max-height: 92vh; overflow: auto; padding: 26px; border-radius: 18px; background: #11162d; color: #fff; box-shadow: 0 24px 80px rgba(0,0,0,.38); }
+.mk-question-preview-card { width: min(1040px, 94vw); max-height: 92vh; overflow: auto; padding: clamp(20px, 2.2vw, 30px); border-radius: 18px; background: #11162d; color: #fff; box-shadow: 0 24px 80px rgba(0,0,0,.38); }
 .mk-question-preview-card .preview-top { display:flex; align-items:center; gap:10px; margin-bottom:18px; }
-.mk-question-preview-card .preview-q { font-size: clamp(22px, 3vw, 36px); font-weight: 800; line-height: 1.35; margin-bottom: 20px; }
+.mk-question-preview-card .preview-q { font-size: clamp(21px, 2.2vw, 32px); font-weight: 800; line-height: 1.4; margin-bottom: 20px; }
 .mk-question-preview-card .preview-choices { display:grid; gap:10px; }
-.mk-question-preview-card .preview-choice { display:flex; gap:12px; align-items:center; padding:14px 16px; border:2px solid rgba(255,255,255,.22); border-radius:12px; background:rgba(255,255,255,.04); }
+.mk-question-preview-card .preview-choice { display:flex; gap:12px; align-items:center; padding:13px 16px; border:2px solid rgba(255,255,255,.22); border-radius:12px; background:rgba(255,255,255,.04); font-size:15px; line-height:1.45; }
 .mk-question-preview-card .preview-choice b { display:grid; place-items:center; width:34px; height:34px; flex:none; border-radius:9px; background:rgba(255,255,255,.16); }
 .mk-question-preview-card button.preview-choice { width:100%; color:inherit; text-align:left; cursor:pointer; }
 .mk-question-preview-card .preview-choice.selected { border-color:#8b83ff; background:rgba(99,91,255,.22); }
@@ -2703,7 +2708,7 @@ function renderMake() {
       '<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>' +
       (isEdit ? '<a class="btn sm" href="#/play/' + esc(mk.id) + '">▶ 진행 화면 열기</a>' : '')
     ) +
-    '<div class="wrap wide">' +
+    '<div class="wrap wide editor-wide">' +
       '<h1 style="font-size:22px;margin-bottom:4px">' + (isEdit ? '퀴즈 세트 편집' : '새 퀴즈 세트 만들기') + '</h1>' +
       '<div class="card">' +
         '<h2>1. 세트 정보</h2>' +
@@ -2813,8 +2818,7 @@ function mkPreviewRender() {
   } else {
     const choices = Array.isArray(q.choices) ? q.choices : [];
     answerArea = '<div class="preview-choices">' + choices.map((choice, index) => {
-      const selected = type === 'multi'
-        ? (state.answer || []).indexOf(index) >= 0 : Number(state.answer) === index;
+      const selected = QuizPreviewCore.isSelected(state, index);
       const correct = isResult && mkPreviewChoiceIsCorrect(q, index);
       const wrong = isResult && selected && !correct;
       return '<button type="button" class="preview-choice' + (selected ? ' selected' : '') +

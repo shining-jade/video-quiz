@@ -12,6 +12,18 @@ test('미리보기는 문항 3초 전부터 영상 단계를 시작하고 문항
   assert.equal(Preview.advance(state, 10).phase, 'question');
 });
 
+test('객관식 미리보기는 답을 고르기 전에는 어떤 보기에도 선택 상태가 없다', () => {
+  const state = Preview.advance(
+    Preview.create({ type: 'choice', t: 10, answer: 0, choices: ['정답', '오답'] }),
+    10
+  );
+
+  assert.equal(state.answer, null);
+  assert.equal(Preview.isSelected(state, 0), false);
+  assert.equal(Preview.isSelected(state, 1), false);
+  assert.equal(Preview.isSelected(Preview.select(state, 0), 0), true);
+});
+
 test('객관식과 복수선택과 단답형 답안을 실제 정답 기준으로 채점한다', () => {
   assert.equal(Preview.submit(Preview.select(Preview.create({ type: 'choice', t: 5, answer: 2 }), 2)).correct, true);
   assert.equal(Preview.submit(Preview.select(Preview.create({ type: 'multi', t: 5, answers: [0, 2] }), [2, 0])).correct, true);

@@ -33,6 +33,13 @@
     return Object.assign({}, state, { answer: Array.isArray(answer) ? answer.slice() : answer });
   }
 
+  function isSelected(state, index) {
+    if (!state || state.answer == null) return false;
+    return state.question && state.question.type === 'multi'
+      ? Array.isArray(state.answer) && state.answer.indexOf(index) >= 0
+      : state.answer === index;
+  }
+
   function grade(question, answer) {
     const type = question && question.type || 'choice';
     if (type === 'long') return null;
@@ -61,5 +68,5 @@
     return Object.assign({}, state, { phase: 'continued' });
   }
 
-  return { create, advance, select, submit, continuePlayback, grade };
+  return { create, advance, select, isSelected, submit, continuePlayback, grade };
 });

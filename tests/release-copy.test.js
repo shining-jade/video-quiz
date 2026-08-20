@@ -55,8 +55,19 @@ test('넓은 화면은 영상과 문항 목록을 왼쪽에 두고 선택 문항
   const html = read('index.html');
 
   assert.match(html, /class="mk-video-body"[\s\S]*?class="mk-video-left"[\s\S]*?class="mk-video-preview"[\s\S]*?class="mk-question-navigator"[\s\S]*?class="mk-question-editor"/);
-  assert.match(html, /\.mk-video-body\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(360px,[^)]+\)\s+minmax\(0,[^)]+\)/s);
-  assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*?\.mk-video-body\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(html, /\.mk-video-body\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\([^)]+\)\s+minmax\([^)]+\)/s);
+  assert.match(html, /@media \(max-width:\s*1180px\)[\s\S]*?\.mk-video-body\s*\{[^}]*grid-template-columns:\s*1fr/s);
+});
+
+test('큰 화면 편집기는 가로 공간과 문항 입력 영역을 충분히 사용한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /\.wrap\.editor-wide\s*\{[^}]*max-width:\s*1680px/s);
+  assert.match(html, /class="wrap wide editor-wide"/);
+  assert.match(html, /\.mk-video-body\s*\{[^}]*grid-template-columns:\s*minmax\(480px,\s*1fr\)\s+minmax\(640px,\s*1\.25fr\)/s);
+  assert.match(html, /\.mk-question-editor\s+\.q-card\s*\{[^}]*padding:\s*20px/s);
+  assert.match(html, /\.mk-question-editor\s+textarea\s*\{[^}]*min-height:\s*92px[^}]*font-size:\s*15px/s);
+  assert.match(html, /@media \(max-width:\s*1180px\)[\s\S]*?\.mk-video-body\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 
 test('데스크톱 왼쪽 패널 전체는 문항 편집 스크롤을 따라가고 모바일에서는 고정을 해제한다', () => {
@@ -64,7 +75,7 @@ test('데스크톱 왼쪽 패널 전체는 문항 편집 스크롤을 따라가�
 
   assert.match(html, /\.mk-video-left\s*\{[^}]*position:\s*sticky[^}]*top:\s*68px[^}]*max-height:\s*calc\(100vh - 88px\)[^}]*overflow:\s*auto/s);
   assert.match(html, /\.mk-question-navigator\s*\{[^}]*position:\s*static/s);
-  assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*?\.mk-video-left\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow:\s*visible/s);
+  assert.match(html, /@media \(max-width:\s*1180px\)[\s\S]*?\.mk-video-left\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow:\s*visible/s);
 });
 
 test('문항 해설은 넓게 쓰고 개별 제한 시간 입력은 160px로 줄인다', () => {
