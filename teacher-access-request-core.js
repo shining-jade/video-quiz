@@ -11,6 +11,10 @@
     return typeof value === 'string' ? value : String(value == null ? '' : value);
   }
 
+  function nonEmptyString(value) {
+    return typeof value === 'string' && value.length > 0;
+  }
+
   function canonicalEmail(value) {
     return text(value).trim().toLowerCase();
   }
@@ -34,12 +38,12 @@
 
   function buildRequest(user, input = {}, nowMs) {
     if (!isGoogleUser(user)) fail('verified Google 인증 사용자만 신청할 수 있습니다.');
-    const uid = text(user.uid).trim();
+    const uid = user.uid;
     const emailCanonical = canonicalEmail(user.email);
     const displayName = text(user.displayName).trim();
     const organization = text(input.organization).trim();
     const note = text(input.note).trim();
-    if (!uid) fail('uid가 필요합니다.');
+    if (!nonEmptyString(uid)) fail('uid가 필요합니다.');
     if (!emailCanonical || !emailCanonical.includes('@')) fail('유효한 이메일이 필요합니다.');
     validateProfile(displayName, organization, note);
     if (!Number.isFinite(nowMs)) fail('createdAtMs 시각이 필요합니다.');
@@ -59,13 +63,14 @@
   function validateRequest(request) {
     const errors = [];
     const value = request && typeof request === 'object' ? request : {};
-    const uid = text(value.uid).trim();
-    const email = canonicalEmail(value.emailCanonical);
+    const uid = value.uid;
+    const storedEmail = value.emailCanonical;
+    const email = canonicalEmail(storedEmail);
     const displayName = text(value.displayName).trim();
     const organization = text(value.organization).trim();
     const note = text(value.note).trim();
-    if (!uid) errors.push('uid');
-    if (!email || !email.includes('@')) errors.push('emailCanonical');
+    if (!nonEmptyString(uid)) errors.push('uid');
+    if (!nonEmptyString(storedEmail) || storedEmail !== email || !email.includes('@')) errors.push('emailCanonical');
     if (displayName.length < 1 || displayName.length > 80) errors.push('displayName');
     if (organization.length > 120) errors.push('organization');
     if (note.length > 500) errors.push('note');
@@ -74,13 +79,14 @@
     if (!Number.isFinite(value.createdAtMs)) errors.push('createdAtMs');
     if (!Number.isFinite(value.updatedAtMs)) errors.push('updatedAtMs');
     if (value.decidedAtMs !== undefined && !Number.isFinite(value.decidedAtMs)) errors.push('decidedAtMs');
-    if (value.decidedByUid !== undefined && (!text(value.decidedByUid).trim() || text(value.decidedByUid).length > 200)) errors.push('decidedByUid');
+    if (value.decidedByUid !== undefined && !nonEmptyString(value.decidedByUid)) errors.push('decidedByUid');
     if (value.decisionReason !== undefined && text(value.decisionReason).length > 200) errors.push('decisionReason');
     return { ok: errors.length === 0, errors };
   }
 
   function canCancel(request, uid) {
-    return !!request && request.status === 'pending' && text(request.uid).trim() === text(uid).trim();
+    return !!request && request.status === 'pending' && nonEmptyString(request.uid) &&
+      nonEmptyString(uid) && request.uid === uid;
   }
 
   function normalizeDecision(decision) {
@@ -92,7 +98,7 @@
   }
 
   function adminUid(admin) {
-    return text(typeof admin === 'string' ? admin : admin && admin.uid).trim();
+    return typeof admin === 'string' ? admin : admin && admin.uid;
   }
 
   function nextDecision(request, decision, admin, nowMs) {
@@ -102,9 +108,10 @@
     const normalized = normalizeDecision(decision);
     if (!DECISIONS.has(normalized.status)) fail('approved 또는 rejected 결정만 허용됩니다.');
     const decidedByUid = adminUid(admin);
-    if (!decidedByUid) fail('관리자 UID가 필요합니다.');
+    if (!nonEmptyString(decidedByUid)) fail('관리자 UID가 필요합니다.');
     if (normalized.reason.length > 200) fail('decision reason 사유는 200자 이하여야 합니다.');
     if (!Number.isFinite(nowMs)) fail('updatedAtMs 시각이 필요합니다.');
+    if (request.revision >= Number.MAX_SAFE_INTEGER) fail('revision 리비전은 safe integer 범위를 넘을 수 없습니다.');
     return Object.assign({}, request, {
       status: normalized.status,
       revision: request.revision + 1,

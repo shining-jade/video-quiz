@@ -55,6 +55,17 @@ test('buildRequest derives identity and ignores caller privileged fields', () =>
   });
 });
 
+test('Firebase UID values remain opaque and are stored and compared exactly', () => {
+  const spacedUser = { ...user, uid: 'teacher-a ' };
+  const built = core.buildRequest(spacedUser, { organization: '', note: '' }, 1000);
+  assert.equal(built.uid, 'teacher-a ');
+  assert.equal(core.canCancel(built, 'teacher-a'), false);
+  assert.equal(core.canCancel(built, 'teacher-a '), true);
+  const decided = core.nextDecision({ ...built, status: 'pending' }, 'approved', { uid: 'admin-1 ' }, 2000);
+  assert.equal(decided.decidedByUid, 'admin-1 ');
+  assert.throws(() => core.buildRequest({ ...user, uid: '' }, { organization: '', note: '' }, 1000), /uid/);
+});
+
 test('buildRequest requires a verified Google identity and bounded profile fields', () => {
   expectInvalidBuild({ ...user, isAnonymous: true }, /anonymous|인증/);
   expectInvalidBuild({ ...user, emailVerified: false }, /verified|인증/);
@@ -67,6 +78,7 @@ test('buildRequest requires a verified Google identity and bounded profile field
 
 test('validateRequest reports valid and invalid request documents', () => {
   assert.deepEqual(core.validateRequest(request()), { ok: true, errors: [] });
+  assert.equal(core.validateRequest(request({ emailCanonical: ' Teacher@School.KR ' })).ok, false);
   for (const [field, value] of [
     ['status', 'unknown'], ['revision', 0], ['revision', 1.5],
     ['displayName', ''], ['displayName', '   '], ['displayName', 'x'.repeat(81)],
@@ -108,6 +120,12 @@ test('nextDecision rejects stale or invalid decisions and missing admins', () =>
   assert.throws(() => core.nextDecision(request({ status: 'approved' }), 'rejected', { uid: 'admin-1' }, 2000), /pending|대기/);
   assert.throws(() => core.nextDecision(pending, 'approved', {}, 2000), /admin|관리자/);
   assert.throws(() => core.nextDecision(pending, 'approved', { uid: '' }, 2000), /admin|관리자/);
+});
+
+test('nextDecision fails closed before overflowing a maximum safe revision', () => {
+  const maxed = request({ status: 'pending', revision: Number.MAX_SAFE_INTEGER });
+  assert.throws(() => core.nextDecision(maxed, 'approved', { uid: 'admin-1' }, 2000), /revision|리비전|safe/);
+  assert.equal(maxed.revision, Number.MAX_SAFE_INTEGER);
 });
 
 test('teacherStatus maps lifecycle allowance states and accepts legacy enabled', () => {
