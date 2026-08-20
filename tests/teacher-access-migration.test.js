@@ -329,7 +329,8 @@ test('CLI validates target and output before Admin initialization and keeps publ
   ]), {
     projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
     apply: false, confirmProject: 'demo-video-quiz', output: '', lockToken: 'token-a',
-    expectedGeneration: '4:0', unlock: true, verifyLock: false
+    expectedGeneration: '4:0', expectedMigrationGeneration: '',
+    unlock: true, verifyLock: false
   });
   assert.throws(() => cli.validateTarget({ projectId: 'video-quiz-65798', targetMode: 'production' }, {
     FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
@@ -403,5 +404,64 @@ test('CLI verifies and unlocks only the exact reported lock generation', async (
     assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), report);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('access verify-lock reports lock-only or malformed completion evidence as unsafe', async () => {
+  assert.throws(() => cli.parseArgs([
+    '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+    '--verify-lock', '--lock-token', 'token-a', '--expected-generation', '5:0'
+  ]), /expected-migration-generation/i);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teacher-access-verify-'));
+  try {
+    const output = path.join(directory, 'unsafe.json');
+    const report = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--verify-lock', '--lock-token', 'token-a', '--expected-generation', '5:0',
+      '--expected-migration-generation', '4:0', '--output', output
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() { return { db: {}, close() {} }; },
+      async verifyTeacherAccessGate() {
+        return {
+          path: 'migration_gates/teacher_access_status', locked: true,
+          lockToken: 'token-a', projectId: 'demo-video-quiz', targetMode: 'emulator',
+          updateTimeGeneration: '5:0', status: 'running', strictReady: false,
+          migrationGeneration: '4:0'
+        };
+      },
+      writeLine() {}
+    });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.safeToDeployStrictRules, false);
+    assert.match(report.verificationReason, /complete|strict/i);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), report);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('access release verification requires exact complete state and both reported generations', () => {
+  const options = {
+    projectId: 'demo-video-quiz', targetMode: 'emulator', lockToken: 'token-a',
+    expectedGeneration: '5:0', expectedMigrationGeneration: '4:0'
+  };
+  const exact = {
+    locked: true, lockToken: 'token-a', projectId: 'demo-video-quiz', targetMode: 'emulator',
+    updateTimeGeneration: '5:0', status: 'complete', strictReady: true,
+    migrationGeneration: '4:0'
+  };
+  assert.equal(cli.evaluateAccessReleaseVerification(exact, options).safeToDeployStrictRules, true);
+  for (const patch of [
+    { status: 'running' }, { strictReady: false }, { migrationGeneration: '3:0' },
+    { migrationGeneration: 'invalid' }, { updateTimeGeneration: '5:1' },
+    { projectId: 'other-project' }, { targetMode: 'production' }
+  ]) {
+    assert.equal(cli.evaluateAccessReleaseVerification({ ...exact, ...patch }, options)
+      .safeToDeployStrictRules, false);
   }
 });

@@ -306,6 +306,8 @@ test('teacher access release guide fixes compatibility-head migration verify unl
   assert.match(guide, /--apply.*--lock-token <ACCESS_LOCK_TOKEN>/);
   assert.match(guide, /--apply.*--lock-token <COUNTER_LOCK_TOKEN>/);
   assert.match(guide, /--verify-lock.*--expected-generation <ACCESS_LOCK_GENERATION>/);
+  assert.match(guide, /--verify-lock.*--expected-migration-generation <ACCESS_MIGRATION_GENERATION>/);
+  assert.match(guide, /--verify-lock.*--expected-gate-generation <SESSION_GATE_GENERATION>/);
   assert.match(guide, /--unlock.*--expected-generation <COUNTER_LOCK_GENERATION>/);
   assert.match(guide, /access unlock[^\n]*legacy fallback[^\n]*(다시 열지|다시 열리지)/i);
   assert.match(guide, /status: "complete"[^\n]*strictReady: true[^\n]*migrationGeneration/);

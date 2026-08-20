@@ -328,3 +328,91 @@ test('counter CLI publishes exact-generation explicit unlock evidence', async ()
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('counter verify-lock requires and reports the separate exact completion gate generation', async () => {
+  assert.throws(() => cli.parseArgs([
+    '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+    '--verify-lock', '--lock-token', 'counter-lock-a', '--expected-generation', '100:1'
+  ]), /expected-gate-generation/i);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'session-counter-verify-'));
+  try {
+    const output = path.join(directory, 'verify.json');
+    const report = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--verify-lock', '--lock-token', 'counter-lock-a', '--expected-generation', '100:1',
+      '--expected-gate-generation', '100:2', '--output', output
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() { return { db: {}, close() {} }; },
+      async verifySessionCounterReleaseState() {
+        return {
+          lock: { locked: true, updateTimeGeneration: '100:1' },
+          gate: { complete: true, updateTimeGeneration: '100:2' },
+          audit: { preflightNonEndedLegacyCount: 1, safe: false },
+          safeToDeployStrictRules: false,
+          verificationReason: 'authoritative non-ended session audit is not clean'
+        };
+      },
+      writeLine() {}
+    });
+    assert.equal(report.status, 'complete');
+    assert.equal(report.safeToDeployStrictRules, false);
+    assert.equal(report.lock.updateTimeGeneration, '100:1');
+    assert.equal(report.gate.updateTimeGeneration, '100:2');
+    assert.equal(report.audit.preflightNonEndedLegacyCount, 1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), report);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('counter release verification binds exact lock, full Timestamp gate, generation, and live audit', async () => {
+  const at = timestamp(1000);
+  const lock = {
+    locked: true, lockToken: 'counter-lock-a', projectId: 'demo-video-quiz',
+    targetMode: 'emulator', lockedAt: at, lockedByUid: 'admin-a'
+  };
+  const gate = {
+    complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+    rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+    verifiedAt: at, updatedAt: at, completedByUid: 'admin-a'
+  };
+  const db = fakeDb({
+    'migration_gates/session_counter_migration': lock,
+    'migration_gates/session_counters': gate,
+    'sessions/a': {
+      ...baseSession('live'), registeredStudentCount: 0, studentCountRevision: 0
+    }
+  });
+  const exact = await migration.verifySessionCounterReleaseState({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'counter-lock-a', expectedLockGeneration: '100:1',
+    expectedGateGeneration: '100:1'
+  });
+  assert.equal(exact.safeToDeployStrictRules, true);
+  assert.equal(exact.audit.preflightNonEndedLegacyCount, 0);
+
+  db.docs.set('sessions/a', baseSession('live'));
+  const unsafe = await migration.verifySessionCounterReleaseState({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'counter-lock-a', expectedLockGeneration: '100:1',
+    expectedGateGeneration: '100:1'
+  });
+  assert.equal(unsafe.safeToDeployStrictRules, false);
+  assert.equal(unsafe.audit.missingCounterCount, 1);
+
+  db.docs.set('migration_gates/session_counters', {
+    ...gate,
+    verifiedAt: { toMillis() { return 1000; } },
+    updatedAt: { toMillis() { return 1000; } }
+  });
+  await assert.rejects(migration.verifySessionCounterReleaseState({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'counter-lock-a', expectedLockGeneration: '100:1',
+    expectedGateGeneration: '100:1'
+  }), /Timestamp/i);
+});

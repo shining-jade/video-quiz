@@ -26,10 +26,8 @@ function sameTimestamp(left, right) {
   const a = exactTimestamp(left);
   const b = exactTimestamp(right);
   if (!a || !b || a.millis !== b.millis) return false;
-  if (typeof left.isEqual === 'function' && typeof right.isEqual === 'function') {
-    try { return left.isEqual(right) === true && right.isEqual(left) === true; } catch (_) { return false; }
-  }
-  return true;
+  if (typeof left.isEqual !== 'function' || typeof right.isEqual !== 'function') return false;
+  try { return left.isEqual(right) === true && right.isEqual(left) === true; } catch (_) { return false; }
 }
 
 function updateTimeGeneration(snapshot) {
@@ -203,6 +201,40 @@ async function scanSessions(db) {
   return { records, audit: buildAudit(records) };
 }
 
+async function verifySessionCounterReleaseState({
+  db, projectId, targetMode, adminUid, lockToken,
+  expectedLockGeneration, expectedGateGeneration
+}) {
+  if (!expectedLockGeneration || !expectedGateGeneration) {
+    throw new Error('Exact operational lock and completion gate generations are required.');
+  }
+  let lock = await verifySessionCounterMigrationLock({
+    db, projectId, targetMode, adminUid, lockToken,
+    expectedGeneration: expectedLockGeneration
+  });
+  let gate = verifyGateSnapshot(
+    await db.doc(GATE_PATH).get(), { projectId, targetMode }, expectedGateGeneration
+  );
+  const scanned = await scanSessions(db);
+  lock = await verifySessionCounterMigrationLock({
+    db, projectId, targetMode, adminUid, lockToken,
+    expectedGeneration: expectedLockGeneration
+  });
+  gate = verifyGateSnapshot(
+    await db.doc(GATE_PATH).get(), { projectId, targetMode }, expectedGateGeneration
+  );
+  const safe = scanned.audit.safe === true &&
+    scanned.audit.preflightNonEndedLegacyCount === 0 && lock.locked === true &&
+    gate.complete === true;
+  return {
+    lock, gate, audit: scanned.audit,
+    safeToDeployStrictRules: safe,
+    verificationReason: safe
+      ? 'exact operational lock, completion gate, and authoritative non-ended audit verified'
+      : 'authoritative non-ended session audit is not clean'
+  };
+}
+
 function reportBase({ projectId, targetMode, apply }) {
   return {
     tool: 'session-counter-migration', schemaVersion: 1,
@@ -368,6 +400,7 @@ module.exports = {
   updateTimeGeneration,
   unlockSessionCounterMigrationLock,
   verifyMigrationLockSnapshot,
+  verifySessionCounterReleaseState,
   verifySessionCounterMigrationLock,
   verifyGateSnapshot
 };

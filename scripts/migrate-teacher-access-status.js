@@ -9,12 +9,13 @@ function parseArgs(argv) {
   const result = {
     projectId: '', targetMode: 'production', adminUid: '', apply: false,
     confirmProject: '', output: '', lockToken: '', expectedGeneration: '',
-    unlock: false, verifyLock: false
+    expectedMigrationGeneration: '', unlock: false, verifyLock: false
   };
   const fields = {
     '--project': 'projectId', '--target-mode': 'targetMode', '--admin-uid': 'adminUid',
     '--confirm-project': 'confirmProject', '--output': 'output',
-    '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration'
+    '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration',
+    '--expected-migration-generation': 'expectedMigrationGeneration'
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -44,10 +45,28 @@ function parseArgs(argv) {
   if ((result.unlock || result.verifyLock) && (!result.lockToken || !result.expectedGeneration)) {
     throw new Error('--unlock/--verify-lock require exact --lock-token and --expected-generation.');
   }
+  if (result.verifyLock && !result.expectedMigrationGeneration) {
+    throw new Error('--verify-lock requires exact --expected-migration-generation.');
+  }
   if (result.unlock && result.confirmProject !== result.projectId) {
     throw new Error('--unlock requires an exact --confirm-project.');
   }
   return result;
+}
+
+function evaluateAccessReleaseVerification(gate, options) {
+  const validGeneration = value => typeof value === 'string' && /^\d+:\d+$/.test(value);
+  const safe = Boolean(gate) && gate.locked === true && gate.lockToken === options.lockToken &&
+    gate.projectId === options.projectId && gate.targetMode === options.targetMode &&
+    gate.updateTimeGeneration === options.expectedGeneration &&
+    gate.status === 'complete' && gate.strictReady === true &&
+    validGeneration(gate.migrationGeneration) &&
+    gate.migrationGeneration === options.expectedMigrationGeneration;
+  return {
+    safeToDeployStrictRules: safe,
+    verificationReason: safe ? 'exact completion and migration generations verified' :
+      'teacher access completion, strict readiness, target, or migration generation is invalid'
+  };
 }
 
 function validateTarget(options, environment = process.env) {
@@ -137,11 +156,15 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
         adminUid: options.adminUid, lockToken: options.lockToken,
         expectedGeneration: options.expectedGeneration
       });
+      const verification = evaluateAccessReleaseVerification(gate, {
+        ...options, targetMode: target.targetMode
+      });
       report = {
         tool: 'teacher-access-migration-cli', schemaVersion: 1,
         projectId: options.projectId, targetMode: target.targetMode, mode: 'verify-lock',
         operation: 'teacher-access-status-lock-verification', status: 'complete',
-        safeToDeployStrictRules: true, gate
+        safeToDeployStrictRules: verification.safeToDeployStrictRules,
+        verificationReason: verification.verificationReason, gate
       };
     } else {
       report = await dependencies.runTeacherAccessMigration({
@@ -179,5 +202,6 @@ if (require.main === module) main().catch(error => {
 });
 
 module.exports = {
-  failureReport, main, parseArgs, productionDependencies, reserveReport, validateTarget
+  evaluateAccessReleaseVerification, failureReport, main, parseArgs,
+  productionDependencies, reserveReport, validateTarget
 };

@@ -24,7 +24,7 @@
 7. 별도의 예측 불가능한 counter lock token으로 세션 counter apply를 실행합니다. CLI는 `migration_gates/session_counter_migration`을 먼저 잠그고 정확한 updateTime generation에 scan/recount/post-audit를 묶은 뒤에만 completion gate를 기록합니다.
 8. 두 보고서의 lock token/generation, session `gate.updateTimeGeneration`, `preflightNonEndedLegacyCount: 0`, `safeToDeployStrictRules: true`를 확인합니다.
 9. strict Firestore Rules와 정적 앱을 배포합니다.
-10. 배포 직후 두 `--verify-lock`을 실행해 apply 보고서와 **같은 token과 generation**임을 다시 확인합니다. 하나라도 바뀌었으면 사후 audit 뒤 race가 있었으므로 안전을 주장하지 말고 중단합니다.
+10. 배포 직후 두 `--verify-lock`을 실행해 apply 보고서와 **같은 token과 모든 generation**임을 다시 확인합니다. access는 operational lock generation과 완료 `migrationGeneration`, session은 operational lock generation과 별도 completion gate generation이 모두 같아야 합니다. 하나라도 바뀌었으면 사후 audit 뒤 race가 있었으므로 안전을 주장하지 말고 중단합니다.
 11. 검증된 access lock과 session lock을 각각 apply 보고서의 정확한 token/generation으로 명시 해제합니다. 두 completion 상태는 삭제하지 않습니다. access unlock은 운영 잠금만 풀며 legacy fallback을 다시 열지 않습니다.
 12. 관리자 1명, 일반 교사 2명, 겹치는 수업 2개와 학생 세션 2개로 실제 브라우저 smoke를 수행합니다.
 13. rollback commit, 배포 전 Rules, 백업 위치와 모든 migration·verify·unlock 보고서를 같은 운영 기록에 보존합니다.
@@ -121,11 +121,15 @@ git push origin main
 배포 뒤 apply 보고서의 값을 그대로 사용해 lock을 다시 검증합니다.
 
 ```powershell
-pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <ACCESS_LOCK_TOKEN> --expected-generation <ACCESS_LOCK_GENERATION> --output teacher-access-release-verify.json
-pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <COUNTER_LOCK_TOKEN> --expected-generation <COUNTER_LOCK_GENERATION> --output session-counter-release-verify.json
+pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <ACCESS_LOCK_TOKEN> --expected-generation <ACCESS_LOCK_GENERATION> --expected-migration-generation <ACCESS_MIGRATION_GENERATION> --output teacher-access-release-verify.json
+pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <COUNTER_LOCK_TOKEN> --expected-generation <COUNTER_LOCK_GENERATION> --expected-gate-generation <SESSION_GATE_GENERATION> --output session-counter-release-verify.json
 ```
 
-두 verify 보고서가 complete이고 access 보고서가 계속 `status: "complete"`, `strictReady: true`, 같은 `migrationGeneration`을 가리킬 때만 exact token/generation으로 명시 해제합니다.
+Access verify는 `migration_gates/teacher_access_status`가 정확한 project/environment/token/updateTime generation을 유지하면서 `status: "complete"`, `strictReady: true`, apply 보고서와 같은 `migrationGeneration`인지 함께 확인합니다. Operational lock만 맞는 running/false/malformed/stale 상태는 절대 안전으로 판정하지 않습니다.
+
+Session verify는 operational lock인 `migration_gates/session_counter_migration`과 별도 완료 문서 `migration_gates/session_counters`를 모두 읽습니다. 완료 문서는 exact project/environment/rulesVersion/generation, `preflightNonEndedLegacyCount: 0`, Firestore Timestamp인 `verifiedAt`과 `updatedAt`의 완전 일치가 필요합니다. 이어서 모든 non-ended session/student를 다시 감사하고 누락 counter가 0인지 확인한 뒤 두 generation을 다시 readback합니다. 보고서에는 lock과 gate generation, 전수 감사 결과가 함께 남아야 합니다.
+
+문서 누락, `running`, `strictReady: false`, 잘못된 Timestamp/shape, 다른 project/environment, generation 변경 또는 non-ended counter 누락은 durable 보고서를 남기되 `safeToDeployStrictRules: false`이거나 실패여야 합니다. 두 verify 보고서가 complete이고 안전 판정이 true일 때만 exact token/generation으로 명시 해제합니다.
 
 ```powershell
 pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --unlock --confirm-project video-quiz-65798 --lock-token <ACCESS_LOCK_TOKEN> --expected-generation <ACCESS_LOCK_GENERATION> --output teacher-access-unlock.json

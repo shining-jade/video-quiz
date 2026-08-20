@@ -9,12 +9,13 @@ function parseArgs(argv) {
   const result = {
     projectId: '', targetMode: 'production', adminUid: '', apply: false,
     confirmProject: '', output: '', lockToken: '', expectedGeneration: '',
-    unlock: false, verifyLock: false
+    expectedGateGeneration: '', unlock: false, verifyLock: false
   };
   const fields = {
     '--project': 'projectId', '--target-mode': 'targetMode', '--admin-uid': 'adminUid',
     '--confirm-project': 'confirmProject', '--output': 'output',
-    '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration'
+    '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration',
+    '--expected-gate-generation': 'expectedGateGeneration'
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -43,6 +44,9 @@ function parseArgs(argv) {
   }
   if ((result.unlock || result.verifyLock) && (!result.lockToken || !result.expectedGeneration)) {
     throw new Error('--unlock/--verify-lock require exact --lock-token and --expected-generation.');
+  }
+  if (result.verifyLock && !result.expectedGateGeneration) {
+    throw new Error('--verify-lock requires exact --expected-gate-generation.');
   }
   if (result.unlock && result.confirmProject !== result.projectId) {
     throw new Error('--unlock requires an exact --confirm-project.');
@@ -82,6 +86,7 @@ function productionDependencies() {
     runSessionCounterMigration: migration.runSessionCounterMigration,
     unlockSessionCounterMigrationLock: migration.unlockSessionCounterMigrationLock,
     verifySessionCounterMigrationLock: migration.verifySessionCounterMigrationLock,
+    verifySessionCounterReleaseState: migration.verifySessionCounterReleaseState,
     writeLine(line) { process.stdout.write(line + '\n'); }
   };
 }
@@ -119,16 +124,19 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
         safeToDeployStrictRules: false, lock
       };
     } else if (options.verifyLock) {
-      const lock = await dependencies.verifySessionCounterMigrationLock({
+      const verification = await dependencies.verifySessionCounterReleaseState({
         db: services.db, projectId: options.projectId, targetMode: target.targetMode,
         adminUid: options.adminUid, lockToken: options.lockToken,
-        expectedGeneration: options.expectedGeneration
+        expectedLockGeneration: options.expectedGeneration,
+        expectedGateGeneration: options.expectedGateGeneration
       });
       report = {
         tool: 'session-counter-migration-cli', schemaVersion: 1,
         projectId: options.projectId, targetMode: target.targetMode, mode: 'verify-lock',
         operation: 'session-counter-migration-lock-verification', status: 'complete',
-        safeToDeployStrictRules: true, lock
+        safeToDeployStrictRules: verification.safeToDeployStrictRules === true,
+        verificationReason: verification.verificationReason,
+        lock: verification.lock, gate: verification.gate, audit: verification.audit
       };
     } else {
       report = await dependencies.runSessionCounterMigration({
