@@ -1613,14 +1613,14 @@ async function applyTeacherUser(user) {
   if (heartbeatState) heartbeatState.stopActivationHeartbeat();
   if (typeof stopTrashMaintenance === 'function') stopTrashMaintenance();
   const updateVersion = ++teacherAuthVersion;
-  const requestRouteActive = typeof teacherRequestRouteIsCurrent === 'function'
+  const requestRouteAtStart = typeof teacherRequestRouteIsCurrent === 'function'
     ? teacherRequestRouteIsCurrent()
     : (typeof location === 'undefined' || ['#/', '', '#'].includes(String(location.hash || '#/')));
   const observerUid = user && !user.isAnonymous ? String(user.uid || '') : '';
   const inheritedTeacherRequestReroute = typeof teacherRequestReroute !== 'undefined' && teacherRequestReroute;
   const clearedTeacherRequest = typeof clearTeacherRequestScreen === 'function'
     ? clearTeacherRequestScreen(true) : false;
-  if (requestRouteActive && (clearedTeacherRequest || inheritedTeacherRequestReroute)) {
+  if (requestRouteAtStart && (clearedTeacherRequest || inheritedTeacherRequestReroute)) {
     teacherRequestReroute = { authGeneration: updateVersion, uid: observerUid };
   }
   if (typeof authReady !== 'undefined' && authReady && previousUid && (!user || user.uid !== previousUid)) {
@@ -1685,7 +1685,10 @@ async function applyTeacherUser(user) {
     const reroute = typeof teacherRequestReroute !== 'undefined' ? teacherRequestReroute : null;
     if (reroute && reroute.authGeneration === updateVersion && reroute.uid === observerUid) {
       teacherRequestReroute = null;
-      if (requestRouteActive) router();
+      const requestRouteCurrent = typeof teacherRequestRouteIsCurrent === 'function'
+        ? teacherRequestRouteIsCurrent()
+        : (typeof location === 'undefined' || ['#/', '', '#'].includes(String(location.hash || '#/')));
+      if (requestRouteCurrent) router();
     }
   }
   appliedTeacherState = teacherState;

@@ -9459,6 +9459,83 @@ test('A request refresh followed by B routes only B after B allowance resolution
   assert.doesNotMatch(app.innerHTML, /teacher-a|사유 A|인증 상태/);
 });
 
+test('request auth completion does not reroute after leaving home for the join screen', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: 'A 신청 화면 teacher-a@school.kr' };
+  const routes = [];
+  let resolveToken;
+  const context = {
+    authReady: true, location: { hash: '#/' }, teacherRequestReroute: null,
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    teacherRequestScreen: { uid: 'teacher-a', draft: { displayName: 'A', organization: '', note: '' } },
+    teacherAuthVersion: 0, clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    store: { async probeTeacherAllowance() { return null; } }, reconcileTeacherRoute() {}, retractProtectedTeacherScreen() {},
+    router() { routes.push(context.location.hash); app.innerHTML = 'unexpected router'; }, console
+  };
+  loadStageFunctions(['teacherRequestRouteIsCurrent', 'clearTeacherRequestScreen', 'applyTeacherUser'], context);
+  const user = { uid: 'teacher-a', email: 'teacher-a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolveToken = resolve; }); } };
+
+  const applying = context.applyTeacherUser(user);
+  context.location.hash = '#/join';
+  app.innerHTML = '<input id="join-code" value="123456">';
+  resolveToken({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applying;
+
+  assert.deepEqual(routes, []);
+  assert.match(app.innerHTML, /join-code.*123456/);
+  assert.equal(context.teacherRequestReroute, null);
+});
+
+test('A-to-B request refresh at the sets route reconciles once without a stale reroute', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: 'A 신청 화면 teacher-a@school.kr 사유 A' };
+  const events = [];
+  const resolvers = {};
+  const context = {
+    authReady: true, location: { hash: '#/' }, teacherRequestReroute: null,
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    teacherRequestScreen: { uid: 'teacher-a', draft: { displayName: 'A', organization: '사유 A', note: '메모 A' } },
+    teacherAuthVersion: 0, clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    store: { async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; } },
+    runCleanups() { events.push('cleanup'); },
+    router() { events.push('router'); app.innerHTML = 'sets for ' + context.teacherUser.uid; },
+    go(route) { events.push('go:' + route); context.location.hash = '#/' + route; },
+    retractProtectedTeacherScreen() {}, console
+  };
+  vm.runInNewContext(
+    extractFunction(html, 'teacherRouteRequirement') + '\n' +
+    extractFunction(html, 'reconcileTeacherRoute') + '\n' +
+    extractFunction(html, 'teacherRequestRouteIsCurrent') + '\n' +
+    extractFunction(html, 'clearTeacherRequestScreen') + '\n' +
+    extractFunction(html, 'applyTeacherUser'),
+    context
+  );
+  const user = uid => ({ uid, email: uid + '@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolvers[uid] = resolve; }); } });
+
+  const applyingA = context.applyTeacherUser(user('teacher-a'));
+  const applyingB = context.applyTeacherUser(user('teacher-b'));
+  context.location.hash = '#/sets';
+  app.innerHTML = 'sets loading for teacher-b';
+  await Promise.resolve();
+  resolvers['teacher-b']({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applyingB;
+  resolvers['teacher-a']({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applyingA;
+
+  assert.deepEqual(events, ['cleanup', 'router']);
+  assert.equal(app.innerHTML, 'sets for teacher-b');
+  assert.equal(context.teacherRequestReroute, null);
+  assert.doesNotMatch(app.innerHTML, /teacher-a|사유 A|인증 상태/);
+});
+
 test('admin request guard rejects the same admin screen after switching away from the requests tab or body', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const body = {};
