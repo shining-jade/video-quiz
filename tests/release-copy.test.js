@@ -17,6 +17,16 @@ test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
   });
 });
 
+test('교사 신청과 관리자 승인 화면의 inline handlers are included in the parsed release script', () => {
+  const html = read('index.html');
+
+  ['screenTeacherRequest', 'submitTeacherRequestForm', 'cancelTeacherRequest',
+    'renderAdminTeacherRequests', 'adminDecideTeacherRequest'].forEach(name => {
+    assert.match(html, new RegExp('function ' + name + '\\('));
+  });
+  assert.match(html, /공용 계정을 쓰지 않고/);
+});
+
 test('편집기 Ctrl+S는 브라우저 기본 동작 없이 현재 위치에서 저장 완료 알림을 표시한다', () => {
   const html = read('index.html');
 
