@@ -272,10 +272,10 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-video-card.active { border-color: var(--accent); }
 .mk-video-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .mk-video-head h2 { margin: 0; flex: 1 1 180px; }
-.mk-video-body { display: block; }
-.mk-video-preview { min-width: 0; max-width: 760px; }
-.mk-question-workspace { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
-.mk-question-navigator { position: sticky; top: 68px; max-height: calc(100vh - 88px); overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #f8f8ff; }
+.mk-video-body { display: grid; grid-template-columns: minmax(360px, .9fr) minmax(0, 1.1fr); gap: 18px; align-items: start; }
+.mk-video-left { min-width: 0; }
+.mk-video-preview { min-width: 0; }
+.mk-question-navigator { position: sticky; top: 68px; max-height: calc(100vh - 88px); overflow: auto; margin-top: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #f8f8ff; }
 .mk-question-navigator h3 { margin-bottom: 4px; }
 .mk-question-editor { min-width: 0; }
 .mk-range-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -302,7 +302,7 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-add-video { border: 2px dashed var(--line); background: transparent; padding: 18px; }
 
 @media (max-width: 900px) {
-  .mk-question-workspace { grid-template-columns: 1fr; }
+  .mk-video-body { grid-template-columns: 1fr; }
   .mk-question-navigator { position: static; max-height: 42vh; }
 }
 .mk-question-preview-card { width: min(900px, 96vw); max-height: 92vh; overflow: auto; padding: 26px; border-radius: 18px; background: #11162d; color: #fff; box-shadow: 0 24px 80px rgba(0,0,0,.38); }
@@ -2662,22 +2662,20 @@ function renderMake() {
       '<div class="field"><label class="f">YouTube 주소</label><input type="text" placeholder="https://www.youtube.com/watch?v=..." value="' + esc(video.videoUrl) + '" ' +
         'onchange="mkSetVideoUrl(' + videoIndex + ',this.value)"><div class="hint">' +
         (video.videoUrl ? (video.videoId ? '영상 ID: ' + esc(video.videoId) : '⚠ 유튜브 주소를 인식하지 못했습니다.') : '') + '</div></div>' +
-      '<div class="mk-video-body"><div class="mk-video-preview">' +
+      '<div class="mk-video-body"><div class="mk-video-left"><div class="mk-video-preview">' +
         (active ? '<div id="mk-player-wrap"></div>' : '<div class="empty">미리보기를 선택하면 이 영상의 플레이어가 열립니다.</div>') +
         '<div class="mk-range-fields"><div class="field"><label class="f">시작 시각</label><input class="mono" data-range-input="' + videoIndex + '-start" value="' + esc(fmtTime(domain.start)) + '" onchange="mkSetRange(' + videoIndex + ',\'start\',this.value)"></div>' +
         '<div class="field"><label class="f">종료 시각 <span class="hint">(비우면 영상 끝)</span></label><input class="mono" data-range-input="' + videoIndex + '-end" value="' + esc(video.endSec == null || video.endSec === '' ? '' : fmtTime(domain.end)) + '" placeholder="영상 끝" onchange="mkSetRange(' + videoIndex + ',\'end\',this.value)"></div></div>' +
         '<div class="mk-range-track"><input data-range-slider="' + videoIndex + '-start" aria-label="영상 ' + (videoIndex + 1) + ' 시작" type="range" min="0" max="' + domain.max + '" value="' + domain.start + '" oninput="mkSetRange(' + videoIndex + ',\'start\',Number(this.value))">' +
         '<input data-range-slider="' + videoIndex + '-end" aria-label="영상 ' + (videoIndex + 1) + ' 종료" type="range" min="0" max="' + domain.max + '" value="' + domain.end + '" oninput="mkSetRange(' + videoIndex + ',\'end\',Number(this.value))"></div>' +
         '<div class="mk-timeline" data-timeline-video="' + videoIndex + '">' + dots + '</div></div>' +
-        '<div class="mk-question-workspace">' +
-          '<aside class="mk-question-navigator" ondragover="mkQuestionNavigatorDragOver(event)">' +
-            '<h3>문항 순서</h3><div class="sub">제목을 끌어 11번도 1번 앞으로 바로 옮길 수 있습니다.</div>' +
-            '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + finalDropzone + '</div>' +
-            '<button class="btn ghost sm block" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button>' +
-          '</aside>' +
-          '<div class="mk-question-editor">' + questions +
-            '<button class="btn" onclick="mkAddQuestion(' + videoIndex + ')">＋ 문항 추가</button>' +
-          '</div>' +
+        '<aside class="mk-question-navigator" ondragover="mkQuestionNavigatorDragOver(event)">' +
+          '<h3>문항 순서</h3><div class="sub">제목을 끌어 11번도 1번 앞으로 바로 옮길 수 있습니다.</div>' +
+          '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + finalDropzone + '</div>' +
+          '<button class="btn ghost sm block" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button>' +
+        '</aside></div>' +
+        '<div class="mk-question-editor">' + questions +
+          '<button class="btn" onclick="mkAddQuestion(' + videoIndex + ')">＋ 문항 추가</button>' +
         '</div></div>' +
     '</section>';
   }).join('');
