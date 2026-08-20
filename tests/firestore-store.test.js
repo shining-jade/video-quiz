@@ -1558,6 +1558,37 @@ test('class plan public/admin queries require a bounded ordered server-time wind
   ), /server|미래|horizon|범위/);
 });
 
+test('own class plan query binds the current identity and returns only action-safe plan metadata', async () => {
+  const own = storedClassPlanPair();
+  const other = storedClassPlanPair({
+    planId: 'plan-other', ownerUid: 'teacher-b', ownerEmailCanonical: 'teacher-b@school.kr',
+    ownerDisplayName: '다른 교사'
+  });
+  const fake = makeFirestoreFake({
+    'class_plans_private/plan-a': own.storedPrivate,
+    'class_plans_private/plan-other': other.storedPrivate
+  });
+  const store = createStore(fake);
+
+  const plans = await store.listOwnClassPlans(9_000, 25_000, 20, {
+    uid: 'teacher-a', email: 'teacher@school.kr'
+  });
+
+  assert.deepEqual(plans, {
+    'plan-a': { planId: 'plan-a', revision: 1, status: 'planned' }
+  });
+  assert.deepEqual(fake.calls().filter(call => call.operation === 'where').map(call => [
+    call.path, call.field, call.operator, call.value
+  ]), [
+    ['class_plans_private', 'ownerUid', '==', 'teacher-a'],
+    ['class_plans_private', 'plannedStartAt', '>=', new Date(9_000)],
+    ['class_plans_private', 'plannedStartAt', '<', new Date(25_000)]
+  ]);
+  await assert.rejects(store.listOwnClassPlans(9_000, 25_000, 20, {
+    uid: '', email: 'teacher@school.kr'
+  }), /UID|identity|신원/);
+});
+
 test('class plan attach rechecks active identity, revision, owner and set then binds one session idempotently', async () => {
   const pair = storedClassPlanPair();
   const fake = makeFirestoreFake({
@@ -12414,7 +12445,8 @@ test('approved teacher dashboard shows today\'s schedule and counts without iden
   };
   const teacher = { uid: 'teacher-a-uid', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
   const context = {
-    teacherDashboard: null, teacherState: teacher, teacherAuthVersion: 7,
+    teacherDashboard: null, teacherUser: { uid: 'teacher-a-uid' }, teacherState: teacher, teacherAuthVersion: 7,
+    clockUserId: 'teacher-a-uid',
     location: { hash: '#/' }, ClassPlanningCore: require('../class-planning-core.js'),
     AuthCore: require('../auth-core.js'),
     document: {
@@ -12424,7 +12456,8 @@ test('approved teacher dashboard shows today\'s schedule and counts without iden
     onCleanup() {},
     store: {
       serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
-      async listPublicPlans() { publicReads += 1; return plans; }
+      async listPublicPlans() { publicReads += 1; return plans; },
+      async listOwnClassPlans() { return {}; }
     }
   };
   loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard'], context);
@@ -12449,7 +12482,8 @@ test('admin dashboard alone renders teacher identity and stale dashboard work ca
   const admin = { uid: 'admin-a', email: 'admin@school.kr', role: 'admin', status: 'admin' };
   const teacherB = { uid: 'teacher-b', email: 'teacher-b@school.kr', role: 'teacher', status: 'teacher' };
   const context = {
-    teacherDashboard: null, teacherState: admin, teacherAuthVersion: 3,
+    teacherDashboard: null, teacherUser: { uid: 'admin-a' }, teacherState: admin, teacherAuthVersion: 3,
+    clockUserId: 'admin-a',
     location: { hash: '#/' }, ClassPlanningCore: require('../class-planning-core.js'),
     AuthCore: require('../auth-core.js'),
     document: {
@@ -12460,7 +12494,8 @@ test('admin dashboard alone renders teacher identity and stale dashboard work ca
     store: {
       serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
       async probeTeacherAllowance() { return { enabled: true, role: 'admin' }; },
-      listAdminPlans() { return new Promise(resolve => { resolvePlans = resolve; }); }
+      listAdminPlans() { return new Promise(resolve => { resolvePlans = resolve; }); },
+      async listOwnClassPlans() { return {}; }
     }
   };
   loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard'], context);
@@ -12494,7 +12529,8 @@ test('teacher dashboard stops outside protected home and exposes one explicit re
   let calls = 0;
   const teacher = { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
   const context = {
-    teacherDashboard: null, teacherState: teacher, teacherAuthVersion: 2,
+    teacherDashboard: null, teacherUser: { uid: 'teacher-a' }, teacherState: teacher, teacherAuthVersion: 2,
+    clockUserId: 'teacher-a',
     location: { hash: '#/' }, ClassPlanningCore: require('../class-planning-core.js'),
     AuthCore: require('../auth-core.js'),
     document: {
@@ -12508,7 +12544,8 @@ test('teacher dashboard stops outside protected home and exposes one explicit re
         calls += 1;
         if (calls === 1) throw new Error('offline');
         return {};
-      }
+      },
+      async listOwnClassPlans() { return {}; }
     }
   };
   loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard', 'retryTeacherDashboard'], context);
@@ -12523,4 +12560,126 @@ test('teacher dashboard stops outside protected home and exposes one explicit re
   context.location.hash = '#/join';
   await context.retryTeacherDashboard();
   assert.equal(calls, 2);
+});
+
+test('auth changes synchronously retract populated teacher dashboard DOM before A-to-B or sign-out awaits', async () => {
+  const removed = [];
+  const panel = { innerHTML: 'teacher-b@school.kr private plan', remove() { removed.push(this.innerHTML); } };
+  const userA = { uid: 'teacher-a', email: 'teacher-a@school.kr', emailVerified: true, isAnonymous: false };
+  const context = {
+    authReady: false, teacherUser: userA, teacherAllowance: { enabled: true, role: 'admin' },
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'admin', status: 'admin' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'admin', status: 'admin' },
+    teacherDashboard: { uid: 'teacher-a', authGeneration: 0, panel, stopped: false },
+    teacherAuthVersion: 0, clockUserId: 'teacher-a', clockPromise: null, clockPromiseUid: '',
+    document: { getElementById(id) { return id === 'teacher-dashboard' ? panel : null; } },
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {},
+    store: { async probeTeacherAllowance() { return null; } }, console
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'clearTeacherDashboard', 'applyTeacherUser'], context);
+  let resolveToken;
+  const userB = {
+    uid: 'teacher-b', email: 'teacher-b@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolveToken = resolve; }); }
+  };
+
+  const switching = context.applyTeacherUser(userB);
+  assert.deepEqual(removed, ['teacher-b@school.kr private plan']);
+  assert.equal(context.teacherDashboard, null);
+  resolveToken({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await switching;
+
+  context.teacherDashboard = { uid: 'teacher-b', authGeneration: context.teacherAuthVersion, panel, stopped: false };
+  panel.innerHTML = 'teacher-b@school.kr private plan again';
+  await context.applyTeacherUser(null);
+  assert.deepEqual(removed, [
+    'teacher-b@school.kr private plan', 'teacher-b@school.kr private plan again'
+  ]);
+});
+
+test('same-user admin-to-teacher allowance transition synchronously retracts dashboard private DOM', () => {
+  const removed = [];
+  const panel = { innerHTML: 'admin-only teacher-b@school.kr', remove() { removed.push(this.innerHTML); } };
+  const context = {
+    authReady: false, teacherUser: { uid: 'admin-a', email: 'admin@school.kr', emailVerified: true, isAnonymous: false },
+    teacherAllowance: { enabled: true, role: 'admin' },
+    teacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin', status: 'admin' },
+    appliedTeacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin', status: 'admin' },
+    teacherDashboard: { uid: 'admin-a', authGeneration: 3, panel, stopped: false },
+    document: { getElementById(id) { return id === 'teacher-dashboard' ? panel : null; } },
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'clearTeacherDashboard', 'setTeacherAllowance'], context);
+
+  context.setTeacherAllowance({ enabled: true, role: 'teacher' });
+
+  assert.deepEqual(removed, ['admin-only teacher-b@school.kr']);
+  assert.equal(context.teacherDashboard, null);
+  assert.equal(context.teacherState.role, 'teacher');
+});
+
+test('teacher dashboard synchronizes its clock and keeps the KST day query inside the 1448-minute server horizon', async () => {
+  const panel = { innerHTML: '', isConnected: true };
+  const now = Date.UTC(2026, 7, 20, 6, 0, 0); // 15:00 KST
+  const teacher = { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
+  const queries = [];
+  let clockCalls = 0;
+  const context = {
+    teacherDashboard: null, teacherUser: { uid: 'teacher-a' }, teacherState: teacher,
+    teacherAuthVersion: 2, clockUserId: '', location: { hash: '#/' },
+    ClassPlanningCore: require('../class-planning-core.js'), AuthCore: require('../auth-core.js'),
+    document: { body: { contains() { return true; } }, getElementById(id) { return id === 'teacher-dashboard' ? panel : null; } },
+    onCleanup() {},
+    async ensureClock(user) { clockCalls += 1; context.clockUserId = user.uid; },
+    store: {
+      serverNow() { return now; },
+      async listPublicPlans(from, to, limit) { queries.push([from, to, limit]); return {}; },
+      async listOwnClassPlans() { return {}; }
+    }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard'], context);
+
+  await context.startTeacherDashboard(teacher);
+
+  assert.equal(clockCalls, 1);
+  assert.deepEqual(queries, [[
+    now - (24 * 60 + 7) * 60_000,
+    Date.UTC(2026, 7, 20, 15, 0, 0),
+    100
+  ]]);
+});
+
+test('teacher dashboard shows actions only for the caller own planned public row and excludes ended or cancelled plans', async () => {
+  const panel = { innerHTML: '', isConnected: true };
+  const teacher = { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
+  const publicPlans = {
+    own: { planId: 'own', setId: 'set-own', setTitleSnapshot: '내 세트', className: '내 반', plannedStartAt: 10_000, plannedEndAt: 20_000, expectedStudents: 20, status: 'planned' },
+    other: { planId: 'other', setId: 'set-other', setTitleSnapshot: '다른 세트', className: '다른 반', plannedStartAt: 10_000, plannedEndAt: 20_000, expectedStudents: 20, status: 'planned' },
+    ended: { planId: 'ended', setId: 'set-ended', setTitleSnapshot: '종료', className: '종료 반', plannedStartAt: 10_000, plannedEndAt: 20_000, expectedStudents: 99, actualParticipants: 99, status: 'ended' },
+    cancelled: { planId: 'cancelled', setId: 'set-cancelled', setTitleSnapshot: '취소', className: '취소 반', plannedStartAt: 10_000, plannedEndAt: 20_000, expectedStudents: 99, status: 'cancelled' }
+  };
+  const routes = [];
+  const context = {
+    teacherDashboard: null, teacherUser: { uid: 'teacher-a' }, teacherState: teacher,
+    teacherAuthVersion: 3, clockUserId: 'teacher-a', location: { hash: '#/' },
+    ClassPlanningCore: require('../class-planning-core.js'), AuthCore: require('../auth-core.js'),
+    document: { body: { contains() { return true; } }, getElementById(id) { return id === 'teacher-dashboard' ? panel : null; } },
+    onCleanup() {}, go(route) { routes.push(route); },
+    store: {
+      serverNow() { return 12_000; },
+      async listPublicPlans() { return publicPlans; },
+      async listOwnClassPlans() { return { own: { planId: 'own', revision: 4, status: 'planned' } }; }
+    }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard', 'teacherDashboardPlanAction'], context);
+
+  await context.startTeacherDashboard(teacher);
+
+  assert.match(panel.innerHTML, /계획 수정/);
+  assert.match(panel.innerHTML, /수업 시작/);
+  assert.doesNotMatch(panel.innerHTML, /종료 반|취소 반|teacher-a|teacher-b/);
+  assert.equal((panel.innerHTML.match(/계획 수정/g) || []).length, 1);
+  assert.equal(context.teacherDashboardPlanAction('other', 'start'), false);
+  assert.equal(context.teacherDashboardPlanAction('own', 'edit'), true);
+  assert.deepEqual(routes, ['play/set-own']);
 });

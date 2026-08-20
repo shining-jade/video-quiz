@@ -615,6 +615,35 @@ rulesTest('class-planning: public/private get and bounded list follow the role p
   await assertFails(getDocs(query(collection(owner, 'class_plans_private'), queryLimit(20))));
 });
 
+rulesTest('class-planning: owner-only bounded private list requires the exact ownerUid query', async () => {
+  await writeClassPlanPairDisabled('own-list-plan');
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const start = Timestamp.fromMillis(Date.now() - 60 * 60 * 1000);
+  const end = Timestamp.fromMillis(Date.now() + 60 * 60 * 1000);
+  const ownBounded = query(
+    collection(owner, 'class_plans_private'),
+    where('ownerUid', '==', 'owner-uid'),
+    where('plannedStartAt', '>=', start), where('plannedStartAt', '<', end),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  );
+  const forgedOwner = query(
+    collection(other, 'class_plans_private'),
+    where('ownerUid', '==', 'owner-uid'),
+    where('plannedStartAt', '>=', start), where('plannedStartAt', '<', end),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  );
+  const unscopedOwner = query(
+    collection(owner, 'class_plans_private'),
+    where('plannedStartAt', '>=', start), where('plannedStartAt', '<', end),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  );
+
+  await assertSucceeds(getDocs(ownBounded));
+  await assertFails(getDocs(forgedOwner));
+  await assertFails(getDocs(unscopedOwner));
+});
+
 rulesTest('class-planning: exact pair revision and plan-session identity gate updates and attachment', async () => {
   await writeClassPlanPairDisabled('cas-plan');
   await adminWrite('sessions/plan-session', {

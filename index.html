@@ -1632,6 +1632,7 @@ async function applyTeacherUser(user) {
   const heartbeatOwner = heartbeatState && AuthCore.isTeacher(teacherState)
     ? { uid: teacherState.uid, email: teacherState.email } : null;
   if (heartbeatState) heartbeatState.stopActivationHeartbeat();
+  if (typeof clearTeacherDashboard === 'function') clearTeacherDashboard();
   if (typeof stopTrashMaintenance === 'function') stopTrashMaintenance();
   const updateVersion = ++teacherAuthVersion;
   const requestRouteAtStart = typeof teacherRequestRouteIsCurrent === 'function'
@@ -1720,6 +1721,10 @@ function setTeacherAllowance(allowance) {
   const previousState = appliedTeacherState;
   teacherAllowance = allowance || null;
   teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  if (AuthCore.isAdmin(previousState) && !AuthCore.isAdmin(teacherState) &&
+      typeof clearTeacherDashboard === 'function') {
+    clearTeacherDashboard();
+  }
   renderTeacherAuthArea();
   if (typeof authReady !== 'undefined' && authReady) {
     reconcileTeacherRoute(previousState, teacherState);
@@ -1945,18 +1950,26 @@ function stopTeacherDashboard() {
   return true;
 }
 
-function renderTeacherDashboard(plans, identity, isAdmin) {
+function clearTeacherDashboard() {
+  stopTeacherDashboard();
+  const panel = document.getElementById('teacher-dashboard');
+  if (panel && typeof panel.remove === 'function') panel.remove();
+  else if (panel) panel.innerHTML = '';
+  return true;
+}
+
+function renderTeacherDashboard(plans, identity, isAdmin, ownPlans) {
   const panel = document.getElementById('teacher-dashboard');
   if (!panel) return false;
   const escape = value => typeof esc === 'function' ? esc(value) : String(value == null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const validPlans = Object.values(plans || {}).filter(plan => plan &&
-    ['planned', 'live', 'ended', 'cancelled'].includes(plan.status) &&
+    ['planned', 'live'].includes(plan.status) &&
     Number.isSafeInteger(plan.plannedStartAt) && Number.isSafeInteger(plan.plannedEndAt) &&
     plan.plannedEndAt > plan.plannedStartAt && Number.isSafeInteger(plan.expectedStudents) &&
     plan.expectedStudents >= 1 && plan.expectedStudents <= 500);
-  const activePlans = validPlans.filter(plan => plan.status !== 'cancelled');
+  const activePlans = validPlans;
   const livePlans = validPlans.filter(plan => plan.status === 'live');
   const actualParticipants = livePlans.reduce((total, plan) => total +
     (Number.isSafeInteger(plan.actualParticipants) && plan.actualParticipants >= 0 ? plan.actualParticipants : 0), 0);
@@ -1978,16 +1991,24 @@ function renderTeacherDashboard(plans, identity, isAdmin) {
     return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
   };
   const rows = validPlans.sort((a, b) => a.plannedStartAt - b.plannedStartAt).map(plan => {
+    const own = ownPlans && ownPlans[plan.planId] &&
+      ownPlans[plan.planId].status === 'planned' && plan.status === 'planned'
+      ? ownPlans[plan.planId] : null;
     const administratorIdentity = isAdmin === true
       ? '<span class="admin-identity">담당 ' + escape(plan.ownerDisplayName || '이름 없음') +
         (plan.ownerEmailCanonical ? ' · ' + escape(plan.ownerEmailCanonical) : '') + '</span>'
       : '';
     const actual = Number.isSafeInteger(plan.actualParticipants) && plan.actualParticipants >= 0
       ? ' · 실제 ' + plan.actualParticipants + '명' : '';
+    const actions = own ? '<span class="dashboard-plan-actions"><button class="btn sm" type="button" ' +
+      'data-plan-id="' + escape(plan.planId) + '" data-dashboard-action="edit" ' +
+      'onclick="teacherDashboardPlanAction(this.dataset.planId, this.dataset.dashboardAction)">계획 수정</button>' +
+      '<button class="btn sm primary" type="button" data-plan-id="' + escape(plan.planId) + '" ' +
+      'data-dashboard-action="start" onclick="teacherDashboardPlanAction(this.dataset.planId, this.dataset.dashboardAction)">수업 시작</button></span>' : '';
     return '<div class="plan-row"><span class="time">' + timeLabel(plan.plannedStartAt) +
       '–' + timeLabel(plan.plannedEndAt) + '</span><div class="name">' + escape(plan.className) +
       '<span class="admin-identity">' + escape(plan.setTitleSnapshot) + ' · ' +
-      statusLabel[plan.status] + '</span>' + administratorIdentity + '</div><span class="counts">예상 ' +
+      statusLabel[plan.status] + '</span>' + administratorIdentity + actions + '</div><span class="counts">예상 ' +
       plan.expectedStudents + '명' + actual + '</span></div>';
   }).join('');
   panel.innerHTML = '<h2>오늘의 수업 현황</h2><p class="sub">혼잡도는 수업 운영을 돕는 안내이며, 수업 시작을 제한하지 않습니다.</p>' +
@@ -1995,6 +2016,17 @@ function renderTeacherDashboard(plans, identity, isAdmin) {
     actualParticipants + '명</span><span>예상 동시 참여 ' + peakExpected + '명</span><span class="' +
     warningLevel + '">혼잡도 ' + warningLabel + '</span></div>' +
     (rows ? '<div class="plan-list">' + rows + '</div>' : '<div class="empty">오늘 예정되었거나 진행 중인 수업이 없습니다.</div>');
+  return true;
+}
+
+function teacherDashboardPlanAction(planId, action) {
+  const state = teacherDashboard;
+  if (!state || state.stopped || !state.isCurrent || !state.isCurrent()) return false;
+  const own = state.ownPlans && state.ownPlans[planId];
+  const plan = state.publicPlans && state.publicPlans[planId];
+  if (!own || !plan || own.status !== 'planned' || plan.status !== 'planned' ||
+      !['edit', 'start'].includes(action) || typeof plan.setId !== 'string' || !plan.setId) return false;
+  go('play/' + encodeURIComponent(plan.setId));
   return true;
 }
 
@@ -2015,7 +2047,7 @@ function startTeacherDashboard(identity) {
   const state = teacherDashboard = {
     uid: stateIdentity.uid, email: stateIdentity.email, authGeneration, panel, isAdmin,
     identity: { uid: stateIdentity.uid, email: stateIdentity.email, role: stateIdentity.role },
-    stopped: false, error: '', promise: null
+    stopped: false, error: '', promise: null, publicPlans: {}, ownPlans: {}
   };
   const isCurrent = () => teacherDashboard === state && !state.stopped &&
     AuthCore.isTeacher(teacherState) && teacherState.uid === state.uid &&
@@ -2023,13 +2055,31 @@ function startTeacherDashboard(identity) {
     teacherAuthVersion === state.authGeneration && ['#/', '#', ''].includes(String(location.hash || '#/')) &&
     document.getElementById('teacher-dashboard') === state.panel &&
     (!document.body || typeof document.body.contains !== 'function' || document.body.contains(state.panel));
-  const now = store && typeof store.serverNow === 'function' ? store.serverNow() : Date.now();
-  const day = new Date(now);
-  day.setHours(0, 0, 0, 0);
-  const from = day.getTime() - 24 * 60 * 60_000;
-  const to = day.getTime() + 24 * 60 * 60_000;
+  state.isCurrent = isCurrent;
   state.promise = (async () => {
     try {
+      if (!teacherUser || teacherUser.uid !== state.uid) {
+        throw new Error('서버 시각 동기화를 준비하지 못했습니다.');
+      }
+      if (clockUserId !== state.uid) {
+        if (typeof ensureClock !== 'function') throw new Error('서버 시각 동기화를 준비하지 못했습니다.');
+        await ensureClock(teacherUser);
+        if (!isCurrent()) return false;
+      }
+      if (clockUserId !== state.uid || !store || typeof store.serverNow !== 'function') {
+        throw new Error('서버 시각을 확인하지 못했습니다.');
+      }
+      const now = store.serverNow();
+      if (!Number.isSafeInteger(now)) throw new Error('서버 시각이 올바르지 않습니다.');
+      const kstOffset = 9 * 60 * 60_000;
+      const kstDate = new Date(now + kstOffset);
+      kstDate.setUTCHours(0, 0, 0, 0);
+      const dayStart = kstDate.getTime() - kstOffset;
+      const nextDayStart = dayStart + 24 * 60 * 60_000;
+      // Keep a one-minute transport margin inside the rules' 1448-minute horizon.
+      const from = now - (24 * 60 + 7) * 60_000;
+      const to = Math.min(nextDayStart, now + 32 * 24 * 60 * 60_000 - 1);
+      if (to <= from) throw new Error('수업 현황 조회 기간을 계산하지 못했습니다.');
       if (state.isAdmin) {
         if (!store.probeTeacherAllowance || !store.listAdminPlans) throw new Error('관리자 현황 조회를 준비하지 못했습니다.');
         const allowance = await store.probeTeacherAllowance(state.email);
@@ -2039,13 +2089,23 @@ function startTeacherDashboard(identity) {
         }
       }
       const readPlans = state.isAdmin ? store.listAdminPlans : store.listPublicPlans;
-      if (typeof readPlans !== 'function') throw new Error('수업 현황 조회를 준비하지 못했습니다.');
-      const plans = await readPlans.call(store, from, to, 100);
+      if (typeof readPlans !== 'function' || typeof store.listOwnClassPlans !== 'function') {
+        throw new Error('수업 현황 조회를 준비하지 못했습니다.');
+      }
+      const [plans, ownPlans] = await Promise.all([
+        readPlans.call(store, from, to, 100),
+        store.listOwnClassPlans(from, to, 100, state.identity)
+      ]);
       if (!isCurrent()) return false;
       state.error = '';
       const todayPlans = Object.fromEntries(Object.entries(plans || {}).filter(([, plan]) => plan &&
-        (plan.status === 'live' || Number(plan.plannedStartAt) >= day.getTime())));
-      return renderTeacherDashboard(todayPlans, state.identity, state.isAdmin);
+        ['planned', 'live'].includes(plan.status) &&
+        (plan.status === 'live' || Number(plan.plannedStartAt) >= dayStart)));
+      state.publicPlans = todayPlans;
+      state.ownPlans = Object.fromEntries(Object.entries(ownPlans || {}).filter(([planId, own]) =>
+        todayPlans[planId] && own && own.planId === planId && own.status === todayPlans[planId].status
+      ));
+      return renderTeacherDashboard(todayPlans, state.identity, state.isAdmin, state.ownPlans);
     } catch (error) {
       if (!isCurrent()) return false;
       state.error = error && error.message ? error.message : String(error);

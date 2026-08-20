@@ -1373,7 +1373,9 @@ service cloud.firestore {
     match /class_plans_private/{planId} {
       allow get: if isAdmin() ||
         (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid);
-      allow list: if isAdmin() && request.query.limit != null && request.query.limit <= 100 &&
+      allow list: if (isAdmin() ||
+          (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid)) &&
+        request.query.limit != null && request.query.limit <= 100 &&
         resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
         resource.data.plannedStartAt < request.time + duration.value(32, 'd');
       allow create: if validClassPlanCreate(planId);

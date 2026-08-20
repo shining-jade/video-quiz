@@ -1130,6 +1130,33 @@
       return listClassPlans('class_plans_private', from, to, limit);
     }
 
+    async function listOwnClassPlans(from, to, limit, identity) {
+      const owner = identity || {};
+      const uid = assertUid(owner.uid);
+      const email = canonicalTeacherEmail(owner.emailCanonical === undefined
+        ? owner.email : owner.emailCanonical);
+      if (!email) throw new Error('class plan owner identity가 유효하지 않습니다.');
+      const window = classPlanWindow(from, to, limit);
+      const snapshot = await db.collection('class_plans_private')
+        .where('ownerUid', '==', uid)
+        .where('plannedStartAt', '>=', new Date(window.start))
+        .where('plannedStartAt', '<', new Date(window.end))
+        .orderBy('plannedStartAt', 'asc')
+        .limit(window.count)
+        .get({ source: 'server' });
+      const values = {};
+      snapshot.docs.forEach(document => {
+        const plan = classPlanClientValue(document.data(), document.id);
+        if (plan.ownerUid !== uid) return;
+        values[document.id] = {
+          planId: document.id,
+          revision: plan.revision,
+          status: plan.status
+        };
+      });
+      return values;
+    }
+
     async function attachPlanToSession(planId, sessionId, ownerIdentity) {
       const id = assertPlanId(planId);
       const exactSessionId = assertPlanId(sessionId);
@@ -2724,6 +2751,7 @@
       cancelOwnClassPlan,
       listPublicPlans,
       listAdminPlans,
+      listOwnClassPlans,
       attachPlanToSession,
       finishClassPlan,
       listTeacherAllowances,
