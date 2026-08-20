@@ -889,12 +889,15 @@
     async function getTeacherDeletionReadiness(uid) {
       const exactUid = assertUid(uid);
       const maximum = 101;
-      const [sets, sessions] = await Promise.all([
+      const [sets, sessions, livePlans] = await Promise.all([
         db.collection('quiz_sets').where('ownerUid', '==', exactUid).limit(maximum).get({ source: 'server' }),
         db.collection('sessions').where('teacherUid', '==', exactUid)
-          .where('status', 'in', ['allocating', 'active', 'live']).limit(maximum).get({ source: 'server' })
+          .where('status', 'in', ['allocating', 'active', 'live']).limit(maximum).get({ source: 'server' }),
+        db.collection('class_plans_private').where('ownerUid', '==', exactUid)
+          .where('status', '==', 'live').limit(maximum).get({ source: 'server' })
       ]);
-      const blockingSessions = sessions.docs.slice(0, 100).map(document => {
+      const sessionIds = new Set(sessions.docs.map(document => document.id));
+      const blockingSessions = sessions.docs.map(document => {
         const value = document.data() || {};
         if (value.teacherUid !== exactUid || !['allocating', 'active', 'live'].includes(value.status)) {
           throw new Error('정리 대상 세션 신원이 일치하지 않습니다.');
@@ -906,12 +909,31 @@
           label: typeof value.label === 'string' ? value.label : ''
         };
       });
+      const orphanPlanSessions = livePlans.docs.flatMap(document => {
+        const value = document.data() || {};
+        if (value.ownerUid !== exactUid || value.status !== 'live' ||
+            typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.includes('/')) {
+          throw new Error('정리 대상 live class plan 신원이 일치하지 않습니다.');
+        }
+        if (sessionIds.has(value.sessionId)) return [];
+        return [{
+          sessionId: value.sessionId,
+          status: 'plan_live',
+          code: '',
+          label: typeof value.label === 'string' ? value.label
+            : typeof value.setTitle === 'string' ? value.setTitle : document.id,
+          planId: document.id
+        }];
+      });
+      const combinedBlockers = blockingSessions.concat(orphanPlanSessions);
       return {
         ownedSetCount: Math.min(sets.docs.length, 100),
-        blockingSessionCount: Math.min(sessions.docs.length, 100),
-        blockingSessions,
+        blockingSessionCount: Math.min(combinedBlockers.length, 100),
+        blockingSessions: combinedBlockers.slice(0, 100),
+        liveClassPlanCount: Math.min(livePlans.docs.length, 100),
         ownedSetLimitReached: sets.docs.length > 100,
-        blockingSessionLimitReached: sessions.docs.length > 100
+        blockingSessionLimitReached: sessions.docs.length > 100 || livePlans.docs.length > 100 ||
+          combinedBlockers.length > 100
       };
     }
 
@@ -925,7 +947,11 @@
       const snapshot = await sessionRef.get({ source: 'server' });
       if (!snapshot.exists) throw new Error('정리 대상 세션을 찾을 수 없습니다.');
       const session = snapshot.data() || {};
-      if (session.teacherUid !== exactUid || !['allocating', 'active', 'live'].includes(session.status)) {
+      const attachedPlan = typeof session.classPlanId === 'string' && session.classPlanId &&
+        Number.isSafeInteger(session.classPlanRevision) && session.classPlanRevision > 0;
+      if (session.teacherUid !== exactUid ||
+          (!['allocating', 'active', 'live'].includes(session.status) &&
+            !(session.status === 'ended' && attachedPlan))) {
         throw new Error('정리 대상 세션 소유권 또는 상태가 일치하지 않습니다.');
       }
       if (session.status === 'allocating') {
@@ -946,7 +972,12 @@
           return true;
         });
       }
-      await endSession(exactSessionId);
+      if (session.status !== 'ended') await endSession(exactSessionId);
+      if (attachedPlan) {
+        await finishClassPlan(session.classPlanId, exactSessionId, {
+          expectedRevision: session.classPlanRevision
+        });
+      }
       return true;
     }
 

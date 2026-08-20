@@ -10,12 +10,14 @@ const {
   validateTarget,
   eventId,
   runTeacherPurge,
+  productionDependencies,
   main
 } = require('../scripts/purge-teacher-account.js');
 
 const DAYS_30_MS = 30 * 24 * 60 * 60 * 1000;
 const REQUESTED_AT = Date.UTC(2026, 6, 1);
 const NOW = REQUESTED_AT + DAYS_30_MS;
+const emulatorTest = process.env.FIRESTORE_EMULATOR_HOST ? test : test.skip;
 
 function pendingAllowance(overrides = {}) {
   return {
@@ -32,6 +34,7 @@ function auditState(overrides = {}) {
   return {
     allowance: pendingAllowance(), requestExists: true, profileExists: true,
     legacyAllowanceExists: true, ownedSetIds: [], blockingSessionIds: [],
+    liveClassPlanIds: [],
     authUserExists: true, auditEvent: null,
     ...overrides
   };
@@ -61,7 +64,9 @@ function fakeAdapter(initial = auditState(), options = {}) {
         deletionRequestedAtMs: expected.deletionRequestedAtMs,
         purgeEligibleAtMs: expected.purgeEligibleAtMs,
         proofAtMs: options.proofAtMs === undefined ? NOW : options.proofAtMs,
-        updateTimeMs: options.proofAtMs === undefined ? NOW : options.proofAtMs
+        proofAtToken: options.proofAtToken || 'proof-seconds:nanos',
+        updateTimeMs: options.updateTimeMs === undefined ? NOW + 7 : options.updateTimeMs,
+        proofGeneration: options.proofGeneration || 'generation-1'
       };
       return clone(options.forgedProof ? { ...proof, ...options.forgedProof } : proof);
     },
@@ -82,13 +87,20 @@ function fakeAdapter(initial = auditState(), options = {}) {
     },
     async purgeFirestore(expected) {
       calls.push(['purgeFirestore', clone(expected)]);
-      if (!proof || proof.opId !== expected.opId || proof.proofAtMs !== expected.proofAtMs) {
+      if (options.changeProofBeforeMutation && proof) proof.proofGeneration = 'generation-raced';
+      if (!proof || proof.opId !== expected.opId || proof.proofAtMs !== expected.proofAtMs ||
+          proof.proofAtToken !== expected.proofAtToken ||
+          proof.proofGeneration !== expected.proofGeneration) {
         throw new Error('server-time proof changed');
       }
       if (options.raceAtMutation) throw new Error('authoritative transaction re-read changed');
       if (options.allocationRaceAtMutation) {
         state.blockingSessionIds = ['new-allocating'];
         throw new Error('blocking session appeared before mutation');
+      }
+      if (options.livePlanRaceAtMutation) {
+        state.liveClassPlanIds = ['new-live-plan'];
+        throw new Error('live class plan appeared before mutation');
       }
       state.allowance = null;
       state.requestExists = false;
@@ -99,7 +111,8 @@ function fakeAdapter(initial = auditState(), options = {}) {
         targetUid: expected.uid, allowanceRevision: expected.revision,
         operationId: expected.opId, result: 'firestore_purged',
         projectId: expected.projectId, environment: expected.environment, mode: expected.mode,
-        proofAtMs: expected.proofAtMs,
+        proofAtMs: expected.proofAtMs, proofAtToken: expected.proofAtToken,
+        proofGeneration: expected.proofGeneration,
         deletionRequestedAtMs: expected.deletionRequestedAtMs,
         purgeEligibleAtMs: expected.purgeEligibleAtMs,
         status: 'firestore_purged'
@@ -159,16 +172,16 @@ test('target validation rejects mismatched project/emulator state', () => {
   assert.throws(() => validateTarget(applyOptions({ projectId: 'demo-x', environment: 'production' }), {}), /production|demo/i);
 });
 
-test('dry-run performs authoritative audit and no mutations', async () => {
+test('dry-run performs zero writes and never claims server-time eligibility', async () => {
   const adapter = fakeAdapter();
   const report = await runTeacherPurge({
     adapter, options: applyOptions({ mode: 'dry-run', confirmProject: '', confirmUid: '' }), nowMs: NOW
   });
-  assert.equal(report.status, 'dry-run-eligible');
-  assert.equal(report.safeToPurge, true);
-  assert.deepEqual(adapter.calls.map(call => call[0]), [
-    'audit', 'createServerTimeProof', 'cleanupServerTimeProof'
-  ]);
+  assert.equal(report.status, 'dry-run-audited');
+  assert.equal(report.safeToPurge, false);
+  assert.equal(report.authoritativeTimeVerified, false);
+  assert.equal(report.applyRequiresServerTimeProof, true);
+  assert.deepEqual(adapter.calls.map(call => call[0]), ['audit']);
   assert.equal(report.audit.ownedSetCount, 0);
   assert.equal(report.audit.blockingSessionCount, 0);
   assert.equal(JSON.stringify(report).includes('teacher@school.kr'), false);
@@ -213,6 +226,19 @@ test('apply refuses blockers, malformed state, and a transaction re-read race be
     assert.equal(report.remaining.blockingSessionCount, 1);
     assert.equal(adapter.calls.some(call => call[0] === 'deleteAuthUser'), false);
   });
+  await t.test('existing and racing live class plans block purge', async () => {
+    const blocked = fakeAdapter(auditState({ liveClassPlanIds: ['plan-live'] }));
+    const blockedReport = await runTeacherPurge({ adapter: blocked, options: applyOptions(), nowMs: NOW });
+    assert.equal(blockedReport.status, 'refused');
+    assert.deepEqual(blockedReport.audit.blockers, ['live_class_plans']);
+    assert.equal(blocked.calls.some(call => call[0] === 'createServerTimeProof'), false);
+
+    const raced = fakeAdapter(auditState(), { livePlanRaceAtMutation: true });
+    const racedReport = await runTeacherPurge({ adapter: raced, options: applyOptions(), nowMs: NOW });
+    assert.equal(racedReport.status, 'failed');
+    assert.equal(racedReport.remaining.liveClassPlanCount, 1);
+    assert.equal(raced.calls.some(call => call[0] === 'deleteAuthUser'), false);
+  });
 });
 
 test('server-time proof denies exactly one millisecond early and rejects forged proof identity', async t => {
@@ -230,6 +256,38 @@ test('server-time proof denies exactly one millisecond early and rejects forged 
     assert.match(report.error, /proof|target|identity/i);
     assert.equal(adapter.calls.some(call => call[0] === 'purgeFirestore'), false);
   });
+  await t.test('proof Timestamp and updateTime milliseconds may differ', async () => {
+    const adapter = fakeAdapter(auditState(), { proofAtMs: NOW, updateTimeMs: NOW + 17 });
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
+    assert.equal(report.status, 'complete');
+    assert.equal(adapter.calls.find(call => call[0] === 'purgeFirestore')[1].proofGeneration, 'generation-1');
+  });
+  await t.test('changed proof generation is denied by the mutation reread', async () => {
+    const adapter = fakeAdapter(auditState(), { changeProofBeforeMutation: true });
+    const report = await runTeacherPurge({ adapter, options: applyOptions(), nowMs: NOW });
+    assert.equal(report.status, 'failed');
+    assert.match(report.error, /proof|changed/i);
+    assert.equal(adapter.calls.some(call => call[0] === 'deleteAuthUser'), false);
+  });
+});
+
+emulatorTest('real Emulator accepts repeated server proofs and rejects a stale generation token', async () => {
+  const adapter = await productionDependencies().initialize('demo-video-quiz');
+  const expected = {
+    uid: 'teacher-proof-emulator', opId: eventId('teacher-proof-emulator'),
+    projectId: 'demo-video-quiz', environment: 'emulator', mode: 'apply', revision: 3,
+    deletionRequestedAtMs: REQUESTED_AT, purgeEligibleAtMs: NOW
+  };
+  const first = await adapter.createServerTimeProof(expected);
+  const second = await adapter.createServerTimeProof(expected);
+
+  assert.equal(Number.isSafeInteger(first.proofAtMs), true);
+  assert.equal(Number.isSafeInteger(second.proofAtMs), true);
+  assert.equal(typeof first.proofGeneration, 'string');
+  assert.equal(typeof second.proofGeneration, 'string');
+  assert.notEqual(first.proofGeneration, second.proofGeneration);
+  await assert.rejects(adapter.cleanupServerTimeProof({ ...expected, ...first }), /proof changed/i);
+  await adapter.cleanupServerTimeProof({ ...expected, ...second });
 });
 
 test('partial Firestore or Auth ambiguity is reported fail closed with exact remaining state', async t => {
@@ -269,6 +327,7 @@ test('successful apply records a non-sensitive event, verifies final state, and 
   const recovery = fakeAdapter({
     allowance: null, requestExists: false, profileExists: false,
     legacyAllowanceExists: false, ownedSetIds: [], blockingSessionIds: [],
+    liveClassPlanIds: [],
     authUserExists: true, auditEvent: {
       ...event, status: 'firestore_purged', result: 'firestore_purged'
     }
@@ -286,11 +345,13 @@ test('completed audit retry is idempotent only for the exact same operation and 
     type: 'teacher_account_purged', targetUid: 'teacher-a', allowanceRevision: 8,
     deletionRequestedAtMs: REQUESTED_AT, purgeEligibleAtMs: NOW,
     proofAtMs: NOW, projectId: 'demo-video-quiz', environment: 'emulator', mode: 'apply',
+    proofAtToken: 'proof-complete:0', proofGeneration: 'generation-complete',
     status: 'complete', result: 'complete'
   };
   const completedState = auditState({
     allowance: null, requestExists: false, profileExists: false,
     legacyAllowanceExists: false, ownedSetIds: [], blockingSessionIds: [],
+    liveClassPlanIds: [],
     authUserExists: false, auditEvent: completeEvent
   });
   await t.test('exact completed retry performs no destructive mutation', async () => {

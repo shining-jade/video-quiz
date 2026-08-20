@@ -2243,10 +2243,11 @@ function renderTeacherDeletion(state) {
         ? allowance.purgeEligibleAt.toMillis() : null);
     const sessionRows = (Array.isArray(readiness.blockingSessions) ? readiness.blockingSessions : [])
       .filter(session => session && typeof session.sessionId === 'string' &&
-        ['allocating', 'active', 'live'].includes(session.status))
+        ['allocating', 'active', 'live', 'plan_live'].includes(session.status))
       .map(session => {
         const label = session.label || session.code || session.sessionId;
-        const buttonLabel = session.status === 'allocating' ? '할당 정리' : '안전 종료';
+        const buttonLabel = session.status === 'allocating' ? '할당 정리'
+          : session.status === 'plan_live' ? '계획 종료 재시도' : '안전 종료';
         return '<li><span><b>' + safe(label) + '</b> <span class="hint">' + safe(session.status) +
           (session.code ? ' · ' + safe(session.code) : '') + '</span></span> ' +
           '<button class="btn sm" onclick="resolveTeacherDeletionSession(' +
@@ -2284,7 +2285,7 @@ function resolveTeacherDeletionSession(sessionId) {
   const sessions = state && state.readiness && Array.isArray(state.readiness.blockingSessions)
     ? state.readiness.blockingSessions : [];
   const target = sessions.find(session => session && session.sessionId === exactSessionId &&
-    ['allocating', 'active', 'live'].includes(session.status));
+    ['allocating', 'active', 'live', 'plan_live'].includes(session.status));
   if (!teacherDeletionScreenIsCurrent(state) || !target || state.busy || state.resolvingSessionId ||
       !state.allowance || state.allowance.status !== 'deletion_pending' ||
       !teacherState || teacherState.status !== 'deletion_pending' ||

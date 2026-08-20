@@ -99,6 +99,7 @@ function stateFingerprint(state) {
     legacyAllowanceExists: !!(state && state.legacyAllowanceExists),
     ownedSetIds: [...(state && state.ownedSetIds || [])].sort(),
     blockingSessionIds: [...(state && state.blockingSessionIds || [])].sort(),
+    liveClassPlanIds: [...(state && state.liveClassPlanIds || [])].sort(),
     authUserExists: !!(state && state.authUserExists),
     auditEvent: state && state.auditEvent || null
   }));
@@ -116,6 +117,7 @@ function publicAudit(state, eligibility) {
     blockers: [...eligibility.blockers],
     ownedSetCount: Array.isArray(state.ownedSetIds) ? state.ownedSetIds.length : null,
     blockingSessionCount: Array.isArray(state.blockingSessionIds) ? state.blockingSessionIds.length : null,
+    liveClassPlanCount: Array.isArray(state.liveClassPlanIds) ? state.liveClassPlanIds.length : null,
     revision: eligibility.revision,
     deletionRequestedAtMs: eligibility.deletionRequestedAtMs,
     purgeEligibleAtMs: eligibility.purgeEligibleAtMs,
@@ -137,6 +139,7 @@ function remainingState(state) {
     legacyAllowanceExists: !!(state && state.legacyAllowanceExists),
     ownedSetCount: Array.isArray(state && state.ownedSetIds) ? state.ownedSetIds.length : null,
     blockingSessionCount: Array.isArray(state && state.blockingSessionIds) ? state.blockingSessionIds.length : null,
+    liveClassPlanCount: Array.isArray(state && state.liveClassPlanIds) ? state.liveClassPlanIds.length : null,
     authUserExists: state && typeof state.authUserExists === 'boolean' ? state.authUserExists : null,
     auditEventStatus: state && state.auditEvent && state.auditEvent.status || null
   };
@@ -148,6 +151,7 @@ function baseReport(options, nowMs) {
     projectId: options.projectId, environment: options.environment,
     mode: options.mode, targetUid: options.uid,
     generatedAt: new Date(nowMs).toISOString(), status: 'failed', safeToPurge: false,
+    authoritativeTimeVerified: false, applyRequiresServerTimeProof: true,
     stages: []
   };
 }
@@ -170,14 +174,17 @@ function exactRecoveryEvent(event, options, requiredStatus) {
     Number.isSafeInteger(event.deletionRequestedAtMs) &&
     Number.isSafeInteger(event.purgeEligibleAtMs) &&
     event.purgeEligibleAtMs === event.deletionRequestedAtMs + deletionCore.DAYS_30_MS &&
-    Number.isSafeInteger(event.proofAtMs) && event.proofAtMs >= event.purgeEligibleAtMs;
+    Number.isSafeInteger(event.proofAtMs) && event.proofAtMs >= event.purgeEligibleAtMs &&
+    typeof event.proofAtToken === 'string' && event.proofAtToken.length > 0 &&
+    typeof event.proofGeneration === 'string' && event.proofGeneration.length > 0;
 }
 
 function cleanFirestoreState(state) {
   return !!state && !state.allowance && !state.requestExists && !state.profileExists &&
     !state.legacyAllowanceExists && Array.isArray(state.ownedSetIds) &&
     state.ownedSetIds.length === 0 && Array.isArray(state.blockingSessionIds) &&
-    state.blockingSessionIds.length === 0;
+    state.blockingSessionIds.length === 0 && Array.isArray(state.liveClassPlanIds) &&
+    state.liveClassPlanIds.length === 0;
 }
 
 function validServerTimeProof(proof, expected) {
@@ -186,8 +193,9 @@ function validServerTimeProof(proof, expected) {
     proof.mode === expected.mode && proof.allowanceRevision === expected.revision &&
     proof.deletionRequestedAtMs === expected.deletionRequestedAtMs &&
     proof.purgeEligibleAtMs === expected.purgeEligibleAtMs &&
-    Number.isSafeInteger(proof.proofAtMs) && Number.isSafeInteger(proof.updateTimeMs) &&
-    proof.proofAtMs === proof.updateTimeMs;
+    Number.isSafeInteger(proof.proofAtMs) &&
+    typeof proof.proofAtToken === 'string' && proof.proofAtToken.length > 0 &&
+    typeof proof.proofGeneration === 'string' && proof.proofGeneration.length > 0;
 }
 
 async function cleanupProof(adapter, report, proof) {
@@ -219,6 +227,8 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
   if (completeRetry) {
     report.status = 'complete';
     report.safeToPurge = true;
+    report.authoritativeTimeVerified = true;
+    report.applyRequiresServerTimeProof = false;
     report.stages.push({ name: 'completed-audit-retry', status: 'recovered' });
     report.remaining = remainingState(initial);
     return report;
@@ -239,6 +249,7 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
   if (recoveredFirestore) {
     eligibility = {
       eligible: true, blockers: [], ownedSetCount: 0, blockingSessionCount: 0,
+      liveClassPlanCount: 0,
       revision: initial.auditEvent.allowanceRevision,
       deletionRequestedAtMs: initial.auditEvent.deletionRequestedAtMs,
       purgeEligibleAtMs: initial.auditEvent.purgeEligibleAtMs, remainingMs: 0,
@@ -249,15 +260,21 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
       deletionRequestedAtMs: initial.auditEvent.deletionRequestedAtMs,
       purgeEligibleAtMs: initial.auditEvent.purgeEligibleAtMs,
       proofAtMs: initial.auditEvent.proofAtMs,
+      proofAtToken: initial.auditEvent.proofAtToken,
+      proofGeneration: initial.auditEvent.proofGeneration,
       opId: eventId(options.uid), eventId: eventId(options.uid),
       projectId: options.projectId, environment: options.environment, mode: options.mode
     };
+    report.authoritativeTimeVerified = true;
+    report.applyRequiresServerTimeProof = false;
   } else {
     const structuralEligibility = deletionCore.auditEligibility({
       allowance: initial.allowance,
       ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
       blockingSessionCount: Array.isArray(initial.blockingSessionIds)
-        ? initial.blockingSessionIds.length : -1
+        ? initial.blockingSessionIds.length : -1,
+      liveClassPlanCount: Array.isArray(initial.liveClassPlanIds)
+        ? initial.liveClassPlanIds.length : -1
     }, initial.allowance && initial.allowance.purgeEligibleAtMs);
     if (structuralEligibility.blockers.includes('invalid_state') ||
         structuralEligibility.uid !== options.uid) {
@@ -267,12 +284,35 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
           allowance: null,
           ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
           blockingSessionCount: Array.isArray(initial.blockingSessionIds)
-            ? initial.blockingSessionIds.length : -1
+            ? initial.blockingSessionIds.length : -1,
+          liveClassPlanCount: Array.isArray(initial.liveClassPlanIds)
+            ? initial.liveClassPlanIds.length : -1
         }, initial.allowance && initial.allowance.purgeEligibleAtMs);
       report.audit = publicAudit(initial, refusedEligibility);
       report.status = 'refused';
       report.stages.push({
         name: 'eligibility', status: 'refused', blockers: [...refusedEligibility.blockers]
+      });
+      report.remaining = remainingState(initial);
+      return report;
+    }
+    if (options.mode === 'dry-run') {
+      report.audit = publicAudit(initial, structuralEligibility);
+      report.audit.structurallyReady = structuralEligibility.eligible;
+      report.audit.eligible = false;
+      report.status = 'dry-run-audited';
+      report.stages.push({
+        name: 'structural-audit', status: structuralEligibility.eligible ? 'complete' : 'blocked',
+        blockers: [...structuralEligibility.blockers]
+      });
+      report.remaining = remainingState(initial);
+      return report;
+    }
+    if (!structuralEligibility.eligible) {
+      report.audit = publicAudit(initial, structuralEligibility);
+      report.status = 'refused';
+      report.stages.push({
+        name: 'eligibility', status: 'refused', blockers: [...structuralEligibility.blockers]
       });
       report.remaining = remainingState(initial);
       return report;
@@ -294,11 +334,19 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
       report.stages.push({ name: 'server-time-proof', status: 'complete' });
       if (!validServerTimeProof(proof, expected)) throw new Error('Server-time proof identity is forged or stale.');
       expected.proofAtMs = proof.proofAtMs;
+      expected.proofAtToken = proof.proofAtToken;
+      expected.proofGeneration = proof.proofGeneration;
+      report.authoritativeTimeVerified = true;
+      report.applyRequiresServerTimeProof = false;
     } catch (error) {
       report.stages.push({ name: 'server-time-proof', status: 'failed' });
       report.error = safeError(error);
-      await cleanupProof(adapter, report, proof && expected
-        ? { ...expected, proofAtMs: proof.proofAtMs } : null);
+      await cleanupProof(adapter, report, proof && expected ? {
+        ...expected,
+        proofAtMs: proof.proofAtMs,
+        proofAtToken: proof.proofAtToken,
+        proofGeneration: proof.proofGeneration
+      } : null);
       report.remaining = remainingState(initial);
       return report;
     }
@@ -306,14 +354,18 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
       allowance: initial.allowance,
       ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
       blockingSessionCount: Array.isArray(initial.blockingSessionIds)
-        ? initial.blockingSessionIds.length : -1
+        ? initial.blockingSessionIds.length : -1,
+      liveClassPlanCount: Array.isArray(initial.liveClassPlanIds)
+        ? initial.liveClassPlanIds.length : -1
     }, proof.proofAtMs);
     if (eligibility.uid !== options.uid) {
       eligibility = deletionCore.auditEligibility({
         allowance: null,
         ownedSetCount: Array.isArray(initial.ownedSetIds) ? initial.ownedSetIds.length : -1,
         blockingSessionCount: Array.isArray(initial.blockingSessionIds)
-          ? initial.blockingSessionIds.length : -1
+          ? initial.blockingSessionIds.length : -1,
+        liveClassPlanCount: Array.isArray(initial.liveClassPlanIds)
+          ? initial.liveClassPlanIds.length : -1
       }, proof.proofAtMs);
     }
     report.audit = publicAudit(initial, eligibility);
@@ -325,13 +377,6 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
       return report;
     }
     report.stages.push({ name: 'eligibility', status: 'complete' });
-    if (options.mode === 'dry-run') {
-      report.status = 'dry-run-eligible';
-      report.safeToPurge = true;
-      await cleanupProof(adapter, report, expected);
-      report.remaining = remainingState(initial);
-      return report;
-    }
   }
   report.audit = publicAudit(initial, eligibility);
 
@@ -409,6 +454,7 @@ async function runTeacherPurge({ adapter, options, nowMs }) {
   const clean = remaining.allowanceExists === false && remaining.requestExists === false &&
     remaining.profileExists === false && remaining.legacyAllowanceExists === false &&
     remaining.ownedSetCount === 0 && remaining.blockingSessionCount === 0 &&
+    remaining.liveClassPlanCount === 0 &&
     remaining.authUserExists === false && remaining.auditEventStatus === 'complete';
   if (!clean) {
     report.stages.push({ name: 'final-audit', status: 'failed' });
@@ -431,6 +477,13 @@ function normalizeAllowance(snapshot) {
   };
 }
 
+function timestampToken(value) {
+  if (!value || !Number.isSafeInteger(value.seconds) ||
+      !Number.isSafeInteger(value.nanoseconds) || value.nanoseconds < 0 ||
+      value.nanoseconds >= 1_000_000_000) return '';
+  return String(value.seconds) + ':' + String(value.nanoseconds);
+}
+
 function productionDependencies() {
   const { applicationDefault, initializeApp } = require('firebase-admin/app');
   const { getFirestore, FieldValue, Timestamp } = require('firebase-admin/firestore');
@@ -449,12 +502,14 @@ function productionDependencies() {
       return {
         async audit(uid, identity) {
           const allowanceRef = db.doc('teacher_allowances/' + uid);
-          const [allowanceSnap, requestSnap, profileSnap, eventSnap, setsSnap, sessionsSnap] = await Promise.all([
+          const [allowanceSnap, requestSnap, profileSnap, eventSnap, setsSnap, sessionsSnap, livePlansSnap] = await Promise.all([
             allowanceRef.get(), db.doc('teacher_access_requests/' + uid).get(),
             db.doc('teacher_profiles/' + uid).get(), auditRef(uid).get(),
             db.collection('quiz_sets').where('ownerUid', '==', uid).get(),
             db.collection('sessions').where('teacherUid', '==', uid)
-              .where('status', 'in', ['allocating', 'active', 'live']).get()
+              .where('status', 'in', ['allocating', 'active', 'live']).get(),
+            db.collection('class_plans_private').where('ownerUid', '==', uid)
+              .where('status', '==', 'live').get()
           ]);
           const allowance = normalizeAllowance(allowanceSnap);
           const email = allowance && allowance.emailCanonical || identity && identity.emailCanonical;
@@ -471,6 +526,8 @@ function productionDependencies() {
             deletionRequestedAtMs: deletionCore.timestampMillis(rawEvent.deletionRequestedAt),
             purgeEligibleAtMs: deletionCore.timestampMillis(rawEvent.purgeEligibleAt),
             proofAtMs: deletionCore.timestampMillis(rawEvent.proofAt),
+            proofAtToken: timestampToken(rawEvent.proofAt),
+            proofGeneration: rawEvent.proofGeneration,
             operationId: rawEvent.operationId, projectId: rawEvent.projectId,
             environment: rawEvent.environment, mode: rawEvent.mode,
             status: rawEvent.status, result: rawEvent.result
@@ -480,6 +537,7 @@ function productionDependencies() {
             legacyAllowanceExists: legacySnap ? legacySnap.exists : false,
             ownedSetIds: setsSnap.docs.map(doc => doc.id),
             blockingSessionIds: sessionsSnap.docs.map(doc => doc.id),
+            liveClassPlanIds: livePlansSnap.docs.map(doc => doc.id),
             authUserExists, auditEvent
           };
         },
@@ -508,7 +566,8 @@ function productionDependencies() {
             deletionRequestedAtMs: deletionCore.timestampMillis(data.deletionRequestedAt),
             purgeEligibleAtMs: deletionCore.timestampMillis(data.purgeEligibleAt),
             proofAtMs: deletionCore.timestampMillis(data.proofAt),
-            updateTimeMs: deletionCore.timestampMillis(snapshot.updateTime)
+            proofAtToken: timestampToken(data.proofAt),
+            proofGeneration: timestampToken(snapshot.updateTime)
           };
         },
         async cleanupServerTimeProof(expected) {
@@ -520,7 +579,8 @@ function productionDependencies() {
             if (data.opId !== expected.opId || data.targetUid !== (expected.uid || expected.targetUid) ||
                 data.projectId !== expected.projectId || data.environment !== expected.environment ||
                 data.mode !== expected.mode || data.allowanceRevision !== expected.revision ||
-                deletionCore.timestampMillis(data.proofAt) !== expected.proofAtMs) {
+                timestampToken(data.proofAt) !== expected.proofAtToken ||
+                timestampToken(snapshot.updateTime) !== expected.proofGeneration) {
               throw new Error('Server-time proof changed before cleanup.');
             }
             transaction.delete(ref);
@@ -534,16 +594,20 @@ function productionDependencies() {
           const eventRef = auditRef(expected.uid);
           const operationRef = proofRef(expected.uid);
           await db.runTransaction(async transaction => {
-            const [allowanceSnap, requestSnap, profileSnap, legacySnap, eventSnap, operationSnap, setsSnap, sessionsSnap] = await Promise.all([
+            const [allowanceSnap, requestSnap, profileSnap, legacySnap, eventSnap, operationSnap, setsSnap, sessionsSnap, livePlansSnap] = await Promise.all([
               transaction.get(allowanceRef), transaction.get(requestRef), transaction.get(profileRef),
               transaction.get(legacyRef), transaction.get(eventRef), transaction.get(operationRef),
               transaction.get(db.collection('quiz_sets').where('ownerUid', '==', expected.uid).limit(1)),
               transaction.get(db.collection('sessions').where('teacherUid', '==', expected.uid)
-                .where('status', 'in', ['allocating', 'active', 'live']).limit(1))
+                .where('status', 'in', ['allocating', 'active', 'live']).limit(1)),
+              transaction.get(db.collection('class_plans_private').where('ownerUid', '==', expected.uid)
+                .where('status', '==', 'live').limit(1))
             ]);
             const allowance = normalizeAllowance(allowanceSnap);
             const operation = operationSnap.exists ? operationSnap.data() || {} : null;
             const operationProofAtMs = operation && deletionCore.timestampMillis(operation.proofAt);
+            const operationProofAtToken = operation && timestampToken(operation.proofAt);
+            const operationGeneration = timestampToken(operationSnap.updateTime);
             if (!allowance || allowance.uid !== expected.uid ||
                 allowance.emailCanonical !== expected.emailCanonical ||
                 allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
@@ -556,8 +620,11 @@ function productionDependencies() {
                 operation.allowanceRevision !== expected.revision ||
                 deletionCore.timestampMillis(operation.deletionRequestedAt) !== expected.deletionRequestedAtMs ||
                 deletionCore.timestampMillis(operation.purgeEligibleAt) !== expected.purgeEligibleAtMs ||
-                operationProofAtMs !== expected.proofAtMs || operationProofAtMs < expected.purgeEligibleAtMs ||
-                !setsSnap.empty || !sessionsSnap.empty || eventSnap.exists) {
+                operationProofAtMs !== expected.proofAtMs ||
+                operationProofAtToken !== expected.proofAtToken ||
+                operationGeneration !== expected.proofGeneration ||
+                operationProofAtMs < expected.purgeEligibleAtMs ||
+                !setsSnap.empty || !sessionsSnap.empty || !livePlansSnap.empty || eventSnap.exists) {
               throw new Error('Authoritative Firestore transaction re-read changed.');
             }
             if (requestSnap.exists && requestSnap.data().uid !== expected.uid) {
@@ -575,7 +642,8 @@ function productionDependencies() {
               allowanceRevision: expected.revision,
               deletionRequestedAt: Timestamp.fromMillis(expected.deletionRequestedAtMs),
               purgeEligibleAt: Timestamp.fromMillis(expected.purgeEligibleAtMs),
-              proofAt: Timestamp.fromMillis(expected.proofAtMs),
+              proofAt: operation.proofAt,
+              proofGeneration: expected.proofGeneration,
               status: 'firestore_purged', result: 'firestore_purged',
               firestorePurgedAt: FieldValue.serverTimestamp(),
               actor: 'admin-cli'
@@ -596,7 +664,8 @@ function productionDependencies() {
                 data.operationId !== expected.opId || data.projectId !== expected.projectId ||
                 data.environment !== expected.environment || data.mode !== expected.mode ||
                 data.allowanceRevision !== expected.revision ||
-                deletionCore.timestampMillis(data.proofAt) !== expected.proofAtMs) {
+                timestampToken(data.proofAt) !== expected.proofAtToken ||
+                data.proofGeneration !== expected.proofGeneration) {
               throw new Error('Purge audit event changed before completion.');
             }
             if (data.status === 'complete' && data.result === 'complete') return;
@@ -653,7 +722,7 @@ async function main(argv, dependencies) {
     throw error;
   }
   reservation.commit(JSON.stringify(report, null, 2) + '\n');
-  return report.status === 'complete' || report.status === 'dry-run-eligible' ? 0 : 2;
+  return report.status === 'complete' || report.status === 'dry-run-audited' ? 0 : 2;
 }
 
 if (require.main === module) {

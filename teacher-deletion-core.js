@@ -133,6 +133,8 @@
       remainingMs: null,
       ownedSetCount: Number.isSafeInteger(value && value.ownedSetCount) ? value.ownedSetCount : null,
       blockingSessionCount,
+      liveClassPlanCount: Number.isSafeInteger(value && value.liveClassPlanCount)
+        ? value.liveClassPlanCount : null,
       revision: Number.isSafeInteger(allowance.revision) ? allowance.revision : null,
       uid: typeof allowance.uid === 'string' ? allowance.uid : ''
     };
@@ -147,14 +149,17 @@
       revision(allowance.revision, true);
       const blockingSessionCount = value.blockingSessionCount === undefined
         ? value.liveSessionCount : value.blockingSessionCount;
+      const liveClassPlanCount = value.liveClassPlanCount === undefined ? 0 : value.liveClassPlanCount;
       if (now === null || !Number.isSafeInteger(value.ownedSetCount) || value.ownedSetCount < 0 ||
-          !Number.isSafeInteger(blockingSessionCount) || blockingSessionCount < 0) {
+          !Number.isSafeInteger(blockingSessionCount) || blockingSessionCount < 0 ||
+          !Number.isSafeInteger(liveClassPlanCount) || liveClassPlanCount < 0) {
         return invalidAudit(value);
       }
       const blockers = [];
       if (now < times.purgeEligibleAtMs) blockers.push('waiting_period');
       if (value.ownedSetCount > 0) blockers.push('owned_sets');
       if (blockingSessionCount > 0) blockers.push('blocking_sessions');
+      if (liveClassPlanCount > 0) blockers.push('live_class_plans');
       return {
         eligible: blockers.length === 0,
         blockers,
@@ -163,6 +168,7 @@
         remainingMs: Math.max(0, times.purgeEligibleAtMs - now),
         ownedSetCount: value.ownedSetCount,
         blockingSessionCount,
+        liveClassPlanCount,
         revision: allowance.revision,
         uid: allowance.uid
       };

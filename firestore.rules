@@ -1269,6 +1269,7 @@ service cloud.firestore {
 
     function validDeletionPendingSessionAbort(sessionId) {
       return ownsSessionForSafeDeletionEnd(sessionId) &&
+        resource.data.status == 'allocating' &&
         sessionHasCounterFields(resource.data) &&
         sessionHasCounterFields(request.resource.data) &&
         validSessionCounter(resource.data) && validSessionCounter(request.resource.data) &&
@@ -1610,6 +1611,9 @@ service cloud.firestore {
         request.query.limit != null && request.query.limit <= 100 &&
         resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
         resource.data.plannedStartAt < request.time + duration.value(32, 'd');
+      allow list: if isDeletionPendingTeacher() &&
+        resource.data.ownerUid == request.auth.uid && resource.data.status == 'live' &&
+        request.query.limit != null && request.query.limit <= 101;
       allow create: if validClassPlanCreate(planId);
       allow update: if validClassPlanUpdate(planId);
       allow delete: if false;

@@ -1117,17 +1117,13 @@ rulesTest('teacher-deletion: own request, immediate denial, safe live end, hold-
   assert.equal(readiness.ownedSetCount > 0, true);
   assert.equal(readiness.blockingSessionCount > 0, true);
 
-  await ownerStore.endSession('deletion-live').catch(error => {
-    throw new Error('safe-end stage: ' + error.message, { cause: error });
+  await ownerStore.resolveTeacherDeletionSession('owner-uid', 'deletion-live').catch(error => {
+    throw new Error('safe reciprocal end stage: ' + error.message, { cause: error });
   });
   assert.equal((await adminRead('sessions/deletion-live')).status, 'ended');
   assert.equal((await adminRead('sessions/deletion-live/meta/live')).status, 'ended');
-  const finishedPlan = await ownerStore.finishClassPlan('deletion-plan', 'deletion-live', {
-    expectedRevision: 2
-  }).catch(error => {
-    throw new Error('safe-plan-finish stage: ' + error.message, { cause: error });
-  });
-  assert.equal(finishedPlan.status, 'ended');
+  assert.equal((await adminRead('class_plans_private/deletion-plan')).status, 'ended');
+  assert.equal((await adminRead('class_plans_public/deletion-plan')).status, 'ended');
   assert.equal((await adminRead('sessions/deletion-live')).classPlanRevision, 3);
 
   await adminStore.suspendTeacher('owner-uid', 'independent-hold', requestAdminIdentity).catch(error => {
@@ -1202,14 +1198,23 @@ rulesTest('teacher-deletion fix: pending owner safely resolves orphan allocation
   });
   await adminWrite('sessions/deletion-orphan/meta/live', liveQuestion(0));
   await adminWrite('sessions/deletion-orphan/meta/board', { scores: {} });
+  await adminWrite('sessions/deletion-expired-live', {
+    teacherUid: uid, teacherEmail: email, status: 'live', code: 'OLD123',
+    registeredStudentCount: 0, studentCountRevision: 0,
+    activationLeaseUntil: Timestamp.fromMillis(1)
+  });
 
-  const ownerStore = emulatorStore(googleContext(uid, email));
+  const ownerDb = googleContext(uid, email);
+  const ownerStore = emulatorStore(ownerDb);
   const otherStore = emulatorStore(actorFirestore('otherTeacher'));
   const adminStore = emulatorStore(actorFirestore('admin'));
   const readiness = await ownerStore.getTeacherDeletionReadiness(uid);
-  assert.deepEqual(readiness.blockingSessions.map(item => [item.sessionId, item.status]), [
-    ['deletion-orphan', 'allocating']
+  assert.deepEqual(readiness.blockingSessions.map(item => [item.sessionId, item.status]).sort(), [
+    ['deletion-expired-live', 'live'], ['deletion-orphan', 'allocating']
   ]);
+  await assertFails(updateDoc(doc(ownerDb, 'sessions/deletion-expired-live'), {
+    status: 'aborted', abortedAt: serverTimestamp()
+  }));
   assert.equal(await ownerStore.resolveTeacherDeletionSession(uid, 'deletion-orphan'), true);
   assert.equal((await adminRead('sessions/deletion-orphan')).status, 'aborted');
   assert.equal((await adminRead('codes/DEL123')).sessionId, 'deletion-orphan');

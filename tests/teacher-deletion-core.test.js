@@ -109,13 +109,16 @@ test('cancellation refuses the exact purge boundary and malformed deletion times
   assert.throws(() => core.cancel({ ...pending, revision: Number.MAX_SAFE_INTEGER }, 20_000), /revision|safe/);
 });
 
-test('purge eligibility denies one millisecond early and any ownership or live-session blocker', () => {
+test('purge eligibility denies one millisecond early and any owned-set, session, or live-plan blocker', () => {
   const requestedAt = Date.UTC(2026, 7, 20);
   const pending = core.request(allowance(), requestedAt);
 
   assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 0, blockingSessionCount: 0 }, requestedAt + DAYS_30_MS - 1).eligible, false);
   assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 1, blockingSessionCount: 0 }, requestedAt + DAYS_30_MS).eligible, false);
   assert.equal(core.auditEligibility({ allowance: pending, ownedSetCount: 0, blockingSessionCount: 1 }, requestedAt + DAYS_30_MS).eligible, false);
+  assert.deepEqual(core.auditEligibility({
+    allowance: pending, ownedSetCount: 0, blockingSessionCount: 0, liveClassPlanCount: 1
+  }, requestedAt + DAYS_30_MS).blockers, ['live_class_plans']);
   assert.deepEqual(
     core.auditEligibility({ allowance: pending, ownedSetCount: 0, blockingSessionCount: 0 }, requestedAt + DAYS_30_MS),
     {
@@ -126,6 +129,7 @@ test('purge eligibility denies one millisecond early and any ownership or live-s
       remainingMs: 0,
       ownedSetCount: 0,
       blockingSessionCount: 0,
+      liveClassPlanCount: 0,
       revision: 8,
       uid: 'teacher-a'
     }
@@ -379,7 +383,7 @@ test('store cancellation recovers the safely disabled phase-one state before tim
   assert.equal(fake.read('teacher_allowlist/teacher@school.kr').enabled, true);
 });
 
-test('store deletion readiness returns exact own sets and allocating/active/live session identities', async () => {
+test('store deletion readiness includes an ended session whose reciprocal class plan remains live', async () => {
   const fake = firestoreFake({
     'quiz_sets/own-active': { ownerUid: 'teacher-a', lifecycleState: 'active', title: 'private-title' },
     'quiz_sets/own-trash': { ownerUid: 'teacher-a', lifecycleState: 'trashed', title: 'private-trash' },
@@ -388,18 +392,29 @@ test('store deletion readiness returns exact own sets and allocating/active/live
     'sessions/allocating': { teacherUid: 'teacher-a', status: 'allocating', code: 'ABC123', label: 'recover-me' },
     'sessions/active': { teacherUid: 'teacher-a', status: 'active', code: 'ABC124', label: 'legacy-live' },
     'sessions/ended': { teacherUid: 'teacher-a', status: 'ended', label: 'old' },
-    'sessions/other': { teacherUid: 'teacher-b', status: 'live', label: 'other-live' }
+    'sessions/other': { teacherUid: 'teacher-b', status: 'live', label: 'other-live' },
+    'class_plans_private/plan-stale': {
+      ownerUid: 'teacher-a', status: 'live', sessionId: 'ended', label: 'retry-plan'
+    },
+    'class_plans_private/plan-current': {
+      ownerUid: 'teacher-a', status: 'live', sessionId: 'live', label: 'already-counted'
+    },
+    'class_plans_private/plan-other': {
+      ownerUid: 'teacher-b', status: 'live', sessionId: 'other', label: 'private-other'
+    }
   });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 1);
 
   assert.deepEqual(await store.getTeacherDeletionReadiness('teacher-a'), {
     ownedSetCount: 2,
-    blockingSessionCount: 3,
+    blockingSessionCount: 4,
     blockingSessions: [
       { sessionId: 'live', status: 'live', code: '', label: 'own-live' },
       { sessionId: 'allocating', status: 'allocating', code: 'ABC123', label: 'recover-me' },
-      { sessionId: 'active', status: 'active', code: 'ABC124', label: 'legacy-live' }
+      { sessionId: 'active', status: 'active', code: 'ABC124', label: 'legacy-live' },
+      { sessionId: 'ended', status: 'plan_live', code: '', label: 'retry-plan', planId: 'plan-stale' }
     ],
+    liveClassPlanCount: 2,
     ownedSetLimitReached: false,
     blockingSessionLimitReached: false
   });
@@ -408,6 +423,10 @@ test('store deletion readiness returns exact own sets and allocating/active/live
     [
       { field: 'teacherUid', operator: '==', value: 'teacher-a' },
       { field: 'status', operator: 'in', value: ['allocating', 'active', 'live'] }
+    ],
+    [
+      { field: 'ownerUid', operator: '==', value: 'teacher-a' },
+      { field: 'status', operator: '==', value: 'live' }
     ]
   ]);
 });
@@ -502,7 +521,9 @@ test('deletion UI requires typed acknowledgment, preserves safe pending state on
         };
       },
       async resolveTeacherDeletionSession(uid, sessionId) {
-        if (uid !== 'teacher-a' || sessionId !== 'alloc-a') throw new Error('wrong target');
+        if (uid !== 'teacher-a' || !['alloc-a', 'plan-retry'].includes(sessionId)) {
+          throw new Error('wrong target');
+        }
         return { complete: true, status: 'aborted' };
       },
       async requestTeacherDeletion() {
@@ -540,6 +561,20 @@ test('deletion UI requires typed acknowledgment, preserves safe pending state on
   assert.match(app.innerHTML, /할당 정리/);
   assert.match(app.innerHTML, /종료할 반/);
   assert.match(app.innerHTML, /안전 종료/);
+  assert.equal(await context.resolveTeacherDeletionSession('live-a'), false);
+  assert.equal(context.teacherDeletionScreen.readiness.blockingSessionCount, 2);
+  assert.match(app.innerHTML, /종료할 반/);
+
+  context.teacherDeletionScreen.readiness = {
+    ownedSetCount: 0,
+    blockingSessionCount: 1,
+    blockingSessions: [{
+      sessionId: 'plan-retry', status: 'plan_live', code: '', label: '계획 종료 재시도', planId: 'plan-a'
+    }]
+  };
+  context.renderTeacherDeletion(context.teacherDeletionScreen);
+  assert.match(app.innerHTML, /계획 종료 재시도/);
+  assert.equal(await context.resolveTeacherDeletionSession('plan-retry'), true);
 
   context.teacherDeletionScreen.readiness = {
     ownedSetCount: 0,
