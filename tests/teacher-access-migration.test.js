@@ -156,7 +156,7 @@ test('apply writes exact compatibility and authoritative records, then retries i
   assert.equal(applied.appliedCount, 2);
   assert.equal(applied.safeToDeployStrictRules, true);
   assert.deepEqual(db.docs.get('teacher_allowlist/a@school.kr'), {
-    enabled: true, role: 'teacher', updatedAt: db.docs.get('teacher_allowlist/a@school.kr').updatedAt,
+    uid: 'uid-a', enabled: true, role: 'teacher', updatedAt: db.docs.get('teacher_allowlist/a@school.kr').updatedAt,
     updatedByUid: 'admin-a'
   });
   assert.deepEqual(db.docs.get('teacher_allowances/uid-b'), {
@@ -186,6 +186,8 @@ test('apply holds exact generation-bound migration lock until explicit token unl
     serverTimestamp: () => timestamp(1000)
   });
   assert.equal(report.lock.locked, true);
+  assert.equal(report.lock.status, 'complete');
+  assert.equal(report.lock.strictReady, true);
   assert.equal(report.lock.lockToken, 'exact-lock-token');
   assert.match(report.lock.updateTimeGeneration, /^\d+:\d+$/);
   assert.equal(db.docs.get('migration_gates/teacher_access_status').locked, true);
@@ -200,7 +202,16 @@ test('apply holds exact generation-bound migration lock until explicit token unl
     serverTimestamp: () => timestamp(2000)
   });
   assert.equal(unlocked.locked, false);
+  assert.equal(unlocked.status, 'complete');
+  assert.equal(unlocked.strictReady, true);
   assert.equal(db.docs.get('migration_gates/teacher_access_status').lockToken, 'exact-lock-token');
+  const relocked = await migration.acquireTeacherAccessGate({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'retry-token', serverTimestamp: () => timestamp(3000)
+  });
+  assert.equal(relocked.status, 'complete');
+  assert.equal(relocked.strictReady, true);
+  assert.equal(relocked.migrationGeneration, report.lock.migrationGeneration);
 });
 
 test('Auth display name remains stable after legacy-only profile fields are removed', async () => {
@@ -283,6 +294,22 @@ test('a failed authoritative final audit carries cumulative partial progress', a
     assert.equal(error.partialReport.status, 'partial-failure');
     assert.equal(error.partialReport.safeToDeployStrictRules, false);
     assert.match(error.partialReport.auditError, /authoritative collection read failed/);
+    return true;
+  });
+});
+
+test('a completion-generation post-audit failure never claims release safety', async () => {
+  const db = fakeDb({
+    'teacher_allowlist/a@school.kr': { enabled: true, role: 'teacher' }
+  }, { failCollectionRead: { teacher_allowlist: 3 } });
+  await assert.rejects(migration.runTeacherAccessMigration({
+    db, auth: fakeAuth([googleUser('uid-a', 'a@school.kr')]),
+    projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    apply: true, confirmProject: 'demo-video-quiz', serverTimestamp: () => timestamp(1000)
+  }), error => {
+    assert.equal(error.partialReport.safeToDeployStrictRules, false);
+    assert.equal(error.partialReport.lock.status, 'complete');
+    assert.match(error.message, /authoritative collection read failed/);
     return true;
   });
 });

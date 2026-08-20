@@ -42,7 +42,7 @@ service cloud.firestore {
       let currentExists = exists(teacherAllowancePath());
       return verifiedEmail() && (currentExists
         ? validActiveTeacherAllowance(get(teacherAllowancePath()).data)
-        : validLegacyTeacherAllowance());
+        : !teacherAccessMigrationComplete() && validLegacyTeacherAllowance());
     }
 
     function isDeletionPendingTeacher() {
@@ -74,7 +74,7 @@ service cloud.firestore {
       let currentExists = exists(teacherAllowancePath());
       let approved = currentExists
         ? validActiveTeacherAllowance(get(teacherAllowancePath()).data)
-        : validLegacyTeacherAllowance();
+        : !teacherAccessMigrationComplete() && validLegacyTeacherAllowance();
       return verifiedEmail() && approved &&
         (currentExists
           ? get(teacherAllowancePath()).data.role
@@ -190,8 +190,8 @@ service cloud.firestore {
     }
 
     function validApprovedLegacyAllowance(data) {
-      return data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
-        data.enabled == true && data.role == 'teacher' &&
+      return data.keys().hasOnly(['uid', 'enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        data.uid is string && data.enabled == true && data.role == 'teacher' &&
         data.updatedAt == request.time && data.updatedByUid == request.auth.uid;
     }
 
@@ -242,7 +242,8 @@ service cloud.firestore {
     function validLifecycleLegacyAllowance(email, enabled) {
       let target = /databases/$(database)/documents/teacher_allowlist/$(email);
       return existsAfter(target) &&
-        getAfter(target).data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        getAfter(target).data.keys().hasOnly(['uid', 'enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        getAfter(target).data.uid == resource.data.uid &&
         getAfter(target).data.enabled == enabled &&
         getAfter(target).data.role == 'teacher' &&
         getAfter(target).data.updatedAt == request.time &&
@@ -421,7 +422,8 @@ service cloud.firestore {
       let after = getAfter(allowancePath).data;
       return verifiedEmail() && email == request.auth.token.email &&
         exists(allowancePath) && existsAfter(allowancePath) &&
-        request.resource.data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        request.resource.data.keys().hasOnly(['uid', 'enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        request.resource.data.uid == request.auth.uid &&
         request.resource.data.role == 'teacher' &&
         request.resource.data.enabled == after.enabled &&
         request.resource.data.updatedAt == request.time &&
@@ -459,13 +461,39 @@ service cloud.firestore {
       return !exists(path) || get(path).data.get('locked', false) == false;
     }
 
+    function teacherAccessMigrationComplete() {
+      let path = /databases/$(database)/documents/migration_gates/teacher_access_status;
+      let data = exists(path) ? get(path).data : {};
+      return exists(path) && data.get('status', '') == 'complete' &&
+        data.get('strictReady', false) == true &&
+        data.get('migrationGeneration', '') is string &&
+        data.get('migrationGeneration', '').size() > 0;
+    }
+
     function validAdminSyncedLegacyAllowance(email, enabled, role) {
       let path = /databases/$(database)/documents/teacher_allowlist/$(email);
       return existsAfter(path) &&
-        getAfter(path).data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        getAfter(path).data.keys().hasOnly(['uid', 'enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        getAfter(path).data.uid == resource.data.uid &&
         getAfter(path).data.enabled == enabled && getAfter(path).data.role == role &&
         getAfter(path).data.updatedAt == request.time &&
         getAfter(path).data.updatedByUid == request.auth.uid;
+    }
+
+    function validAuthoritativeLegacyMirror(email) {
+      let uid = request.resource.data.get('uid', '');
+      let allowancePath = /databases/$(database)/documents/teacher_allowances/$(uid);
+      return signedIn() && teacherAccessMigrationUnlocked() && uid is string && uid.size() > 0 &&
+        request.resource.data.keys().hasOnly([
+          'uid', 'enabled', 'role', 'updatedAt', 'updatedByUid'
+        ]) && request.resource.data.updatedAt == request.time &&
+        request.resource.data.updatedByUid == request.auth.uid && existsAfter(allowancePath) &&
+        getAfter(allowancePath).data.uid == uid &&
+        getAfter(allowancePath).data.emailCanonical == email &&
+        getAfter(allowancePath).data.enabled == request.resource.data.enabled &&
+        getAfter(allowancePath).data.role == request.resource.data.role &&
+        getAfter(allowancePath).data.updatedAt == request.time &&
+        getAfter(allowancePath).data.updatedByUid == request.auth.uid;
     }
 
     function validAdminTeacherAllowanceMutation(uid) {
@@ -1517,7 +1545,7 @@ service cloud.firestore {
           publicData.get('warningLevel', null),
           publicData.get('warningAcknowledgedAt', null),
           publicData.get('sessionId', null), publicData.get('actualStartedAt', null),
-          publicData.get('actualEndedAt', null), publicData.get('actualParticipants', null)
+          publicData.get('actualEndedAt', null)
         ] == [
           privateData.planId, privateData.setId, privateData.setTitleSnapshot,
           privateData.className, privateData.plannedStartAt, privateData.plannedEndAt,
@@ -1526,8 +1554,10 @@ service cloud.firestore {
           privateData.get('warningLevel', null),
           privateData.get('warningAcknowledgedAt', null),
           privateData.get('sessionId', null), privateData.get('actualStartedAt', null),
-          privateData.get('actualEndedAt', null), privateData.get('actualParticipants', null)
-        ];
+          privateData.get('actualEndedAt', null)
+        ] && (publicData.get('actualParticipants', null) == privateData.get('actualParticipants', null) ||
+          (privateData.status == 'live' && !('actualParticipants' in privateData) &&
+            publicData.actualParticipants is int && publicData.actualParticipants >= 0));
     }
 
     function validClassPlanPairAfter(planId) {
@@ -1572,11 +1602,13 @@ service cloud.firestore {
 
     function validClassPlanAttach(beforeData, afterData) {
       let sessionPath = /databases/$(database)/documents/sessions/$(afterData.sessionId);
+      let publicAfter = getAfter(classPlanPublicPath(afterData.planId)).data;
       return afterData.status == 'live' && exists(sessionPath) && existsAfter(sessionPath) &&
         get(sessionPath).data.teacherUid == beforeData.ownerUid &&
         get(sessionPath).data.get('teacherEmail', '') == beforeData.ownerEmailCanonical &&
         get(sessionPath).data.setId == beforeData.setId &&
         get(sessionPath).data.status == 'live' &&
+        publicAfter.actualParticipants == get(sessionPath).data.registeredStudentCount &&
         getAfter(sessionPath).data.classPlanId == afterData.planId &&
         getAfter(sessionPath).data.classPlanRevision == afterData.revision &&
         afterData.actualStartedAt == get(sessionPath).data.createdAt &&
@@ -1712,10 +1744,14 @@ service cloud.firestore {
 
     match /teacher_allowlist/{email} {
       allow get, list: if isAdmin();
-      allow create: if teacherAccessMigrationUnlocked() && isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email);
+      allow create: if canonicalAllowanceId(email) &&
+        (validAuthoritativeLegacyMirror(email) ||
+          (!teacherAccessMigrationComplete() && teacherAccessMigrationUnlocked() && isAdmin() &&
+            validAllowanceDocument(email)));
       allow update: if validOwnTeacherDeletionLegacyAllowance(email) ||
-        (teacherAccessMigrationUnlocked() && isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email) &&
-          !protectsCurrentAdmin(email));
+        validAuthoritativeLegacyMirror(email) ||
+        (!teacherAccessMigrationComplete() && teacherAccessMigrationUnlocked() && isAdmin() &&
+          canonicalAllowanceId(email) && validAllowanceDocument(email) && !protectsCurrentAdmin(email));
       allow delete: if false;
       allow read, write: if false;
     }

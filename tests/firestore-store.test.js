@@ -5,6 +5,26 @@ const path = require('node:path');
 const vm = require('node:vm');
 const core = require('../firestore-core.js');
 
+test('browser script order exposes class planning thresholds before firestore store captures the core', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const scripts = [...html.matchAll(/<script src="([^"]+\.js)"/g)].map(match => match[1]);
+  assert.ok(scripts.indexOf('class-planning-core.js') < scripts.indexOf('firestore-store.js'));
+  const context = {
+    console, TextEncoder, Date, Math,
+    FirestoreCore: { timestampMillis() { return null; }, offsetFromRoundTrip() {}, claimFirstAvailableCode() {}, chunk() {} },
+    CollaborationTrashCore: {}, TeacherAccessRequestCore: {},
+    firebase: { firestore: { Timestamp: class Timestamp {} } }
+  };
+  context.globalThis = context;
+  for (const name of scripts.filter(name => ['class-planning-core.js', 'firestore-store.js'].includes(name))) {
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', name), 'utf8'), context, { filename: name });
+  }
+  const store = context.FirestoreStore.createFirestoreStore(
+    { doc() { return { async get() { return { exists: false }; } }; } }, {}, () => 0
+  );
+  assert.deepEqual({ ...(await store.getClassPlanningThresholds()) }, { caution: 60, crowded: 120 });
+});
+
 const SERVER_TIMESTAMP = Symbol('server timestamp');
 const DELETE_FIELD = Symbol('delete field');
 
@@ -1628,7 +1648,8 @@ test('class plan attach rechecks active identity, revision, owner and set then b
     'class_plans_public/plan-a': pair.storedPublic,
     'sessions/session-a': {
       teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', setId: 'set-a',
-      status: 'live', createdAt: { toMillis: () => 12_000 }
+      status: 'live', createdAt: { toMillis: () => 12_000 },
+      registeredStudentCount: 1, studentCountRevision: 1, lastStudentUid: 'student-1'
     }
   });
   const store = createStore(fake);
@@ -1642,6 +1663,8 @@ test('class plan attach rechecks active identity, revision, owner and set then b
   assert.equal(attached.sessionId, 'session-a');
   assert.equal(fake.value('class_plans_public/plan-a').sessionId, 'session-a');
   assert.equal(fake.value('class_plans_public/plan-a').actualStartedAt.toMillis(), 12_000);
+  assert.equal(fake.value('class_plans_public/plan-a').actualParticipants, 1);
+  assert.equal(fake.value('class_plans_private/plan-a').actualParticipants, undefined);
   assert.equal(fake.value('sessions/session-a').classPlanId, 'plan-a');
   assert.equal(fake.value('sessions/session-a').classPlanRevision, 2);
 

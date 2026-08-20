@@ -649,7 +649,7 @@ rulesTest('class-planning: exact pair revision and plan-session identity gate up
   await adminWrite('sessions/plan-session', {
     teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
     status: 'live', createdAt: Timestamp.fromMillis(12_000),
-    registeredStudentCount: 0, studentCountRevision: 0,
+    registeredStudentCount: 1, studentCountRevision: 1, lastStudentUid: 'seed-student',
     activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
   });
   await adminWrite('sessions/wrong-set-session', {
@@ -657,6 +657,9 @@ rulesTest('class-planning: exact pair revision and plan-session identity gate up
     status: 'live', createdAt: Timestamp.fromMillis(12_000),
     registeredStudentCount: 0, studentCountRevision: 0,
     activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
+  });
+  await adminWrite('sessions/plan-session/students/seed-student', {
+    uid: 'seed-student', name: '첫번째', grade: 1, klass: 1, num: 1
   });
   const owner = actorFirestore('owner');
 
@@ -693,12 +696,27 @@ rulesTest('class-planning: exact pair revision and plan-session identity gate up
     sessionId: 'plan-session', actualStartedAt: Timestamp.fromMillis(12_000),
     createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
   });
+  const forgedAttach = writeBatch(owner);
+  setClassPlanPair(forgedAttach, owner, 'cas-plan', attached);
+  forgedAttach.update(doc(owner, 'sessions/plan-session'), {
+    classPlanId: 'cas-plan', classPlanRevision: 3
+  });
+  await assertFails(forgedAttach.commit());
+  attached.publicPlan.actualParticipants = 1;
   const attachBatch = writeBatch(owner);
   setClassPlanPair(attachBatch, owner, 'cas-plan', attached);
   attachBatch.update(doc(owner, 'sessions/plan-session'), {
     classPlanId: 'cas-plan', classPlanRevision: 3
   });
   await assertSucceeds(attachBatch.commit());
+  assert.equal((await getDoc(doc(owner, 'class_plans_private/cas-plan'))).data().actualParticipants, undefined);
+  assert.equal((await getDoc(doc(owner, 'class_plans_public/cas-plan'))).data().actualParticipants, 1);
+  const studentDb = anonymousContext('attach-student-2');
+  await emulatorStore(studentDb).joinStudent('plan-session', 'attach-student-2', {
+    name: '두번째', grade: 1, klass: 1, num: 2
+  });
+  assert.equal((await adminRead('sessions/plan-session')).registeredStudentCount, 2);
+  assert.equal((await adminRead('class_plans_public/cas-plan')).actualParticipants, 2);
 });
 
 rulesTest('class-planning: ended actuals must match the linked authoritative session summary', async () => {
@@ -725,8 +743,14 @@ rulesTest('class-planning: ended actuals must match the linked authoritative ses
     const batch = writeBatch(owner);
     setClassPlanPair(batch, owner, 'finish-plan', ended);
     batch.update(doc(owner, 'sessions/finish-session'), { classPlanRevision: 3 });
-    if (actualParticipants === 2) await assertSucceeds(batch.commit());
-    else await assertFails(batch.commit());
+    if (actualParticipants === 2) {
+      const forgedPublic = { ...ended, publicPlan: { ...ended.publicPlan, actualParticipants: 999 } };
+      const forgedBatch = writeBatch(owner);
+      setClassPlanPair(forgedBatch, owner, 'finish-plan', forgedPublic);
+      forgedBatch.update(doc(owner, 'sessions/finish-session'), { classPlanRevision: 3 });
+      await assertFails(forgedBatch.commit());
+      await assertSucceeds(batch.commit());
+    } else await assertFails(batch.commit());
   }
 });
 
@@ -1097,6 +1121,38 @@ rulesTest('teacher-access: active migration lock blocks both legacy and UID allo
     suspendedAt: serverTimestamp(), suspendedByUid: 'admin-uid', suspensionReason: 'hold',
     updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
   }));
+});
+
+rulesTest('teacher-access: completed exact gate permanently disables fallback and legacy-only writes after unlock', async () => {
+  const legacyUid = 'legacy-only-uid';
+  const legacyEmail = 'legacy-only@school.kr';
+  await adminWrite(`teacher_allowlist/${legacyEmail}`, { enabled: true, role: 'teacher' });
+  const legacy = googleContext(legacyUid, legacyEmail);
+  await assertSucceeds(getDoc(doc(legacy, 'quiz_sets/set1')));
+  const admin = actorFirestore('admin');
+  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/precomplete@school.kr'), {
+    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
+  await adminWrite('migration_gates/teacher_access_status', {
+    locked: false, lockToken: 'completed-token', projectId, targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(1), lockedByUid: 'admin-uid',
+    status: 'complete', strictReady: true, migrationGeneration: '7:0',
+    completedAt: Timestamp.fromMillis(2), completedByUid: 'admin-uid',
+    unlockedAt: Timestamp.fromMillis(3), unlockedByUid: 'admin-uid'
+  });
+  await assertFails(getDoc(doc(legacy, 'quiz_sets/set1')));
+  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/owner@school.kr'), {
+    enabled: false, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
+  await adminWrite('teacher_allowances/owner-uid', {
+    ...(await adminRead('teacher_allowances/owner-uid')), revision: 1
+  });
+  const changed = await emulatorStore(admin).adminUpdateTeacherAllowance({
+    uid: 'owner-uid', emailCanonical: 'owner@school.kr', expectedRevision: 1,
+    status: 'suspended', role: 'teacher', reason: 'complete-gate'
+  }, requestAdminIdentity);
+  assert.equal(changed.revision, 2);
+  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).uid, 'owner-uid');
 });
 
 rulesTest('teacher-access: owner resubmits rejected and cancelled requests but cannot drift identity or revision', async () => {

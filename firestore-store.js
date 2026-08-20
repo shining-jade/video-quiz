@@ -651,6 +651,7 @@
             updatedByUid: admin.uid
           });
           transaction.set(legacyRef, {
+            uid: exactUid,
             enabled: true,
             role: 'teacher',
             updatedAt: fieldValue.serverTimestamp(),
@@ -768,6 +769,7 @@
           updatedByUid: exactUid
         });
         transaction.set(legacyRef, {
+          uid: exactUid,
           enabled: false,
           role: 'teacher',
           updatedAt: fieldValue.serverTimestamp(),
@@ -844,6 +846,7 @@
         transaction.update(allowanceRef, update);
         if (!held) {
           transaction.set(legacyRef, {
+            uid: exactUid,
             enabled: true,
             role: 'teacher',
             updatedAt: fieldValue.serverTimestamp(),
@@ -895,6 +898,7 @@
         transaction.update(allowanceRef, update);
         if (!held) {
           transaction.set(legacyRef, {
+            uid: exactUid,
             enabled: true,
             role: 'teacher',
             updatedAt: fieldValue.serverTimestamp(),
@@ -1055,6 +1059,7 @@
           updatedByUid: admin.uid
         });
         transaction.set(legacyRef, {
+          uid: exactUid,
           enabled: false,
           role: 'teacher',
           updatedAt: fieldValue.serverTimestamp(),
@@ -1093,6 +1098,7 @@
         restored.updatedByUid = admin.uid;
         transaction.set(allowanceRef, restored);
         transaction.set(legacyRef, {
+          uid: exactUid,
           enabled: true,
           role: 'teacher',
           updatedAt: fieldValue.serverTimestamp(),
@@ -1641,13 +1647,21 @@
           throw new Error('class plan revision이 변경되었습니다.');
         }
         if (session.status !== 'live') throw new Error('활성화된 live session만 연결할 수 있습니다.');
+        const participantCount = session.registeredStudentCount;
+        if (!Number.isSafeInteger(participantCount) || participantCount < 0 ||
+            session.studentCountRevision !== participantCount ||
+            (participantCount === 0
+              ? session.lastStudentUid !== undefined
+              : typeof session.lastStudentUid !== 'string' || !session.lastStudentUid)) {
+          throw new Error('session participant counter가 유효하지 않습니다.');
+        }
         const startedAtMs = classPlanTimestamp(session.createdAt, 'session createdAt');
         const update = {
           status: 'live', sessionId: exactSessionId, actualStartedAt: session.createdAt,
           revision: revision + 1, updatedAt: fieldValue.serverTimestamp()
         };
         transaction.update(pair.privateRef, update);
-        transaction.update(pair.publicRef, update);
+        transaction.update(pair.publicRef, { ...update, actualParticipants: participantCount });
         transaction.update(sessionRef, {
           classPlanId: id,
           classPlanRevision: revision + 1
@@ -3221,7 +3235,7 @@
         }
         transaction.set(allowanceRef, next);
         transaction.set(legacyRef, {
-          enabled: next.enabled, role: next.role,
+          uid, enabled: next.enabled, role: next.role,
           updatedAt: fieldValue.serverTimestamp(), updatedByUid: admin.uid
         });
         return { ...next };
