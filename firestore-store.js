@@ -716,6 +716,8 @@
     }
 
     const CLASS_PLAN_WINDOW_MAX_MS = 31 * 24 * 60 * 60 * 1000;
+    const CLASS_PLAN_QUERY_PAST_MS = 24 * 60 * 60 * 1000;
+    const CLASS_PLAN_QUERY_FUTURE_MS = 32 * 24 * 60 * 60 * 1000;
     const classPlanPrivateBaseKeys = [
       'planId', 'ownerUid', 'ownerEmailCanonical', 'ownerDisplayName',
       'setId', 'setTitleSnapshot', 'className', 'plannedStartAt', 'plannedEndAt',
@@ -925,7 +927,29 @@
         const privateSnapshot = await transaction.get(privateRef);
         const publicSnapshot = await transaction.get(publicRef);
         if (privateSnapshot.exists || publicSnapshot.exists) {
-          throw new Error('class plan ID가 이미 존재하거나 pair가 손상되었습니다.');
+          if (!privateSnapshot.exists || !publicSnapshot.exists) {
+            throw new Error('class plan ID가 이미 존재하거나 pair가 손상되었습니다.');
+          }
+          const existing = assertClassPlanPair(
+            privateSnapshot.data(), publicSnapshot.data(), true
+          ).privateValue;
+          const comparableKeys = [
+            'planId', 'ownerUid', 'ownerEmailCanonical', 'ownerDisplayName',
+            'setId', 'setTitleSnapshot', 'className', 'plannedStartAt', 'plannedEndAt',
+            'expectedStudents', 'status', 'revision', 'warningLevel',
+            'warningAcknowledgedAt', 'sessionId', 'actualStartedAtMs',
+            'actualEndedAtMs', 'actualParticipants'
+          ];
+          const comparable = value => comparableKeys.map(key => {
+            const current = value[key];
+            return current === undefined ? null : current;
+          });
+          if (existing.status !== 'planned' || existing.revision !== 1 ||
+              JSON.stringify(comparable(existing)) !==
+                JSON.stringify(comparable(pair.privateValue))) {
+            throw new Error('기존 class plan이 exact revision-1 planned pair와 일치하지 않습니다.');
+          }
+          return { ...existing };
         }
         const documents = storedClassPlanDocuments(pair.privateValue);
         transaction.set(privateRef, documents.privateDocument);
@@ -1017,6 +1041,13 @@
       if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
         throw new Error('class plan query limit은 1~100이어야 합니다.');
       }
+      const now = serverNow();
+      if (start < now - CLASS_PLAN_QUERY_PAST_MS) {
+        throw new Error('class plan 조회 시작은 server-time 과거 horizon 안이어야 합니다.');
+      }
+      if (end > now + CLASS_PLAN_QUERY_FUTURE_MS) {
+        throw new Error('class plan 조회 끝은 server-time 미래 horizon 안이어야 합니다.');
+      }
       return { start, end, count };
     }
 
@@ -1061,7 +1092,8 @@
           throw new Error('class plan owner identity가 일치하지 않습니다.');
         }
         await requireActiveClassPlanOwner(transaction, pair.privateValue);
-        const sessionSnapshot = await transaction.get(db.doc('sessions/' + exactSessionId));
+        const sessionRef = db.doc('sessions/' + exactSessionId);
+        const sessionSnapshot = await transaction.get(sessionRef);
         if (!sessionSnapshot.exists) throw new Error('연결할 session이 없습니다.');
         const session = sessionSnapshot.data() || {};
         if (session.teacherUid !== uid || session.setId !== pair.privateValue.setId ||
@@ -1070,6 +1102,10 @@
         }
         if (pair.privateValue.sessionId === exactSessionId &&
             ['live', 'ended'].includes(pair.privateValue.status)) {
+          if (session.classPlanId !== id ||
+              session.classPlanRevision !== pair.privateValue.revision) {
+            throw new Error('class plan과 session의 reciprocal attachment가 손상되었습니다.');
+          }
           return { ...pair.privateValue };
         }
         if (pair.privateValue.status !== 'planned' || pair.privateValue.sessionId !== undefined) {
@@ -1086,6 +1122,10 @@
         };
         transaction.update(pair.privateRef, update);
         transaction.update(pair.publicRef, update);
+        transaction.update(sessionRef, {
+          classPlanId: id,
+          classPlanRevision: revision + 1
+        });
         return {
           ...pair.privateValue, status: 'live', sessionId: exactSessionId,
           actualStartedAtMs: startedAtMs, revision: revision + 1
@@ -1097,8 +1137,6 @@
       const id = assertPlanId(planId);
       const exactSessionId = assertPlanId(sessionId);
       const revision = assertExpectedRevision(actuals && actuals.expectedRevision);
-      const students = await db.collection('sessions/' + exactSessionId + '/students')
-        .get({ source: 'server' });
       return db.runTransaction(async transaction => {
         const pair = await readClassPlanPair(transaction, id);
         const sessionSnapshot = await transaction.get(db.doc('sessions/' + exactSessionId));
@@ -1109,32 +1147,46 @@
             session.setId !== pair.privateValue.setId) {
           throw new Error('class plan과 종료 session identity가 일치하지 않습니다.');
         }
-        if (pair.privateValue.status === 'ended') return { ...pair.privateValue };
+        const count = session.registeredStudentCount;
+        const validCounter = Number.isSafeInteger(count) && count >= 0 &&
+          session.studentCountRevision === count && session.actualParticipants === count &&
+          session.classPlanId === id &&
+          (count === 0
+            ? session.lastStudentUid === undefined
+            : typeof session.lastStudentUid === 'string' && Boolean(session.lastStudentUid));
+        if (pair.privateValue.status === 'ended') {
+          if (session.status !== 'ended' || !validCounter ||
+              session.classPlanRevision !== pair.privateValue.revision ||
+              pair.privateValue.actualParticipants !== count ||
+              classPlanTimestamp(session.endedAt, 'session endedAt') !==
+                pair.privateValue.actualEndedAtMs) {
+            throw new Error('ended class plan의 authoritative session summary가 손상되었습니다.');
+          }
+          return { ...pair.privateValue };
+        }
         if (pair.privateValue.status !== 'live' || pair.privateValue.revision !== revision) {
           throw new Error('live class plan revision이 변경되었습니다.');
         }
         if (session.status !== 'ended') {
           throw new Error('authoritative session 종료 후에만 class plan을 ended로 만들 수 있습니다.');
         }
-        if (!Number.isSafeInteger(session.actualParticipants) ||
-            session.actualParticipants !== students.size) {
-          throw new Error('authoritative session participant count와 학생 집계가 일치하지 않습니다.');
+        if (!validCounter || session.classPlanRevision !== revision) {
+          throw new Error('authoritative session participant counter와 plan attachment가 일치하지 않습니다.');
         }
         const endedAtMs = classPlanTimestamp(session.endedAt, 'session endedAt');
-        for (const student of students.docs) {
-          const current = await transaction.get(student.ref);
-          if (!current.exists) throw new Error('종료 학생 집계가 변경되어 다시 시도해야 합니다.');
-        }
         const update = {
           status: 'ended', actualEndedAt: session.endedAt,
-          actualParticipants: students.size, revision: revision + 1,
+          actualParticipants: count, revision: revision + 1,
           updatedAt: fieldValue.serverTimestamp()
         };
         transaction.update(pair.privateRef, update);
         transaction.update(pair.publicRef, update);
+        transaction.update(db.doc('sessions/' + exactSessionId), {
+          classPlanRevision: revision + 1
+        });
         return {
           ...pair.privateValue, status: 'ended', actualEndedAtMs: endedAtMs,
-          actualParticipants: students.size, revision: revision + 1
+          actualParticipants: count, revision: revision + 1
         };
       });
     }
@@ -1886,6 +1938,9 @@
       delete storedSession.snapshotImages;
       delete storedSession.allocationToken;
       storedSession.status = 'allocating';
+      storedSession.registeredStudentCount = 0;
+      storedSession.studentCountRevision = 0;
+      delete storedSession.lastStudentUid;
       if (setSnapshot) storedSession.snapshotVersion = 1;
       const snapshotOperations = [
         {
@@ -2075,15 +2130,37 @@
     }
 
     async function joinStudent(sessionId, authUid, profile) {
-      const reference = db.doc('sessions/' + sessionId + '/students/' + authUid);
-      const current = await reference.get().then(snapshotValue);
-      const student = {
-        ...(profile || {}),
-        uid: authUid,
-        joinedAt: current && current.joinedAt || fieldValue.serverTimestamp()
-      };
-      await reference.set(student);
-      return student;
+      const sessionReference = db.doc('sessions/' + sessionId);
+      const studentReference = db.doc('sessions/' + sessionId + '/students/' + authUid);
+      return db.runTransaction(async transaction => {
+        const sessionSnapshot = await transaction.get(sessionReference);
+        const studentSnapshot = await transaction.get(studentReference);
+        if (!sessionSnapshot.exists) throw new Error('학생이 참여할 session이 없습니다.');
+        const session = sessionSnapshot.data() || {};
+        const current = studentSnapshot.exists ? studentSnapshot.data() || {} : null;
+        const count = session.registeredStudentCount;
+        const revision = session.studentCountRevision;
+        if (!Number.isSafeInteger(count) || count < 0 || revision !== count) {
+          throw new Error('session student counter migration이 필요합니다.');
+        }
+        if (!['active', 'live'].includes(session.status)) {
+          throw new Error('종료된 session에는 학생이 참여할 수 없습니다.');
+        }
+        const student = {
+          ...(profile || {}),
+          uid: authUid,
+          joinedAt: current && current.joinedAt || fieldValue.serverTimestamp()
+        };
+        transaction.set(studentReference, student);
+        if (!current) {
+          transaction.update(sessionReference, {
+            registeredStudentCount: count + 1,
+            studentCountRevision: revision + 1,
+            lastStudentUid: authUid
+          });
+        }
+        return student;
+      });
     }
 
     async function getOwnResponses(sessionId, studentId) {
@@ -2308,6 +2385,25 @@
             if (session.teacherUid !== teacherUid || session.code !== code) {
               return { allowed: false, complete: false };
             }
+            if (session.classPlanId !== undefined) {
+              const planId = assertPlanId(session.classPlanId);
+              const privatePlanSnapshot = await transaction.get(
+                db.doc('class_plans_private/' + planId)
+              );
+              const publicPlanSnapshot = await transaction.get(
+                db.doc('class_plans_public/' + planId)
+              );
+              if (!privatePlanSnapshot.exists || !publicPlanSnapshot.exists) {
+                return { allowed: false, complete: false };
+              }
+              const plan = assertClassPlanPair(
+                privatePlanSnapshot.data(), publicPlanSnapshot.data(), true
+              ).privateValue;
+              if (plan.sessionId === sessionId && ['live', 'ended'].includes(plan.status)) {
+                return { allowed: false, complete: false };
+              }
+              return { allowed: false, complete: false };
+            }
             if (allocationToken) {
               const allocationSnapshot = await transaction.get(allocationReference);
               const allocation = allocationSnapshot.exists ? allocationSnapshot.data() || {} : null;
@@ -2382,6 +2478,23 @@
           allocation.token !== pending.token) {
         return { complete: false, ignored: true };
       }
+      if (pending.planId && ['attaching', 'attached'].includes(pending.attachStatus)) {
+        if (!pending.ownerEmail || !pending.setId || !Number.isSafeInteger(pending.planRevision)) {
+          return { complete: false, ignored: true };
+        }
+        if (session.setId !== pending.setId) return { complete: false, ignored: true };
+        const attached = await attachPlanToSession(
+          pending.planId, pending.sessionId, {
+            uid: pending.ownerUid,
+            email: pending.ownerEmail,
+            expectedRevision: pending.planRevision
+          }
+        );
+        return {
+          complete: false, active: true, attached: true,
+          planRevision: attached.revision
+        };
+      }
       if (session.status === 'live') {
         const leaseUntil = timestampMillis(session.activationLeaseUntil);
         if (leaseUntil && nowFn() + serverOffset <= leaseUntil) {
@@ -2417,8 +2530,6 @@
     }
 
     async function endSession(sessionId) {
-      const students = await db.collection('sessions/' + sessionId + '/students')
-        .get({ source: 'server' });
       const sessionRef = db.doc('sessions/' + sessionId);
       const liveRef = db.doc('sessions/' + sessionId + '/meta/live');
       return db.runTransaction(async transaction => {
@@ -2429,20 +2540,34 @@
         }
         const session = sessionSnapshot.data() || {};
         const live = liveSnapshot.data() || {};
-        if (session.status === 'ended' && live.status === 'ended') {
+        const count = session.registeredStudentCount;
+        const revision = session.studentCountRevision;
+        if (!Number.isSafeInteger(count) || count < 0 || revision !== count ||
+            (count === 0 && session.lastStudentUid !== undefined) ||
+            (count > 0 && (typeof session.lastStudentUid !== 'string' || !session.lastStudentUid))) {
+          throw new Error('session student counter migration이 필요합니다.');
+        }
+        if (session.status === 'ended' && live.status === 'ended' &&
+            session.actualParticipants === count) {
           return {
             endedAt: session.endedAt,
             actualParticipants: session.actualParticipants
           };
         }
-        for (const student of students.docs) {
-          const current = await transaction.get(student.ref);
-          if (!current.exists) throw new Error('학생 집계가 변경되어 종료를 다시 시도해야 합니다.');
+        if (session.status === 'ended' && live.status === 'ended') {
+          transaction.set(sessionRef, { actualParticipants: count }, { merge: true });
+          transaction.set(liveRef, {
+            q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
+          });
+          return { endedAt: session.endedAt, actualParticipants: count, repaired: true };
+        }
+        if (!['active', 'live'].includes(session.status)) {
+          throw new Error('종료할 수 없는 session 상태입니다.');
         }
         transaction.set(sessionRef, {
           status: 'ended',
           endedAt: fieldValue.serverTimestamp(),
-          actualParticipants: students.size
+          actualParticipants: count
         }, { merge: true });
         transaction.set(liveRef, {
           q: -1,

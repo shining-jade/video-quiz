@@ -335,12 +335,17 @@ async function seedFirestore() {
         teacherUid: 'owner-uid',
         teacherEmail: 'owner@school.kr',
         status: 'live',
+        registeredStudentCount: 2,
+        studentCountRevision: 2,
+        lastStudentUid: 'other-student-uid',
         activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
       }),
       setDoc(doc(db, 'sessions/s2'), {
         teacherUid: 'other-teacher-uid',
         teacherEmail: 'other@school.kr',
         status: 'live',
+        registeredStudentCount: 0,
+        studentCountRevision: 0,
         activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
       }),
       setDoc(doc(db, 'sessions/s1/meta/live'), {
@@ -569,19 +574,41 @@ rulesTest('class-planning: public/private get and bounded list follow the role p
 
   const boundedPublic = query(
     collection(owner, 'class_plans_public'),
-    where('plannedStartAt', '>=', Timestamp.fromMillis(1)),
-    where('plannedStartAt', '<', Timestamp.fromMillis(50_000)),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(Date.now() - 60 * 60 * 1000)),
+    where('plannedStartAt', '<', Timestamp.fromMillis(Date.now() + 60 * 60 * 1000)),
     orderBy('plannedStartAt', 'asc'), queryLimit(20)
   );
   const boundedPrivate = query(
     collection(admin, 'class_plans_private'),
-    where('plannedStartAt', '>=', Timestamp.fromMillis(1)),
-    where('plannedStartAt', '<', Timestamp.fromMillis(50_000)),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(Date.now() - 60 * 60 * 1000)),
+    where('plannedStartAt', '<', Timestamp.fromMillis(Date.now() + 60 * 60 * 1000)),
     orderBy('plannedStartAt', 'asc'), queryLimit(20)
   );
   await assertSucceeds(getDocs(boundedPublic));
   await assertSucceeds(getDocs(boundedPrivate));
+  const transportBoundaryNow = Date.now();
+  await assertSucceeds(getDocs(query(
+    collection(owner, 'class_plans_public'),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(
+      transportBoundaryNow - 24 * 60 * 60 * 1000
+    )),
+    where('plannedStartAt', '<', Timestamp.fromMillis(transportBoundaryNow + 60 * 60 * 1000)),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  )));
   await assertFails(getDocs(collection(owner, 'class_plans_public')));
+  await assertFails(getDocs(query(collection(owner, 'class_plans_public'), queryLimit(20))));
+  await assertFails(getDocs(query(
+    collection(owner, 'class_plans_public'),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(Date.now() - 25 * 60 * 60 * 1000)),
+    where('plannedStartAt', '<', Timestamp.fromMillis(Date.now() + 60 * 60 * 1000)),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  )));
+  await assertFails(getDocs(query(
+    collection(owner, 'class_plans_public'),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(Date.now() - 60 * 60 * 1000)),
+    where('plannedStartAt', '<', Timestamp.fromMillis(Date.now() + 33 * 24 * 60 * 60 * 1000)),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  )));
   await assertFails(getDocs(query(collection(owner, 'class_plans_public'), queryLimit(101))));
   await assertFails(getDocs(query(collection(owner, 'class_plans_private'), queryLimit(20))));
 });
@@ -591,11 +618,13 @@ rulesTest('class-planning: exact pair revision and plan-session identity gate up
   await adminWrite('sessions/plan-session', {
     teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
     status: 'live', createdAt: Timestamp.fromMillis(12_000),
+    registeredStudentCount: 0, studentCountRevision: 0,
     activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
   });
   await adminWrite('sessions/wrong-set-session', {
     teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set2',
     status: 'live', createdAt: Timestamp.fromMillis(12_000),
+    registeredStudentCount: 0, studentCountRevision: 0,
     activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
   });
   const owner = actorFirestore('owner');
@@ -635,6 +664,9 @@ rulesTest('class-planning: exact pair revision and plan-session identity gate up
   });
   const attachBatch = writeBatch(owner);
   setClassPlanPair(attachBatch, owner, 'cas-plan', attached);
+  attachBatch.update(doc(owner, 'sessions/plan-session'), {
+    classPlanId: 'cas-plan', classPlanRevision: 3
+  });
   await assertSucceeds(attachBatch.commit());
 });
 
@@ -646,7 +678,9 @@ rulesTest('class-planning: ended actuals must match the linked authoritative ses
   await adminWrite('sessions/finish-session', {
     teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
     status: 'ended', createdAt: Timestamp.fromMillis(12_000),
-    endedAt: Timestamp.fromMillis(25_000), actualParticipants: 2
+    endedAt: Timestamp.fromMillis(25_000), actualParticipants: 2,
+    registeredStudentCount: 2, studentCountRevision: 2, lastStudentUid: 'student-2',
+    classPlanId: 'finish-plan', classPlanRevision: 2
   });
   const owner = actorFirestore('owner');
 
@@ -659,9 +693,77 @@ rulesTest('class-planning: ended actuals must match the linked authoritative ses
     });
     const batch = writeBatch(owner);
     setClassPlanPair(batch, owner, 'finish-plan', ended);
+    batch.update(doc(owner, 'sessions/finish-session'), { classPlanRevision: 3 });
     if (actualParticipants === 2) await assertSucceeds(batch.commit());
     else await assertFails(batch.commit());
   }
+});
+
+rulesTest('class-planning: attached live session은 abort와 parent delete로 고아화할 수 없다', async () => {
+  await writeClassPlanPairDisabled('protected-plan', {
+    status: 'live', revision: 2, sessionId: 'protected-session',
+    actualStartedAt: Timestamp.fromMillis(12_000)
+  });
+  await adminWrite('sessions/protected-session', {
+    code: 'PROT12', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr',
+    setId: 'set1', status: 'live', createdAt: Timestamp.fromMillis(12_000),
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() - 1_000),
+    registeredStudentCount: 0, studentCountRevision: 0,
+    classPlanId: 'protected-plan', classPlanRevision: 2
+  });
+  await adminWrite('sessions/protected-session/meta/allocation', {
+    token: 'protected-token-1234', ownerUid: 'owner-uid'
+  });
+  await adminWrite('codes/PROT12', { sessionId: 'protected-session' });
+  const owner = actorFirestore('owner');
+  const store = emulatorStore(owner);
+
+  assert.equal(await store.abortSessionAllocation(
+    'protected-session', 'PROT12', 'owner-uid', 'protected-token-1234'
+  ), false);
+  await assertFails(updateDoc(doc(owner, 'sessions/protected-session'), {
+    status: 'aborted', abortedAt: serverTimestamp()
+  }));
+  await assertFails(deleteDoc(doc(owner, 'sessions/protected-session')));
+  assert.equal((await getDoc(doc(owner, 'sessions/protected-session'))).data().status, 'live');
+});
+
+rulesTest('session student counter는 최초 child create와 exact atomic pair일 때만 증가한다', async () => {
+  const student = actorFirestore('anonymous');
+  const owner = actorFirestore('owner');
+  const parent = doc(student, 'sessions/s1');
+  const child = doc(student, 'sessions/s1/students/new-student-uid');
+  const profile = { uid: 'new-student-uid', grade: 1, klass: 1, num: 5, name: '신규' };
+
+  await assertFails(setDoc(child, profile));
+  await assertFails(updateDoc(parent, {
+    registeredStudentCount: 3, studentCountRevision: 3,
+    lastStudentUid: 'new-student-uid'
+  }));
+  const wrongUid = writeBatch(student);
+  wrongUid.update(parent, {
+    registeredStudentCount: 3, studentCountRevision: 3,
+    lastStudentUid: 'other-student-uid'
+  });
+  wrongUid.set(child, profile);
+  await assertFails(wrongUid.commit());
+
+  const paired = writeBatch(student);
+  paired.update(parent, {
+    registeredStudentCount: 3, studentCountRevision: 3,
+    lastStudentUid: 'new-student-uid'
+  });
+  paired.set(child, profile);
+  await assertSucceeds(paired.commit());
+
+  const replay = writeBatch(student);
+  replay.update(parent, {
+    registeredStudentCount: 4, studentCountRevision: 4,
+    lastStudentUid: 'new-student-uid'
+  });
+  replay.set(child, { ...profile, name: '재가입' });
+  await assertFails(replay.commit());
+  assert.equal((await getDoc(doc(owner, 'sessions/s1'))).data().registeredStudentCount, 3);
 });
 
 rulesTest('teacher-access: teacher request owner may create, server-read, and cancel only the exact own pending request', async () => {
@@ -1109,7 +1211,8 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
     await resetFirestore();
     await adminWrite('sessions/partial', {
       code: 'PART23', setId: 'set1', teacherUid: actors.owner.uid,
-      teacherEmail: actors.owner.email, status: 'aborted'
+      teacherEmail: actors.owner.email, status: 'aborted',
+      registeredStudentCount: 0, studentCountRevision: 0
     });
     await adminWrite('sessions/partial/meta/live', { q: -1, openedAt: 0, revealed: false, limitSec: 0 });
     await adminWrite('sessions/partial/meta/board', { scores: {} });
@@ -1127,11 +1230,13 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
     await resetFirestore();
     await adminWrite('sessions/old-allocation', {
       code: 'REASN2', setId: 'set1', teacherUid: actors.owner.uid,
-      teacherEmail: actors.owner.email, status: 'allocating'
+      teacherEmail: actors.owner.email, status: 'allocating',
+      registeredStudentCount: 0, studentCountRevision: 0
     });
     await adminWrite('sessions/new-allocation', {
       code: 'REASN2', setId: 'set1', teacherUid: actors.owner.uid,
-      teacherEmail: actors.owner.email, status: 'live'
+      teacherEmail: actors.owner.email, status: 'live',
+      registeredStudentCount: 0, studentCountRevision: 0
     });
     await adminWrite('codes/REASN2', { sessionId: 'new-allocation' });
 
@@ -1166,6 +1271,8 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
     teacherUid: actors.owner.uid,
     teacherEmail: actors.owner.email,
     status: 'allocating',
+    registeredStudentCount: 0,
+    studentCountRevision: 0,
     activationLeaseUntil: Timestamp.fromMillis(Date.now() + 180_000)
   }));
   await assertFails(updateDoc(
@@ -1296,6 +1403,42 @@ rulesTest('등록 학생 live listener는 atomic endSession의 ended projection�
   await assertFails(getDoc(doc(actorFirestore('anonymous'), 'sessions/s1/meta/live')));
 });
 
+rulesTest('join/end transaction barrier에서 종료가 이기면 join 재시도는 fail closed되고 live가 stranded되지 않는다', async () => {
+  const now = Date.now();
+  await adminWrite('sessions/race-session', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', activationLeaseUntil: Timestamp.fromMillis(now + 60_000),
+    registeredStudentCount: 0, studentCountRevision: 0
+  });
+  await adminWrite('sessions/race-session/meta/live', liveQuestion(0));
+  let reachedParent;
+  let releaseParent;
+  const reached = new Promise(resolve => { reachedParent = resolve; });
+  const release = new Promise(resolve => { releaseParent = resolve; });
+  const joiningStore = emulatorStore(actorFirestore('anonymous'), null, {
+    path: 'sessions/race-session',
+    async wait() { reachedParent(); await release; }
+  });
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+
+  const joining = joiningStore.joinStudent('race-session', 'new-student-uid', {
+    name: '신규', grade: 1, klass: 1, num: 7
+  });
+  await reached;
+  await ownerStore.endSession('race-session');
+  releaseParent();
+  await assert.rejects(joining);
+
+  const ended = (await getDoc(doc(actorFirestore('owner'), 'sessions/race-session'))).data();
+  assert.equal(ended.status, 'ended');
+  assert.equal(ended.actualParticipants, 0);
+  assert.equal(ended.registeredStudentCount, 0);
+  assert.equal((await getDoc(doc(actorFirestore('owner'),
+    'sessions/race-session/students/new-student-uid'))).exists(), false);
+  assert.equal((await getDoc(doc(actorFirestore('owner'),
+    'sessions/race-session/meta/live'))).data().status, 'ended');
+});
+
 rulesTest('fix-round-4: ended live projection은 같은 atomic parent 종료에서만 쓸 수 있다', async t => {
   const safeEndedLive = {
     q: -1,
@@ -1305,18 +1448,24 @@ rulesTest('fix-round-4: ended live projection은 같은 atomic parent 종료에�
     status: 'ended'
   };
 
-  await t.test('parent-only 종료는 유지되지만 뒤이은 live-only ended 쓰기를 허용하지 않는다', async () => {
+  await t.test('parent-only forged ended와 actualParticipants는 모두 거부된다', async () => {
     await resetFirestore();
     const owner = actorFirestore('owner');
     const sessionReference = doc(owner, 'sessions/s1');
     const liveReference = doc(owner, 'sessions/s1/meta/live');
 
-    await assertSucceeds(updateDoc(sessionReference, {
+    await assertFails(updateDoc(sessionReference, {
       status: 'ended',
-      endedAt: serverTimestamp()
+      endedAt: serverTimestamp(),
+      actualParticipants: 999
     }));
     assert.equal((await getDoc(liveReference)).data().q, 0);
     await assertFails(setDoc(liveReference, safeEndedLive));
+    await assertFails(setDoc(doc(owner, 'sessions/forged-ended-create'), {
+      teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'ended',
+      endedAt: serverTimestamp(), actualParticipants: 999,
+      registeredStudentCount: 0, studentCountRevision: 0
+    }));
   });
 
   await t.test('live-only forged ended는 grace가 끝난 뒤에도 거부된다', async () => {
@@ -1972,6 +2121,8 @@ rulesTest('fix-round: teacher code allocation reads unused and foreign collision
       teacherUid: 'owner-uid',
       teacherEmail: 'owner@school.kr',
       status: 'live',
+      registeredStudentCount: 0,
+      studentCountRevision: 0,
       activationLeaseUntil: Timestamp.fromMillis(Date.now() + 10_000)
     });
     transaction.set(doc(owner, 'sessions/created-session/meta/live'), {
@@ -2002,13 +2153,9 @@ rulesTest('fix-round: live session supports read-before-create student join flow
   const studentReference = doc(student, 'sessions/s1/students/joining-student-uid');
   const missingStudent = await assertSucceeds(getDoc(studentReference));
   assert.equal(missingStudent.exists(), false);
-  await assertSucceeds(setDoc(studentReference, {
-    uid: 'joining-student-uid',
-    grade: 1,
-    class: 2,
-    number: 5,
-    name: '신규 학생'
-  }));
+  await emulatorStore(student).joinStudent('s1', 'joining-student-uid', {
+    grade: 1, klass: 2, num: 5, name: '신규 학생'
+  });
   const missingResponse = await assertSucceeds(getDoc(
     doc(student, 'sessions/s1/responses/joining-student-uid')
   ));
@@ -2452,13 +2599,15 @@ const writeMatrix = [
       teacherUid: actors[actorName].uid,
       teacherEmail: actors[actorName].email || '',
       status: 'live',
+      registeredStudentCount: 0,
+      studentCountRevision: 0,
       activationLeaseUntil: serverTimestamp()
     }),
     updateValue: () => ({ status: 'ended' }),
     allowed: {
       create: approvedTeachers,
-      update: ['owner'],
-      delete: ['owner', 'admin']
+      update: [],
+      delete: ['admin']
     }
   },
   {
@@ -2501,7 +2650,7 @@ const writeMatrix = [
       name: '참여 학생'
     }),
     updateValue: () => ({ number: 10 }),
-    allowed: { create: ['student', 'anonymous'], update: ['student'], delete: ['owner', 'admin'] }
+    allowed: { create: [], update: ['student'], delete: ['admin'] }
   },
   {
     name: '응답',
@@ -3086,15 +3235,18 @@ rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용�
   const other = actorFirestore('otherTeacher');
   await assertSucceeds(setDoc(doc(other, 'sessions/active-source'), {
     setId: 'set1', teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active'
+    teacherEmail: actors.otherTeacher.email, status: 'active',
+    registeredStudentCount: 0, studentCountRevision: 0
   }));
   await assertFails(setDoc(doc(other, 'sessions/missing-source'), {
     setId: 'does-not-exist', teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active'
+    teacherEmail: actors.otherTeacher.email, status: 'active',
+    registeredStudentCount: 0, studentCountRevision: 0
   }));
   await assertFails(setDoc(doc(other, 'sessions/non-string-source'), {
     setId: 123, teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active'
+    teacherEmail: actors.otherTeacher.email, status: 'active',
+    registeredStudentCount: 0, studentCountRevision: 0
   }));
 });
 

@@ -1122,18 +1122,26 @@ test('학생 응답 client validation은 공개 문항 유형과 같은 경계�
 });
 
 test('학생 참여는 자기 UID 문서를 먼저 읽고 프로필 필드로 저장한다', async () => {
-  const fake = makeFirestoreFake();
+  const fake = makeFirestoreFake({
+    'sessions/session-a': {
+      status: 'live', registeredStudentCount: 0, studentCountRevision: 0
+    }
+  });
   const store = createStore(fake);
 
   const student = await store.joinStudent('session-a', 'anonymous-uid', {
     grade: 3, klass: 2, num: 7, name: '홍길동'
   });
 
-  assert.deepEqual(fake.calls().filter(call => ['get', 'set'].includes(call.operation)).map(call => [
+  assert.deepEqual(fake.calls().filter(call =>
+    ['transactionGet', 'transactionSet', 'transactionUpdate'].includes(call.operation)
+  ).map(call => [
     call.operation, call.path
   ]), [
-    ['get', 'sessions/session-a/students/anonymous-uid'],
-    ['set', 'sessions/session-a/students/anonymous-uid']
+    ['transactionGet', 'sessions/session-a'],
+    ['transactionGet', 'sessions/session-a/students/anonymous-uid'],
+    ['transactionSet', 'sessions/session-a/students/anonymous-uid'],
+    ['transactionUpdate', 'sessions/session-a']
   ]);
   const stored = fake.value('sessions/session-a/students/anonymous-uid');
   assert.deepEqual({ ...stored, joinedAt: stored.joinedAt.toMillis() }, {
@@ -1417,6 +1425,33 @@ test('class plan create rollback leaves neither side when the atomic commit fail
   assert.equal(fake.has('class_plans_public/plan-a'), false);
 });
 
+test('class plan create ambiguous commit retry accepts only the exact existing revision-1 pair', async () => {
+  const pair = storedClassPlanPair();
+  const exactFake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic
+  });
+  const retried = await createStore(exactFake).createClassPlan(
+    classPlanPair().privatePlan, classPlanPair().publicPlan
+  );
+  assert.equal(retried.planId, 'plan-a');
+  assert.equal(retried.revision, 1);
+  assert.equal(exactFake.calls().filter(call =>
+    ['transactionSet', 'transactionUpdate'].includes(call.operation)
+  ).length, 0);
+
+  const mismatchPair = storedClassPlanPair({ className: '다른 반' });
+  const mismatchFake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': mismatchPair.storedPrivate,
+    'class_plans_public/plan-a': mismatchPair.storedPublic
+  });
+  await assert.rejects(createStore(mismatchFake).createClassPlan(
+    classPlanPair().privatePlan, classPlanPair().publicPlan
+  ), /이미 존재|exact|일치|손상/);
+});
+
 test('class plan update and cancellation use exact revision CAS and keep both projections equal', async () => {
   const pair = storedClassPlanPair();
   const fake = makeFirestoreFake({
@@ -1487,6 +1522,13 @@ test('class plan public/admin queries require a bounded ordered server-time wind
   ]);
   await assert.rejects(store.listPublicPlans(25_000, 9_000, 20), /window|기간|범위/);
   await assert.rejects(store.listAdminPlans(9_000, 25_000, 101), /limit/);
+  await assert.rejects(store.listPublicPlans(
+    1_000 - 24 * 60 * 60 * 1000 - 1, 2_000, 20
+  ), /server|과거|horizon|범위/);
+  await assert.rejects(store.listPublicPlans(
+    1_000 + 2 * 24 * 60 * 60 * 1000,
+    1_000 + 32 * 24 * 60 * 60 * 1000 + 1, 20
+  ), /server|미래|horizon|범위/);
 });
 
 test('class plan attach rechecks active identity, revision, owner and set then binds one session idempotently', async () => {
@@ -1511,6 +1553,8 @@ test('class plan attach rechecks active identity, revision, owner and set then b
   assert.equal(attached.sessionId, 'session-a');
   assert.equal(fake.value('class_plans_public/plan-a').sessionId, 'session-a');
   assert.equal(fake.value('class_plans_public/plan-a').actualStartedAt.toMillis(), 12_000);
+  assert.equal(fake.value('sessions/session-a').classPlanId, 'plan-a');
+  assert.equal(fake.value('sessions/session-a').classPlanRevision, 2);
 
   const writesBeforeRetry = fake.calls().filter(call =>
     ['transactionSet', 'transactionUpdate'].includes(call.operation)
@@ -1545,10 +1589,9 @@ test('class plan finish ignores forged actuals and ends only after authoritative
     'sessions/session-a': {
       teacherUid: 'teacher-a', setId: 'set-a', status: 'ended',
       createdAt: { toMillis: () => 12_000 }, endedAt: { toMillis: () => 25_000 },
-      actualParticipants: 2
-    },
-    'sessions/session-a/students/student-1': { uid: 'student-1' },
-    'sessions/session-a/students/student-2': { uid: 'student-2' }
+      registeredStudentCount: 2, studentCountRevision: 2, lastStudentUid: 'student-2',
+      actualParticipants: 2, classPlanId: 'plan-a', classPlanRevision: 2
+    }
   });
   const store = createStore(fake);
 
@@ -1565,7 +1608,7 @@ test('class plan finish ignores forged actuals and ends only after authoritative
   assert.equal(stored.actualEndedAt.toMillis(), 25_000);
 });
 
-test('class plan finish rejects a session summary that disagrees with authoritative student documents', async () => {
+test('class plan finish rejects missing or mismatched persistent authoritative counter', async () => {
   const pair = storedClassPlanPair({
     status: 'live', revision: 2, sessionId: 'session-a', actualStartedAtMs: 12_000
   });
@@ -1579,10 +1622,8 @@ test('class plan finish rejects a session summary that disagrees with authoritat
     'sessions/session-a': {
       teacherUid: 'teacher-a', setId: 'set-a', status: 'ended',
       createdAt: { toMillis: () => 12_000 }, endedAt: { toMillis: () => 25_000 },
-      actualParticipants: 1
-    },
-    'sessions/session-a/students/student-1': { uid: 'student-1' },
-    'sessions/session-a/students/student-2': { uid: 'student-2' }
+      actualParticipants: 1, classPlanId: 'plan-a', classPlanRevision: 2
+    }
   });
 
   await assert.rejects(createStore(fake).finishClassPlan('plan-a', 'session-a', {
@@ -1591,9 +1632,12 @@ test('class plan finish rejects a session summary that disagrees with authoritat
   assert.equal(fake.value('class_plans_private/plan-a').status, 'live');
 });
 
-test('class plan session end records the authoritative student count in the atomic ended parent', async () => {
+test('class plan session end records the persistent authoritative student count in the atomic ended parent', async () => {
   const fake = makeFirestoreFake({
-    'sessions/session-a': { teacherUid: 'teacher-a', status: 'live' },
+    'sessions/session-a': {
+      teacherUid: 'teacher-a', status: 'live', registeredStudentCount: 2,
+      studentCountRevision: 2, lastStudentUid: 'student-2'
+    },
     'sessions/session-a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
     'sessions/session-a/students/student-1': { uid: 'student-1' },
     'sessions/session-a/students/student-2': { uid: 'student-2' }
@@ -4159,7 +4203,9 @@ test('빈 반 코드는 소유 교사 정보와 함께 한 트랜잭션에서 �
   const codeDocument = fake.value('codes/ABC234');
   assert.equal(codeDocument.sessionId, 'new');
   assert.equal(codeDocument.createdAt.toMillis(), 20_000);
-  assert.deepEqual(fake.value('sessions/new'), { ...session, status: 'allocating' });
+  assert.deepEqual(fake.value('sessions/new'), {
+    ...session, status: 'allocating', registeredStudentCount: 0, studentCountRevision: 0
+  });
   assert.deepEqual(fake.value('sessions/new/meta/live'), {
     q: -1, openedAt: 0, revealed: false, limitSec: 0
   });
@@ -4180,7 +4226,8 @@ test('세션 시작은 충돌한 후보를 건너뛰고 열 개 안에서 선점
 
   assert.equal(code, 'NEW234');
   assert.deepEqual(fake.value('sessions/new'), {
-    ...session, status: 'allocating', code: 'NEW234'
+    ...session, status: 'allocating', code: 'NEW234',
+    registeredStudentCount: 0, studentCountRevision: 0
   });
   assert.equal(fake.value('codes/NEW234').sessionId, 'new');
 });
@@ -4562,7 +4609,9 @@ test('live token identity works while the local openedAt server timestamp is unr
 
 test('세션 종료는 타이머 제출 유예 중에도 parent와 안전한 ended live를 원자적으로 쓴다', async () => {
   const fake = makeFirestoreFake({
-    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a': {
+      setId: 'set1', status: 'live', registeredStudentCount: 0, studentCountRevision: 0
+    },
     'sessions/a/meta/live': {
       q: 2,
       openedAt: 10,
@@ -4590,9 +4639,72 @@ test('세션 종료는 타이머 제출 유예 중에도 parent와 안전한 end
   assert.equal(fake.calls().filter(call => call.operation === 'batchCommit').length, 0);
 });
 
+test('attached live allocation abort는 server pair를 확인해 거부하고 ambiguous reload는 attach를 재개한다', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'attached', actualStartedAtMs: 12_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 12_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 12_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'codes/ATT123': { sessionId: 'attached' },
+    'sessions/attached': {
+      code: 'ATT123', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr',
+      setId: 'set-a', status: 'live', createdAt: { toMillis: () => 12_000 },
+      activationLeaseUntil: 1, classPlanId: 'plan-a', classPlanRevision: 2,
+      registeredStudentCount: 0, studentCountRevision: 0
+    },
+    'sessions/attached/meta/allocation': { token: 'attached-token-1234', ownerUid: 'teacher-a' }
+  });
+  const { createFirestoreStore } = loadStoreModule();
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 100_000);
+
+  assert.equal(await store.abortSessionAllocation(
+    'attached', 'ATT123', 'teacher-a', 'attached-token-1234'
+  ), false);
+  assert.equal(fake.value('sessions/attached').status, 'live');
+  assert.deepEqual(await store.recoverPendingSessionAllocation({
+    sessionId: 'attached', code: 'ATT123', ownerUid: 'teacher-a',
+    ownerEmail: 'teacher@school.kr', token: 'attached-token-1234',
+    planId: 'plan-a', planRevision: 1, setId: 'set-a', attachStatus: 'attaching'
+  }), { complete: false, active: true, attached: true, planRevision: 2 });
+  assert.equal(fake.value('sessions/attached').status, 'live');
+});
+
+test('학생 최초 join만 parent counter와 exact pair로 증가하고 재가입 프로필 수정은 증가시키지 않는다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a': {
+      teacherUid: 'teacher-a', status: 'live',
+      registeredStudentCount: 0, studentCountRevision: 0
+    }
+  });
+  const store = createStore(fake);
+
+  await store.joinStudent('a', 'student-1', { name: '가', grade: 1 });
+  await store.joinStudent('a', 'student-1', { name: '가 수정', grade: 2 });
+  await store.joinStudent('a', 'student-2', { name: '나', grade: 1 });
+
+  assert.deepEqual(fake.value('sessions/a'), {
+    teacherUid: 'teacher-a', status: 'live',
+    registeredStudentCount: 2, studentCountRevision: 2,
+    lastStudentUid: 'student-2'
+  });
+  assert.equal(fake.value('sessions/a/students/student-1').name, '가 수정');
+  assert.equal(fake.value('sessions/a/students/student-1').joinedAt.toMillis(), 50_000);
+  assert.equal(fake.calls().filter(call =>
+    call.operation === 'transactionUpdate' && call.path === 'sessions/a'
+  ).length, 2);
+});
+
 test('세션 종료 재시도는 이미 확정된 ended 시각과 참여 집계를 다시 쓰지 않는다', async () => {
   const fake = makeFirestoreFake({
-    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a': {
+      setId: 'set1', status: 'live', registeredStudentCount: 0, studentCountRevision: 0
+    },
     'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
   }, { committedServerMillis: 20_000 });
   const store = createStore(fake);
@@ -4602,6 +4714,55 @@ test('세션 종료 재시도는 이미 확정된 ended 시각과 참여 집계�
   await store.endSession('a');
 
   assert.equal(fake.value('sessions/a').endedAt.toMillis(), firstEndedAt.toMillis());
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 2);
+});
+
+test('세션 종료는 student query 결과가 아니라 paired parent counter만 actualParticipants로 확정한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a': {
+      setId: 'set1', status: 'live', registeredStudentCount: 2, studentCountRevision: 2,
+      lastStudentUid: 'student-2'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    'sessions/a/students/student-1': { uid: 'student-1' }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').actualParticipants, 2);
+  assert.equal(fake.calls().some(call =>
+    call.operation === 'getCollection' && call.path === 'sessions/a/students'
+  ), false);
+});
+
+test('counter 없는 legacy session 종료는 추정하지 않고 fail closed로 live를 보존한다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    'sessions/a/students/student-1': { uid: 'student-1' }
+  });
+
+  await assert.rejects(createStore(fake).endSession('a'), /counter|migration|집계/);
+  assert.equal(fake.value('sessions/a').status, 'live');
+  assert.equal(fake.value('sessions/a/meta/live').status, undefined);
+});
+
+test('ended 재시도는 preserved endedAt으로 actual count를 counter invariant에 복구한다', async () => {
+  const endedAt = { toMillis: () => 20_000 };
+  const fake = makeFirestoreFake({
+    'sessions/a': {
+      setId: 'set1', status: 'ended', endedAt, actualParticipants: 1,
+      registeredStudentCount: 2, studentCountRevision: 2, lastStudentUid: 'student-2'
+    },
+    'sessions/a/meta/live': {
+      q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
+    }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').actualParticipants, 2);
+  assert.equal(fake.value('sessions/a').endedAt.toMillis(), 20_000);
   assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 2);
 });
 
@@ -6059,11 +6220,58 @@ test('allocation 실패 재시도는 저장된 planned 계획과 동일 session 
   assert.equal(context.pl.classPlanAttached, true);
 });
 
+test('계획 create 응답이 유실돼도 같은 plan ID exact retry 뒤 allocation을 계속한다', async () => {
+  let creates = 0, allocations = 0;
+  const context = {
+    ...pendingAllocationTestContext(),
+    pl: {
+      setId: 'set1', set: { title: '세트', author: '교사', videos: [] }, flatQuestions: [],
+      reviewedClassPlan: { privatePlan: { planId: 'plan-a', revision: 1 }, publicPlan: { planId: 'plan-a' } }
+    },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    $() { return { value: '' }; }, lsSet() {},
+    rid(length) { return length === 12 ? 'SESSION-STABLE' : length === 24 ? 'token-stable-123456789012' : 'CODE12'; },
+    SV_TS: SERVER_TIMESTAMP, normSet(value) { return value; }, imgCache: {},
+    store: {
+      async createClassPlan(privatePlan) {
+        creates += 1;
+        assert.equal(privatePlan.planId, 'plan-a');
+        if (creates === 1) throw new Error('commit response lost');
+        return { planId: 'plan-a', revision: 1 };
+      },
+      async getQuizSetSnapshot() { return { setSnapshot: context.pl.set, snapshotImages: {} }; },
+      async startSession() { allocations += 1; return 'CODE12'; },
+      async activateSessionAllocation() { return true; },
+      async attachPlanToSession() { return { revision: 2 }; }
+    },
+    renderPlayRun() {}, alert() {}, console: { error() {} }
+  };
+  loadStageFunctions(['plStartSessionHeartbeat', 'plStartSession'], context);
+
+  await context.plStartSession();
+  assert.equal(allocations, 0);
+  await context.plStartSession();
+
+  assert.equal(creates, 2);
+  assert.equal(allocations, 1);
+  assert.equal(context.pl.classPlanAttached, true);
+});
+
 test('attach 응답 실패 재시도는 활성 allocation을 덮어쓰지 않고 같은 identity로 attach만 재시도한다', async () => {
   let allocations = 0, attachAttempts = 0, renders = 0;
   const attaches = [];
+  const records = new Map();
   const context = {
-    ...pendingAllocationTestContext(),
+    ...pendingAllocationTestContext({
+      pendingAllocationRemember(record) { records.set(record.sessionId, clone(record)); return true; },
+      pendingAllocationPatch(sessionId, patch) {
+        records.set(sessionId, { ...records.get(sessionId), ...clone(patch) }); return true;
+      },
+      pendingAllocationRemove(sessionId) { records.delete(sessionId); return true; }
+    }),
     pl: {
       setId: 'set1', set: { title: '세트', author: '교사', videos: [] }, flatQuestions: [],
       reviewedClassPlan: { privatePlan: { planId: 'plan-a', revision: 1 }, publicPlan: { planId: 'plan-a' } }
@@ -6095,6 +6303,12 @@ test('attach 응답 실패 재시도는 활성 allocation을 덮어쓰지 않고
   await context.plStartSession();
   assert.equal(context.pl.classPlanAllocationActivated, true);
   assert.equal(renders, 0);
+  assert.deepEqual({
+    planId: records.get('SESSION-STABLE').planId,
+    planRevision: records.get('SESSION-STABLE').planRevision,
+    setId: records.get('SESSION-STABLE').setId,
+    attachStatus: records.get('SESSION-STABLE').attachStatus
+  }, { planId: 'plan-a', planRevision: 1, setId: 'set1', attachStatus: 'attaching' });
   await context.plStartSession();
 
   assert.equal(allocations, 1);
@@ -6103,6 +6317,8 @@ test('attach 응답 실패 재시도는 활성 allocation을 덮어쓰지 않고
   ]);
   assert.equal(context.pl.classPlanAttached, true);
   assert.equal(renders, 1);
+  assert.equal(records.get('SESSION-STABLE').attachStatus, 'attached');
+  assert.equal(records.get('SESSION-STABLE').planRevision, 2);
 });
 
 test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 전달한다', async () => {
@@ -9809,6 +10025,62 @@ test('admin Google 역할을 통과한 관리자 화면은 폐기된 비밀번�
     ['cleanup', 'function'],
     ['render']
   ]);
+});
+
+test('ambiguous attach 뒤 reload recovery는 plan/revision/status를 보존하고 attached live를 삭제하지 않는다', async () => {
+  const values = new Map();
+  const localStorage = {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, String(value)); }
+  };
+  const key = 'vq_pending_allocations_v1';
+  values.set(key, JSON.stringify([{
+    sessionId: 'attached-session', code: 'ATT123', ownerUid: 'owner-user',
+    ownerEmail: 'owner@school.kr', token: 'attached-token-1234',
+    createdAt: 1, recoverAfter: 2, planId: 'plan-a', planRevision: 1,
+    setId: 'set-a', attachStatus: 'attaching'
+  }]));
+  let scheduled = 0;
+  const context = {
+    PENDING_ALLOCATION_KEY: key,
+    PENDING_ALLOCATION_RECOVERY_DELAY_MS: 30_000,
+    pendingAllocationRecoveryTimer: null,
+    localStorage, Date: { now() { return 10_000; } },
+    teacherAuthVersion: 3,
+    teacherState: {
+      status: 'teacher', role: 'teacher', uid: 'owner-user', email: 'owner@school.kr'
+    },
+    AuthCore: require('../auth-core.js'),
+    setTimeout() { scheduled += 1; return 9; }, clearTimeout() {},
+    renderTeacherAuthArea() {},
+    store: {
+      async recoverPendingSessionAllocation(record) {
+        assert.equal(record.attachStatus, 'attaching');
+        return { complete: false, active: true, attached: true, planRevision: 2 };
+      }
+    }
+  };
+  loadStageFunctions([
+    'pendingAllocationRead', 'pendingAllocationWrite', 'pendingAllocationPatch',
+    'pendingAllocationRemove', 'pendingAllocationsForOwner',
+    'recoverPendingAllocationsForTeacher'
+  ], context);
+
+  const results = await context.recoverPendingAllocationsForTeacher(context.teacherState);
+  assert.equal(results[0].attached, true);
+  assert.equal(scheduled, 0);
+  assert.deepEqual(clone(context.pendingAllocationRead()[0]), {
+    sessionId: 'attached-session', code: 'ATT123', ownerUid: 'owner-user',
+    ownerEmail: 'owner@school.kr', token: 'attached-token-1234',
+    createdAt: 1, recoverAfter: 2, planId: 'plan-a', planRevision: 2,
+    setId: 'set-a', attachStatus: 'attached',
+    lastError: '연결된 수업계획 세션이 진행 중입니다. 이 기록은 자동 삭제하지 않습니다.'
+  });
+
+  const reloadContext = { PENDING_ALLOCATION_KEY: key, localStorage };
+  loadStageFunctions(['pendingAllocationRead'], reloadContext);
+  assert.equal(reloadContext.pendingAllocationRead()[0].attachStatus, 'attached');
+  assert.equal(reloadContext.pendingAllocationRead()[0].planRevision, 2);
 });
 
 test('권한 신청 화면은 미승인 Google 사용자에게만 신청 폼을 보여 주고 보호 교사 카드를 숨긴다', async () => {

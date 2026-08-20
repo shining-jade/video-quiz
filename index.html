@@ -1566,12 +1566,19 @@ async function recoverPendingAllocationsForTeacher(owner) {
       if (result && result.complete) {
         pendingAllocationRemove(record.sessionId, record.token);
       } else {
-        pendingAllocationPatch(record.sessionId, {
-          lastError: result && result.active
-            ? '다른 교사 화면에서 진행 중입니다. heartbeat가 끝난 뒤 다시 시도해 주세요.'
-            : '세션 할당 identity가 달라 자동 정리를 건너뛰었습니다.'
-        });
-        if (result && result.active) {
+        pendingAllocationPatch(record.sessionId, Object.assign(
+          result && result.attached ? {
+            attachStatus: 'attached', planRevision: result.planRevision
+          } : {},
+          {
+            lastError: result && result.attached
+              ? '연결된 수업계획 세션이 진행 중입니다. 이 기록은 자동 삭제하지 않습니다.'
+              : result && result.active
+                ? '다른 교사 화면에서 진행 중입니다. heartbeat가 끝난 뒤 다시 시도해 주세요.'
+                : '세션 할당 identity가 달라 자동 정리를 건너뛰었습니다.'
+          }
+        ));
+        if (result && result.active && !result.attached) {
           const activeRetryAt = Date.now() + PENDING_ALLOCATION_RECOVERY_DELAY_MS;
           nextRetryAt = nextRetryAt ? Math.min(nextRetryAt, activeRetryAt) : activeRetryAt;
         }
@@ -4711,6 +4718,16 @@ function plStartSession() {
   }
   if (planningEnabled && state.classPlanAllocationActivated && !state.classPlanAttached) {
     state.startingSession = true;
+    if (!pendingAllocationPatch(state.classPlanSessionId, {
+      planId: state.classPlanId,
+      planRevision: state.classPlanRevision,
+      setId: state.setId,
+      attachStatus: 'attaching'
+    })) {
+      state.startingSession = false;
+      alert('세션 복구 정보에 수업계획 연결 상태를 저장하지 못했습니다.');
+      return Promise.resolve(null);
+    }
     return Promise.resolve().then(() => store.attachPlanToSession(
       state.classPlanId,
       state.classPlanSessionId,
@@ -4723,6 +4740,10 @@ function plStartSession() {
       if (pl !== state || !sameOwnerGeneration()) return null;
       state.classPlanRevision = attached && attached.revision || state.classPlanRevision + 1;
       state.classPlanAttached = true;
+      pendingAllocationPatch(state.classPlanSessionId, {
+        planRevision: state.classPlanRevision,
+        attachStatus: 'attached'
+      });
       plStartSessionHeartbeat(
         state, authState, authGeneration, state.classPlanAllocationToken
       );
@@ -4751,7 +4772,13 @@ function plStartSession() {
   if (!pendingAllocationRemember({
     sessionId, code: '', ownerUid: authState.uid, ownerEmail: authState.email,
     token: allocationToken, createdAt: pendingCreatedAt,
-    recoverAfter: pendingCreatedAt + PENDING_ALLOCATION_RECOVERY_DELAY_MS
+    recoverAfter: pendingCreatedAt + PENDING_ALLOCATION_RECOVERY_DELAY_MS,
+    ...(planningEnabled ? {
+      planId: state.classPlanId,
+      planRevision: state.classPlanRevision,
+      setId: state.setId,
+      attachStatus: 'unattached'
+    } : {})
   })) {
     state.startingSession = false;
     alert('세션 복구 정보를 이 브라우저에 안전하게 저장하지 못했습니다. 저장소 사용을 허용한 뒤 다시 시도해 주세요.');
@@ -4878,6 +4905,12 @@ function plStartSession() {
     }
     if (planningEnabled && !state.classPlanAttached) {
       try {
+        if (!pendingAllocationPatch(sessionId, {
+          planId: state.classPlanId,
+          planRevision: state.classPlanRevision,
+          setId: state.setId,
+          attachStatus: 'attaching'
+        })) throw new Error('세션 복구 정보에 수업계획 연결 상태를 저장하지 못했습니다.');
         const attached = await store.attachPlanToSession(
           state.classPlanId,
           sessionId,
@@ -4890,6 +4923,10 @@ function plStartSession() {
         if (pl !== state || !sameOwnerGeneration()) return;
         state.classPlanRevision = attached && attached.revision || state.classPlanRevision + 1;
         state.classPlanAttached = true;
+        if (!pendingAllocationPatch(sessionId, {
+          planRevision: state.classPlanRevision,
+          attachStatus: 'attached'
+        })) throw new Error('세션 복구 정보에 수업계획 연결 완료를 저장하지 못했습니다.');
       } catch (attachError) {
         throw attachError;
       }

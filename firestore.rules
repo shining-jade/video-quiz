@@ -876,8 +876,9 @@ service cloud.firestore {
       let sessionPath = /databases/$(database)/documents/sessions/$(sessionId);
       return exists(sessionPath) &&
         existsAfter(sessionPath) &&
-        get(sessionPath).data.get('status', null) != 'ended' &&
         getAfter(sessionPath).data.get('status', null) == 'ended' &&
+        getAfter(sessionPath).data.get('actualParticipants', -1) ==
+          getAfter(sessionPath).data.get('registeredStudentCount', -2) &&
         validEndedLiveData(request.resource.data);
     }
 
@@ -927,20 +928,117 @@ service cloud.firestore {
         validOpenStudentResponseUpdate(sessionId);
     }
 
-    function validSessionLeaseWrite() {
-      let changed = request.resource.data.diff(resource.data).affectedKeys();
-      return !changed.hasAny(['activationHeartbeatAt']) &&
-        (request.resource.data.status != 'live' ||
-          (request.resource.data.activationLeaseUntil is timestamp &&
-            request.resource.data.activationLeaseUntil <= request.time + duration.value(120, 's')));
+    function validSessionCounter(data) {
+      return data.registeredStudentCount is int && data.registeredStudentCount >= 0 &&
+        data.studentCountRevision is int &&
+        data.studentCountRevision == data.registeredStudentCount &&
+        (data.registeredStudentCount == 0
+          ? !('lastStudentUid' in data)
+          : data.lastStudentUid is string && data.lastStudentUid.size() > 0 &&
+            data.lastStudentUid.size() <= 128);
+    }
+
+    function validSessionCreateCounter() {
+      return request.resource.data.registeredStudentCount == 0 &&
+        request.resource.data.studentCountRevision == 0 &&
+        request.resource.data.status in ['active', 'allocating', 'live'] &&
+        !('lastStudentUid' in request.resource.data) &&
+        !('endedAt' in request.resource.data) &&
+        !('actualParticipants' in request.resource.data) &&
+        !('abortedAt' in request.resource.data) &&
+        !('classPlanId' in request.resource.data) &&
+        !('classPlanRevision' in request.resource.data);
+    }
+
+    function validSessionActivation() {
+      return resource.data.status == 'allocating' && request.resource.data.status == 'live' &&
+        request.resource.data.activationLeaseUntil is timestamp &&
+        request.resource.data.activationLeaseUntil <= request.time + duration.value(120, 's') &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'activationLeaseUntil'
+        ]);
+    }
+
+    function validSessionHeartbeat() {
+      return resource.data.status == 'live' && request.resource.data.status == 'live' &&
+        request.resource.data.activationLeaseUntil is timestamp &&
+        request.resource.data.activationLeaseUntil <= request.time + duration.value(120, 's') &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activationLeaseUntil']);
     }
 
     function validSessionAbortTransition() {
-      return request.resource.data.status != 'aborted' ||
-        resource.data.status in ['allocating', 'aborted'] ||
-        (resource.data.status == 'live' &&
-          resource.data.get('activationLeaseUntil', null) is timestamp &&
-          request.time > resource.data.get('activationLeaseUntil', null));
+      return !('classPlanId' in resource.data) && !('classPlanRevision' in resource.data) &&
+        request.resource.data.status == 'aborted' &&
+        request.resource.data.abortedAt == request.time &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'abortedAt']) &&
+        (resource.data.status in ['allocating', 'aborted'] ||
+          (resource.data.status == 'live' &&
+            resource.data.get('activationLeaseUntil', null) is timestamp &&
+            request.time > resource.data.get('activationLeaseUntil', null)));
+    }
+
+    function validSessionEnd(sessionId) {
+      let livePath = /databases/$(database)/documents/sessions/$(sessionId)/meta/live;
+      return resource.data.status in ['active', 'live'] &&
+        request.resource.data.status == 'ended' &&
+        request.resource.data.endedAt == request.time &&
+        request.resource.data.actualParticipants == resource.data.registeredStudentCount &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'endedAt', 'actualParticipants'
+        ]) && existsAfter(livePath) && validEndedLiveData(getAfter(livePath).data);
+    }
+
+    function validSessionEndRepair(sessionId) {
+      let livePath = /databases/$(database)/documents/sessions/$(sessionId)/meta/live;
+      return resource.data.status == 'ended' && request.resource.data.status == 'ended' &&
+        request.resource.data.actualParticipants == resource.data.registeredStudentCount &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['actualParticipants']) &&
+        existsAfter(livePath) && validEndedLiveData(getAfter(livePath).data);
+    }
+
+    function validStudentCounterIncrement(sessionId) {
+      let studentPath = /databases/$(database)/documents/sessions/$(sessionId)/students/$(request.auth.uid);
+      return anonymousStudent() && resource.data.status in ['active', 'live'] &&
+        resource.data.get('activationLeaseUntil', null) is timestamp &&
+        request.time <= resource.data.get('activationLeaseUntil', null) &&
+        resource.data.registeredStudentCount is int && resource.data.registeredStudentCount >= 0 &&
+        resource.data.studentCountRevision == resource.data.registeredStudentCount &&
+        !exists(studentPath) && existsAfter(studentPath) &&
+        getAfter(studentPath).data.uid == request.auth.uid &&
+        request.resource.data.registeredStudentCount == resource.data.registeredStudentCount + 1 &&
+        request.resource.data.studentCountRevision == resource.data.studentCountRevision + 1 &&
+        request.resource.data.lastStudentUid == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'registeredStudentCount', 'studentCountRevision', 'lastStudentUid'
+        ]);
+    }
+
+    function validSessionPlanAttach(sessionId) {
+      let planId = request.resource.data.classPlanId;
+      let privatePath = classPlanPrivatePath(planId);
+      return !('classPlanId' in resource.data) && !('classPlanRevision' in resource.data) &&
+        planId is string && request.resource.data.classPlanRevision is int &&
+        existsAfter(privatePath) &&
+        getAfter(privatePath).data.sessionId == sessionId &&
+        getAfter(privatePath).data.status == 'live' &&
+        getAfter(privatePath).data.revision == request.resource.data.classPlanRevision &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'classPlanId', 'classPlanRevision'
+        ]);
+    }
+
+    function validSessionPlanFinish(sessionId) {
+      let privatePath = classPlanPrivatePath(resource.data.classPlanId);
+      return resource.data.status == 'ended' && request.resource.data.status == 'ended' &&
+        resource.data.classPlanRevision is int &&
+        request.resource.data.classPlanId == resource.data.classPlanId &&
+        request.resource.data.classPlanRevision == resource.data.classPlanRevision + 1 &&
+        exists(privatePath) && existsAfter(privatePath) &&
+        get(privatePath).data.sessionId == sessionId && get(privatePath).data.status == 'live' &&
+        get(privatePath).data.revision == resource.data.classPlanRevision &&
+        getAfter(privatePath).data.status == 'ended' &&
+        getAfter(privatePath).data.revision == request.resource.data.classPlanRevision &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['classPlanRevision']);
     }
 
     function classPlanPrivatePath(planId) {
@@ -1092,11 +1190,13 @@ service cloud.firestore {
 
     function validClassPlanAttach(beforeData, afterData) {
       let sessionPath = /databases/$(database)/documents/sessions/$(afterData.sessionId);
-      return afterData.status == 'live' && exists(sessionPath) &&
+      return afterData.status == 'live' && exists(sessionPath) && existsAfter(sessionPath) &&
         get(sessionPath).data.teacherUid == beforeData.ownerUid &&
         get(sessionPath).data.get('teacherEmail', '') == beforeData.ownerEmailCanonical &&
         get(sessionPath).data.setId == beforeData.setId &&
         get(sessionPath).data.status == 'live' &&
+        getAfter(sessionPath).data.classPlanId == afterData.planId &&
+        getAfter(sessionPath).data.classPlanRevision == afterData.revision &&
         afterData.actualStartedAt == get(sessionPath).data.createdAt &&
         afterData.diff(beforeData).affectedKeys().hasOnly([
           'status', 'sessionId', 'actualStartedAt', 'revision', 'updatedAt'
@@ -1106,12 +1206,18 @@ service cloud.firestore {
     function validClassPlanFinish(beforeData, afterData) {
       let sessionPath = /databases/$(database)/documents/sessions/$(beforeData.sessionId);
       return afterData.status == 'ended' && afterData.sessionId == beforeData.sessionId &&
-        exists(sessionPath) && get(sessionPath).data.teacherUid == beforeData.ownerUid &&
+        exists(sessionPath) && existsAfter(sessionPath) &&
+        get(sessionPath).data.teacherUid == beforeData.ownerUid &&
         get(sessionPath).data.setId == beforeData.setId &&
         get(sessionPath).data.status == 'ended' &&
+        validSessionCounter(get(sessionPath).data) &&
+        get(sessionPath).data.classPlanId == beforeData.planId &&
+        get(sessionPath).data.classPlanRevision == beforeData.revision &&
+        getAfter(sessionPath).data.classPlanRevision == afterData.revision &&
         afterData.actualStartedAt == beforeData.actualStartedAt &&
         afterData.actualEndedAt == get(sessionPath).data.endedAt &&
         get(sessionPath).data.get('actualParticipants', -1) == afterData.actualParticipants &&
+        get(sessionPath).data.registeredStudentCount == afterData.actualParticipants &&
         afterData.diff(beforeData).affectedKeys().hasOnly([
           'status', 'actualEndedAt', 'actualParticipants', 'revision', 'updatedAt'
         ]);
@@ -1185,7 +1291,9 @@ service cloud.firestore {
     match /class_plans_private/{planId} {
       allow get: if isAdmin() ||
         (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid);
-      allow list: if isAdmin() && request.query.limit != null && request.query.limit <= 100;
+      allow list: if isAdmin() && request.query.limit != null && request.query.limit <= 100 &&
+        resource.data.plannedStartAt >= request.time - duration.value(1441, 'm') &&
+        resource.data.plannedStartAt < request.time + duration.value(32, 'd');
       allow create: if validClassPlanCreate(planId);
       allow update: if validClassPlanUpdate(planId);
       allow delete: if false;
@@ -1195,7 +1303,9 @@ service cloud.firestore {
     match /class_plans_public/{planId} {
       allow get: if isApprovedTeacher() && validClassPlanPublic(resource.data, planId);
       allow list: if isApprovedTeacher() && request.query.limit != null &&
-        request.query.limit <= 100;
+        request.query.limit <= 100 &&
+        resource.data.plannedStartAt >= request.time - duration.value(1441, 'm') &&
+        resource.data.plannedStartAt < request.time + duration.value(32, 'd');
       allow create: if validClassPlanCreate(planId);
       allow update: if validClassPlanUpdate(planId);
       allow delete: if false;
@@ -1285,6 +1395,7 @@ service cloud.firestore {
       allow create: if isApprovedTeacher() &&
         request.resource.data.teacherUid == request.auth.uid &&
         request.resource.data.teacherEmail == request.auth.token.email &&
+        validSessionCreateCounter() &&
         (!('setId' in request.resource.data) ||
           (request.resource.data.setId is string &&
             exists(/databases/$(database)/documents/quiz_sets/$(request.resource.data.setId)) &&
@@ -1293,11 +1404,18 @@ service cloud.firestore {
           (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
             request.resource.data.get('activationLeaseUntil', null) <=
               request.time + duration.value(120, 's')));
-      allow update: if ownsSession(sessionId) &&
-        request.resource.data.teacherUid == resource.data.teacherUid &&
+      allow update: if request.resource.data.teacherUid == resource.data.teacherUid &&
         request.resource.data.teacherEmail == resource.data.teacherEmail &&
-        validSessionLeaseWrite() && validSessionAbortTransition();
-      allow delete: if isAdmin() || ownsSession(sessionId);
+        (validStudentCounterIncrement(sessionId) || (ownsSession(sessionId) &&
+          validSessionCounter(resource.data) && validSessionCounter(request.resource.data) && (
+          validSessionActivation() || validSessionHeartbeat() ||
+          validSessionAbortTransition() || validSessionEnd(sessionId) ||
+          validSessionEndRepair(sessionId) || validSessionPlanAttach(sessionId) ||
+          validSessionPlanFinish(sessionId)
+        )));
+      allow delete: if !('classPlanId' in resource.data) &&
+        !('classPlanRevision' in resource.data) &&
+        (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted'));
       allow read, write: if false;
 
       match /meta/allocation {
@@ -1309,7 +1427,9 @@ service cloud.firestore {
           request.resource.data.token.size() <= 128 &&
           request.resource.data.ownerUid == request.auth.uid;
         allow update: if false;
-        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow delete: if isAdmin() ||
+          (ownsSession(sessionId) &&
+            get(/databases/$(database)/documents/sessions/$(sessionId)).data.status == 'aborted');
         allow read, write: if false;
       }
 
@@ -1346,12 +1466,21 @@ service cloud.firestore {
             studentId == request.auth.uid &&
             (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
         allow list: if isAdmin() || ownsSession(sessionId);
-        allow create: if anonymousStudent() && sessionIsJoinable(sessionId) && validStudent(studentId);
+        allow create: if anonymousStudent() && validStudent(studentId) &&
+          existsAfter(/databases/$(database)/documents/sessions/$(sessionId)) &&
+          getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.registeredStudentCount ==
+            get(/databases/$(database)/documents/sessions/$(sessionId)).data.registeredStudentCount + 1 &&
+          getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.studentCountRevision ==
+            get(/databases/$(database)/documents/sessions/$(sessionId)).data.studentCountRevision + 1 &&
+          getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.lastStudentUid ==
+            request.auth.uid;
         allow update: if isJoinedStudent(sessionId) &&
           sessionIsJoinable(sessionId) &&
           validStudent(studentId) &&
           request.resource.data.uid == resource.data.uid;
-        allow delete: if isAdmin() || ownsSession(sessionId);
+        allow delete: if isAdmin() ||
+          (ownsSession(sessionId) &&
+            get(/databases/$(database)/documents/sessions/$(sessionId)).data.status == 'aborted');
         allow read, write: if false;
       }
 
