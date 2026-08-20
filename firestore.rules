@@ -943,6 +943,199 @@ service cloud.firestore {
           request.time > resource.data.get('activationLeaseUntil', null));
     }
 
+    function classPlanPrivatePath(planId) {
+      return /databases/$(database)/documents/class_plans_private/$(planId);
+    }
+
+    function classPlanPublicPath(planId) {
+      return /databases/$(database)/documents/class_plans_public/$(planId);
+    }
+
+    function validClassPlanCommon(data, planId) {
+      return data.planId == planId &&
+        data.setId is string && data.setId.size() > 0 && data.setId.size() <= 128 &&
+        data.setTitleSnapshot is string && data.setTitleSnapshot.size() > 0 &&
+        data.setTitleSnapshot.size() <= 200 &&
+        data.className is string && data.className.size() > 0 && data.className.size() <= 80 &&
+        data.plannedStartAt is timestamp && data.plannedEndAt is timestamp &&
+        data.plannedEndAt > data.plannedStartAt &&
+        data.plannedEndAt <= data.plannedStartAt + duration.value(24, 'h') &&
+        data.expectedStudents is int && data.expectedStudents >= 1 && data.expectedStudents <= 500 &&
+        data.status in ['planned', 'live', 'ended', 'cancelled'] &&
+        isPositiveSafeRevision(data.revision) &&
+        data.createdAt is timestamp && data.updatedAt is timestamp && data.updatedAt >= data.createdAt &&
+        (!('warningLevel' in data) || data.warningLevel in ['green', 'caution', 'crowded']) &&
+        (!('warningAcknowledgedAt' in data) || data.warningAcknowledgedAt is timestamp) &&
+        (!('sessionId' in data) ||
+          (data.sessionId is string && data.sessionId.size() > 0 && data.sessionId.size() <= 128)) &&
+        (!('actualStartedAt' in data) || data.actualStartedAt is timestamp) &&
+        (!('actualEndedAt' in data) || data.actualEndedAt is timestamp) &&
+        (!('actualParticipants' in data) ||
+          (data.actualParticipants is int && data.actualParticipants >= 0)) &&
+        (data.status in ['planned', 'cancelled']
+          ? !('sessionId' in data) && !('actualStartedAt' in data) &&
+            !('actualEndedAt' in data) && !('actualParticipants' in data)
+          : data.status == 'live'
+            ? ('sessionId' in data) && ('actualStartedAt' in data) &&
+              !('actualEndedAt' in data) && !('actualParticipants' in data)
+            : ('sessionId' in data) && ('actualStartedAt' in data) &&
+              ('actualEndedAt' in data) && ('actualParticipants' in data) &&
+              data.actualEndedAt >= data.actualStartedAt);
+    }
+
+    function validClassPlanPrivate(data, planId) {
+      return data.keys().hasAll([
+          'planId', 'ownerUid', 'ownerEmailCanonical', 'ownerDisplayName',
+          'setId', 'setTitleSnapshot', 'className', 'plannedStartAt', 'plannedEndAt',
+          'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'planId', 'ownerUid', 'ownerEmailCanonical', 'ownerDisplayName',
+          'setId', 'setTitleSnapshot', 'className', 'plannedStartAt', 'plannedEndAt',
+          'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt',
+          'warningLevel', 'warningAcknowledgedAt', 'sessionId', 'actualStartedAt',
+          'actualEndedAt', 'actualParticipants'
+        ]) && validClassPlanCommon(data, planId) &&
+        data.ownerUid is string && data.ownerUid.size() > 0 && data.ownerUid.size() <= 128 &&
+        data.ownerEmailCanonical is string && canonicalAllowanceId(data.ownerEmailCanonical) &&
+        data.ownerDisplayName is string && data.ownerDisplayName.size() > 0 &&
+        data.ownerDisplayName.size() <= 80;
+    }
+
+    function validClassPlanPublic(data, planId) {
+      return data.keys().hasAll([
+          'planId', 'setId', 'setTitleSnapshot', 'className', 'plannedStartAt',
+          'plannedEndAt', 'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'planId', 'setId', 'setTitleSnapshot', 'className', 'plannedStartAt',
+          'plannedEndAt', 'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt',
+          'warningLevel', 'warningAcknowledgedAt', 'sessionId', 'actualStartedAt',
+          'actualEndedAt', 'actualParticipants'
+        ]) && validClassPlanCommon(data, planId);
+    }
+
+    function classPlanPublicKeysOnly(data) {
+      return data.keys().hasAll([
+          'planId', 'setId', 'setTitleSnapshot', 'className', 'plannedStartAt',
+          'plannedEndAt', 'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'planId', 'setId', 'setTitleSnapshot', 'className', 'plannedStartAt',
+          'plannedEndAt', 'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt',
+          'warningLevel', 'warningAcknowledgedAt', 'sessionId', 'actualStartedAt',
+          'actualEndedAt', 'actualParticipants'
+        ]);
+    }
+
+    function matchingClassPlanPair(privateData, publicData) {
+      return [
+          publicData.planId, publicData.setId, publicData.setTitleSnapshot,
+          publicData.className, publicData.plannedStartAt, publicData.plannedEndAt,
+          publicData.expectedStudents, publicData.status, publicData.revision,
+          publicData.createdAt, publicData.updatedAt,
+          publicData.get('warningLevel', null),
+          publicData.get('warningAcknowledgedAt', null),
+          publicData.get('sessionId', null), publicData.get('actualStartedAt', null),
+          publicData.get('actualEndedAt', null), publicData.get('actualParticipants', null)
+        ] == [
+          privateData.planId, privateData.setId, privateData.setTitleSnapshot,
+          privateData.className, privateData.plannedStartAt, privateData.plannedEndAt,
+          privateData.expectedStudents, privateData.status, privateData.revision,
+          privateData.createdAt, privateData.updatedAt,
+          privateData.get('warningLevel', null),
+          privateData.get('warningAcknowledgedAt', null),
+          privateData.get('sessionId', null), privateData.get('actualStartedAt', null),
+          privateData.get('actualEndedAt', null), privateData.get('actualParticipants', null)
+        ];
+    }
+
+    function validClassPlanPairAfter(planId) {
+      let privatePath = classPlanPrivatePath(planId);
+      let publicPath = classPlanPublicPath(planId);
+      return existsAfter(privatePath) && existsAfter(publicPath) &&
+        validClassPlanPrivate(getAfter(privatePath).data, planId) &&
+        validClassPlanPublic(getAfter(publicPath).data, planId) &&
+        matchingClassPlanPair(getAfter(privatePath).data, getAfter(publicPath).data);
+    }
+
+    function validClassPlanCreate(planId) {
+      let privateData = getAfter(classPlanPrivatePath(planId)).data;
+      return isApprovedTeacher() && validClassPlanPairAfter(planId) &&
+        privateData.ownerUid == request.auth.uid &&
+        privateData.ownerEmailCanonical == request.auth.token.email &&
+        privateData.status == 'planned' && privateData.revision == 1 &&
+        privateData.createdAt == request.time && privateData.updatedAt == request.time;
+    }
+
+    function sameClassPlanIdentity(beforeData, afterData) {
+      return [
+          afterData.planId, afterData.ownerUid, afterData.ownerEmailCanonical,
+          afterData.ownerDisplayName, afterData.setId, afterData.setTitleSnapshot,
+          afterData.createdAt
+        ] == [
+          beforeData.planId, beforeData.ownerUid, beforeData.ownerEmailCanonical,
+          beforeData.ownerDisplayName, beforeData.setId, beforeData.setTitleSnapshot,
+          beforeData.createdAt
+        ];
+    }
+
+    function validPlannedClassPlanTransition(beforeData, afterData) {
+      return (afterData.status == 'planned' &&
+          afterData.diff(beforeData).affectedKeys().hasOnly([
+            'className', 'plannedStartAt', 'plannedEndAt', 'expectedStudents',
+            'warningLevel', 'warningAcknowledgedAt', 'revision', 'updatedAt'
+          ])) ||
+        (afterData.status == 'cancelled' &&
+          afterData.diff(beforeData).affectedKeys().hasOnly(['status', 'revision', 'updatedAt']));
+    }
+
+    function validClassPlanAttach(beforeData, afterData) {
+      let sessionPath = /databases/$(database)/documents/sessions/$(afterData.sessionId);
+      return afterData.status == 'live' && exists(sessionPath) &&
+        get(sessionPath).data.teacherUid == beforeData.ownerUid &&
+        get(sessionPath).data.get('teacherEmail', '') == beforeData.ownerEmailCanonical &&
+        get(sessionPath).data.setId == beforeData.setId &&
+        get(sessionPath).data.status == 'live' &&
+        afterData.actualStartedAt == get(sessionPath).data.createdAt &&
+        afterData.diff(beforeData).affectedKeys().hasOnly([
+          'status', 'sessionId', 'actualStartedAt', 'revision', 'updatedAt'
+        ]);
+    }
+
+    function validClassPlanFinish(beforeData, afterData) {
+      let sessionPath = /databases/$(database)/documents/sessions/$(beforeData.sessionId);
+      return afterData.status == 'ended' && afterData.sessionId == beforeData.sessionId &&
+        exists(sessionPath) && get(sessionPath).data.teacherUid == beforeData.ownerUid &&
+        get(sessionPath).data.setId == beforeData.setId &&
+        get(sessionPath).data.status == 'ended' &&
+        afterData.actualStartedAt == beforeData.actualStartedAt &&
+        afterData.actualEndedAt == get(sessionPath).data.endedAt &&
+        get(sessionPath).data.get('actualParticipants', -1) == afterData.actualParticipants &&
+        afterData.diff(beforeData).affectedKeys().hasOnly([
+          'status', 'actualEndedAt', 'actualParticipants', 'revision', 'updatedAt'
+        ]);
+    }
+
+    function validClassPlanUpdate(planId) {
+      let beforeData = get(classPlanPrivatePath(planId)).data;
+      let afterData = getAfter(classPlanPrivatePath(planId)).data;
+      let publicAfter = getAfter(classPlanPublicPath(planId)).data;
+      return isApprovedTeacher() && exists(classPlanPrivatePath(planId)) &&
+        exists(classPlanPublicPath(planId)) && existsAfter(classPlanPrivatePath(planId)) &&
+        existsAfter(classPlanPublicPath(planId)) && validClassPlanPrivate(afterData, planId) &&
+        classPlanPublicKeysOnly(publicAfter) && matchingClassPlanPair(afterData, publicAfter) &&
+        beforeData.ownerUid == request.auth.uid &&
+        beforeData.ownerEmailCanonical == request.auth.token.email &&
+        sameClassPlanIdentity(beforeData, afterData) &&
+        afterData.revision == beforeData.revision + 1 &&
+        afterData.updatedAt == request.time &&
+        (beforeData.status == 'planned'
+          ? validPlannedClassPlanTransition(beforeData, afterData) ||
+            validClassPlanAttach(beforeData, afterData)
+          : beforeData.status == 'live' && validClassPlanFinish(beforeData, afterData));
+    }
+
     match /teacher_access_requests/{uid} {
       allow get: if isOwnTeacherRequest(uid) || isAdmin();
       allow list: if isAdmin() && resource.data.status == 'pending' &&
@@ -985,6 +1178,26 @@ service cloud.firestore {
         ((resource.data.get('locked', false) == false && validCounterGateLock() &&
             request.resource.data.lockId != resource.data.get('lockId', '')) ||
           validCounterGateUnlock());
+      allow delete: if false;
+      allow read, write: if false;
+    }
+
+    match /class_plans_private/{planId} {
+      allow get: if isAdmin() ||
+        (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid);
+      allow list: if isAdmin() && request.query.limit != null && request.query.limit <= 100;
+      allow create: if validClassPlanCreate(planId);
+      allow update: if validClassPlanUpdate(planId);
+      allow delete: if false;
+      allow read, write: if false;
+    }
+
+    match /class_plans_public/{planId} {
+      allow get: if isApprovedTeacher() && validClassPlanPublic(resource.data, planId);
+      allow list: if isApprovedTeacher() && request.query.limit != null &&
+        request.query.limit <= 100;
+      allow create: if validClassPlanCreate(planId);
+      allow update: if validClassPlanUpdate(planId);
       allow delete: if false;
       allow read, write: if false;
     }

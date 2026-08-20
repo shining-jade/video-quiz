@@ -15,6 +15,7 @@ const {
   getDocs,
   limit: queryLimit,
   onSnapshot,
+  orderBy,
   query,
   runTransaction,
   serverTimestamp,
@@ -214,7 +215,8 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
             ref: reference(`${path}/${document.id}`),
             data: () => document.data()
           })),
-          empty: snapshot.empty
+          empty: snapshot.empty,
+          size: snapshot.size
         };
       };
       const queryReference = target => ({
@@ -225,6 +227,9 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
         },
         limit(count) {
           return queryReference(query(target, queryLimit(count)));
+        },
+        orderBy(field, direction) {
+          return queryReference(query(target, orderBy(field, direction || 'asc')));
         }
       });
       return queryReference(modularCollection);
@@ -421,6 +426,243 @@ function pendingTeacherRequestDocument(uid, emailCanonical, patch = {}) {
 const requestAdminIdentity = {
   uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
 };
+
+function classPlanDocuments(planId, patch = {}, writeTime = Timestamp.fromMillis(1_000)) {
+  const privatePlan = {
+    planId,
+    ownerUid: 'owner-uid',
+    ownerEmailCanonical: 'owner@school.kr',
+    ownerDisplayName: '소유 교사',
+    setId: 'set1',
+    setTitleSnapshot: '보안 규칙 테스트',
+    className: '2학년 1반',
+    plannedStartAt: Timestamp.fromMillis(10_000),
+    plannedEndAt: Timestamp.fromMillis(20_000),
+    expectedStudents: 30,
+    status: 'planned',
+    revision: 1,
+    warningLevel: 'caution',
+    warningAcknowledgedAt: Timestamp.fromMillis(9_000),
+    createdAt: writeTime,
+    updatedAt: writeTime,
+    ...patch
+  };
+  const publicPlan = {
+    planId: privatePlan.planId,
+    setId: privatePlan.setId,
+    setTitleSnapshot: privatePlan.setTitleSnapshot,
+    className: privatePlan.className,
+    plannedStartAt: privatePlan.plannedStartAt,
+    plannedEndAt: privatePlan.plannedEndAt,
+    expectedStudents: privatePlan.expectedStudents,
+    status: privatePlan.status,
+    revision: privatePlan.revision,
+    warningLevel: privatePlan.warningLevel,
+    warningAcknowledgedAt: privatePlan.warningAcknowledgedAt,
+    createdAt: privatePlan.createdAt,
+    updatedAt: privatePlan.updatedAt
+  };
+  for (const key of ['sessionId', 'actualStartedAt', 'actualEndedAt', 'actualParticipants']) {
+    if (privatePlan[key] !== undefined) publicPlan[key] = privatePlan[key];
+  }
+  return { privatePlan, publicPlan };
+}
+
+async function writeClassPlanPairDisabled(planId, patch = {}) {
+  const pair = classPlanDocuments(planId, patch);
+  await adminWrite(`class_plans_private/${planId}`, pair.privatePlan);
+  await adminWrite(`class_plans_public/${planId}`, pair.publicPlan);
+  return pair;
+}
+
+function setClassPlanPair(batch, db, planId, pair) {
+  batch.set(doc(db, `class_plans_private/${planId}`), pair.privatePlan);
+  batch.set(doc(db, `class_plans_public/${planId}`), pair.publicPlan);
+}
+
+rulesTest('class-planning: active teacher atomically creates own paired projection and overlaps remain advisory', async () => {
+  const owner = actorFirestore('owner');
+  const first = classPlanDocuments('plan-owner-a', {
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  }, serverTimestamp());
+  const firstBatch = writeBatch(owner);
+  setClassPlanPair(firstBatch, owner, 'plan-owner-a', first);
+  await assertSucceeds(firstBatch.commit());
+
+  const second = classPlanDocuments('plan-owner-b', {
+    plannedStartAt: Timestamp.fromMillis(15_000),
+    plannedEndAt: Timestamp.fromMillis(25_000),
+    expectedStudents: 40,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  }, serverTimestamp());
+  const secondBatch = writeBatch(owner);
+  setClassPlanPair(secondBatch, owner, 'plan-owner-b', second);
+  await assertSucceeds(secondBatch.commit());
+
+  assert.equal((await getDoc(doc(owner, 'class_plans_public/plan-owner-a'))).data().ownerUid, undefined);
+  assert.equal((await getDoc(doc(owner, 'class_plans_public/plan-owner-b'))).data().expectedStudents, 40);
+});
+
+rulesTest('class-planning: single-sided, forged-owner, and inactive plan writes fail closed', async () => {
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const student = actorFirestore('student');
+  const signedOut = testEnvironment.unauthenticatedContext().firestore();
+  const unapproved = actorFirestore('unapproved');
+  const pair = classPlanDocuments('attack-plan', {
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  }, serverTimestamp());
+
+  await assertFails(setDoc(doc(owner, 'class_plans_private/attack-plan'), pair.privatePlan));
+  await assertFails(setDoc(doc(owner, 'class_plans_public/attack-plan'), pair.publicPlan));
+
+  const forged = classPlanDocuments('forged-plan', {
+    ownerUid: 'other-teacher-uid', ownerEmailCanonical: 'other@school.kr',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  }, serverTimestamp());
+  const forgedBatch = writeBatch(owner);
+  setClassPlanPair(forgedBatch, owner, 'forged-plan', forged);
+  await assertFails(forgedBatch.commit());
+
+  for (const [index, db] of [other, student, signedOut, unapproved].entries()) {
+    const denied = classPlanDocuments('denied-' + index, {
+      createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+    }, serverTimestamp());
+    const deniedBatch = writeBatch(db);
+    setClassPlanPair(deniedBatch, db, denied.privatePlan.planId, denied);
+    await assertFails(deniedBatch.commit());
+  }
+
+  const otherAllowance = await adminRead('teacher_allowances/other-teacher-uid');
+  for (const status of ['suspended', 'deletion_pending']) {
+    await adminWrite('teacher_allowances/other-teacher-uid', {
+      ...otherAllowance, status, enabled: false
+    });
+    const denied = classPlanDocuments('inactive-' + status, {
+      ownerUid: 'other-teacher-uid', ownerEmailCanonical: 'other@school.kr',
+      ownerDisplayName: '다른 교사', createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+    }, serverTimestamp());
+    const deniedBatch = writeBatch(other);
+    setClassPlanPair(deniedBatch, other, denied.privatePlan.planId, denied);
+    await assertFails(deniedBatch.commit());
+  }
+});
+
+rulesTest('class-planning: public/private get and bounded list follow the role projection matrix', async () => {
+  await writeClassPlanPairDisabled('matrix-plan');
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const admin = actorFirestore('admin');
+  const denied = [
+    actorFirestore('student'), actorFirestore('unapproved'),
+    testEnvironment.unauthenticatedContext().firestore()
+  ];
+
+  await assertSucceeds(getDoc(doc(owner, 'class_plans_private/matrix-plan')));
+  await assertFails(getDoc(doc(other, 'class_plans_private/matrix-plan')));
+  await assertSucceeds(getDoc(doc(admin, 'class_plans_private/matrix-plan')));
+  await assertSucceeds(getDoc(doc(other, 'class_plans_public/matrix-plan')));
+  for (const db of denied) {
+    await assertFails(getDoc(doc(db, 'class_plans_private/matrix-plan')));
+    await assertFails(getDoc(doc(db, 'class_plans_public/matrix-plan')));
+  }
+
+  const boundedPublic = query(
+    collection(owner, 'class_plans_public'),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(1)),
+    where('plannedStartAt', '<', Timestamp.fromMillis(50_000)),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  );
+  const boundedPrivate = query(
+    collection(admin, 'class_plans_private'),
+    where('plannedStartAt', '>=', Timestamp.fromMillis(1)),
+    where('plannedStartAt', '<', Timestamp.fromMillis(50_000)),
+    orderBy('plannedStartAt', 'asc'), queryLimit(20)
+  );
+  await assertSucceeds(getDocs(boundedPublic));
+  await assertSucceeds(getDocs(boundedPrivate));
+  await assertFails(getDocs(collection(owner, 'class_plans_public')));
+  await assertFails(getDocs(query(collection(owner, 'class_plans_public'), queryLimit(101))));
+  await assertFails(getDocs(query(collection(owner, 'class_plans_private'), queryLimit(20))));
+});
+
+rulesTest('class-planning: exact pair revision and plan-session identity gate updates and attachment', async () => {
+  await writeClassPlanPairDisabled('cas-plan');
+  await adminWrite('sessions/plan-session', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', createdAt: Timestamp.fromMillis(12_000),
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
+  });
+  await adminWrite('sessions/wrong-set-session', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set2',
+    status: 'live', createdAt: Timestamp.fromMillis(12_000),
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 15_000)
+  });
+  const owner = actorFirestore('owner');
+
+  const changed = classPlanDocuments('cas-plan', {
+    className: '2학년 2반', expectedStudents: 31, revision: 2,
+    createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
+  });
+  const updateBatch = writeBatch(owner);
+  setClassPlanPair(updateBatch, owner, 'cas-plan', changed);
+  await assertSucceeds(updateBatch.commit());
+
+  await assertFails(updateDoc(doc(owner, 'class_plans_private/cas-plan'), {
+    className: 'single-side', revision: 3, updatedAt: serverTimestamp()
+  }));
+  const stale = classPlanDocuments('cas-plan', {
+    className: 'stale', revision: 2,
+    createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
+  });
+  const staleBatch = writeBatch(owner);
+  setClassPlanPair(staleBatch, owner, 'cas-plan', stale);
+  await assertFails(staleBatch.commit());
+
+  const wrongAttach = classPlanDocuments('cas-plan', {
+    className: '2학년 2반', expectedStudents: 31, status: 'live', revision: 3,
+    sessionId: 'wrong-set-session', actualStartedAt: Timestamp.fromMillis(12_000),
+    createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
+  });
+  const wrongBatch = writeBatch(owner);
+  setClassPlanPair(wrongBatch, owner, 'cas-plan', wrongAttach);
+  await assertFails(wrongBatch.commit());
+
+  const attached = classPlanDocuments('cas-plan', {
+    className: '2학년 2반', expectedStudents: 31, status: 'live', revision: 3,
+    sessionId: 'plan-session', actualStartedAt: Timestamp.fromMillis(12_000),
+    createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
+  });
+  const attachBatch = writeBatch(owner);
+  setClassPlanPair(attachBatch, owner, 'cas-plan', attached);
+  await assertSucceeds(attachBatch.commit());
+});
+
+rulesTest('class-planning: ended actuals must match the linked authoritative session summary', async () => {
+  await writeClassPlanPairDisabled('finish-plan', {
+    status: 'live', revision: 2, sessionId: 'finish-session',
+    actualStartedAt: Timestamp.fromMillis(12_000)
+  });
+  await adminWrite('sessions/finish-session', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'ended', createdAt: Timestamp.fromMillis(12_000),
+    endedAt: Timestamp.fromMillis(25_000), actualParticipants: 2
+  });
+  const owner = actorFirestore('owner');
+
+  for (const actualParticipants of [999, 2]) {
+    const ended = classPlanDocuments('finish-plan', {
+      status: 'ended', revision: 3, sessionId: 'finish-session',
+      actualStartedAt: Timestamp.fromMillis(12_000),
+      actualEndedAt: Timestamp.fromMillis(25_000), actualParticipants,
+      createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
+    });
+    const batch = writeBatch(owner);
+    setClassPlanPair(batch, owner, 'finish-plan', ended);
+    if (actualParticipants === 2) await assertSucceeds(batch.commit());
+    else await assertFails(batch.commit());
+  }
+});
 
 rulesTest('teacher-access: teacher request owner may create, server-read, and cancel only the exact own pending request', async () => {
   const unapproved = actorFirestore('unapproved');

@@ -162,12 +162,33 @@ function makeFirestoreFake(initial = {}, options = {}) {
       .map(key => docSnapshot(key, source));
   }
 
+  function queryComparable(value) {
+    if (value instanceof Date) return value.getTime();
+    if (value && typeof value.toMillis === 'function') return value.toMillis();
+    return value;
+  }
+
   function querySnapshot(path, source = documents, filters = []) {
     const limit = filters.find(filter => filter.type === 'limit');
+    const order = filters.find(filter => filter.type === 'orderBy');
+    const matches = (left, operator, right) => {
+      const a = queryComparable(left);
+      const b = queryComparable(right);
+      if (operator === '==') return a === b;
+      if (operator === '>=') return a >= b;
+      if (operator === '>') return a > b;
+      if (operator === '<=') return a <= b;
+      if (operator === '<') return a < b;
+      return false;
+    };
     const docs = collectionDocs(path, source).filter(document =>
-      filters.every(filter => filter.type === 'limit' ||
-        filter.operator === '==' && document.get(filter.field) === filter.value)
-    ).slice(0, limit ? limit.value : undefined);
+      filters.every(filter => ['limit', 'orderBy'].includes(filter.type) ||
+        matches(document.get(filter.field), filter.operator, filter.value))
+    ).sort((left, right) => {
+      if (!order) return 0;
+      const compared = queryComparable(left.get(order.field)) - queryComparable(right.get(order.field));
+      return order.direction === 'desc' ? -compared : compared;
+    }).slice(0, limit ? limit.value : undefined);
     return {
       docs,
       empty: docs.length === 0,
@@ -262,6 +283,10 @@ function makeFirestoreFake(initial = {}, options = {}) {
       },
       limit(value) {
         return collectionRef(path, filters.concat({ type: 'limit', value }));
+      },
+      orderBy(field, direction) {
+        calls.push({ operation: 'orderBy', path, field, direction: direction || 'asc' });
+        return collectionRef(path, filters.concat({ type: 'orderBy', field, direction: direction || 'asc' }));
       },
       onSnapshot(next, error) {
         return addListener(collectionListeners, path, next, error, querySnapshot);
@@ -1276,6 +1301,336 @@ function teacherRequestInput(patch = {}) {
 const teacherRequestAdmin = {
   uid: 'admin-uid', email: 'ADMIN@School.KR', role: 'admin'
 };
+
+function classPlanPair(patch = {}) {
+  const privatePlan = {
+    planId: 'plan-a',
+    ownerUid: 'teacher-a',
+    ownerEmailCanonical: 'teacher@school.kr',
+    ownerDisplayName: '김교사',
+    setId: 'set-a',
+    setTitleSnapshot: '안전 수업',
+    className: '2학년 1반',
+    plannedStartAt: 10_000,
+    plannedEndAt: 20_000,
+    expectedStudents: 30,
+    status: 'planned',
+    revision: 1,
+    warningLevel: 'caution',
+    warningAcknowledgedAt: 9_000,
+    createdAtMs: 8_000,
+    updatedAtMs: 8_000,
+    ...patch
+  };
+  const publicPlan = {
+    planId: privatePlan.planId,
+    setId: privatePlan.setId,
+    setTitleSnapshot: privatePlan.setTitleSnapshot,
+    className: privatePlan.className,
+    plannedStartAt: privatePlan.plannedStartAt,
+    plannedEndAt: privatePlan.plannedEndAt,
+    expectedStudents: privatePlan.expectedStudents,
+    status: privatePlan.status,
+    revision: privatePlan.revision,
+    warningLevel: privatePlan.warningLevel,
+    warningAcknowledgedAt: privatePlan.warningAcknowledgedAt
+  };
+  for (const key of [
+    'sessionId', 'actualStartedAtMs', 'actualEndedAtMs', 'actualParticipants'
+  ]) {
+    if (privatePlan[key] !== undefined) publicPlan[key] = privatePlan[key];
+  }
+  return { privatePlan, publicPlan };
+}
+
+function activeTeacherAllowance(patch = {}) {
+  return {
+    uid: 'teacher-a', emailCanonical: 'teacher@school.kr', displayName: '김교사',
+    status: 'active', enabled: true, role: 'teacher', administrativeHold: false,
+    ...patch
+  };
+}
+
+function storedClassPlanPair(patch = {}) {
+  const { privatePlan, publicPlan } = classPlanPair(patch);
+  const storedPrivate = {
+    ...privatePlan,
+    plannedStartAt: new Date(privatePlan.plannedStartAt),
+    plannedEndAt: new Date(privatePlan.plannedEndAt),
+    warningAcknowledgedAt: new Date(privatePlan.warningAcknowledgedAt),
+    createdAt: { toMillis: () => privatePlan.createdAtMs },
+    updatedAt: { toMillis: () => privatePlan.updatedAtMs }
+  };
+  delete storedPrivate.createdAtMs;
+  delete storedPrivate.updatedAtMs;
+  const storedPublic = {
+    ...publicPlan,
+    plannedStartAt: new Date(publicPlan.plannedStartAt),
+    plannedEndAt: new Date(publicPlan.plannedEndAt),
+    warningAcknowledgedAt: new Date(publicPlan.warningAcknowledgedAt),
+    createdAt: { toMillis: () => privatePlan.createdAtMs },
+    updatedAt: { toMillis: () => privatePlan.updatedAtMs }
+  };
+  return { storedPrivate, storedPublic };
+}
+
+test('class plan create atomically writes one exact private/public projection pair', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance()
+  }, { committedServerMillis: 8_500 });
+  const store = createStore(fake);
+  const pair = classPlanPair();
+
+  const created = await store.createClassPlan(pair.privatePlan, pair.publicPlan);
+
+  assert.equal(created.planId, 'plan-a');
+  assert.equal(created.revision, 1);
+  const privateStored = fake.value('class_plans_private/plan-a');
+  const publicStored = fake.value('class_plans_public/plan-a');
+  assert.equal(privateStored.ownerUid, 'teacher-a');
+  assert.equal(publicStored.ownerUid, undefined);
+  assert.equal(publicStored.ownerEmailCanonical, undefined);
+  assert.equal(publicStored.ownerDisplayName, undefined);
+  for (const key of [
+    'planId', 'revision', 'setId', 'setTitleSnapshot', 'className',
+    'expectedStudents', 'status', 'warningLevel'
+  ]) assert.equal(publicStored[key], privateStored[key], key);
+  assert.equal(publicStored.plannedStartAt.getTime(), privateStored.plannedStartAt.getTime());
+  assert.equal(publicStored.plannedEndAt.getTime(), privateStored.plannedEndAt.getTime());
+  assert.deepEqual(Object.keys(publicStored).sort(), [
+    'className', 'createdAt', 'expectedStudents', 'planId', 'plannedEndAt',
+    'plannedStartAt', 'revision', 'setId', 'setTitleSnapshot', 'status',
+    'updatedAt', 'warningAcknowledgedAt', 'warningLevel'
+  ]);
+});
+
+test('class plan create rollback leaves neither side when the atomic commit fails', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance()
+  }, { failTransactionAt: 1, failTransactionMessage: 'planned paired write failure' });
+  const store = createStore(fake);
+  const pair = classPlanPair();
+
+  await assert.rejects(store.createClassPlan(pair.privatePlan, pair.publicPlan), /paired write failure/);
+
+  assert.equal(fake.has('class_plans_private/plan-a'), false);
+  assert.equal(fake.has('class_plans_public/plan-a'), false);
+});
+
+test('class plan update and cancellation use exact revision CAS and keep both projections equal', async () => {
+  const pair = storedClassPlanPair();
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic
+  });
+  const store = createStore(fake);
+
+  await assert.rejects(store.updateOwnClassPlan('plan-a', 2, {
+    className: '변조', expectedStudents: 31
+  }), /revision/);
+  assert.equal(fake.value('class_plans_private/plan-a').className, '2학년 1반');
+
+  const updated = await store.updateOwnClassPlan('plan-a', 1, {
+    className: '2학년 2반', plannedStartAt: 11_000, plannedEndAt: 21_000,
+    expectedStudents: 31, warningLevel: 'green', warningAcknowledgedAt: 10_500
+  });
+  assert.equal(updated.revision, 2);
+  for (const path of ['class_plans_private/plan-a', 'class_plans_public/plan-a']) {
+    const value = fake.value(path);
+    assert.equal(value.className, '2학년 2반');
+    assert.equal(value.expectedStudents, 31);
+    assert.equal(value.revision, 2);
+    assert.equal(value.ownerUid, path.includes('private') ? 'teacher-a' : undefined);
+  }
+
+  await assert.rejects(store.updateOwnClassPlan('plan-a', 2, {
+    ownerUid: 'forged-owner'
+  }), /field|필드|owner/i);
+
+  await assert.rejects(store.cancelOwnClassPlan('plan-a', 1), /revision/);
+  const cancelled = await store.cancelOwnClassPlan('plan-a', 2);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.revision, 3);
+  assert.equal(fake.value('class_plans_public/plan-a').status, 'cancelled');
+  assert.equal(fake.value('class_plans_public/plan-a').revision, 3);
+});
+
+test('class plan public/admin queries require a bounded ordered server-time window', async () => {
+  const first = storedClassPlanPair();
+  const second = storedClassPlanPair({
+    planId: 'plan-b', plannedStartAt: 30_000, plannedEndAt: 40_000,
+    className: '2학년 2반'
+  });
+  const fake = makeFirestoreFake({
+    'class_plans_public/plan-a': first.storedPublic,
+    'class_plans_public/plan-b': second.storedPublic,
+    'class_plans_private/plan-a': first.storedPrivate,
+    'class_plans_private/plan-b': second.storedPrivate
+  });
+  const store = createStore(fake);
+
+  const publicPlans = await store.listPublicPlans(9_000, 25_000, 20);
+  const adminPlans = await store.listAdminPlans(9_000, 25_000, 20);
+
+  assert.deepEqual(Object.keys(publicPlans), ['plan-a']);
+  assert.equal(publicPlans['plan-a'].plannedStartAt, 10_000);
+  assert.equal(publicPlans['plan-a'].ownerUid, undefined);
+  assert.equal(adminPlans['plan-a'].ownerUid, 'teacher-a');
+  assert.deepEqual(fake.calls().filter(call => call.operation === 'where').map(call => [
+    call.path, call.field, call.operator, call.value.getTime()
+  ]), [
+    ['class_plans_public', 'plannedStartAt', '>=', 9_000],
+    ['class_plans_public', 'plannedStartAt', '<', 25_000],
+    ['class_plans_private', 'plannedStartAt', '>=', 9_000],
+    ['class_plans_private', 'plannedStartAt', '<', 25_000]
+  ]);
+  await assert.rejects(store.listPublicPlans(25_000, 9_000, 20), /window|기간|범위/);
+  await assert.rejects(store.listAdminPlans(9_000, 25_000, 101), /limit/);
+});
+
+test('class plan attach rechecks active identity, revision, owner and set then binds one session idempotently', async () => {
+  const pair = storedClassPlanPair();
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': activeTeacherAllowance(),
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'sessions/session-a': {
+      teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', setId: 'set-a',
+      status: 'live', createdAt: { toMillis: () => 12_000 }
+    }
+  });
+  const store = createStore(fake);
+  const owner = {
+    uid: 'teacher-a', email: 'teacher@school.kr', expectedRevision: 1
+  };
+
+  const attached = await store.attachPlanToSession('plan-a', 'session-a', owner);
+  assert.equal(attached.status, 'live');
+  assert.equal(attached.revision, 2);
+  assert.equal(attached.sessionId, 'session-a');
+  assert.equal(fake.value('class_plans_public/plan-a').sessionId, 'session-a');
+  assert.equal(fake.value('class_plans_public/plan-a').actualStartedAt.toMillis(), 12_000);
+
+  const writesBeforeRetry = fake.calls().filter(call =>
+    ['transactionSet', 'transactionUpdate'].includes(call.operation)
+  ).length;
+  const retried = await store.attachPlanToSession('plan-a', 'session-a', owner);
+  assert.equal(retried.revision, 2);
+  assert.equal(fake.calls().filter(call =>
+    ['transactionSet', 'transactionUpdate'].includes(call.operation)
+  ).length, writesBeforeRetry);
+
+  fake.emit('sessions/session-b', {
+    teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', setId: 'other-set',
+    status: 'live', createdAt: { toMillis: () => 13_000 }
+  });
+  await assert.rejects(store.attachPlanToSession('plan-a', 'session-b', {
+    ...owner, expectedRevision: 2
+  }), /already|연결|session|세트|상태/i);
+  assert.equal(fake.value('class_plans_private/plan-a').sessionId, 'session-a');
+});
+
+test('class plan finish ignores forged actuals and ends only after authoritative ended session count', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'session-a', actualStartedAtMs: 12_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 12_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 12_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'sessions/session-a': {
+      teacherUid: 'teacher-a', setId: 'set-a', status: 'ended',
+      createdAt: { toMillis: () => 12_000 }, endedAt: { toMillis: () => 25_000 },
+      actualParticipants: 2
+    },
+    'sessions/session-a/students/student-1': { uid: 'student-1' },
+    'sessions/session-a/students/student-2': { uid: 'student-2' }
+  });
+  const store = createStore(fake);
+
+  const finished = await store.finishClassPlan('plan-a', 'session-a', {
+    expectedRevision: 2, actualParticipants: 999, actualEndedAtMs: 1
+  });
+
+  assert.equal(finished.status, 'ended');
+  assert.equal(finished.revision, 3);
+  assert.equal(finished.actualParticipants, 2);
+  assert.equal(finished.actualEndedAtMs, 25_000);
+  const stored = fake.value('class_plans_public/plan-a');
+  assert.equal(stored.actualParticipants, 2);
+  assert.equal(stored.actualEndedAt.toMillis(), 25_000);
+});
+
+test('class plan finish rejects a session summary that disagrees with authoritative student documents', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'session-a', actualStartedAtMs: 12_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 12_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 12_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'sessions/session-a': {
+      teacherUid: 'teacher-a', setId: 'set-a', status: 'ended',
+      createdAt: { toMillis: () => 12_000 }, endedAt: { toMillis: () => 25_000 },
+      actualParticipants: 1
+    },
+    'sessions/session-a/students/student-1': { uid: 'student-1' },
+    'sessions/session-a/students/student-2': { uid: 'student-2' }
+  });
+
+  await assert.rejects(createStore(fake).finishClassPlan('plan-a', 'session-a', {
+    expectedRevision: 2
+  }), /count|집계|participant|인원/);
+  assert.equal(fake.value('class_plans_private/plan-a').status, 'live');
+});
+
+test('class plan session end records the authoritative student count in the atomic ended parent', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/session-a': { teacherUid: 'teacher-a', status: 'live' },
+    'sessions/session-a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    'sessions/session-a/students/student-1': { uid: 'student-1' },
+    'sessions/session-a/students/student-2': { uid: 'student-2' }
+  });
+
+  await createStore(fake).endSession('session-a');
+
+  assert.equal(fake.value('sessions/session-a').status, 'ended');
+  assert.equal(fake.value('sessions/session-a').actualParticipants, 2);
+  assert.equal(fake.value('sessions/session-a/meta/live').status, 'ended');
+});
+
+test('class plan finish failure commits no fabricated ended projection and remains retryable', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'session-a', actualStartedAtMs: 12_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 12_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 12_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic,
+    'sessions/session-a': {
+      teacherUid: 'teacher-a', setId: 'set-a', status: 'live',
+      createdAt: { toMillis: () => 12_000 }
+    }
+  });
+  const store = createStore(fake);
+
+  await assert.rejects(store.finishClassPlan('plan-a', 'session-a', {
+    expectedRevision: 2
+  }), /ended|종료/);
+
+  assert.equal(fake.value('class_plans_private/plan-a').status, 'live');
+  assert.equal(fake.value('class_plans_public/plan-a').status, 'live');
+});
 
 test('teacher request submit, server read, and exact-revision cancellation preserve owner identity', async () => {
   const fake = makeFirestoreFake();
@@ -4230,10 +4585,24 @@ test('세션 종료는 타이머 제출 유예 중에도 parent와 안전한 end
   assert.deepEqual(fake.value('sessions/a/meta/live'), {
     q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
   });
-  assert.deepEqual(
-    fake.calls().filter(call => call.operation === 'batchCommit'),
-    [{ operation: 'batchCommit', size: 2 }]
-  );
+  assert.equal(session.actualParticipants, 0);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 1);
+  assert.equal(fake.calls().filter(call => call.operation === 'batchCommit').length, 0);
+});
+
+test('세션 종료 재시도는 이미 확정된 ended 시각과 참여 집계를 다시 쓰지 않는다', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/a': { setId: 'set1', status: 'live' },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  }, { committedServerMillis: 20_000 });
+  const store = createStore(fake);
+
+  await store.endSession('a');
+  const firstEndedAt = fake.value('sessions/a').endedAt;
+  await store.endSession('a');
+
+  assert.equal(fake.value('sessions/a').endedAt.toMillis(), firstEndedAt.toMillis());
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 2);
 });
 
 test('점수판은 meta/board 문서에 scores 필드로 쓴다', async () => {
@@ -5543,6 +5912,199 @@ test('다른 영상 문항으로 이동하면 로드 뒤 목표 3초 전을 기�
   assert.equal(ctx.pl.fired[1], false);
 });
 
+test('우리 반 시작하기는 수업계획 입력과 로컬 경고 확인 dialog를 먼저 제공한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+
+  assert.match(html, /id="pl-plan-dialog"/);
+  assert.match(html, /id="pl-plan-class-name"/);
+  assert.match(html, /id="pl-plan-start"[^>]*type="datetime-local"|type="datetime-local"[^>]*id="pl-plan-start"/);
+  assert.match(html, /id="pl-plan-end"[^>]*type="datetime-local"|type="datetime-local"[^>]*id="pl-plan-end"/);
+  assert.match(html, /id="pl-plan-expected"/);
+  assert.match(html, /id="pl-plan-warning"/);
+  assert.match(html, /id="pl-plan-ack"/);
+  assert.match(html, /경고 확인 후 진행/);
+  assert.match(html, /onclick="plOpenClassPlanDialog\(\)"/);
+});
+
+test('겹침 조회 실패는 현황 확인 불가를 표시하지만 로컬 확인 뒤 계획 진행을 허용한다', async () => {
+  const warning = { textContent: '', className: '' };
+  const ack = { checked: true };
+  const dialog = { closeCalls: 0, close() { this.closeCalls += 1; } };
+  const elements = {
+    '#pl-plan-class-name': { value: ' 2학년 3반 ' },
+    '#pl-plan-start': { value: '2026-08-20T10:00' },
+    '#pl-plan-end': { value: '2026-08-20T10:50' },
+    '#pl-plan-expected': { value: '35' },
+    '#pl-plan-warning': warning,
+    '#pl-plan-ack': ack,
+    '#pl-plan-dialog': dialog
+  };
+  let starts = 0;
+  const context = {
+    pl: { setId: 'set-a', set: { title: '분수', author: '김교사' } },
+    teacherState: {
+      status: 'teacher', role: 'teacher', uid: 'teacher-a',
+      email: 'Teacher@School.kr', displayName: '김교사'
+    },
+    teacherAuthVersion: 4,
+    AuthCore: require('../auth-core.js'),
+    ClassPlanningCore: require('../class-planning-core.js'),
+    $(selector) { return elements[selector] || null; },
+    store: {
+      serverNow() { return new Date('2026-08-20T00:59:00Z').getTime(); },
+      async listPublicPlans() { throw new Error('offline'); }
+    },
+    rid() { return 'plan-stable'; },
+    lsSet() {},
+    plStartSession() { starts += 1; return Promise.resolve(true); },
+    alert() {}
+  };
+  loadStageFunctions(['plReviewClassPlan', 'plConfirmClassPlan'], context);
+
+  assert.equal(await context.plReviewClassPlan(), true);
+  assert.match(warning.textContent, /현황 확인 불가.*수업은 진행할 수 있습니다/);
+  ack.checked = true;
+  assert.equal(await context.plConfirmClassPlan(), true);
+  assert.equal(starts, 1);
+  assert.equal(context.pl.reviewedClassPlan.privatePlan.warningLevel, 'caution');
+  assert.equal(context.pl.reviewedClassPlan.privatePlan.warningAcknowledgedAt,
+    new Date('2026-08-20T00:59:00Z').getTime());
+  assert.equal(dialog.closeCalls, 1);
+});
+
+test('계획 저장 성공 전에는 allocation을 시작하지 않고 성공 뒤 한 세션에 한 번만 attach한다', async () => {
+  const events = [];
+  let finishCreate;
+  const context = {
+    ...pendingAllocationTestContext(),
+    pl: {
+      setId: 'set1', set: { title: '세트', author: '교사', videos: [] }, flatQuestions: [],
+      reviewedClassPlan: { privatePlan: { planId: 'plan-a', revision: 1 }, publicPlan: { planId: 'plan-a' } }
+    },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    teacherAuthVersion: 7,
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    $() { return { value: '2학년 3반' }; }, lsSet() {},
+    rid(length) { return length === 12 ? 'SESSION12345' : length === 24 ? 'allocation-token-123456' : 'CODE12'; },
+    SV_TS: SERVER_TIMESTAMP, normSet(value) { return value; }, imgCache: {},
+    store: {
+      createClassPlan() { events.push('create'); return new Promise(resolve => { finishCreate = resolve; }); },
+      async getQuizSetSnapshot() { events.push('snapshot'); return { setSnapshot: context.pl.set, snapshotImages: {} }; },
+      async startSession() { events.push('allocate'); return 'CODE12'; },
+      async activateSessionAllocation() { events.push('activate'); return true; },
+      async attachPlanToSession(planId, sessionId, owner) {
+        events.push(['attach', planId, sessionId, owner.expectedRevision]);
+        return { revision: 2 };
+      }
+    },
+    renderPlayRun() { events.push('render'); }, alert() {}, console
+  };
+  loadStageFunctions(['plStartSessionHeartbeat', 'plStartSession'], context);
+
+  const starting = context.plStartSession();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['create']);
+  finishCreate({ revision: 1 });
+  await starting;
+
+  assert.deepEqual(events, [
+    'create', 'snapshot', 'allocate', 'activate', ['attach', 'plan-a', 'SESSION12345', 1], 'render'
+  ]);
+  assert.equal(context.pl.classPlanId, 'plan-a');
+  assert.equal(context.pl.classPlanSessionId, 'SESSION12345');
+  assert.equal(context.pl.classPlanRevision, 2);
+});
+
+test('allocation 실패 재시도는 저장된 planned 계획과 동일 session identity를 재사용한다', async () => {
+  let creates = 0, allocations = 0;
+  const sessions = [];
+  const context = {
+    ...pendingAllocationTestContext(),
+    pl: {
+      setId: 'set1', set: { title: '세트', author: '교사', videos: [] }, flatQuestions: [],
+      reviewedClassPlan: { privatePlan: { planId: 'plan-a', revision: 1 }, publicPlan: { planId: 'plan-a' } }
+    },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    $() { return { value: '' }; }, lsSet() {},
+    rid(length) { return length === 12 ? 'SESSION-STABLE' : length === 24 ? 'token-stable-123456789012' : 'CODE12'; },
+    SV_TS: SERVER_TIMESTAMP, normSet(value) { return value; }, imgCache: {},
+    store: {
+      async createClassPlan() { creates += 1; return { revision: 1 }; },
+      async getQuizSetSnapshot() { return { setSnapshot: context.pl.set, snapshotImages: {} }; },
+      async startSession(sessionId) {
+        sessions.push(sessionId);
+        allocations += 1;
+        if (allocations === 1) throw new Error('allocation failed');
+        return 'CODE12';
+      },
+      async activateSessionAllocation() { return true; },
+      async attachPlanToSession() { return { revision: 2 }; }
+    },
+    renderPlayRun() {}, alert() {}, console: { error() {} }
+  };
+  loadStageFunctions(['plStartSessionHeartbeat', 'plStartSession'], context);
+
+  await context.plStartSession();
+  assert.equal(context.pl.classPlanPersisted, true);
+  assert.equal(context.pl.classPlanAttached, undefined);
+  await context.plStartSession();
+
+  assert.equal(creates, 1);
+  assert.deepEqual(sessions, ['SESSION-STABLE', 'SESSION-STABLE']);
+  assert.equal(context.pl.classPlanAttached, true);
+});
+
+test('attach 응답 실패 재시도는 활성 allocation을 덮어쓰지 않고 같은 identity로 attach만 재시도한다', async () => {
+  let allocations = 0, attachAttempts = 0, renders = 0;
+  const attaches = [];
+  const context = {
+    ...pendingAllocationTestContext(),
+    pl: {
+      setId: 'set1', set: { title: '세트', author: '교사', videos: [] }, flatQuestions: [],
+      reviewedClassPlan: { privatePlan: { planId: 'plan-a', revision: 1 }, publicPlan: { planId: 'plan-a' } }
+    },
+    teacherState: {
+      status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+    },
+    AuthCore: require('../auth-core.js'), PlaylistCore: require('../playlist-core.js'),
+    $() { return { value: '' }; }, lsSet() {},
+    rid(length) { return length === 12 ? 'SESSION-STABLE' : length === 24 ? 'token-stable-123456789012' : 'CODE12'; },
+    SV_TS: SERVER_TIMESTAMP, normSet(value) { return value; }, imgCache: {},
+    store: {
+      async createClassPlan() { return { revision: 1 }; },
+      async getQuizSetSnapshot() { return { setSnapshot: context.pl.set, snapshotImages: {} }; },
+      async startSession() { allocations += 1; return 'CODE12'; },
+      async activateSessionAllocation() { return true; },
+      async attachPlanToSession(planId, sessionId, owner) {
+        attaches.push([planId, sessionId, owner.expectedRevision]);
+        attachAttempts += 1;
+        if (attachAttempts === 1) throw new Error('ambiguous attach response');
+        return { revision: 2 };
+      },
+      async abortSessionAllocation() { return true; }
+    },
+    renderPlayRun() { renders += 1; }, alert() {}, toast() {}, console: { error() {} }
+  };
+  loadStageFunctions(['plStartSessionHeartbeat', 'plStartSession'], context);
+
+  await context.plStartSession();
+  assert.equal(context.pl.classPlanAllocationActivated, true);
+  assert.equal(renders, 0);
+  await context.plStartSession();
+
+  assert.equal(allocations, 1);
+  assert.deepEqual(attaches, [
+    ['plan-a', 'SESSION-STABLE', 1], ['plan-a', 'SESSION-STABLE', 1]
+  ]);
+  assert.equal(context.pl.classPlanAttached, true);
+  assert.equal(renders, 1);
+});
+
 test('교사 수업 시작은 세션 정보와 코드 생성기를 저장소에 전달한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const serverTimestamp = Symbol('server timestamp');
@@ -6395,6 +6957,72 @@ test('교사 수업 종료는 저장소 종료가 끝난 뒤 안내 화면으로
     ['toast', '진행을 종료했습니다'],
     ['go', 'live/session-a']
   ]);
+});
+
+test('session 종료 실패는 class plan ended를 만들거나 이동하지 않는다', async () => {
+  let finishes = 0, routes = 0;
+  const context = {
+    pendingAllocationRemove() { return true; },
+    pl: {
+      sessionId: 'session-a', classPlanId: 'plan-a', classPlanRevision: 2,
+      classPlanAttached: true
+    },
+    confirm() { return true; },
+    document: {
+      fullscreenElement: null,
+      getElementById() { return null; },
+      body: { classList: { remove() {} } }
+    },
+    store: {
+      async endSession() { throw new Error('end failed'); },
+      async finishClassPlan() { finishes += 1; }
+    },
+    toast() {}, go() { routes += 1; }
+  };
+  loadStageFunctions(['plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'], context);
+
+  await assert.rejects(context.plEndSession(), /end failed/);
+  assert.equal(finishes, 0);
+  assert.equal(routes, 0);
+});
+
+test('plan finish 실패 재시도는 동일 plan/session/revision으로 끝낸 뒤에만 이동한다', async () => {
+  const finishes = [];
+  let attempts = 0, routes = 0;
+  const context = {
+    pendingAllocationRemove() { return true; },
+    pl: {
+      sessionId: 'session-a', classPlanId: 'plan-a', classPlanRevision: 2,
+      classPlanAttached: true
+    },
+    confirm() { return true; },
+    document: {
+      fullscreenElement: null,
+      getElementById() { return null; },
+      body: { classList: { remove() {} } }
+    },
+    store: {
+      async endSession() {},
+      async finishClassPlan(planId, sessionId, actuals) {
+        finishes.push([planId, sessionId, actuals.expectedRevision]);
+        attempts += 1;
+        if (attempts === 1) throw new Error('finish failed');
+        return { revision: 3 };
+      }
+    },
+    toast() {}, go() { routes += 1; }
+  };
+  loadStageFunctions(['plResetStageFullscreenUI', 'plExitStageFullscreen', 'plEndSession'], context);
+
+  await assert.rejects(context.plEndSession(), /finish failed/);
+  assert.equal(routes, 0);
+  await context.plEndSession();
+
+  assert.deepEqual(finishes, [
+    ['plan-a', 'session-a', 2], ['plan-a', 'session-a', 2]
+  ]);
+  assert.equal(context.pl.classPlanRevision, 3);
+  assert.equal(routes, 1);
 });
 
 test('교사 전체화면 진입은 기존 플레이어를 재생성하지 않고 stage만 요청한다', async () => {

@@ -8,10 +8,13 @@
   const teacherAccess = typeof module === 'object' && module.exports
     ? require('./teacher-access-request-core.js')
     : root.TeacherAccessRequestCore;
-  const api = factory(core, collaboration, teacherAccess);
+  const classPlanning = typeof module === 'object' && module.exports
+    ? require('./class-planning-core.js')
+    : root.ClassPlanningCore;
+  const api = factory(core, collaboration, teacherAccess, classPlanning);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, collaboration, teacherAccess) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, collaboration, teacherAccess, classPlanning) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
   const SAFE_REQUEST_BYTES = 8_000_000;
@@ -709,6 +712,430 @@
           updatedAt: fieldValue.serverTimestamp(),
           updatedByUid: admin.uid
         });
+      });
+    }
+
+    const CLASS_PLAN_WINDOW_MAX_MS = 31 * 24 * 60 * 60 * 1000;
+    const classPlanPrivateBaseKeys = [
+      'planId', 'ownerUid', 'ownerEmailCanonical', 'ownerDisplayName',
+      'setId', 'setTitleSnapshot', 'className', 'plannedStartAt', 'plannedEndAt',
+      'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt'
+    ];
+    const classPlanPublicBaseKeys = [
+      'planId', 'setId', 'setTitleSnapshot', 'className', 'plannedStartAt',
+      'plannedEndAt', 'expectedStudents', 'status', 'revision', 'createdAt', 'updatedAt'
+    ];
+    const classPlanOptionalKeys = [
+      'warningLevel', 'warningAcknowledgedAt', 'sessionId', 'actualStartedAt',
+      'actualEndedAt', 'actualParticipants'
+    ];
+
+    function classPlanningCore() {
+      const value = classPlanning ||
+        (typeof globalThis !== 'undefined' && globalThis.ClassPlanningCore);
+      if (!value || typeof value.publicProjection !== 'function') {
+        throw new Error('ClassPlanningCore가 준비되지 않았습니다.');
+      }
+      return value;
+    }
+
+    function assertPlanId(value) {
+      if (typeof value !== 'string' || !value || value.length > 128 || value.includes('/')) {
+        throw new Error('유효한 class plan ID가 필요합니다.');
+      }
+      return value;
+    }
+
+    function classPlanTimestamp(value, name) {
+      const millis = value instanceof Date ? value.getTime() : timestampMillis(value);
+      if (!Number.isSafeInteger(millis)) throw new Error(name + ' timestamp가 유효하지 않습니다.');
+      return millis;
+    }
+
+    function classPlanClientValue(data, id) {
+      if (!data) return null;
+      const value = { ...data, planId: data.planId || id };
+      value.plannedStartAt = classPlanTimestamp(data.plannedStartAt, 'plannedStartAt');
+      value.plannedEndAt = classPlanTimestamp(data.plannedEndAt, 'plannedEndAt');
+      if (data.warningAcknowledgedAt !== undefined) {
+        value.warningAcknowledgedAt = classPlanTimestamp(
+          data.warningAcknowledgedAt, 'warningAcknowledgedAt'
+        );
+      }
+      if (data.actualStartedAt !== undefined) {
+        value.actualStartedAtMs = classPlanTimestamp(data.actualStartedAt, 'actualStartedAt');
+        delete value.actualStartedAt;
+      }
+      if (data.actualEndedAt !== undefined) {
+        value.actualEndedAtMs = classPlanTimestamp(data.actualEndedAt, 'actualEndedAt');
+        delete value.actualEndedAt;
+      }
+      if (data.createdAt !== undefined) {
+        value.createdAtMs = classPlanTimestamp(data.createdAt, 'createdAt');
+        delete value.createdAt;
+      }
+      if (data.updatedAt !== undefined) {
+        value.updatedAtMs = classPlanTimestamp(data.updatedAt, 'updatedAt');
+        delete value.updatedAt;
+      }
+      return value;
+    }
+
+    function classPlanPublicValue(privateValue) {
+      const value = {
+        ...classPlanningCore().publicProjection(privateValue),
+        planId: privateValue.planId,
+        revision: privateValue.revision
+      };
+      if (privateValue.sessionId !== undefined) value.sessionId = privateValue.sessionId;
+      return value;
+    }
+
+    function assertClassPlanShape(value, isPrivate, stored) {
+      const plan = value || {};
+      assertPlanId(plan.planId);
+      if (!Number.isSafeInteger(plan.revision) || plan.revision < 1) {
+        throw new Error('class plan revision은 positive safe integer여야 합니다.');
+      }
+      const base = isPrivate ? classPlanPrivateBaseKeys : classPlanPublicBaseKeys;
+      const allowed = base.concat(classPlanOptionalKeys);
+      const keys = Object.keys(plan);
+      if (keys.some(key => !allowed.includes(key)) || base.some(key => !keys.includes(key))) {
+        throw new Error('class plan 문서에 허용되지 않은 필드가 있습니다.');
+      }
+      const client = stored ? classPlanClientValue(plan, plan.planId) : { ...plan };
+      if (!stored) {
+        if (client.createdAtMs === undefined || client.updatedAtMs === undefined) {
+          throw new Error('class plan 생성 시각이 필요합니다.');
+        }
+        classPlanTimestamp(client.createdAtMs, 'createdAtMs');
+        classPlanTimestamp(client.updatedAtMs, 'updatedAtMs');
+      }
+      classPlanningCore().publicProjection(client);
+      if (isPrivate) {
+        if (typeof client.ownerUid !== 'string' || !client.ownerUid ||
+            client.ownerEmailCanonical !== canonicalTeacherEmail(client.ownerEmailCanonical) ||
+            !client.ownerEmailCanonical || typeof client.ownerDisplayName !== 'string' ||
+            !client.ownerDisplayName.trim() || client.ownerDisplayName.trim().length > 80) {
+          throw new Error('class plan owner identity가 유효하지 않습니다.');
+        }
+      }
+      return client;
+    }
+
+    function assertClassPlanPair(privateData, publicData, stored) {
+      const privateValue = assertClassPlanShape(privateData, true, stored);
+      const publicValue = assertClassPlanShape(publicData, false, stored);
+      const expected = classPlanPublicValue(privateValue);
+      const publicComparable = { ...publicValue };
+      delete publicComparable.createdAtMs;
+      delete publicComparable.updatedAtMs;
+      const comparableKeys = Object.keys(publicComparable);
+      const expectedKeys = Object.keys(expected);
+      const mismatch = expectedKeys.find(key =>
+        JSON.stringify(publicComparable[key]) !== JSON.stringify(expected[key])
+      );
+      if (comparableKeys.length !== expectedKeys.length || mismatch) {
+        throw new Error('class plan private/public projection pair가 일치하지 않습니다.' +
+          (mismatch ? ' field=' + mismatch : ' fields=' + comparableKeys.join(',')));
+      }
+      return { privateValue, publicValue };
+    }
+
+    function storedClassPlanDocuments(privateValue) {
+      const publicValue = classPlanPublicValue(privateValue);
+      const convert = value => {
+        const stored = { ...value };
+        stored.plannedStartAt = new Date(value.plannedStartAt);
+        stored.plannedEndAt = new Date(value.plannedEndAt);
+        if (value.warningAcknowledgedAt !== undefined) {
+          stored.warningAcknowledgedAt = new Date(value.warningAcknowledgedAt);
+        }
+        if (value.actualStartedAtMs !== undefined) {
+          stored.actualStartedAt = new Date(value.actualStartedAtMs);
+          delete stored.actualStartedAtMs;
+        }
+        if (value.actualEndedAtMs !== undefined) {
+          stored.actualEndedAt = new Date(value.actualEndedAtMs);
+          delete stored.actualEndedAtMs;
+        }
+        delete stored.createdAtMs;
+        delete stored.updatedAtMs;
+        stored.createdAt = fieldValue.serverTimestamp();
+        stored.updatedAt = fieldValue.serverTimestamp();
+        return stored;
+      };
+      return { privateDocument: convert(privateValue), publicDocument: convert(publicValue) };
+    }
+
+    async function requireActiveClassPlanOwner(transaction, owner) {
+      const allowanceSnapshot = await transaction.get(
+        db.doc('teacher_allowances/' + owner.ownerUid)
+      );
+      if (!allowanceSnapshot.exists) throw new Error('active teacher allowance가 필요합니다.');
+      const allowance = allowanceSnapshot.data() || {};
+      if (allowance.uid !== owner.ownerUid ||
+          allowance.emailCanonical !== owner.ownerEmailCanonical ||
+          allowance.status !== 'active' || allowance.enabled !== true ||
+          !['teacher', 'admin'].includes(allowance.role)) {
+        throw new Error('현재 active 교사 신원이 class plan owner와 일치하지 않습니다.');
+      }
+      return allowance;
+    }
+
+    async function readClassPlanPair(transaction, planId) {
+      const privateRef = db.doc('class_plans_private/' + planId);
+      const publicRef = db.doc('class_plans_public/' + planId);
+      const privateSnapshot = await transaction.get(privateRef);
+      const publicSnapshot = await transaction.get(publicRef);
+      if (!privateSnapshot.exists || !publicSnapshot.exists) {
+        throw new Error('paired class plan 문서가 없습니다.');
+      }
+      const pair = assertClassPlanPair(
+        privateSnapshot.data(), publicSnapshot.data(), true
+      );
+      return { ...pair, privateRef, publicRef };
+    }
+
+    async function createClassPlan(privatePlan, publicPlan) {
+      const privateInput = { ...(privatePlan || {}) };
+      const publicInput = { ...(publicPlan || {}) };
+      if (privateInput.createdAtMs === undefined || privateInput.updatedAtMs === undefined) {
+        throw new Error('class plan 생성 시각이 필요합니다.');
+      }
+      const createPrivate = { ...privateInput };
+      const createPublic = { ...publicInput };
+      createPrivate.createdAt = new Date(createPrivate.createdAtMs);
+      createPrivate.updatedAt = new Date(createPrivate.updatedAtMs);
+      delete createPrivate.createdAtMs;
+      delete createPrivate.updatedAtMs;
+      createPublic.createdAt = createPrivate.createdAt;
+      createPublic.updatedAt = createPrivate.updatedAt;
+      const pair = assertClassPlanPair(createPrivate, createPublic, true);
+      if (pair.privateValue.status !== 'planned' || pair.privateValue.revision !== 1 ||
+          pair.privateValue.sessionId !== undefined || pair.privateValue.actualStartedAtMs !== undefined ||
+          pair.privateValue.actualEndedAtMs !== undefined || pair.privateValue.actualParticipants !== undefined) {
+        throw new Error('새 class plan은 revision 1 planned 상태여야 합니다.');
+      }
+      const planId = assertPlanId(pair.privateValue.planId);
+      const privateRef = db.doc('class_plans_private/' + planId);
+      const publicRef = db.doc('class_plans_public/' + planId);
+      return db.runTransaction(async transaction => {
+        await requireActiveClassPlanOwner(transaction, pair.privateValue);
+        const privateSnapshot = await transaction.get(privateRef);
+        const publicSnapshot = await transaction.get(publicRef);
+        if (privateSnapshot.exists || publicSnapshot.exists) {
+          throw new Error('class plan ID가 이미 존재하거나 pair가 손상되었습니다.');
+        }
+        const documents = storedClassPlanDocuments(pair.privateValue);
+        transaction.set(privateRef, documents.privateDocument);
+        transaction.set(publicRef, documents.publicDocument);
+        return { ...pair.privateValue };
+      });
+    }
+
+    function classPlanUpdate(updates) {
+      const value = updates || {};
+      const allowed = [
+        'className', 'plannedStartAt', 'plannedEndAt', 'expectedStudents',
+        'warningLevel', 'warningAcknowledgedAt'
+      ];
+      const keys = Object.keys(value);
+      if (!keys.length || keys.some(key => !allowed.includes(key))) {
+        throw new Error('class plan update 필드가 허용되지 않습니다.');
+      }
+      return value;
+    }
+
+    async function updateOwnClassPlan(planId, expectedRevision, updates) {
+      const id = assertPlanId(planId);
+      const revision = assertExpectedRevision(expectedRevision);
+      const patch = classPlanUpdate(updates);
+      return db.runTransaction(async transaction => {
+        const pair = await readClassPlanPair(transaction, id);
+        await requireActiveClassPlanOwner(transaction, pair.privateValue);
+        if (pair.privateValue.status !== 'planned') {
+          throw new Error('planned class plan만 수정할 수 있습니다.');
+        }
+        if (pair.privateValue.revision !== revision) {
+          throw new Error('class plan revision이 변경되었습니다.');
+        }
+        const next = {
+          ...pair.privateValue,
+          ...patch,
+          revision: revision + 1,
+          updatedAtMs: serverNow()
+        };
+        classPlanningCore().publicProjection(next);
+        const publicNext = classPlanPublicValue(next);
+        const privateUpdate = {
+          ...patch,
+          plannedStartAt: new Date(next.plannedStartAt),
+          plannedEndAt: new Date(next.plannedEndAt),
+          revision: next.revision,
+          updatedAt: fieldValue.serverTimestamp()
+        };
+        if (patch.warningAcknowledgedAt !== undefined) {
+          privateUpdate.warningAcknowledgedAt = new Date(patch.warningAcknowledgedAt);
+        }
+        const publicUpdate = { ...privateUpdate };
+        transaction.update(pair.privateRef, privateUpdate);
+        transaction.update(pair.publicRef, publicUpdate);
+        return { ...next, ...publicNext };
+      });
+    }
+
+    async function cancelOwnClassPlan(planId, expectedRevision) {
+      const id = assertPlanId(planId);
+      const revision = assertExpectedRevision(expectedRevision);
+      return db.runTransaction(async transaction => {
+        const pair = await readClassPlanPair(transaction, id);
+        await requireActiveClassPlanOwner(transaction, pair.privateValue);
+        if (pair.privateValue.status !== 'planned') {
+          throw new Error('planned class plan만 취소할 수 있습니다.');
+        }
+        if (pair.privateValue.revision !== revision) {
+          throw new Error('class plan revision이 변경되었습니다.');
+        }
+        const update = {
+          status: 'cancelled', revision: revision + 1,
+          updatedAt: fieldValue.serverTimestamp()
+        };
+        transaction.update(pair.privateRef, update);
+        transaction.update(pair.publicRef, update);
+        return { ...pair.privateValue, status: 'cancelled', revision: revision + 1 };
+      });
+    }
+
+    function classPlanWindow(from, to, limit) {
+      const start = classPlanTimestamp(from, 'class plan window start');
+      const end = classPlanTimestamp(to, 'class plan window end');
+      const count = limit == null ? 50 : Number(limit);
+      if (end <= start || end - start > CLASS_PLAN_WINDOW_MAX_MS) {
+        throw new Error('class plan 조회 기간은 양수이며 31일 이하여야 합니다.');
+      }
+      if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
+        throw new Error('class plan query limit은 1~100이어야 합니다.');
+      }
+      return { start, end, count };
+    }
+
+    async function listClassPlans(collectionName, from, to, limit) {
+      const window = classPlanWindow(from, to, limit);
+      const snapshot = await db.collection(collectionName)
+        .where('plannedStartAt', '>=', new Date(window.start))
+        .where('plannedStartAt', '<', new Date(window.end))
+        .orderBy('plannedStartAt', 'asc')
+        .limit(window.count)
+        .get({ source: 'server' });
+      const values = {};
+      snapshot.docs.forEach(document => {
+        values[document.id] = classPlanClientValue(document.data(), document.id);
+      });
+      return values;
+    }
+
+    function listPublicPlans(from, to, limit) {
+      return listClassPlans('class_plans_public', from, to, limit);
+    }
+
+    function listAdminPlans(from, to, limit) {
+      return listClassPlans('class_plans_private', from, to, limit);
+    }
+
+    async function attachPlanToSession(planId, sessionId, ownerIdentity) {
+      const id = assertPlanId(planId);
+      const exactSessionId = assertPlanId(sessionId);
+      const owner = ownerIdentity || {};
+      const uid = assertUid(owner.uid);
+      const email = canonicalTeacherEmail(owner.emailCanonical === undefined
+        ? owner.email : owner.emailCanonical);
+      const revision = assertExpectedRevision(owner.expectedRevision);
+      if (!email || email !== (owner.emailCanonical === undefined
+        ? canonicalTeacherEmail(owner.email) : owner.emailCanonical)) {
+        throw new Error('class plan owner email 신원이 유효하지 않습니다.');
+      }
+      return db.runTransaction(async transaction => {
+        const pair = await readClassPlanPair(transaction, id);
+        if (pair.privateValue.ownerUid !== uid || pair.privateValue.ownerEmailCanonical !== email) {
+          throw new Error('class plan owner identity가 일치하지 않습니다.');
+        }
+        await requireActiveClassPlanOwner(transaction, pair.privateValue);
+        const sessionSnapshot = await transaction.get(db.doc('sessions/' + exactSessionId));
+        if (!sessionSnapshot.exists) throw new Error('연결할 session이 없습니다.');
+        const session = sessionSnapshot.data() || {};
+        if (session.teacherUid !== uid || session.setId !== pair.privateValue.setId ||
+            (session.teacherEmail && canonicalTeacherEmail(session.teacherEmail) !== email)) {
+          throw new Error('class plan과 session의 owner 또는 세트가 일치하지 않습니다.');
+        }
+        if (pair.privateValue.sessionId === exactSessionId &&
+            ['live', 'ended'].includes(pair.privateValue.status)) {
+          return { ...pair.privateValue };
+        }
+        if (pair.privateValue.status !== 'planned' || pair.privateValue.sessionId !== undefined) {
+          throw new Error('class plan은 이미 다른 session에 연결되었거나 상태가 변경되었습니다.');
+        }
+        if (pair.privateValue.revision !== revision) {
+          throw new Error('class plan revision이 변경되었습니다.');
+        }
+        if (session.status !== 'live') throw new Error('활성화된 live session만 연결할 수 있습니다.');
+        const startedAtMs = classPlanTimestamp(session.createdAt, 'session createdAt');
+        const update = {
+          status: 'live', sessionId: exactSessionId, actualStartedAt: session.createdAt,
+          revision: revision + 1, updatedAt: fieldValue.serverTimestamp()
+        };
+        transaction.update(pair.privateRef, update);
+        transaction.update(pair.publicRef, update);
+        return {
+          ...pair.privateValue, status: 'live', sessionId: exactSessionId,
+          actualStartedAtMs: startedAtMs, revision: revision + 1
+        };
+      });
+    }
+
+    async function finishClassPlan(planId, sessionId, actuals) {
+      const id = assertPlanId(planId);
+      const exactSessionId = assertPlanId(sessionId);
+      const revision = assertExpectedRevision(actuals && actuals.expectedRevision);
+      const students = await db.collection('sessions/' + exactSessionId + '/students')
+        .get({ source: 'server' });
+      return db.runTransaction(async transaction => {
+        const pair = await readClassPlanPair(transaction, id);
+        const sessionSnapshot = await transaction.get(db.doc('sessions/' + exactSessionId));
+        if (!sessionSnapshot.exists) throw new Error('종료된 session을 찾을 수 없습니다.');
+        const session = sessionSnapshot.data() || {};
+        if (pair.privateValue.sessionId !== exactSessionId ||
+            session.teacherUid !== pair.privateValue.ownerUid ||
+            session.setId !== pair.privateValue.setId) {
+          throw new Error('class plan과 종료 session identity가 일치하지 않습니다.');
+        }
+        if (pair.privateValue.status === 'ended') return { ...pair.privateValue };
+        if (pair.privateValue.status !== 'live' || pair.privateValue.revision !== revision) {
+          throw new Error('live class plan revision이 변경되었습니다.');
+        }
+        if (session.status !== 'ended') {
+          throw new Error('authoritative session 종료 후에만 class plan을 ended로 만들 수 있습니다.');
+        }
+        if (!Number.isSafeInteger(session.actualParticipants) ||
+            session.actualParticipants !== students.size) {
+          throw new Error('authoritative session participant count와 학생 집계가 일치하지 않습니다.');
+        }
+        const endedAtMs = classPlanTimestamp(session.endedAt, 'session endedAt');
+        for (const student of students.docs) {
+          const current = await transaction.get(student.ref);
+          if (!current.exists) throw new Error('종료 학생 집계가 변경되어 다시 시도해야 합니다.');
+        }
+        const update = {
+          status: 'ended', actualEndedAt: session.endedAt,
+          actualParticipants: students.size, revision: revision + 1,
+          updatedAt: fieldValue.serverTimestamp()
+        };
+        transaction.update(pair.privateRef, update);
+        transaction.update(pair.publicRef, update);
+        return {
+          ...pair.privateValue, status: 'ended', actualEndedAtMs: endedAtMs,
+          actualParticipants: students.size, revision: revision + 1
+        };
       });
     }
 
@@ -1990,19 +2417,41 @@
     }
 
     async function endSession(sessionId) {
-      const batch = db.batch();
-      batch.set(db.doc('sessions/' + sessionId), {
-        status: 'ended',
-        endedAt: fieldValue.serverTimestamp()
-      }, { merge: true });
-      batch.set(db.doc('sessions/' + sessionId + '/meta/live'), {
-        q: -1,
-        openedAt: 0,
-        revealed: false,
-        limitSec: 0,
-        status: 'ended'
+      const students = await db.collection('sessions/' + sessionId + '/students')
+        .get({ source: 'server' });
+      const sessionRef = db.doc('sessions/' + sessionId);
+      const liveRef = db.doc('sessions/' + sessionId + '/meta/live');
+      return db.runTransaction(async transaction => {
+        const sessionSnapshot = await transaction.get(sessionRef);
+        const liveSnapshot = await transaction.get(liveRef);
+        if (!sessionSnapshot.exists || !liveSnapshot.exists) {
+          throw new Error('종료할 session 또는 live 문서가 없습니다.');
+        }
+        const session = sessionSnapshot.data() || {};
+        const live = liveSnapshot.data() || {};
+        if (session.status === 'ended' && live.status === 'ended') {
+          return {
+            endedAt: session.endedAt,
+            actualParticipants: session.actualParticipants
+          };
+        }
+        for (const student of students.docs) {
+          const current = await transaction.get(student.ref);
+          if (!current.exists) throw new Error('학생 집계가 변경되어 종료를 다시 시도해야 합니다.');
+        }
+        transaction.set(sessionRef, {
+          status: 'ended',
+          endedAt: fieldValue.serverTimestamp(),
+          actualParticipants: students.size
+        }, { merge: true });
+        transaction.set(liveRef, {
+          q: -1,
+          openedAt: 0,
+          revealed: false,
+          limitSec: 0,
+          status: 'ended'
+        });
       });
-      await batch.commit();
     }
 
     function writeBoard(sessionId, board, studentScores) {
@@ -2028,6 +2477,13 @@
       decideTeacherRequest,
       suspendTeacher,
       restoreTeacher,
+      createClassPlan,
+      updateOwnClassPlan,
+      cancelOwnClassPlan,
+      listPublicPlans,
+      listAdminPlans,
+      attachPlanToSession,
+      finishClassPlan,
       listTeacherAllowances,
       upsertTeacherAllowance,
       disableTeacherAllowance,
