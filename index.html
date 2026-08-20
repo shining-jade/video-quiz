@@ -686,6 +686,10 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 16px; }
 .filters .fc { flex: 0 1 150px; }
 .filters .fc label.f { margin-bottom: 4px; }
+.ov-explain-img, .stu-explain-img {
+  display: block; max-width: 100%; max-height: 280px; object-fit: contain;
+  margin: 10px auto 16px; border-radius: 10px;
+}
 </style>
 </head>
 <body>
@@ -3331,8 +3335,6 @@ function mkImageField(q, videoIndex, i) {
         '<div class="hint">올린 사진은 브라우저에서 자동으로 줄여 저장합니다. 외부 주소는 원본이 지워지면 안 보이게 됩니다.</div>') +
   '</div>';
 }
-.ov-explain-img, .stu-explain-img { display: block; max-width: 100%; max-height: 280px; object-fit: contain; margin: 10px auto 16px; border-radius: 10px; }
-
 function mkExplanationField(q, videoIndex, questionIndex) {
   const open = !!q._explainOpen;
   if (!open) {

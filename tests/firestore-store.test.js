@@ -1762,7 +1762,9 @@ test('구형·신형 세트를 영상 배열 중심의 같은 화면 모델로 �
     videoId: 'a', videoUrl: 'url-a', startSec: 0, endSec: null,
     questions: [{
       type: 'choice', t: 10, text: 'A', choices: [], answer: 0, answers: [], accept: [],
-      imgUrl: '', imgUp: false, _img: '', explain: '', limitSec: null
+      imgUrl: '', imgUp: false, _img: '', explain: '',
+      explainImgUrl: '', explainImgUp: false, _explainImg: '', _explainOpen: false,
+      limitSec: null
     }]
   }]);
   assert.deepEqual(modern.videos.map(video => video.videoId), ['a', 'b']);
@@ -2323,7 +2325,7 @@ test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한�
     fmtTime(value) { return '0:' + String(value || 0).padStart(2, '0'); },
     PlaylistCore: require('../playlist-core.js'),
     qType(q) { return q.type || 'choice'; }, QTYPES: { choice: '객관식' },
-    mkAnswerField() { return ''; }, mkImageField() { return ''; },
+    mkAnswerField() { return ''; }, mkImageField() { return ''; }, mkExplanationField() { return ''; },
     mkRenderSettings() {}, mkSyncVideo() {},
     mkShowShare() {}, mkMarkDirty() {}, lsSet() {},
     $: selector => {
@@ -2359,7 +2361,7 @@ test('문항 제목 버블은 영상 전체 번호와 빈 영상·마지막 삽�
     fmtTime(value) { return '0:' + String(value || 0).padStart(2, '0'); },
     PlaylistCore: require('../playlist-core.js'),
     qType(q) { return q.type || 'long'; }, QTYPES: { long: '서술형' },
-    mkAnswerField() { return ''; }, mkImageField() { return ''; },
+    mkAnswerField() { return ''; }, mkImageField() { return ''; }, mkExplanationField() { return ''; },
     mkRenderSettings() {}, mkSyncVideo() {}, mkShowShare() {}, mkMarkDirty() {}, lsSet() {},
     $: selector => {
       if (!elements.has(selector)) elements.set(selector, { addEventListener() {}, style: {} });
