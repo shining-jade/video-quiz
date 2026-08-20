@@ -5722,15 +5722,18 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
       player: { pauseVideo() {} },
       flatQuestions: [{}, {}, {}, {
         number: 4, key: 'v1q1', type: 'choice', text: '공개 질문', choices: ['A', 'B'],
-        answer: 1, explain: '정답 해설', imgUp: true
+        answer: 1, explain: '정답 해설', imgUp: true, explainImgUp: true
       }],
       set: { settings: { autoPause: true, revealMode: 'manual' } }
     },
     SV_TS: serverTimestamp,
     limitFor() { return 20; },
     loadQuestionImage(setId, key, sessionId) {
-      assert.deepEqual([setId, key, sessionId], [undefined, 'v1q1', 'session-a']);
-      return Promise.resolve('data:image/jpeg;base64,current');
+      assert.equal(setId, undefined);
+      assert.equal(sessionId, 'session-a');
+      return Promise.resolve(key === 'v1q1e'
+        ? 'data:image/jpeg;base64,explanation'
+        : 'data:image/jpeg;base64,current');
     },
     FirestoreStore: {
       ...loadStoreModule(),
@@ -5745,6 +5748,7 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
     }
   };
   vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
+  vm.runInNewContext(extractFunction(html, 'plExplanationImage'), context);
   vm.runInNewContext(extractFunction(html, 'plReveal'), context);
 
   await context.plOpenQuestion(3);
@@ -5769,9 +5773,21 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
       }
     }],
     ['revealLive', 'session-a', { q: 3, openedAt: 456 }, {
-      answer: 1, explain: '정답 해설'
+      answer: 1, explain: '정답 해설', explainImage: 'data:image/jpeg;base64,explanation'
     }]
   ]);
+});
+
+test('학생 문항 view는 공개 전 해설 이미지를 숨기고 공개 뒤에만 합친다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = {};
+  vm.runInNewContext(extractFunction(html, 'studentQuestionView'), context);
+  const base = { q: 0, publicQuestion: { number: 1, total: 1, text: 'Q', choices: [] } };
+
+  assert.equal(context.studentQuestionView({ ...base, revealed: false }).question.explainImage, undefined);
+  assert.equal(context.studentQuestionView({ ...base, revealed: true,
+    publicAnswer: { explain: '해설', explainImage: 'https://example.com/e.png' }
+  }).question.explainImage, 'https://example.com/e.png');
 });
 
 test('교사 수업 종료는 저장소 종료가 끝난 뒤 안내 화면으로 이동한다', async () => {

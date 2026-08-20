@@ -3306,6 +3306,7 @@ function mkImageField(q, videoIndex, i) {
         '<div class="hint">올린 사진은 브라우저에서 자동으로 줄여 저장합니다. 외부 주소는 원본이 지워지면 안 보이게 됩니다.</div>') +
   '</div>';
 }
+.ov-explain-img, .stu-explain-img { display: block; max-width: 100%; max-height: 280px; object-fit: contain; margin: 10px auto 16px; border-radius: 10px; }
 
 function mkExplanationField(q, videoIndex, questionIndex) {
   const open = !!q._explainOpen;
@@ -5312,7 +5313,11 @@ async function plOpenQuestion(i) {
     live.submitGraceUntil = new Date(graceUntil);
     live.revealAt = new Date(Math.max(openedMillis + revealDelay * 1000, graceUntil));
   }
-  if (revealed) live.publicAnswer = FirestoreStore.publicAnswer(question);
+  if (revealed) {
+    const explainImage = await plExplanationImage(question, i);
+    if (pl !== state || state.pendingLiveQuestion !== i) return false;
+    live.publicAnswer = FirestoreStore.publicAnswer(question, explainImage);
+  }
   try {
     await store.setLive(state.sessionId, live);
     if (pl !== state || state.pendingLiveQuestion !== i) return false;
@@ -5334,16 +5339,26 @@ async function plOpenQuestion(i) {
     throw e;
   }
 }
-function plReveal() {
+async function plExplanationImage(question, questionIndex) {
+  if (!pl || !question) return '';
+  if (question.explainImgUrl) return question.explainImgUrl;
+  if (!question.explainImgUp) return '';
+  return loadQuestionImage(
+    pl.setId, String(question.key || questionIndex) + 'e', pl.sessionId, pl.snapshotVersion
+  );
+}
+
+async function plReveal() {
   if (!pl || pl.live.q < 0) return;
   const question = pl.flatQuestions[pl.live.q];
   if (!question) return;
   const identity = FirestoreStore.liveIdentity(pl.live);
   if (!identity) return Promise.resolve(false);
+  const explainImage = await plExplanationImage(question, pl.live.q);
   return store.revealLive(
     pl.sessionId,
     identity,
-    FirestoreStore.publicAnswer(question)
+    FirestoreStore.publicAnswer(question, explainImage)
   );
 }
 
@@ -5714,6 +5729,7 @@ function plRenderOverlay() {
     stage.appendChild(ov);
   }
   const type = qType(q);
+  const publicAnswer = pl.live.publicAnswer || {};
   ov.innerHTML = '<div class="ov-inner">' +
     '<div class="ov-top">' +
       '<span class="tag" style="background:rgba(255,255,255,.18);color:#fff">문항 ' + (q.number || i + 1) + ' / ' + pl.flatQuestions.length + '</span>' +
@@ -5725,7 +5741,8 @@ function plRenderOverlay() {
     '<div class="quiz-body">' +
       (hasImage(q) ? '<img class="q-img" id="ov-img" alt="문항 이미지">' : '') +
       '<div class="ov-q">' + esc(q.text) + '</div>' +
-      (q.explain ? '<div class="ov-explain-top" id="ov-explain-top" style="display:none">💡 ' + esc(q.explain) + '</div>' : '') +
+      (publicAnswer.explain ? '<div class="ov-explain-top" id="ov-explain-top" style="display:none">💡 ' + esc(publicAnswer.explain) + '</div>' : '') +
+      (publicAnswer.explainImage ? '<img class="ov-explain-img" id="ov-explain-img" style="display:none" src="' + esc(publicAnswer.explainImage) + '" alt="해설 이미지">' : '') +
       (isTextType(q)
         ? '<div id="ov-textwrap"></div>'
         : '<div class="ov-choices" id="ov-choices">' +
@@ -5847,6 +5864,8 @@ function plRenderOverlayCounts() {
   }
   const ex = ov.querySelector('#ov-explain-top');
   if (ex) ex.style.display = revealed ? '' : 'none';
+  const exImage = ov.querySelector('#ov-explain-img');
+  if (exImage) exImage.style.display = revealed ? '' : 'none';
   const rv = ov.querySelector('#ov-reveal');
   if (rv) {
     rv.disabled = revealed;
@@ -6245,6 +6264,7 @@ function stRender() {
       '<div class="stu-q">' + esc(q.text) + '</div>' +
       // 해설은 공개 직후 가장 먼저 눈에 들어와야 하므로 보기 위쪽에 크게 놓는다
       (revealed && q.explain ? '<div class="stu-explain-top">💡 ' + esc(q.explain) + '</div>' : '') +
+      (revealed && q.explainImage ? '<img class="stu-explain-img" src="' + esc(q.explainImage) + '" alt="해설 이미지">' : '') +
       stAnswerUI(q, i, my, revealed, locked) +
       '<div class="privacy-note">입력한 학년·반·번호·이름과 응답이 저장됩니다.</div>' +
     '</div>');

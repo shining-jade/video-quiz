@@ -127,6 +127,16 @@ test('문항 미리보기는 다른 화면으로 이동할 때 남지 않는다'
   assert.match(html, /function router\(\) \{[\s\S]*?mkCloseQuestionPreview\(\);[\s\S]*?runCleanups\(\);/);
 });
 
+test('정답 공개 화면은 해설 글 아래에 해설 이미지를 표시한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /id="ov-explain-top"[\s\S]*?id="ov-explain-img"/);
+  assert.match(html, /publicAnswer\.explain[\s\S]*?publicAnswer\.explainImage/);
+  assert.match(html, /class="stu-explain-top"[\s\S]*?class="stu-explain-img"/);
+  assert.match(html, /function plExplanationImage\(question, questionIndex\)/);
+  assert.match(html, /FirestoreStore\.publicAnswer\(question, explainImage\)/);
+});
+
 test('사용자 안내는 편집 이력, 교차 영상 이동과 seek 재출제 안전 규칙을 설명한다', () => {
   const readme = read('README.md');
   const handoff = read('docs/HANDOFF-2026-08-14.md');
