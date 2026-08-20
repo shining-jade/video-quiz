@@ -1,5 +1,7 @@
 # 인수인계 프롬프트 (Codex 등 다른 도구에 넘길 때)
 
+> 2026-08-20 교사 개인 계정 권한 신청·수업계획·현황판 전환 준비: 운영 migration/deploy/browser 인수는 미실행입니다. [`docs/TEACHER-ACCESS-CLASS-PLANNING.md`](./docs/TEACHER-ACCESS-CLASS-PLANNING.md)의 backup → Emulator → access dry-run/apply → session counter scan/apply/gate → strict Rules → static deploy → 관리자 1명·교사 2명·겹친 수업 2개 smoke 순서를 그대로 따르고, 두 apply durable 보고서의 `safeToDeployStrictRules: true`와 session gate `updateTimeGeneration`을 확인하십시오. 진행 중인 legacy session, counter/UID 불일치, partial audit가 하나라도 있으면 배포를 중단합니다.
+
 > OX·이미지 구현은 **끝났습니다.** 이 문서는 남은 검증과 다듬기를 넘길 때 쓰라고 만든 것입니다.
 > 그대로 복사해 붙여넣으면 됩니다.
 

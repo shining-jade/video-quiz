@@ -58,6 +58,8 @@ teacher_allowlist/teacher@school.kr
 
 ### 3) 기존 데이터 이전
 
+교사 개인 계정 승인과 수업계획 현황판을 배포할 때는 기존 email allowlist를 UID 기반 `teacher_allowances`로 이관하고, 종료되지 않은 세션의 학생 counter를 전수 감사한 뒤 completion gate를 기록해야 합니다. 정확한 backup → Emulator → access dry-run/apply → session counter scan/apply/gate → strict Rules → static deploy → 두 교사·두 수업 browser smoke 순서는 [`docs/TEACHER-ACCESS-CLASS-PLANNING.md`](./docs/TEACHER-ACCESS-CLASS-PLANNING.md)를 따릅니다. 두 apply 보고서가 모두 `safeToDeployStrictRules: true`가 아니면 배포하지 않습니다.
+
 엄격한 규칙을 게시하기 전에 기존 `ownerUid` 없는 데이터와 응답의 레거시 정오 필드를 신뢰할 수 있는 Admin SDK 명령으로 이전합니다. 브라우저에서는 이전하지 않습니다. 먼저 대상 Google 계정의 Firebase Authentication UID를 확인하고 관리자 자격 증명이 설정된 로컬 터미널에서 dry-run을 실행합니다.
 
 ```powershell
