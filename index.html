@@ -1612,6 +1612,8 @@ async function applyTeacherUser(user) {
   if (heartbeatState) heartbeatState.stopActivationHeartbeat();
   if (typeof stopTrashMaintenance === 'function') stopTrashMaintenance();
   const updateVersion = ++teacherAuthVersion;
+  const clearedTeacherRequest = typeof clearTeacherRequestScreen === 'function'
+    ? clearTeacherRequestScreen(true) : false;
   if (typeof authReady !== 'undefined' && authReady && previousUid && (!user || user.uid !== previousUid)) {
     retractProtectedTeacherScreen();
   }
@@ -1671,6 +1673,7 @@ async function applyTeacherUser(user) {
   renderTeacherAuthArea();
   if (typeof authReady !== 'undefined' && authReady) {
     reconcileTeacherRoute(previousState, teacherState);
+    if (clearedTeacherRequest && typeof teacherRequestRouteIsCurrent === 'function' && teacherRequestRouteIsCurrent()) router();
   }
   appliedTeacherState = teacherState;
   return true;
@@ -1887,39 +1890,58 @@ function screenHome() {
   '</div>';
 }
 
-function teacherRequestScreenIsCurrent(state) {
+function teacherRequestRouteIsCurrent() {
   const route = typeof location === 'undefined' ? '#/' : String(location.hash || '#/');
+  return route === '#/' || route === '' || route === '#';
+}
+
+function clearTeacherRequestScreen(retract) {
+  const hadScreen = !!teacherRequestScreen;
+  teacherRequestScreen = null;
+  if (retract && hadScreen && teacherRequestRouteIsCurrent() && typeof APP === 'function') {
+    APP().innerHTML = '<div class="wrap"><div class="empty">인증 상태를 다시 확인하는 중…</div></div>';
+  }
+  return hadScreen;
+}
+
+function teacherRequestScreenIsCurrent(state) {
+  const routeCurrent = typeof teacherRequestRouteIsCurrent === 'function'
+    ? teacherRequestRouteIsCurrent()
+    : (typeof location === 'undefined' || ['#/', '', '#'].includes(String(location.hash || '#/')));
   return teacherRequestScreen === state && !!state && teacherAuthVersion === state.authGeneration &&
     !!teacherUser && teacherUser.uid === state.uid && !!teacherState && teacherState.uid === state.uid &&
-    teacherState.status === 'unapproved' && (route === '#/' || route === '' || route === '#');
+    teacherState.status === 'unapproved' && routeCurrent;
 }
 
 function renderTeacherRequest(state) {
   if (!state) return false;
   const request = state.request || null;
-  const busy = !!state.submitting || !!state.cancelling;
+  const draft = state.draft || { displayName: state.displayName || '', organization: '', note: '' };
+  const busy = !!state.submitting || !!state.cancelling || !!state.refreshing;
   const status = state.error
     ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>'
     : state.message ? '<div class="notice ok" role="status">' + esc(state.message) + '</div>' : '';
   const identity = '<div class="card"><h2>Google 계정 확인</h2><div class="sub">이름과 이메일은 Google 계정에서 가져오며 신청 내용으로 바꿀 수 없습니다.</div>' +
-    '<div><b>' + esc(state.displayName) + '</b><br><span class="hint">' + esc(state.email) + '</span></div></div>';
+    '<div><b>' + esc(draft.displayName) + '</b><br><span class="hint">' + esc(state.email) + '</span></div></div>';
   let body = '';
   if (!request) {
     body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><p class="sub">공용 계정을 쓰지 않고, 지금 로그인한 Google 계정으로 교사 권한을 신청합니다.</p>' + status +
       '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
-      '<div class="field"><label class="f" for="teacher-request-organization">소속 (선택)</label><input id="teacher-request-organization" name="organization" maxlength="120"' + (busy ? ' disabled' : '') + '></div>' +
-      '<div class="field"><label class="f" for="teacher-request-note">메모 (선택)</label><textarea id="teacher-request-note" name="note" maxlength="500"' + (busy ? ' disabled' : '') + '></textarea></div>' +
+      '<div class="field"><label class="f" for="teacher-request-organization">소속 (선택)</label><input id="teacher-request-organization" name="organization" maxlength="120" value="' + esc(draft.organization) + '"' + (busy ? ' disabled' : '') + '></div>' +
+      '<div class="field"><label class="f" for="teacher-request-note">메모 (선택)</label><textarea id="teacher-request-note" name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(draft.note) + '</textarea></div>' +
       '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>' + (state.submitting ? '신청 저장 중…' : '교사 권한 신청') + '</button></form></div>';
   } else if (request.status === 'pending') {
     body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice info" role="status">승인 대기 중입니다. 관리자가 신청 내용을 검토한 뒤 알려드립니다.</div>' + status +
-      '<button class="btn danger" onclick="cancelTeacherRequest()"' + (busy ? ' disabled' : '') + '>' + (state.cancelling ? '신청 취소 중…' : '신청 취소') + '</button></div>';
+      '<div class="row"><button class="btn" onclick="refreshTeacherRequestStatus()"' + (busy ? ' disabled' : '') + '>' + (state.refreshing ? '상태 확인 중…' : '승인 상태 새로고침') + '</button>' +
+      '<button class="btn danger" onclick="cancelTeacherRequest()"' + (busy ? ' disabled' : '') + '>' + (state.cancelling ? '신청 취소 중…' : '신청 취소') + '</button></div></div>';
   } else if (request.status === 'rejected') {
     body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice bad" role="status">신청이 승인되지 않았습니다.' +
       (request.decisionReason ? ' 사유: ' + esc(request.decisionReason) : ' 관리자에게 문의해 주세요.') + '</div>' + status + '</div>';
   } else if (request.status === 'cancelled') {
     body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice" role="status">신청이 취소되었습니다. 다시 신청하려면 관리자에게 재신청 가능 여부를 문의해 주세요.</div>' + status + '</div>';
   } else {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice info" role="status">승인 상태를 서버에서 다시 확인하는 중입니다.</div>' + status + '</div>';
+    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice info" role="status">승인 상태를 서버에서 다시 확인해 주세요.</div>' + status +
+      '<button class="btn" onclick="refreshTeacherRequestStatus()"' + (busy ? ' disabled' : '') + '>승인 상태 새로고침</button></div>';
   }
   APP().innerHTML = topbar() + '<div class="wrap">' + identity + body + '</div>';
   return true;
@@ -1930,10 +1952,11 @@ function screenTeacherRequest() {
   const state = teacherRequestScreen = {
     uid: teacherUser.uid, email: String(teacherUser.email || '').trim().toLowerCase(),
     displayName: String(teacherUser.displayName || '').trim(), authGeneration: teacherAuthVersion,
-    request: null, submitting: false, cancelling: false, message: '', error: ''
+    request: null, submitting: false, cancelling: false, refreshing: false, message: '', error: '',
+    draft: { displayName: String(teacherUser.displayName || '').trim(), organization: '', note: '' }
   };
   if (!state.uid || !state.email || !state.displayName) return false;
-  if (typeof onCleanup === 'function') onCleanup(() => { if (teacherRequestScreen === state) teacherRequestScreen = null; });
+  if (typeof onCleanup === 'function') onCleanup(() => { if (teacherRequestScreen === state) clearTeacherRequestScreen(false); });
   renderTeacherRequest(state);
   return store.getOwnTeacherRequest(state.uid).then(request => {
     if (!teacherRequestScreenIsCurrent(state)) return false;
@@ -1955,11 +1978,15 @@ function submitTeacherRequestForm(event) {
   if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling || state.request) return Promise.resolve(false);
   const form = event && event.currentTarget;
   const fields = form && form.elements ? form.elements : {};
-  const organization = fields.organization ? fields.organization.value : '';
-  const note = fields.note ? fields.note.value : '';
+  state.draft = Object.assign({}, state.draft, {
+    organization: String(fields.organization ? fields.organization.value : ''),
+    note: String(fields.note ? fields.note.value : '')
+  });
   let request;
   try {
-    request = TeacherAccessRequestCore.buildRequest(teacherUser, { organization, note }, Date.now());
+    request = TeacherAccessRequestCore.buildRequest(teacherUser, {
+      organization: state.draft.organization, note: state.draft.note
+    }, Date.now());
   } catch (error) {
     state.error = error && error.message ? error.message : String(error);
     renderTeacherRequest(state);
@@ -1978,6 +2005,34 @@ function submitTeacherRequestForm(event) {
     if (!teacherRequestScreenIsCurrent(state)) return false;
     state.submitting = false;
     state.error = error && error.message ? error.message : '신청 저장에 실패했습니다. 다시 시도해 주세요.';
+    renderTeacherRequest(state);
+    return false;
+  });
+}
+
+function refreshTeacherRequestStatus() {
+  const state = teacherRequestScreen;
+  if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling || state.refreshing) return Promise.resolve(false);
+  state.refreshing = true; state.error = ''; state.message = '';
+  renderTeacherRequest(state);
+  return store.getOwnTeacherRequest(state.uid).then(async request => {
+    if (!teacherRequestScreenIsCurrent(state)) return false;
+    const allowance = await store.probeTeacherAllowance(state.email);
+    if (!teacherRequestScreenIsCurrent(state)) return false;
+    state.request = request || null;
+    state.refreshing = false;
+    if (request && request.status === 'approved' && allowance) {
+      if (typeof setTeacherAllowance === 'function') setTeacherAllowance(allowance);
+      if (typeof go === 'function') go('sets');
+      return true;
+    }
+    state.message = '승인 상태를 서버에서 다시 확인했습니다.';
+    renderTeacherRequest(state);
+    return true;
+  }).catch(error => {
+    if (!teacherRequestScreenIsCurrent(state)) return false;
+    state.refreshing = false;
+    state.error = error && error.message ? error.message : '승인 상태를 확인하지 못했습니다. 다시 시도해 주세요.';
     renderTeacherRequest(state);
     return false;
   });
@@ -7209,24 +7264,30 @@ function admTeacherAccounts() {
 
 function adminTeacherRequestScreenIsCurrent(state) {
   const route = typeof location === 'undefined' ? '#/admin' : String(location.hash || '');
+  const body = typeof $ === 'function' ? $('#adm-body') : null;
   return adminTeacherRequestScreen === state && !!state && adm === state.adm &&
     teacherAuthVersion === state.authGeneration && !!teacherUser && teacherUser.uid === state.uid &&
-    AuthCore.isAdmin(teacherState) && route === '#/admin';
+    AuthCore.isAdmin(teacherState) && route === '#/admin' && adm.tab === 'requests' && state.body === body;
 }
 
 function renderAdminTeacherRequests() {
-  if (!AuthCore.isAdmin(teacherState)) return false;
+  if (!AuthCore.isAdmin(teacherState) || !adm || adm.tab !== 'requests') return false;
   const body = $('#adm-body');
   if (!body) return false;
   let state = adminTeacherRequestScreen;
   if (!adminTeacherRequestScreenIsCurrent(state)) {
     state = adminTeacherRequestScreen = {
-      adm, uid: teacherUser && teacherUser.uid, authGeneration: teacherAuthVersion,
-      requests: null, loading: false, inFlight: null, message: '', error: ''
+      adm, body, uid: teacherUser && teacherUser.uid, authGeneration: teacherAuthVersion,
+      requests: null, loading: false, inFlight: null, message: '', error: '', loadError: ''
     };
     if (typeof onCleanup === 'function') onCleanup(() => { if (adminTeacherRequestScreen === state) adminTeacherRequestScreen = null; });
   }
   if (!state.requests && !state.loading) {
+    if (state.loadError) {
+      body.innerHTML = '<div class="card"><div class="notice bad" role="alert">' + esc(state.loadError) + '</div>' +
+        '<button class="btn" onclick="retryAdminTeacherRequests()">다시 시도</button></div>';
+      return true;
+    }
     state.loading = true;
     body.innerHTML = '<div class="empty">교사 권한 신청을 불러오는 중…</div>';
     const actor = Object.assign({}, teacherState, { authGeneration: state.authGeneration, currentAuthGeneration: teacherAuthVersion });
@@ -7238,7 +7299,7 @@ function renderAdminTeacherRequests() {
     }).catch(error => {
       if (!adminTeacherRequestScreenIsCurrent(state)) return;
       state.loading = false;
-      state.error = error && error.message ? error.message : '신청 목록을 불러오지 못했습니다.';
+      state.loadError = error && error.message ? error.message : '신청 목록을 불러오지 못했습니다.';
       if (String(error && error.code || '').toLowerCase().indexOf('permission-denied') >= 0) {
         if (typeof retractProtectedTeacherScreen === 'function') retractProtectedTeacherScreen();
         if (typeof go === 'function') go('home');
@@ -7293,17 +7354,6 @@ function adminDecideTeacherRequest(uid, revision, decision, control) {
     delete state.requests[uid];
     state.inFlight = null;
     state.message = decision === 'approved' ? '교사 권한을 승인했습니다.' : '교사 권한 신청을 거절했습니다.';
-    if (store.probeTeacherAllowance) {
-      try {
-        const allowance = await store.probeTeacherAllowance(teacherState.email);
-        if (!adminTeacherRequestScreenIsCurrent(state)) return false;
-        if (typeof setTeacherAllowance === 'function') setTeacherAllowance(allowance);
-      } catch (error) {
-        if (!adminTeacherRequestScreenIsCurrent(state)) return false;
-        console.error(error);
-        state.message += ' 내 권한 상태는 다음 화면에서 다시 확인합니다.';
-      }
-    }
     renderAdminTeacherRequests();
     return true;
   }).catch(error => {
@@ -7318,6 +7368,15 @@ function adminDecideTeacherRequest(uid, revision, decision, control) {
     renderAdminTeacherRequests();
     return false;
   });
+}
+
+function retryAdminTeacherRequests() {
+  const state = adminTeacherRequestScreen;
+  if (!adminTeacherRequestScreenIsCurrent(state) || state.loading || state.inFlight) return false;
+  state.loadError = '';
+  state.error = '';
+  state.requests = null;
+  return renderAdminTeacherRequests();
 }
 
 async function admSaveTeacherAllowance(email, role, enabled) {
@@ -7419,7 +7478,11 @@ function admRenderShell() {
   admLoad();
 }
 
-function admTab(t) { adm.tab = t; admRenderBody(); }
+function admTab(t) {
+  if (t !== 'requests') adminTeacherRequestScreen = null;
+  adm.tab = t;
+  admRenderBody();
+}
 
 /** 기간에 걸린 세션만 골라 응답을 불러온다 — 전체를 매번 읽지 않기 위해 */
 function admLoad() {

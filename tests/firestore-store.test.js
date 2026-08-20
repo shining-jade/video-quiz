@@ -9296,7 +9296,7 @@ test('admin request decision disables duplicate controls and uses the exact uid 
   const body = { innerHTML: '' };
   const calls = [];
   const context = {
-    adm: {}, adminTeacherRequestScreen: null,
+    adm: { tab: 'requests' }, adminTeacherRequestScreen: null,
     teacherUser: { uid: 'admin-a', email: 'admin@school.kr' },
     teacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin', status: 'admin' }, teacherAuthVersion: 4,
     location: { hash: '#/admin' }, AuthCore: { isAdmin(value) { return value && value.role === 'admin'; } },
@@ -9312,7 +9312,7 @@ test('admin request decision disables duplicate controls and uses the exact uid 
   };
   loadStageFunctions(['adminTeacherRequestScreenIsCurrent', 'renderAdminTeacherRequests', 'adminDecideTeacherRequest'], context);
   const state = context.adminTeacherRequestScreen = {
-    adm: context.adm, uid: 'admin-a', authGeneration: 4,
+    adm: context.adm, body, uid: 'admin-a', authGeneration: 4,
     requests: { 'teacher-a': { uid: 'teacher-a', displayName: '신청자', emailCanonical: 'teacher-a@school.kr', revision: 9 } }
   };
   context.renderAdminTeacherRequests();
@@ -9323,8 +9323,7 @@ test('admin request decision disables duplicate controls and uses the exact uid 
   resolveDecision({ status: 'approved', revision: 10 });
   await decision;
   assert.deepEqual(clone(calls), [
-    ['teacher-a', 9, { status: 'approved', reason: '' }, 'admin-a', 4],
-    ['allowance', 'admin@school.kr']
+    ['teacher-a', 9, { status: 'approved', reason: '' }, 'admin-a', 4]
   ]);
 });
 
@@ -9333,7 +9332,7 @@ test('admin request permission denial retracts the protected admin route without
   const body = { innerHTML: 'old queue' };
   const events = [];
   const context = {
-    adm: {}, adminTeacherRequestScreen: null,
+    adm: { tab: 'requests' }, adminTeacherRequestScreen: null,
     teacherUser: { uid: 'admin-a', email: 'admin@school.kr' }, teacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin' }, teacherAuthVersion: 2,
     location: { hash: '#/admin' }, AuthCore: { isAdmin(value) { return value && value.role === 'admin'; } },
     $() { return body; }, esc(value) { return String(value); }, onCleanup() {},
@@ -9351,7 +9350,7 @@ test('stale admin request load cannot resurrect its queue after the route change
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const body = { innerHTML: '' };
   const context = {
-    adm: {}, adminTeacherRequestScreen: null,
+    adm: { tab: 'requests' }, adminTeacherRequestScreen: null,
     teacherUser: { uid: 'admin-a', email: 'admin@school.kr' }, teacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin' }, teacherAuthVersion: 2,
     location: { hash: '#/admin' }, AuthCore: { isAdmin(value) { return value && value.role === 'admin'; } },
     $() { return body; }, esc(value) { return String(value); }, onCleanup() {},
@@ -9365,6 +9364,108 @@ test('stale admin request load cannot resurrect its queue after the route change
   resolveRequests({ 'teacher-a': { uid: 'teacher-a', displayName: '신청자', emailCanonical: 'teacher-a@school.kr', revision: 1 } });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(body.innerHTML, '다음 화면');
+});
+
+test('same-user request refresh synchronously clears the previous request screen and draft before rerouting', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: 'A 신청 화면 teacher-a@school.kr 이유 A' };
+  const context = {
+    authReady: true, location: { hash: '#/' },
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    teacherRequestScreen: { uid: 'teacher-a', draft: { displayName: 'A', organization: '이유 A', note: '메모 A' } },
+    teacherAuthVersion: 0, clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    store: { async probeTeacherAllowance() { return null; } },
+    router() {}, reconcileTeacherRoute() {}, console
+  };
+  loadStageFunctions(['teacherRequestRouteIsCurrent', 'clearTeacherRequestScreen', 'applyTeacherUser'], context);
+  let resolveToken;
+  const delayedUser = { uid: 'teacher-a', email: 'teacher-a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolveToken = resolve; }); } };
+
+  const applying = context.applyTeacherUser(delayedUser);
+
+  assert.equal(context.teacherRequestScreen, null);
+  assert.doesNotMatch(app.innerHTML, /teacher-a@school\.kr|이유 A|메모 A/);
+  resolveToken({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applying;
+});
+
+test('admin request guard rejects the same admin screen after switching away from the requests tab or body', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const body = {};
+  const context = {
+    adm: { tab: 'sessions' }, adminTeacherRequestScreen: { adm: null, uid: 'admin-a', authGeneration: 2, body },
+    teacherUser: { uid: 'admin-a' }, teacherState: { role: 'admin' }, teacherAuthVersion: 2,
+    location: { hash: '#/admin' }, AuthCore: { isAdmin(value) { return value && value.role === 'admin'; } },
+    $() { return body; }
+  };
+  context.adminTeacherRequestScreen.adm = context.adm;
+  vm.runInNewContext(extractFunction(html, 'adminTeacherRequestScreenIsCurrent'), context);
+
+  assert.equal(context.adminTeacherRequestScreenIsCurrent(context.adminTeacherRequestScreen), false);
+});
+
+test('admin request load failure renders an explicit retry state without automatically loading again', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const body = { innerHTML: '' };
+  let calls = 0;
+  const context = {
+    adm: { tab: 'requests' }, adminTeacherRequestScreen: null,
+    teacherUser: { uid: 'admin-a', email: 'admin@school.kr' }, teacherState: { uid: 'admin-a', email: 'admin@school.kr', role: 'admin' }, teacherAuthVersion: 2,
+    location: { hash: '#/admin' }, AuthCore: { isAdmin(value) { return value && value.role === 'admin'; } },
+    $() { return body; }, esc(value) { return String(value); }, onCleanup() {},
+    store: { async listPendingTeacherRequests() { calls += 1; throw new Error('offline'); } }
+  };
+  loadStageFunctions(['adminTeacherRequestScreenIsCurrent', 'renderAdminTeacherRequests'], context);
+  context.renderAdminTeacherRequests();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(calls, 1);
+  assert.match(body.innerHTML, /다시 시도/);
+});
+
+test('approved requester refresh rechecks its own server request and allowance before opening a teacher route', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: '' };
+  const calls = [];
+  const context = {
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherState: { uid: 'teacher-a', status: 'unapproved' }, teacherAuthVersion: 5,
+    teacherRequestScreen: null, location: { hash: '#/' }, AuthCore: { isTeacher(value) { return value && value.status === 'teacher'; } },
+    APP() { return app; }, topbar() { return '<nav></nav>'; }, esc(value) { return String(value); },
+    store: {
+      async getOwnTeacherRequest(uid) { calls.push(['request', uid]); return { status: 'approved', revision: 2 }; },
+      async probeTeacherAllowance(email) { calls.push(['allowance', email]); return { enabled: true, role: 'teacher' }; }
+    },
+    setTeacherAllowance(value) { context.teacherState = { uid: 'teacher-a', status: value ? 'teacher' : 'unapproved' }; },
+    go(route) { calls.push(['go', route]); }
+  };
+  loadStageFunctions(['teacherRequestRouteIsCurrent', 'teacherRequestScreenIsCurrent', 'renderTeacherRequest', 'refreshTeacherRequestStatus'], context);
+  context.teacherRequestScreen = { uid: 'teacher-a', email: 'teacher-a@school.kr', displayName: '교사', authGeneration: 5, request: { status: 'pending', revision: 1 }, draft: { displayName: '교사', organization: '', note: '' } };
+
+  await context.refreshTeacherRequestStatus();
+
+  assert.deepEqual(clone(calls), [['request', 'teacher-a'], ['allowance', 'teacher-a@school.kr'], ['go', 'sets']]);
+});
+
+test('request form preserves its profile draft through validation failure and rerender', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: '' };
+  const context = {
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr', displayName: '김교사' }, teacherState: { uid: 'teacher-a', status: 'unapproved' }, teacherAuthVersion: 3,
+    location: { hash: '#/' }, teacherRequestScreen: null, AuthCore: { isTeacher() { return false; } },
+    APP() { return app; }, topbar() { return '<nav></nav>'; }, esc(value) { return String(value); },
+    TeacherAccessRequestCore: { buildRequest() { throw new Error('invalid'); } }
+  };
+  loadStageFunctions(['teacherRequestRouteIsCurrent', 'teacherRequestScreenIsCurrent', 'renderTeacherRequest', 'submitTeacherRequestForm'], context);
+  context.teacherRequestScreen = { uid: 'teacher-a', email: 'teacher-a@school.kr', displayName: '김교사', authGeneration: 3, request: null, submitting: false, cancelling: false, message: '', error: '', draft: { displayName: '김교사', organization: '', note: '' } };
+
+  await context.submitTeacherRequestForm({ preventDefault() {}, currentTarget: { elements: { organization: { value: '1학년' }, note: { value: '저장할 메모' } } } });
+
+  assert.match(app.innerHTML, /value="1학년"/);
+  assert.match(app.innerHTML, /저장할 메모/);
 });
 
 test('관리자 교사 계정 화면은 canonical 이메일과 자기 계정 보호를 표시한다', async () => {

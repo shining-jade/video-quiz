@@ -20,8 +20,8 @@ test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
 test('교사 신청과 관리자 승인 화면의 inline handlers are included in the parsed release script', () => {
   const html = read('index.html');
 
-  ['screenTeacherRequest', 'submitTeacherRequestForm', 'cancelTeacherRequest',
-    'renderAdminTeacherRequests', 'adminDecideTeacherRequest'].forEach(name => {
+  ['screenTeacherRequest', 'submitTeacherRequestForm', 'cancelTeacherRequest', 'refreshTeacherRequestStatus',
+    'renderAdminTeacherRequests', 'adminDecideTeacherRequest', 'retryAdminTeacherRequests'].forEach(name => {
     assert.match(html, new RegExp('function ' + name + '\\('));
   });
   assert.match(html, /공용 계정을 쓰지 않고/);
