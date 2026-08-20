@@ -13,6 +13,8 @@ function clone(value) {
   if (value === SERVER_TIMESTAMP) return value;
   if (value === DELETE_FIELD) return value;
   if (value instanceof Date) return new Date(value.getTime());
+  if (value && value.constructor && value.constructor.name === 'Timestamp' &&
+      typeof value.toMillis === 'function' && typeof value.toDate === 'function') return value;
   if (Array.isArray(value)) return value.map(clone);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]));
@@ -4861,6 +4863,71 @@ test('migration gate 완료 뒤 counter 없는 legacy session 종료는 fail clo
   await assert.rejects(createStore(fake).endSession('a'), /counter|migration|집계/);
   assert.equal(fake.value('sessions/a').status, 'live');
   assert.equal(fake.value('sessions/a/meta/live').status, undefined);
+});
+
+test('raw numeric gate timestamps는 완료로 오인하지 않고 legacy session을 안전 종료한다', async () => {
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt: 10_000, updatedAt: 10_000, completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').status, 'ended');
+  assert.equal(fake.value('sessions/a').actualParticipants, undefined);
+  assert.equal(fake.value('sessions/a/meta/live').status, 'ended');
+});
+
+test('millis가 불일치하는 timestamp-shaped gate는 완료로 오인하지 않고 legacy safe end를 유지한다', async () => {
+  class Timestamp {
+    constructor() { this.seconds = 10; this.nanoseconds = 0; }
+    toMillis() { return 10_001; }
+    toDate() { return new Date(10_001); }
+    isEqual() { return false; }
+  }
+  const shaped = new Timestamp();
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt: shaped, updatedAt: shaped, completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  });
+
+  await createStore(fake).endSession('a');
+
+  assert.equal(fake.value('sessions/a').status, 'ended');
+  assert.equal(fake.value('sessions/a').actualParticipants, undefined);
+});
+
+test('실제 Firebase Timestamp exact gate는 strict migration 완료를 활성화한다', async () => {
+  const { Timestamp } = require('firebase/firestore');
+  const verifiedAt = new Timestamp(10, 123_456_789);
+  const fake = makeFirestoreFake({
+    'migration_gates/session_counters': {
+      complete: true, projectId: 'demo-video-quiz', environment: 'emulator',
+      rulesVersion: 'session-counters-v1', preflightNonEndedLegacyCount: 0,
+      verifiedAt, updatedAt: verifiedAt, completedByUid: 'admin-uid'
+    },
+    'sessions/a': {
+      setId: 'set1', teacherUid: 'teacher-a', teacherEmail: 'teacher@school.kr', status: 'live'
+    },
+    'sessions/a/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 }
+  });
+
+  await assert.rejects(createStore(fake).endSession('a'), /counter|migration|집계/);
+  assert.equal(fake.value('sessions/a').status, 'live');
 });
 
 test('ended 재시도는 preserved endedAt으로 actual count를 counter invariant에 복구한다', async () => {

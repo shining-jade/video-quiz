@@ -751,17 +751,42 @@
       const value = data || {};
       const keys = Object.keys(value).sort();
       const exactKeys = [...SESSION_COUNTER_GATE_KEYS].sort();
-      const verifiedAt = value.verifiedAt instanceof Date
-        ? value.verifiedAt.getTime() : timestampMillis(value.verifiedAt);
-      const updatedAt = value.updatedAt instanceof Date
-        ? value.updatedAt.getTime() : timestampMillis(value.updatedAt);
+      const exactTimestampMillis = timestamp => {
+        if (timestamp instanceof Date) {
+          const millis = timestamp.getTime();
+          return Number.isSafeInteger(millis) ? millis : null;
+        }
+        if (!timestamp || typeof timestamp !== 'object') return null;
+        const prototype = Object.getPrototypeOf(timestamp);
+        if (!prototype || !prototype.constructor ||
+            prototype.constructor.name !== 'Timestamp' ||
+            typeof prototype.toMillis !== 'function' ||
+            typeof prototype.toDate !== 'function' ||
+            typeof prototype.isEqual !== 'function') return null;
+        const seconds = timestamp.seconds;
+        const nanoseconds = timestamp.nanoseconds;
+        if (!Number.isSafeInteger(seconds) || seconds < -62135596800 ||
+            seconds > 253402300799 || !Number.isInteger(nanoseconds) ||
+            nanoseconds < 0 || nanoseconds >= 1_000_000_000) return null;
+        const expected = seconds * 1000 + nanoseconds / 1_000_000;
+        let actual;
+        try {
+          actual = timestamp.toMillis();
+        } catch (error) {
+          return null;
+        }
+        return Number.isFinite(actual) && Math.abs(actual) <= Number.MAX_SAFE_INTEGER &&
+          actual === expected ? actual : null;
+      };
+      const verifiedAt = exactTimestampMillis(value.verifiedAt);
+      const updatedAt = exactTimestampMillis(value.updatedAt);
       return JSON.stringify(keys) === JSON.stringify(exactKeys) &&
         value.complete === true && typeof value.projectId === 'string' &&
         value.projectId.length > 0 && value.projectId.length <= 120 &&
         ['production', 'emulator'].includes(value.environment) &&
         value.rulesVersion === 'session-counters-v1' &&
         value.preflightNonEndedLegacyCount === 0 &&
-        Number.isSafeInteger(verifiedAt) && verifiedAt === updatedAt &&
+        verifiedAt !== null && verifiedAt === updatedAt &&
         typeof value.completedByUid === 'string' && value.completedByUid.length > 0 &&
         value.completedByUid.length <= 128;
     }
