@@ -1713,15 +1713,19 @@ async function applyTeacherUser(user) {
   renderTeacherAuthArea();
   if (typeof authReady !== 'undefined' && authReady) {
     const routeReconciled = reconcileTeacherRoute(previousState, teacherState);
+    let requestRerouted = false;
     const reroute = typeof teacherRequestReroute !== 'undefined' ? teacherRequestReroute : null;
     if (reroute && reroute.authGeneration === updateVersion && reroute.uid === observerUid) {
       teacherRequestReroute = null;
       const requestRouteCurrent = typeof teacherRequestRouteIsCurrent === 'function'
         ? teacherRequestRouteIsCurrent()
         : (typeof location === 'undefined' || ['#/', '', '#'].includes(String(location.hash || '#/')));
-      if (requestRouteCurrent) router();
+      if (requestRouteCurrent) {
+        router();
+        requestRerouted = true;
+      }
     }
-    if (!routeReconciled && !teacherRequestReroute &&
+    if (!routeReconciled && !requestRerouted && !teacherRequestReroute &&
         typeof rerenderEligibleTeacherHome === 'function') {
       rerenderEligibleTeacherHome(updateVersion, teacherState.uid);
     }
@@ -4926,7 +4930,7 @@ async function plConfirmClassPlan(event) {
       lsSet('vq_last_label', updated.className);
       const selectedDialog = $('#pl-plan-dialog');
       if (selectedDialog && typeof selectedDialog.close === 'function') selectedDialog.close();
-      await plStartSession();
+      if (typeof toast === 'function') toast('수업계획을 수정했습니다.');
       return true;
     } catch (error) {
       if (pl === state) alert('수업계획 수정 실패: ' + (error && error.message ? error.message : String(error)));
@@ -5110,8 +5114,15 @@ function plStartSession() {
   }
   state.startingSession = true;
   const legacyLabel = $('#pl-label');
-  const label = legacyLabel && legacyLabel.value.trim() ||
-    state.reviewedClassPlan && state.reviewedClassPlan.privatePlan.className || '';
+  const inputLabel = legacyLabel && typeof legacyLabel.value === 'string'
+    ? legacyLabel.value.trim() : '';
+  const selectedLabel = state.selectedClassPlan && typeof state.selectedClassPlan.className === 'string'
+    ? state.selectedClassPlan.className.trim() : '';
+  const reviewedLabel = state.reviewedClassPlan && state.reviewedClassPlan.privatePlan &&
+    typeof state.reviewedClassPlan.privatePlan.className === 'string'
+    ? state.reviewedClassPlan.privatePlan.className.trim() : '';
+  const label = inputLabel && inputLabel.length <= 80 ? inputLabel :
+    (selectedLabel && selectedLabel.length <= 80 ? selectedLabel : reviewedLabel);
   lsSet('vq_last_label', label);
   const sessionId = planningEnabled
     ? (state.classPlanSessionId || (state.classPlanSessionId = rid(12)))

@@ -12745,7 +12745,7 @@ test('selected planned class starts by allocation then attaches its existing rev
     ...pendingAllocationTestContext(),
     pl: {
       setId: 'set1', set: { title: '세트', author: '교사', videos: [] }, flatQuestions: [],
-      selectedClassPlan: { planId: 'plan-existing', revision: 7, status: 'planned' },
+      selectedClassPlan: { planId: 'plan-existing', revision: 7, status: 'planned', className: '선택한 2학년 3반' },
       classPlanId: 'plan-existing', classPlanRevision: 7, classPlanPersisted: true
     },
     teacherState: { status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' },
@@ -12756,7 +12756,7 @@ test('selected planned class starts by allocation then attaches its existing rev
     store: {
       async createClassPlan() { creates += 1; throw new Error('must not create'); },
       async getQuizSetSnapshot() { events.push('snapshot'); return { setSnapshot: context.pl.set, snapshotImages: {} }; },
-      async startSession() { events.push('allocate'); return 'CODE12'; },
+      async startSession(sessionId, session) { events.push(['allocate', sessionId, session.label]); return 'CODE12'; },
       async activateSessionAllocation() { events.push('activate'); return true; },
       async attachPlanToSession(planId, sessionId, owner) {
         events.push(['attach', planId, sessionId, owner.expectedRevision]);
@@ -12771,14 +12771,16 @@ test('selected planned class starts by allocation then attaches its existing rev
 
   assert.equal(creates, 0);
   assert.deepEqual(events, [
-    'snapshot', 'allocate', 'activate', ['attach', 'plan-existing', 'SESSION-EXIST', 7], 'render'
+    'snapshot', ['allocate', 'SESSION-EXIST', '선택한 2학년 3반'], 'activate',
+    ['attach', 'plan-existing', 'SESSION-EXIST', 7], 'render'
   ]);
   assert.equal(context.pl.classPlanRevision, 8);
 });
 
-test('editing a selected planned class updates its exact revision and never creates a new class-plan ID', async () => {
+test('editing a selected planned class updates its exact revision, reports success, and never starts a session', async () => {
   const calls = [];
   const alerts = [];
+  const toasts = [];
   const warning = { textContent: '', className: '' };
   const ack = { checked: true };
   const dialog = { close() {} };
@@ -12812,6 +12814,7 @@ test('editing a selected planned class updates its exact revision and never crea
       },
       async createClassPlan() { throw new Error('must not create'); }
     },
+    toast(message) { toasts.push(message); },
     async plStartSession() { calls.push('start'); return true; }
   };
   // datetime-local comparisons are intentionally expressed as matching local test values.
@@ -12825,10 +12828,11 @@ test('editing a selected planned class updates its exact revision and never crea
       className: '2학년 3반', plannedStartAt: 60_000, plannedEndAt: 120_000,
       expectedStudents: 30, warningLevel: 'green', warningAcknowledgedAt: 30_000
     }
-  ], 'start']);
+  ]]);
   assert.equal(context.pl.classPlanPersisted, true);
   assert.equal(context.pl.classPlanId, 'plan-existing');
   assert.equal(context.pl.classPlanRevision, 8);
+  assert.deepEqual(toasts, ['수업계획을 수정했습니다.']);
 });
 
 test('eligible current home rerenders once for only its matching auth generation', () => {
@@ -12874,4 +12878,30 @@ test('home auth replacement rerenders only the resolved current eligible teacher
   await applyingA;
 
   assert.deepEqual(homeRenders, [[2, 'teacher-b']]);
+});
+
+test('request-marker home router and dashboard rerender are mutually exclusive', async () => {
+  const events = [];
+  const context = {
+    authReady: true, location: { hash: '#/' }, teacherRequestReroute: null,
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    clockUserId: '', clockPromise: null, clockPromiseUid: '', teacherAuthVersion: 0,
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {},
+    clearTeacherRequestScreen() { return true; },
+    reconcileTeacherRoute() { return false; },
+    router() { events.push('router'); },
+    rerenderEligibleTeacherHome() { events.push('rerender'); return true; },
+    store: { async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; } }, console
+  };
+  loadStageFunctions(['applyTeacherUser'], context);
+  const user = {
+    uid: 'teacher-a', email: 'teacher-a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return Promise.resolve({ claims: { firebase: { sign_in_provider: 'google.com' } } }); }
+  };
+
+  await context.applyTeacherUser(user);
+
+  assert.deepEqual(events, ['router']);
 });
