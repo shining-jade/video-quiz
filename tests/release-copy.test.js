@@ -45,7 +45,7 @@ test('문항 제목 목록은 영상 아래 왼쪽 탐색기로 배치되고 긴
   const html = read('index.html');
 
   assert.match(html, /class="mk-video-left"[\s\S]*?class="mk-question-navigator"[\s\S]*?class="mk-question-editor"/);
-  assert.match(html, /\.mk-question-navigator\s*\{[^}]*position:\s*sticky[^}]*overflow:\s*auto/s);
+  assert.match(html, /\.mk-video-left\s*\{[^}]*position:\s*sticky[^}]*overflow:\s*auto/s);
   assert.match(html, /function mkQuestionNavigatorDragOver\(event\)[\s\S]*?scrollTop/);
   assert.match(html, /onclick="mkFocusQuestion\(/);
   assert.match(html, /function mkFocusQuestion\(videoIndex,\s*(?:questionIndex|i)\)[\s\S]*?scrollIntoView/);
@@ -57,6 +57,14 @@ test('넓은 화면은 영상과 문항 목록을 왼쪽에 두고 선택 문항
   assert.match(html, /class="mk-video-body"[\s\S]*?class="mk-video-left"[\s\S]*?class="mk-video-preview"[\s\S]*?class="mk-question-navigator"[\s\S]*?class="mk-question-editor"/);
   assert.match(html, /\.mk-video-body\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(360px,[^)]+\)\s+minmax\(0,[^)]+\)/s);
   assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*?\.mk-video-body\s*\{[^}]*grid-template-columns:\s*1fr/s);
+});
+
+test('데스크톱 왼쪽 패널 전체는 문항 편집 스크롤을 따라가고 모바일에서는 고정을 해제한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /\.mk-video-left\s*\{[^}]*position:\s*sticky[^}]*top:\s*68px[^}]*max-height:\s*calc\(100vh - 88px\)[^}]*overflow:\s*auto/s);
+  assert.match(html, /\.mk-question-navigator\s*\{[^}]*position:\s*static/s);
+  assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*?\.mk-video-left\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow:\s*visible/s);
 });
 
 test('편집 문항은 저장 전 실제 퀴즈 모양 미리보기를 열 수 있다', () => {
