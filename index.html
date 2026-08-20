@@ -184,6 +184,12 @@ textarea { resize: vertical; min-height: 62px; }
 .choice-row .btn { flex: none; }
 .time-input { width: 110px !important; }
 .mk-explanation-time-grid { grid-template-columns: minmax(0, 1fr) 160px; }
+.mk-explanation-time-grid > .field { margin-bottom: 0; display: flex; flex-direction: column; }
+.mk-explanation-time-grid > .field > .f { min-height: 44px; display: flex; align-items: flex-end; }
+.q-card .q-head > .time-input, .q-card .q-head > .btn { height: 42px; }
+.q-card .q-head > .time-input { padding-top: 8px; padding-bottom: 8px; }
+.mk-explanation-panel { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: #f8f8ff; }
+.mk-explanation-panel .img-box img { max-height: 180px; }
 @media (max-width: 700px) {
   .mk-explanation-time-grid { grid-template-columns: 1fr; }
 }
@@ -1157,6 +1163,10 @@ function normQuestions(qs) {
       imgUp: !!q.imgUp,
       _img: '',                 // 업로드 이미지 원본 (images 하위 컬렉션에서 따로 불러온다)
       explain: q.explain || '',
+      explainImgUrl: q.explainImgUrl || '',
+      explainImgUp: !!q.explainImgUp,
+      _explainImg: '',
+      _explainOpen: !!(q.explain || q.explainImgUrl || q.explainImgUp),
       limitSec: (q.limitSec === undefined || q.limitSec === null || q.limitSec === '') ? null : Number(q.limitSec)
     };
   });
@@ -2131,6 +2141,8 @@ function setImportOne(p) {
       if (q.imgUrl) o.imgUrl = q.imgUrl;
       if (q.imgUp) o.imgUp = true;
       if (q.explain) o.explain = q.explain;
+      if (q.explainImgUrl) o.explainImgUrl = q.explainImgUrl;
+      if (q.explainImgUp) o.explainImgUp = true;
       if (q.limitSec !== null && q.limitSec !== undefined) o.limitSec = q.limitSec;
       return o;
     })
@@ -2382,7 +2394,8 @@ function blankQuestion(t) {
     type: 'choice', t: t || 0, text: '',
     choices: ['', '', '', ''], answer: 0, answers: [], accept: [],
     imgUrl: '', imgUp: false, _img: '',
-    explain: '', limitSec: null
+    explain: '', explainImgUrl: '', explainImgUp: false, _explainImg: '', _explainOpen: false,
+    limitSec: null
   };
 }
 
@@ -2581,6 +2594,7 @@ function screenMake(setId) {
         state.videos.forEach((video, videoIndex) => {
           video.questions.forEach((q, questionIndex) => {
             if (q.imgUp) q._img = imgs['v' + videoIndex + 'q' + questionIndex] || '';
+            if (q.explainImgUp) q._explainImg = imgs['v' + videoIndex + 'q' + questionIndex + 'e'] || '';
           });
         });
         // The persisted comparison basis is always the canonical server model,
@@ -2669,7 +2683,7 @@ function renderMake() {
         '<div class="field"><label class="f">질문</label><textarea oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].text=this.value" placeholder="예) 감염병 전파를 막는 가장 기본적인 방법은?">' + esc(q.text) + '</textarea></div>' +
         mkImageField(q, videoIndex, questionIndex) + mkAnswerField(q, videoIndex, questionIndex) +
         '<div class="grid2 mk-explanation-time-grid"><div class="field"><label class="f">해설 (선택)</label>' +
-          '<input type="text" value="' + esc(q.explain) + '" oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].explain=this.value"></div>' +
+          mkExplanationField(q, videoIndex, questionIndex) + '</div>' +
           '<div class="field"><label class="f">이 문항만 제한 시간 다르게 (선택)</label><div class="unit-wrap">' +
           '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
             'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].limitSec=this.value===\'\'?null:Math.max(0,Number(this.value)||0)"><span class="unit">초</span></div></div></div>' +
@@ -3293,6 +3307,75 @@ function mkImageField(q, videoIndex, i) {
   '</div>';
 }
 
+function mkExplanationField(q, videoIndex, questionIndex) {
+  const open = !!q._explainOpen;
+  if (!open) {
+    return '<button type="button" class="btn ghost" onclick="mkToggleExplanation(' +
+      videoIndex + ',' + questionIndex + ')">＋ 해설 추가</button>';
+  }
+  const src = q._explainImg || q.explainImgUrl || '';
+  return '<div class="mk-explanation-panel">' +
+    '<div class="row" style="align-items:center;margin-bottom:10px"><b>해설 내용</b><span class="spacer"></span>' +
+      '<button type="button" class="btn sm ghost" onclick="mkToggleExplanation(' + videoIndex + ',' + questionIndex + ')">접기</button></div>' +
+    '<textarea placeholder="정답을 이해할 수 있도록 설명을 입력하세요" ' +
+      'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].explain=this.value">' + esc(q.explain) + '</textarea>' +
+    '<label class="f" style="margin-top:12px">해설 이미지 (선택)</label>' +
+    (src
+      ? '<div class="img-box"><img src="' + esc(src) + '" alt="해설 이미지">' +
+          '<button type="button" class="btn sm danger" onclick="mkClearExplanationImage(' + videoIndex + ',' + questionIndex + ')">이미지 제거</button></div>'
+      : '<div class="row" style="align-items:center"><label class="btn sm" style="margin:0">📁 파일 올리기' +
+          '<input type="file" accept="image/*" style="display:none" onchange="mkUploadExplanationImage(' + videoIndex + ',' + questionIndex + ',this)"></label>' +
+          '<input type="text" placeholder="또는 해설 이미지 주소(https://…)" onchange="mkSetExplanationImageUrl(' + videoIndex + ',' + questionIndex + ',this.value)" style="flex:1 1 220px"></div>') +
+    '</div>';
+}
+
+function mkToggleExplanation(videoIndex, questionIndex) {
+  const q = mk.videos[videoIndex].questions[questionIndex];
+  q._explainOpen = !q._explainOpen;
+  renderMake();
+}
+
+function mkUploadExplanationImage(videoIndex, questionIndex, input) {
+  const state = mk;
+  const file = input.files && input.files[0];
+  const question = state && state.videos[videoIndex] && state.videos[videoIndex].questions[questionIndex];
+  if (!file || !question) return;
+  input.value = '';
+  toast('해설 이미지를 줄이는 중…');
+  return prepareImage(file).then(dataUri => {
+    if (mk !== state || !state.videos.some(video => video.questions.indexOf(question) >= 0)) return;
+    question._explainImg = dataUri;
+    question.explainImgUp = true;
+    question.explainImgUrl = '';
+    question._explainOpen = true;
+    mkMarkDirty();
+    renderMake();
+    toast('해설 이미지를 넣었습니다');
+  }).catch(e => { if (mk === state) { console.error(e); alert(e.message); } });
+}
+
+function mkSetExplanationImageUrl(videoIndex, questionIndex, value) {
+  const url = String(value || '').trim();
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url)) { alert('http:// 또는 https:// 로 시작하는 주소를 넣어 주세요.'); return; }
+  const q = mk.videos[videoIndex].questions[questionIndex];
+  q.explainImgUrl = url.slice(0, 1000);
+  q.explainImgUp = false;
+  q._explainImg = '';
+  q._explainOpen = true;
+  mkMarkDirty();
+  renderMake();
+}
+
+function mkClearExplanationImage(videoIndex, questionIndex) {
+  const q = mk.videos[videoIndex].questions[questionIndex];
+  q._explainImg = '';
+  q.explainImgUp = false;
+  q.explainImgUrl = '';
+  mkMarkDirty();
+  renderMake();
+}
+
 function mkUploadImage(videoIndex, i, input) {
   const state = mk;
   const file = input.files && input.files[0];
@@ -3599,6 +3682,10 @@ function mkPayload() {
         images['v' + videoIndex + 'q' + questionIndex] = q._img;
       } else if (q.imgUrl) o.imgUrl = q.imgUrl;
       if (q.explain && q.explain.trim()) o.explain = q.explain.trim();
+      if (q.explainImgUp && q._explainImg) {
+        o.explainImgUp = true;
+        images['v' + videoIndex + 'q' + questionIndex + 'e'] = q._explainImg;
+      } else if (q.explainImgUrl) o.explainImgUrl = q.explainImgUrl;
       if (q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) o.limitSec = Math.max(0, Number(q.limitSec));
       return o;
     });
@@ -3682,6 +3769,7 @@ function mkSave(forceNew, options) {
       questions: normQuestions(video.questions).map((question, questionIndex) => {
         const q = Object.assign({}, question);
         if (q.imgUp) q._img = built.images['v' + videoIndex + 'q' + questionIndex] || '';
+        if (q.explainImgUp) q._explainImg = built.images['v' + videoIndex + 'q' + questionIndex + 'e'] || '';
         return q;
       })
     })) : [];

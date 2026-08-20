@@ -86,6 +86,20 @@ test('문항 해설은 넓게 쓰고 개별 제한 시간 입력은 160px로 줄
   assert.match(html, /@media \(max-width:\s*700px\)[\s\S]*?\.mk-explanation-time-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
 });
 
+test('해설 편집은 기본 접힘이며 필요할 때 글과 별도 이미지를 펼친다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /function mkExplanationField\(q, videoIndex, questionIndex\)/);
+  assert.match(html, /＋ 해설 추가/);
+  assert.match(html, /해설 이미지 \(선택\)/);
+  assert.match(html, /function mkToggleExplanation\(videoIndex, questionIndex\)/);
+  assert.match(html, /function mkUploadExplanationImage\(videoIndex, questionIndex, input\)/);
+  assert.match(html, /function mkSetExplanationImageUrl\(videoIndex, questionIndex, value\)/);
+  assert.match(html, /function mkClearExplanationImage\(videoIndex, questionIndex\)/);
+  assert.match(html, /\.mk-explanation-time-grid\s*>\s*\.field\s*\{[^}]*margin-bottom:\s*0/s);
+  assert.match(html, /\.q-card\s+\.q-head\s+>\s*\.time-input[^}]*height:\s*42px/s);
+});
+
 test('편집 문항은 저장 전 실제 퀴즈 모양 미리보기를 열 수 있다', () => {
   const html = read('index.html');
 

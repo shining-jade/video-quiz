@@ -2112,7 +2112,8 @@ test('편집 payload는 영상별 문항과 업로드 이미지를 신형 키로
       title: ' 세트 ', author: ' 교사 ', settings: {}, createdAt: 10, archived: false,
       videos: [
         { videoId: 'a', videoUrl: ' url-a ', startSec: 10, endSec: 20,
-          questions: [{ type: 'long', t: 15, text: ' A ', choices: [], imgUp: true, _img: 'img-a' }] },
+          questions: [{ type: 'long', t: 15, text: ' A ', choices: [], imgUp: true, _img: 'img-a',
+            explain: '해설 A', explainImgUp: true, _explainImg: 'explain-a' }] },
         { videoId: 'b', videoUrl: ' url-b ', startSec: 30, endSec: 60,
           questions: [{ type: 'long', t: 40, text: ' B ', choices: [], imgUp: true, _img: 'img-b' }] }
       ]
@@ -2128,11 +2129,14 @@ test('편집 payload는 영상별 문항과 업로드 이미지를 신형 키로
 
   assert.deepEqual(JSON.parse(JSON.stringify(payload.set.videos)), [
     { videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 20,
-      questions: [{ type: 'long', t: 15, text: 'A', choices: [], answer: 0, imgUp: true }] },
+      questions: [{ type: 'long', t: 15, text: 'A', choices: [], answer: 0, imgUp: true,
+        explain: '해설 A', explainImgUp: true }] },
     { videoId: 'b', videoUrl: 'url-b', startSec: 30, endSec: 60,
       questions: [{ type: 'long', t: 40, text: 'B', choices: [], answer: 0, imgUp: true }] }
   ]);
-  assert.deepEqual(JSON.parse(JSON.stringify(payload.images)), { v0q0: 'img-a', v1q0: 'img-b' });
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.images)), {
+    v0q0: 'img-a', v0q0e: 'explain-a', v1q0: 'img-b'
+  });
   assert.equal(payload.set.questions, undefined);
 });
 
@@ -2157,13 +2161,13 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
           title: '세트', author: '교사', ownerUid: 'teacher-1', settings: {}, createdAt: 10, updatedAt: 20,
           videos: [
             { videoId: 'a', videoUrl: 'url-a', startSec: 10, endSec: 20,
-              questions: [{ text: 'A', imgUp: true, _img: '' }] },
+              questions: [{ text: 'A', imgUp: true, _img: '', explainImgUp: true, _explainImg: '' }] },
             { videoId: 'b', videoUrl: 'url-b', startSec: 30, endSec: 60,
               questions: [{ text: 'B', imgUp: true, _img: '' }] }
           ]
         };
       },
-      async getImages() { return { v0q0: 'img-a', v1q0: 'img-b' }; }
+      async getImages() { return { v0q0: 'img-a', v0q0e: 'explain-a', v1q0: 'img-b' }; }
     },
     normSet(value) { return value; }, mkRestoreDraft() { return false; },
     renderMake() { rendered += 1; },
@@ -2182,6 +2186,7 @@ test('저장된 세트 편집은 모든 영상과 영상별 canonical 이미지�
   assert.equal(context.mk.videoId, undefined);
   assert.equal(context.mk.questions, undefined);
   assert.equal(context.mk.videos[0].questions[0]._img, 'img-a');
+  assert.equal(context.mk.videos[0].questions[0]._explainImg, 'explain-a');
   assert.equal(context.mk.videos[1].questions[0]._img, 'img-b');
 });
 
