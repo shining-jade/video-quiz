@@ -5833,6 +5833,22 @@ test('한쪽 미리보기의 서술형 입력은 반대쪽 입력과 같은 답�
   assert.equal(studentInput.value, '새 답');
 });
 
+test('문항 이미지는 저장된 그림이 있어도 기본 접힘이고 펼친 뒤에만 미리보기를 렌더링한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const context = { esc(value) { return String(value); }, Math };
+  vm.runInNewContext(extractFunction(html, 'mkImageField'), context);
+  const question = { _img: 'data:image/jpeg;base64,abc', imgUrl: '', imgUp: true, _imgOpen: false };
+
+  const collapsed = context.mkImageField(question, 0, 0);
+  assert.match(collapsed, /이미지 보기·변경/);
+  assert.doesNotMatch(collapsed, /<img/);
+
+  question._imgOpen = true;
+  const expanded = context.mkImageField(question, 0, 0);
+  assert.match(expanded, /문항 이미지/);
+  assert.match(expanded, /접기/);
+});
+
 test('학생 문항 view는 공개 전 해설 이미지를 숨기고 공개 뒤에만 합친다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {};

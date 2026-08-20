@@ -182,6 +182,10 @@ textarea { resize: vertical; min-height: 62px; }
 .choice-row input[type=radio] { width: 20px; height: 20px; flex: none; accent-color: var(--accent); }
 .choice-row .cno { width: 20px; text-align: center; color: var(--ink-3); font-size: 13px; font-weight: 700; flex: none; }
 .choice-row .btn { flex: none; }
+.choice-drag-handle[draggable="true"] { cursor: grab; }
+.choice-drag-handle[draggable="true"]:active { cursor: grabbing; }
+.choice-row.choice-drop-target { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.choice-drag-handle { color: var(--ink-3); font-weight: 800; cursor: grab; user-select: none; }
 .time-input { width: 110px !important; }
 .mk-explanation-time-grid { grid-template-columns: minmax(0, 1fr) 160px; }
 .mk-explanation-time-grid > .field { margin-bottom: 0; display: flex; flex-direction: column; }
@@ -716,6 +720,7 @@ table.tbl td.ctr, table.tbl th.ctr { text-align: center; }
 <script src="editor-draft.js"></script>
 <script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
+<script src="choice-order-core.js"></script>
 <script src="quiz-trigger-core.js"></script>
 <script src="quiz-preview-core.js"></script>
 <script src="teacher-stage.js"></script>
@@ -2419,7 +2424,7 @@ function blankQuestion(t) {
   return {
     type: 'choice', t: t || 0, text: '',
     choices: ['', '', '', ''], answer: 0, answers: [], accept: [],
-    imgUrl: '', imgUp: false, _img: '',
+    imgUrl: '', imgUp: false, _img: '', _imgOpen: false,
     explain: '', explainImgUrl: '', explainImgUp: false, _explainImg: '', _explainOpen: false,
     limitSec: null
   };
@@ -3306,13 +3311,16 @@ function mkAnswerField(q, videoIndex, i) {
   return '<div class="field"><label class="f">' + label + '</label>' +
     choices.map((c, j) => {
       const checked = isMulti ? ((q.answers || []).indexOf(j) >= 0) : (q.answer === j);
-      return '<div class="choice-row">' +
+      return '<div class="choice-row" ' + (!isOX ? 'ondragover="mkChoiceDragOver(event)" ondragleave="mkChoiceDragLeave(event)" ondrop="mkChoiceDrop(event,' + videoIndex + ',' + i + ',' + j + ')"' : '') + '>' +
+        (!isOX ? '<span class="choice-drag-handle" draggable="true" ondragstart="mkChoiceDragStart(event,' + videoIndex + ',' + i + ',' + j + ')" title="끌어서 보기 순서 변경" aria-label="끌어서 보기 순서 변경" role="button" tabindex="0">↕</span>' : '') +
         (isMulti
           ? '<input type="checkbox" ' + (checked ? 'checked' : '') + ' onchange="mkToggleMulti(' + videoIndex + ',' + i + ',' + j + ',this.checked)" style="width:20px;height:20px;accent-color:var(--accent)">'
           : '<input type="radio" name="ans-' + videoIndex + '-' + i + '" ' + (checked ? 'checked' : '') + ' onchange="mk.videos[' + videoIndex + '].questions[' + i + '].answer=' + j + '">') +
         '<span class="cno">' + (isOX ? ['O', 'X'][j] : LETTERS[j]) + '</span>' +
         '<input type="text" value="' + esc(c) + '" oninput="mk.videos[' + videoIndex + '].questions[' + i + '].choices[' + j + ']=this.value" ' +
           'placeholder="' + (isOX ? ['맞다 / 그렇다', '아니다 / 틀리다'][j] : '보기 ' + (j + 1)) + '">' +
+        (!isOX ? '<button class="btn sm ghost" aria-label="위로 이동" title="위로 이동" ' + (j === 0 ? 'disabled' : '') + ' onclick="mkMoveChoice(' + videoIndex + ',' + i + ',' + j + ',' + (j - 1) + ')">↑</button>' +
+          '<button class="btn sm ghost" aria-label="아래로 이동" title="아래로 이동" ' + (j === choices.length - 1 ? 'disabled' : '') + ' onclick="mkMoveChoice(' + videoIndex + ',' + i + ',' + j + ',' + (j + 1) + ')">↓</button>' : '') +
         (!isOX && choices.length > 2 ? '<button class="btn sm ghost" onclick="mkDelChoice(' + videoIndex + ',' + i + ',' + j + ')">✕</button>' : '') +
       '</div>';
     }).join('') +
@@ -3325,7 +3333,13 @@ function mkAnswerField(q, videoIndex, i) {
 /* ── 이미지 넣기 ──────────────────────────────────────────────────────── */
 function mkImageField(q, videoIndex, i) {
   const src = q._img || q.imgUrl || '';
-  return '<div class="field"><label class="f">이미지 (선택)</label>' +
+  if (!q._imgOpen) {
+    return '<div class="field"><button type="button" class="btn ghost" onclick="mkToggleImage(' + videoIndex + ',' + i + ')">' +
+      (src ? '🖼 이미지 보기·변경' : '＋ 문제 이미지 추가') + '</button>' +
+      (src ? '<span class="hint" style="margin-left:8px">이미지 등록됨</span>' : '') + '</div>';
+  }
+  return '<div class="field"><div class="row" style="align-items:center"><label class="f" style="margin:0">이미지 (선택)</label><span class="spacer"></span>' +
+    '<button type="button" class="btn sm ghost" onclick="mkToggleImage(' + videoIndex + ',' + i + ')">접기</button></div>' +
     (src
       ? '<div class="img-box"><img src="' + esc(src) + '" alt="문항 이미지" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'">' +
           '<div class="img-bad" style="display:none">⚠ 이미지를 불러오지 못했습니다. 주소를 확인하세요.</div>' +
@@ -3340,6 +3354,11 @@ function mkImageField(q, videoIndex, i) {
         '</div>' +
         '<div class="hint">올린 사진은 브라우저에서 자동으로 줄여 저장합니다. 외부 주소는 원본이 지워지면 안 보이게 됩니다.</div>') +
   '</div>';
+}
+function mkToggleImage(videoIndex, i) {
+  const q = mk.videos[videoIndex].questions[i];
+  q._imgOpen = !q._imgOpen;
+  renderMake();
 }
 function mkExplanationField(q, videoIndex, questionIndex) {
   const open = !!q._explainOpen;
@@ -3425,6 +3444,7 @@ function mkUploadImage(videoIndex, i, input) {
     question._img = dataUri;
     question.imgUp = true;
     question.imgUrl = '';
+    question._imgOpen = true;
     mkMarkDirty();
     renderMake();
     toast('이미지를 넣었습니다 (' + Math.round(dataUri.length / 1024) + 'KB)');
@@ -3438,6 +3458,7 @@ function mkSetImageUrl(videoIndex, i, v) {
   q.imgUrl = url.slice(0, 1000);
   q.imgUp = false;
   q._img = '';
+  q._imgOpen = true;
   mkMarkDirty();
   renderMake();
 }
@@ -3448,6 +3469,40 @@ function mkClearImage(videoIndex, i) {
   q.imgUrl = '';
   mkMarkDirty();
   renderMake();
+}
+
+function mkMoveChoice(videoIndex, questionIndex, fromIndex, toIndex) {
+  const q = mk && mk.videos[videoIndex] && mk.videos[videoIndex].questions[questionIndex];
+  if (!q || typeof ChoiceOrderCore === 'undefined') return false;
+  const moved = ChoiceOrderCore.move(q, Number(fromIndex), Number(toIndex));
+  if (!moved) return false;
+  Object.assign(q, moved);
+  mkMarkDirty('choice-order:' + videoIndex + ':' + questionIndex);
+  renderMake();
+  return true;
+}
+
+function mkChoiceDragStart(event, videoIndex, questionIndex, choiceIndex) {
+  if (!event || !event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-video-quiz-choice', JSON.stringify({ videoIndex, questionIndex, choiceIndex }));
+}
+function mkChoiceDragOver(event) {
+  if (!event) return;
+  event.preventDefault();
+  if (event.currentTarget && event.currentTarget.classList) event.currentTarget.classList.add('choice-drop-target');
+}
+function mkChoiceDragLeave(event) {
+  if (event && event.currentTarget && event.currentTarget.classList) event.currentTarget.classList.remove('choice-drop-target');
+}
+function mkChoiceDrop(event, videoIndex, questionIndex, toIndex) {
+  if (!event || !event.dataTransfer) return false;
+  event.preventDefault();
+  if (event.currentTarget && event.currentTarget.classList) event.currentTarget.classList.remove('choice-drop-target');
+  let source;
+  try { source = JSON.parse(event.dataTransfer.getData('application/x-video-quiz-choice')); } catch (e) { return false; }
+  if (!source || Number(source.videoIndex) !== Number(videoIndex) || Number(source.questionIndex) !== Number(questionIndex)) return false;
+  return mkMoveChoice(videoIndex, questionIndex, source.choiceIndex, toIndex);
 }
 
 function mkSetType(videoIndex, i, type) {

@@ -41,6 +41,20 @@ test('편집기에는 undo/redo와 문항 제목 버블의 드래그·키보드 
   assert.match(html, /다음 영상/);
 });
 
+test('객관식 보기는 드래그와 버튼으로 순서를 바꾸고 문제 이미지는 기본 접힘이다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /choice-order-core\.js/);
+  assert.match(html, /function mkMoveChoice\(videoIndex, questionIndex, fromIndex, toIndex\)/);
+  assert.match(html, /function mkChoiceDragStart\(event, videoIndex, questionIndex, choiceIndex\)/);
+  assert.match(html, /application\/x-video-quiz-choice/);
+  assert.match(html, /aria-label="위로 이동"/);
+  assert.match(html, /aria-label="아래로 이동"/);
+  assert.match(html, /function mkToggleImage\(videoIndex, i\)/);
+  assert.match(html, /문제 이미지 추가/);
+  assert.match(html, /이미지 보기·변경/);
+});
+
 test('문항 제목 목록은 영상 아래 왼쪽 탐색기로 배치되고 긴 목록을 자동 스크롤한다', () => {
   const html = read('index.html');
 
