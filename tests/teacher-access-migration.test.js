@@ -11,6 +11,18 @@ function timestamp(milliseconds) {
   return { toMillis() { return milliseconds; } };
 }
 
+function firestoreTimestamp(milliseconds) {
+  const seconds = Math.floor(milliseconds / 1000);
+  const nanoseconds = (milliseconds - seconds * 1000) * 1_000_000;
+  return {
+    seconds, nanoseconds,
+    toMillis() { return milliseconds; },
+    isEqual(other) {
+      return Boolean(other) && other.seconds === seconds && other.nanoseconds === nanoseconds;
+    }
+  };
+}
+
 function googleUser(uid, email, displayName = '교사') {
   return {
     uid, email, displayName, emailVerified: true,
@@ -23,6 +35,7 @@ function fakeDb(initial, options = {}) {
   const versions = new Map([...docs.keys()].map(key => [key, 1]));
   const writes = [];
   const collectionReads = new Map();
+  const documentReads = new Map();
   let transactionCount = 0;
   const snapshot = documentPath => ({
     exists: docs.has(documentPath),
@@ -37,7 +50,14 @@ function fakeDb(initial, options = {}) {
   return {
     docs,
     writes,
-    doc(documentPath) { return { path: documentPath, async get() { return snapshot(documentPath); } }; },
+    doc(documentPath) { return { path: documentPath, async get() {
+      const call = (documentReads.get(documentPath) || 0) + 1;
+      documentReads.set(documentPath, call);
+      if (options.beforeDocumentRead) {
+        await options.beforeDocumentRead({ documentPath, call, docs, versions });
+      }
+      return snapshot(documentPath);
+    } }; },
     collection(collectionPath) {
       return { async get() {
         const call = (collectionReads.get(collectionPath) || 0) + 1;
@@ -48,6 +68,8 @@ function fakeDb(initial, options = {}) {
         return { docs: directChildren(collectionPath).map(snapshot) };
       } };
     },
+    collectionReadCount(collectionPath) { return collectionReads.get(collectionPath) || 0; },
+    documentReadCount(documentPath) { return documentReads.get(documentPath) || 0; },
     async runTransaction(handler) {
       transactionCount += 1;
       if (options.beforeTransaction) {
@@ -73,6 +95,7 @@ function fakeAuth(users, options = {}) {
   const byEmail = new Map(users.map(user => [String(user.email).toLowerCase(), user]));
   let readCount = 0;
   return {
+    get readCount() { return readCount; },
     async getUserByEmail(email) {
       readCount += 1;
       if (options.failAt === readCount) throw new Error('auth enumeration failed');
@@ -83,6 +106,28 @@ function fakeAuth(users, options = {}) {
         throw error;
       }
       return user;
+    }
+  };
+}
+
+function completedAccessState(patch = {}) {
+  const at = firestoreTimestamp(1000);
+  return {
+    'teacher_allowlist/a@school.kr': {
+      uid: 'uid-a', enabled: true, role: 'teacher', updatedAt: at, updatedByUid: 'admin-a'
+    },
+    'teacher_allowances/uid-a': {
+      uid: 'uid-a', emailCanonical: 'a@school.kr', displayName: '교사',
+      status: 'active', enabled: true, role: 'teacher', administrativeHold: false,
+      revision: 1, approvedAt: at, approvedByUid: 'admin-a',
+      updatedAt: at, updatedByUid: 'admin-a'
+    },
+    'migration_gates/teacher_access_status': {
+      locked: true, lockToken: 'token-a', projectId: 'demo-video-quiz',
+      targetMode: 'emulator', lockedAt: at, lockedByUid: 'admin-a',
+      status: 'complete', strictReady: true, migrationGeneration: '1:0',
+      completedAt: at, completedByUid: 'admin-a',
+      ...patch
     }
   };
 }
@@ -434,11 +479,23 @@ test('access verify-lock reports lock-only or malformed completion evidence as u
           migrationGeneration: '4:0'
         };
       },
+      async verifyTeacherAccessReleaseState() {
+        return {
+          status: 'complete', safeToDeployStrictRules: false,
+          verificationReason: 'teacher access completion state is invalid',
+          gate: {
+            path: 'migration_gates/teacher_access_status', locked: true,
+            lockToken: 'token-a', projectId: 'demo-video-quiz', targetMode: 'emulator',
+            updateTimeGeneration: '5:0', status: 'running', strictReady: false,
+            migrationGeneration: '4:0'
+          }
+        };
+      },
       writeLine() {}
     });
     assert.equal(report.status, 'complete');
     assert.equal(report.safeToDeployStrictRules, false);
-    assert.match(report.verificationReason, /complete|strict/i);
+    assert.match(report.verificationReason, /completion|strict/i);
     assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), report);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -446,22 +503,156 @@ test('access verify-lock reports lock-only or malformed completion evidence as u
 });
 
 test('access release verification requires exact complete state and both reported generations', () => {
+  const completedAt = firestoreTimestamp(1000);
   const options = {
-    projectId: 'demo-video-quiz', targetMode: 'emulator', lockToken: 'token-a',
+    projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a', lockToken: 'token-a',
     expectedGeneration: '5:0', expectedMigrationGeneration: '4:0'
   };
   const exact = {
     locked: true, lockToken: 'token-a', projectId: 'demo-video-quiz', targetMode: 'emulator',
     updateTimeGeneration: '5:0', status: 'complete', strictReady: true,
-    migrationGeneration: '4:0'
+    migrationGeneration: '4:0', completedAt, completedByUid: 'admin-a'
   };
   assert.equal(cli.evaluateAccessReleaseVerification(exact, options).safeToDeployStrictRules, true);
   for (const patch of [
     { status: 'running' }, { strictReady: false }, { migrationGeneration: '3:0' },
     { migrationGeneration: 'invalid' }, { updateTimeGeneration: '5:1' },
-    { projectId: 'other-project' }, { targetMode: 'production' }
+    { projectId: 'other-project' }, { targetMode: 'production' },
+    { completedAt: undefined }, { completedAt: timestamp(1000) },
+    { completedByUid: '' }, { completedByUid: 'other-admin' }
   ]) {
     assert.equal(cli.evaluateAccessReleaseVerification({ ...exact, ...patch }, options)
       .safeToDeployStrictRules, false);
+  }
+});
+
+test('public access verify CLI performs authoritative DB and Auth reads before reporting safe', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teacher-access-authoritative-'));
+  const db = fakeDb(completedAccessState());
+  const auth = fakeAuth([googleUser('uid-a', 'a@school.kr')]);
+  try {
+    const output = path.join(directory, 'verify.json');
+    const report = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--verify-lock', '--lock-token', 'token-a', '--expected-generation', '1:0',
+      '--expected-migration-generation', '1:0', '--output', output
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() { return { db, auth, close() {} }; },
+      verifyTeacherAccessGate: migration.verifyTeacherAccessGate,
+      verifyTeacherAccessReleaseState: migration.verifyTeacherAccessReleaseState,
+      writeLine() {}
+    });
+    assert.equal(report.safeToDeployStrictRules, true);
+    assert.equal(report.audit.safe, true);
+    assert.equal(db.collectionReadCount('teacher_allowlist') > 0, true);
+    assert.equal(db.collectionReadCount('teacher_allowances') > 0, true);
+    assert.equal(auth.readCount > 0, true);
+    assert.equal(db.documentReadCount('migration_gates/teacher_access_status'), 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('public access verify CLI reports missing completion fields and post-scan gate races unsafe', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teacher-access-release-race-'));
+  try {
+    for (const [name, patch] of [
+      ['missing-completed-at', { completedAt: undefined }],
+      ['missing-completed-by', { completedByUid: '' }]
+    ]) {
+      const output = path.join(directory, name + '.json');
+      const db = fakeDb(completedAccessState(patch));
+      const auth = fakeAuth([googleUser('uid-a', 'a@school.kr')]);
+      const report = await cli.main([
+        '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+        '--verify-lock', '--lock-token', 'token-a', '--expected-generation', '1:0',
+        '--expected-migration-generation', '1:0', '--output', output
+      ], {
+        environment: {
+          FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+          FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+        },
+        reserveReport: cli.reserveReport,
+        async initialize() { return { db, auth, close() {} }; },
+        verifyTeacherAccessGate: migration.verifyTeacherAccessGate,
+        verifyTeacherAccessReleaseState: migration.verifyTeacherAccessReleaseState,
+        writeLine() {}
+      });
+      assert.equal(report.safeToDeployStrictRules, false, name);
+      assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).safeToDeployStrictRules, false);
+    }
+
+    const racedDb = fakeDb(completedAccessState(), {
+      beforeDocumentRead({ documentPath, call, docs, versions }) {
+        if (documentPath === 'migration_gates/teacher_access_status' && call === 2) {
+          docs.set(documentPath, { ...docs.get(documentPath), strictReady: false });
+          versions.set(documentPath, 2);
+        }
+      }
+    });
+    const raceOutput = path.join(directory, 'gate-race.json');
+    const raced = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--verify-lock', '--lock-token', 'token-a', '--expected-generation', '1:0',
+      '--expected-migration-generation', '1:0', '--output', raceOutput
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() {
+        return { db: racedDb, auth: fakeAuth([googleUser('uid-a', 'a@school.kr')]), close() {} };
+      },
+      verifyTeacherAccessGate: migration.verifyTeacherAccessGate,
+      verifyTeacherAccessReleaseState: migration.verifyTeacherAccessReleaseState,
+      writeLine() {}
+    });
+    assert.equal(raced.safeToDeployStrictRules, false);
+    assert.match(raced.verificationReason, /generation|gate|changed/i);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('public access verify CLI publishes partial unsafe evidence when authoritative Auth scan fails', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teacher-access-auth-failure-'));
+  try {
+    const output = path.join(directory, 'verify.json');
+    const report = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--verify-lock', '--lock-token', 'token-a', '--expected-generation', '1:0',
+      '--expected-migration-generation', '1:0', '--output', output
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() {
+        return {
+          db: fakeDb(completedAccessState()),
+          auth: fakeAuth([googleUser('uid-a', 'a@school.kr')], { failAt: 1 }),
+          close() {}
+        };
+      },
+      verifyTeacherAccessGate: migration.verifyTeacherAccessGate,
+      verifyTeacherAccessReleaseState: migration.verifyTeacherAccessReleaseState,
+      writeLine() {}
+    });
+    assert.equal(report.status, 'partial-failure');
+    assert.equal(report.safeToDeployStrictRules, false);
+    assert.match(report.auditError, /auth enumeration failed/i);
+    const durable = JSON.parse(fs.readFileSync(output, 'utf8'));
+    assert.equal(durable.status, 'partial-failure');
+    assert.equal(durable.safeToDeployStrictRules, false);
+    assert.match(durable.auditError, /auth enumeration failed/i);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

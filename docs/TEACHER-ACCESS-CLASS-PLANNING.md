@@ -125,7 +125,7 @@ pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode producti
 pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <COUNTER_LOCK_TOKEN> --expected-generation <COUNTER_LOCK_GENERATION> --expected-gate-generation <SESSION_GATE_GENERATION> --output session-counter-release-verify.json
 ```
 
-Access verify는 `migration_gates/teacher_access_status`가 정확한 project/environment/token/updateTime generation을 유지하면서 `status: "complete"`, `strictReady: true`, apply 보고서와 같은 `migrationGeneration`인지 함께 확인합니다. Operational lock만 맞는 running/false/malformed/stale 상태는 절대 안전으로 판정하지 않습니다.
+Access verify는 `migration_gates/teacher_access_status`가 정확한 project/environment/token/updateTime generation을 유지하면서 `status: "complete"`, `strictReady: true`, apply 보고서와 같은 `migrationGeneration`인지 함께 확인합니다. `completedAt`은 실제 Firestore Timestamp여야 하고 `completedByUid`는 현재 검증 admin UID와 일치해야 합니다. 그 뒤 legacy/UID allowance와 Firebase Auth identity를 전수 재감사하고, 같은 gate fields와 updateTime generation을 다시 읽어야만 안전을 보고합니다. Auth/collection read 실패는 partial unsafe 보고서로 남고, operational lock만 맞는 running/false/malformed/stale 상태는 절대 안전으로 판정하지 않습니다.
 
 Session verify는 operational lock인 `migration_gates/session_counter_migration`과 별도 완료 문서 `migration_gates/session_counters`를 모두 읽습니다. 완료 문서는 exact project/environment/rulesVersion/generation, `preflightNonEndedLegacyCount: 0`, Firestore Timestamp인 `verifiedAt`과 `updatedAt`의 완전 일치가 필요합니다. 이어서 모든 non-ended session/student를 다시 감사하고 누락 counter가 0인지 확인한 뒤 두 generation을 다시 readback합니다. 보고서에는 lock과 gate generation, 전수 감사 결과가 함께 남아야 합니다.
 
@@ -137,6 +137,8 @@ pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode produc
 ```
 
 호환 head Rules가 counter migration보다 먼저 배포되므로 counter 없는 legacy session에는 어느 시점에도 신규 학생이 들어갈 수 없습니다. session lock은 이미 counter가 있는 세션의 join까지 유지보수 동안 닫아 scan/apply/post-audit 사이의 틈을 제거합니다.
+
+종료되지 않은 세션의 학생 문서는 admin도 단독 삭제할 수 없습니다. 별도 counted decrement protocol을 도입하기 전까지 학생 삭제는 counter migration lock이 해제된 `ended|aborted` 세션 cleanup에서만 admin 또는 세션 소유자에게 허용됩니다. Lock 중에는 종료된 세션 cleanup도 중단해 verify scan과 삭제가 교차하지 않게 합니다.
 
 Access unlock 뒤에도 `migration_gates/teacher_access_status`의 completion fields를 삭제·초기화하지 않습니다. 재감사 때문에 operational lock을 다시 잡더라도 완료 상태를 보존해야 하며, legacy fallback을 임시로 되살리는 rollback은 허용되지 않습니다.
 

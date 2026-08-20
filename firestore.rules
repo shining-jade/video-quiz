@@ -2000,9 +2000,10 @@ service cloud.firestore {
           sessionIsJoinable(sessionId) &&
           validStudent(studentId) &&
           request.resource.data.uid == resource.data.uid;
-        allow delete: if isAdmin() ||
-          (ownsSession(sessionId) &&
-            get(/databases/$(database)/documents/sessions/$(sessionId)).data.status == 'aborted');
+        allow delete: if sessionCounterMigrationUnlocked() &&
+          (isAdmin() || ownsSession(sessionId)) &&
+          get(/databases/$(database)/documents/sessions/$(sessionId)).data.status in
+            ['ended', 'aborted'];
         allow read, write: if false;
       }
 

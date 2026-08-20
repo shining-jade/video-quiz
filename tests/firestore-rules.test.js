@@ -1963,6 +1963,38 @@ rulesTest('session counter migration lock closes every new join until exact serv
   assert.equal((await adminRead('sessions/counter-lock-session')).registeredStudentCount, 1);
 });
 
+rulesTest('active student deletion cannot invalidate a counter audit and cleanup waits for unlock', async () => {
+  const admin = actorFirestore('admin');
+  const owner = actorFirestore('owner');
+  const studentPath = 'sessions/s1/students/student-uid';
+
+  await assertFails(deleteDoc(doc(admin, studentPath)));
+  await assertFails(deleteDoc(doc(owner, studentPath)));
+  assert.equal((await adminRead('sessions/s1')).registeredStudentCount, 2);
+  assert.equal((await adminRead(studentPath)).uid, 'student-uid');
+
+  await adminWrite('migration_gates/session_counter_migration', {
+    locked: true, lockToken: 'counter-lock-delete', projectId, targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(Date.now()), lockedByUid: actors.admin.uid
+  });
+  const scanDuringLock = getDocs(collection(admin, 'sessions/s1/students'));
+  const racedDelete = assertFails(deleteDoc(doc(admin, studentPath)));
+  assert.equal((await assertSucceeds(scanDuringLock)).size, 2);
+  await racedDelete;
+  assert.equal((await adminRead(studentPath)).uid, 'student-uid');
+
+  await adminWrite('sessions/s1', {
+    ...(await adminRead('sessions/s1')), status: 'ended'
+  });
+  await assertFails(deleteDoc(doc(admin, studentPath)));
+  await adminWrite('migration_gates/session_counter_migration', {
+    locked: false, lockToken: 'counter-lock-delete', projectId, targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(1), lockedByUid: actors.admin.uid,
+    unlockedAt: Timestamp.fromMillis(2), unlockedByUid: actors.admin.uid
+  });
+  await assertSucceeds(deleteDoc(doc(admin, studentPath)));
+});
+
 rulesTest('class planning thresholds are teacher-readable and exact admin-only server-time writes', async () => {
   await adminWrite('config/class_planning', {
     caution: 60, crowded: 120,
@@ -3228,7 +3260,7 @@ const writeMatrix = [
       name: '참여 학생'
     }),
     updateValue: () => ({ number: 10 }),
-    allowed: { create: [], update: ['student'], delete: ['admin'] }
+    allowed: { create: [], update: ['student'], delete: [] }
   },
   {
     name: '응답',

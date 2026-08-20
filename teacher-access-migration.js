@@ -18,6 +18,12 @@ function timestampValid(value) {
   try { return Number.isFinite(value.toMillis()); } catch (_) { return false; }
 }
 
+function firestoreTimestampValid(value) {
+  if (!timestampValid(value) || !Number.isInteger(value.seconds) ||
+      !Number.isInteger(value.nanoseconds) || typeof value.isEqual !== 'function') return false;
+  try { return value.isEqual(value) === true; } catch (_) { return false; }
+}
+
 function validUid(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 128 && !value.includes('/');
 }
@@ -104,6 +110,7 @@ function verifyTeacherAccessGateSnapshot(snapshot, expected, expectedGeneration)
     projectId: data.projectId, targetMode: data.targetMode,
     status: data.status, strictReady: data.strictReady,
     migrationGeneration: data.migrationGeneration,
+    completedAt: data.completedAt, completedByUid: data.completedByUid,
     updateTimeGeneration: updateTimeGeneration(snapshot)
   };
   if (expectedGeneration && evidence.updateTimeGeneration !== expectedGeneration) {
@@ -179,6 +186,23 @@ async function verifyTeacherAccessGate({ db, projectId, targetMode, adminUid, lo
   return verifyTeacherAccessGateSnapshot(await db.doc(GATE_PATH).get(), {
     projectId, targetMode, adminUid, lockToken
   }, expectedGeneration);
+}
+
+function evaluateTeacherAccessReleaseEvidence(gate, options) {
+  const validGeneration = value => typeof value === 'string' && /^\d+:\d+$/.test(value);
+  const safe = Boolean(gate) && gate.locked === true && gate.lockToken === options.lockToken &&
+    gate.projectId === options.projectId && gate.targetMode === options.targetMode &&
+    gate.updateTimeGeneration === options.expectedGeneration &&
+    gate.status === 'complete' && gate.strictReady === true &&
+    validGeneration(gate.migrationGeneration) &&
+    gate.migrationGeneration === options.expectedMigrationGeneration &&
+    firestoreTimestampValid(gate.completedAt) && gate.completedByUid === options.adminUid;
+  return {
+    safeToDeployStrictRules: safe,
+    verificationReason: safe
+      ? 'exact completion, administrator, and migration generations verified'
+      : 'teacher access completion shape, administrator, target, or migration generation is invalid'
+  };
 }
 
 async function unlockTeacherAccessGate({
@@ -302,6 +326,52 @@ async function scanAccessState({ db, auth, adminUid, at }) {
     audit.allowanceMismatchCount === 0 && audit.legacyCompatibilityMismatchCount === 0 &&
     audit.orphanAllowanceCount === 0;
   return { planned, audit };
+}
+
+async function verifyTeacherAccessReleaseState({
+  db, auth, projectId, targetMode, adminUid, lockToken,
+  expectedGeneration, expectedMigrationGeneration
+}) {
+  let gate;
+  let audit;
+  try {
+    gate = await verifyTeacherAccessGate({
+      db, projectId, targetMode, adminUid, lockToken, expectedGeneration
+    });
+    const initialEvidence = evaluateTeacherAccessReleaseEvidence(gate, {
+      projectId, targetMode, adminUid, lockToken,
+      expectedGeneration, expectedMigrationGeneration
+    });
+    if (!initialEvidence.safeToDeployStrictRules) {
+      return { status: 'complete', gate, audit, ...initialEvidence };
+    }
+    const scanned = await scanAccessState({ db, auth, adminUid, at: gate.completedAt });
+    audit = scanned.audit;
+    gate = await verifyTeacherAccessGate({
+      db, projectId, targetMode, adminUid, lockToken, expectedGeneration
+    });
+    const finalEvidence = evaluateTeacherAccessReleaseEvidence(gate, {
+      projectId, targetMode, adminUid, lockToken,
+      expectedGeneration, expectedMigrationGeneration
+    });
+    const safe = finalEvidence.safeToDeployStrictRules === true && audit.safe === true;
+    return {
+      status: 'complete', gate, audit,
+      safeToDeployStrictRules: safe,
+      verificationReason: safe
+        ? 'exact completion gate and authoritative access audit verified'
+        : audit.safe === true ? finalEvidence.verificationReason :
+          'authoritative teacher access audit found identity or allowance drift'
+    };
+  } catch (error) {
+    return {
+      status: 'partial-failure', gate, audit,
+      safeToDeployStrictRules: false,
+      verificationReason: 'authoritative teacher access gate or audit changed: ' +
+        String(error && error.message || error),
+      auditError: String(error && error.message || error)
+    };
+  }
 }
 
 async function runTeacherAccessMigration({
@@ -434,6 +504,7 @@ async function runTeacherAccessMigration({
 module.exports = {
   acquireTeacherAccessGate,
   completeTeacherAccessGate,
+  evaluateTeacherAccessReleaseEvidence,
   allowanceCoherent,
   buildAllowance,
   canonicalEmail,
@@ -443,5 +514,6 @@ module.exports = {
   unlockTeacherAccessGate,
   updateTimeGeneration,
   verifyTeacherAccessGate,
+  verifyTeacherAccessReleaseState,
   verifyTeacherAccessGateSnapshot
 };

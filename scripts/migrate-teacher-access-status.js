@@ -55,18 +55,7 @@ function parseArgs(argv) {
 }
 
 function evaluateAccessReleaseVerification(gate, options) {
-  const validGeneration = value => typeof value === 'string' && /^\d+:\d+$/.test(value);
-  const safe = Boolean(gate) && gate.locked === true && gate.lockToken === options.lockToken &&
-    gate.projectId === options.projectId && gate.targetMode === options.targetMode &&
-    gate.updateTimeGeneration === options.expectedGeneration &&
-    gate.status === 'complete' && gate.strictReady === true &&
-    validGeneration(gate.migrationGeneration) &&
-    gate.migrationGeneration === options.expectedMigrationGeneration;
-  return {
-    safeToDeployStrictRules: safe,
-    verificationReason: safe ? 'exact completion and migration generations verified' :
-      'teacher access completion, strict readiness, target, or migration generation is invalid'
-  };
+  return migration.evaluateTeacherAccessReleaseEvidence(gate, options);
 }
 
 function validateTarget(options, environment = process.env) {
@@ -100,6 +89,7 @@ function productionDependencies() {
     runTeacherAccessMigration: migration.runTeacherAccessMigration,
     unlockTeacherAccessGate: migration.unlockTeacherAccessGate,
     verifyTeacherAccessGate: migration.verifyTeacherAccessGate,
+    verifyTeacherAccessReleaseState: migration.verifyTeacherAccessReleaseState,
     writeLine(line) { process.stdout.write(line + '\n'); }
   };
 }
@@ -151,20 +141,22 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
         safeToDeployStrictRules: false, gate
       };
     } else if (options.verifyLock) {
-      const gate = await dependencies.verifyTeacherAccessGate({
-        db: services.db, projectId: options.projectId, targetMode: target.targetMode,
+      const verification = await dependencies.verifyTeacherAccessReleaseState({
+        db: services.db, auth: services.auth,
+        projectId: options.projectId, targetMode: target.targetMode,
         adminUid: options.adminUid, lockToken: options.lockToken,
-        expectedGeneration: options.expectedGeneration
-      });
-      const verification = evaluateAccessReleaseVerification(gate, {
-        ...options, targetMode: target.targetMode
+        expectedGeneration: options.expectedGeneration,
+        expectedMigrationGeneration: options.expectedMigrationGeneration
       });
       report = {
         tool: 'teacher-access-migration-cli', schemaVersion: 1,
         projectId: options.projectId, targetMode: target.targetMode, mode: 'verify-lock',
-        operation: 'teacher-access-status-lock-verification', status: 'complete',
+        operation: 'teacher-access-status-lock-verification', status: verification.status,
         safeToDeployStrictRules: verification.safeToDeployStrictRules,
-        verificationReason: verification.verificationReason, gate
+        verificationReason: verification.verificationReason,
+        gate: verification.gate,
+        ...(verification.audit ? { audit: verification.audit } : {}),
+        ...(verification.auditError ? { auditError: verification.auditError } : {})
       };
     } else {
       report = await dependencies.runTeacherAccessMigration({
