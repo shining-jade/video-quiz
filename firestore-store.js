@@ -1130,6 +1130,22 @@
       return listClassPlans('class_plans_private', from, to, limit);
     }
 
+    async function getOwnClassPlan(planId, identity) {
+      const id = assertPlanId(planId);
+      const owner = identity || {};
+      const uid = assertUid(owner.uid);
+      const email = canonicalTeacherEmail(owner.emailCanonical === undefined
+        ? owner.email : owner.emailCanonical);
+      if (!email) throw new Error('class plan owner identity가 유효하지 않습니다.');
+      const snapshot = await db.doc('class_plans_private/' + id).get({ source: 'server' });
+      if (!snapshot.exists) return null;
+      const plan = assertClassPlanShape(snapshot.data(), true, true);
+      if (plan.ownerUid !== uid || plan.ownerEmailCanonical !== email) {
+        throw new Error('class plan owner identity가 일치하지 않습니다.');
+      }
+      return { ...plan };
+    }
+
     async function listOwnClassPlans(from, to, limit, identity) {
       const owner = identity || {};
       const uid = assertUid(owner.uid);
@@ -2751,6 +2767,7 @@
       cancelOwnClassPlan,
       listPublicPlans,
       listAdminPlans,
+      getOwnClassPlan,
       listOwnClassPlans,
       attachPlanToSession,
       finishClassPlan,

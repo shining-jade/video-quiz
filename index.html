@@ -1623,6 +1623,15 @@ function retryPendingAllocations() {
   });
 }
 
+function rerenderEligibleTeacherHome(authGeneration, uid) {
+  if (teacherAuthVersion !== authGeneration || !AuthCore.isTeacher(teacherState) ||
+      teacherState.uid !== uid || !['#/', '#', ''].includes(String(location.hash || '#/'))) {
+    return false;
+  }
+  screenHome();
+  return true;
+}
+
 async function applyTeacherUser(user) {
   const previousState = typeof appliedTeacherState !== 'undefined' && appliedTeacherState
     ? appliedTeacherState : teacherState;
@@ -1703,7 +1712,7 @@ async function applyTeacherUser(user) {
   }
   renderTeacherAuthArea();
   if (typeof authReady !== 'undefined' && authReady) {
-    reconcileTeacherRoute(previousState, teacherState);
+    const routeReconciled = reconcileTeacherRoute(previousState, teacherState);
     const reroute = typeof teacherRequestReroute !== 'undefined' ? teacherRequestReroute : null;
     if (reroute && reroute.authGeneration === updateVersion && reroute.uid === observerUid) {
       teacherRequestReroute = null;
@@ -1711,6 +1720,10 @@ async function applyTeacherUser(user) {
         ? teacherRequestRouteIsCurrent()
         : (typeof location === 'undefined' || ['#/', '', '#'].includes(String(location.hash || '#/')));
       if (requestRouteCurrent) router();
+    }
+    if (!routeReconciled && !teacherRequestReroute &&
+        typeof rerenderEligibleTeacherHome === 'function') {
+      rerenderEligibleTeacherHome(updateVersion, teacherState.uid);
     }
   }
   appliedTeacherState = teacherState;
@@ -1727,7 +1740,10 @@ function setTeacherAllowance(allowance) {
   }
   renderTeacherAuthArea();
   if (typeof authReady !== 'undefined' && authReady) {
-    reconcileTeacherRoute(previousState, teacherState);
+    const routeReconciled = reconcileTeacherRoute(previousState, teacherState);
+    if (!routeReconciled && typeof rerenderEligibleTeacherHome === 'function') {
+      rerenderEligibleTeacherHome(teacherAuthVersion, teacherState.uid);
+    }
   }
   appliedTeacherState = teacherState;
 }
@@ -1868,13 +1884,34 @@ function reconcileTeacherRoute(previous, next) {
   return false;
 }
 
+function parsePlayClassPlanRoute(queryString) {
+  const query = String(queryString || '').replace(/^\?/, '');
+  if (!query) return null;
+  const params = new URLSearchParams(query);
+  const planId = params.get('plan');
+  const revisionValue = params.get('revision');
+  const mode = params.get('mode');
+  if (planId === null && revisionValue === null && mode === null) return null;
+  const revision = Number(revisionValue);
+  if (params.getAll('plan').length !== 1 || params.getAll('revision').length !== 1 ||
+      params.getAll('mode').length !== 1 || typeof planId !== 'string' || !planId ||
+      planId.length > 128 || planId.includes('/') || !Number.isSafeInteger(revision) ||
+      revision < 1 || String(revision) !== revisionValue || !['edit', 'start'].includes(mode)) {
+    return { invalid: true };
+  }
+  return { planId, revision, mode };
+}
+
 function router() {
   if (!authReady) return;
   mkCloseQuestionPreview();
   runCleanups();
   window.scrollTo(0, 0);
   const raw = location.hash.replace(/^#\/?/, '');
-  const parts = raw.split('/').filter(x => x !== '');
+  const questionIndex = raw.indexOf('?');
+  const routePath = questionIndex >= 0 ? raw.slice(0, questionIndex) : raw;
+  const routeQuery = questionIndex >= 0 ? raw.slice(questionIndex + 1) : '';
+  const parts = routePath.split('/').filter(x => x !== '');
   const name = parts[0] || 'home';
   const arg = parts[1] ? decodeURIComponent(parts[1]) : '';
 
@@ -1883,7 +1920,7 @@ function router() {
     case 'sets':  requireTeacher(screenSetList); break;
     case 'trash': requireTeacher(screenTrash); break;
     case 'make':  requireTeacher(() => screenMake(arg)); break;
-    case 'play':  requireTeacher(() => screenPlay(arg)); break;
+    case 'play':  requireTeacher(() => screenPlay(arg, parsePlayClassPlanRoute(routeQuery))); break;
     case 'join':  screenJoin(arg); break;
     case 'live':  requireTeacher(() => screenDashboard(arg)); break;
     case 'admin': requireAdmin(screenAdmin); break;
@@ -2025,8 +2062,10 @@ function teacherDashboardPlanAction(planId, action) {
   const own = state.ownPlans && state.ownPlans[planId];
   const plan = state.publicPlans && state.publicPlans[planId];
   if (!own || !plan || own.status !== 'planned' || plan.status !== 'planned' ||
+      !Number.isSafeInteger(own.revision) || own.revision < 1 ||
       !['edit', 'start'].includes(action) || typeof plan.setId !== 'string' || !plan.setId) return false;
-  go('play/' + encodeURIComponent(plan.setId));
+  go('play/' + encodeURIComponent(plan.setId) + '?plan=' + encodeURIComponent(planId) +
+    '&revision=' + own.revision + '&mode=' + action);
   return true;
 }
 
@@ -4505,7 +4544,35 @@ function mkShowShare() {
    ══════════════════════════════════════════════════════════════════════ */
 let pl = null;   // 재생 화면 상태
 
-function screenPlay(setId) {
+function plLoadSelectedClassPlan(state, selection) {
+  if (!selection) return Promise.resolve(true);
+  const authState = teacherState;
+  const authGeneration = teacherAuthVersion;
+  if (selection.invalid || !AuthCore.isTeacher(authState) || !store ||
+      typeof store.getOwnClassPlan !== 'function') {
+    return Promise.reject(new Error('선택한 수업계획을 확인할 수 없습니다.'));
+  }
+  const isCurrent = () => pl === state && AuthCore.isTeacher(teacherState) &&
+    teacherState.uid === authState.uid && teacherState.email === authState.email &&
+    teacherAuthVersion === authGeneration;
+  return Promise.resolve(store.getOwnClassPlan(selection.planId, {
+    uid: authState.uid, email: authState.email
+  })).then(plan => {
+    if (!isCurrent()) return false;
+    if (!plan || plan.planId !== selection.planId || plan.revision !== selection.revision ||
+        plan.status !== 'planned' || plan.setId !== state.setId ||
+        plan.ownerUid !== authState.uid || plan.ownerEmailCanonical !== String(authState.email).toLowerCase()) {
+      throw new Error('선택한 수업계획이 변경되었거나 현재 교사의 계획이 아닙니다.');
+    }
+    state.selectedClassPlan = { ...plan };
+    state.classPlanId = plan.planId;
+    state.classPlanRevision = plan.revision;
+    state.classPlanPersisted = true;
+    return true;
+  });
+}
+
+function screenPlay(setId, routeClassPlan) {
   if (!setId) { go('make'); return; }
   pl = {
     setId: setId, set: null,
@@ -4528,7 +4595,8 @@ function screenPlay(setId) {
     qrPosition: null,
     qrDrag: null,
     previousVolume: 100,
-    ytCancels: []
+    ytCancels: [],
+    routeClassPlan: routeClassPlan || null
   };
   const state = pl;
   const fullscreenChange = () => { if (pl === state) plHandleFullscreenChange(); };
@@ -4571,7 +4639,7 @@ function screenPlay(setId) {
 
   APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">퀴즈 세트를 불러오는 중…</div></div>';
 
-  store.getQuizSet(setId).then(savedSet => {
+  store.getQuizSet(setId).then(async savedSet => {
     if (pl !== state) return;
     const set = normSet(savedSet);
     const flatQuestions = set ? PlaylistCore.flattenQuestions(set.videos) : [];
@@ -4593,7 +4661,13 @@ function screenPlay(setId) {
     state.dueQuestions = [];
     state.quizTrigger = typeof QuizTriggerCore === 'object' && QuizTriggerCore.create
       ? QuizTriggerCore.create(flatQuestions) : null;
+    if (state.routeClassPlan) {
+      const selected = await plLoadSelectedClassPlan(state, state.routeClassPlan);
+      if (!selected || pl !== state) return;
+    }
     renderPlayIntro();
+    if (state.routeClassPlan && state.routeClassPlan.mode === 'edit') plOpenClassPlanDialog();
+    if (state.routeClassPlan && state.routeClassPlan.mode === 'start') plStartSession();
   }).catch(e => {
     if (pl !== state) return;
     console.error(e);
@@ -4672,8 +4746,18 @@ function plOpenClassPlanDialog() {
     const date = new Date(millis);
     return new Date(millis - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
   };
-  if (!startInput.value) startInput.value = localValue(now);
-  if (!endInput.value) endInput.value = localValue(now + 50 * 60_000);
+  const selected = state.selectedClassPlan;
+  const classInput = $('#pl-plan-class-name');
+  if (selected && selected.status === 'planned') {
+    if (classInput) classInput.value = selected.className;
+    startInput.value = localValue(selected.plannedStartAt);
+    endInput.value = localValue(selected.plannedEndAt);
+    const expectedInput = $('#pl-plan-expected');
+    if (expectedInput) expectedInput.value = String(selected.expectedStudents);
+  } else {
+    if (!startInput.value) startInput.value = localValue(now);
+    if (!endInput.value) endInput.value = localValue(now + 50 * 60_000);
+  }
   const warning = $('#pl-plan-warning');
   if (warning && !state.pendingClassPlanReview) {
     warning.textContent = '[현황 확인]을 눌러 겹치는 수업을 확인해 주세요.';
@@ -4699,9 +4783,15 @@ async function plReviewClassPlan() {
   if (!classInput || !startInput || !endInput || !expectedInput || !warning) return false;
   try {
     const now = store && typeof store.serverNow === 'function' ? store.serverNow() : serverNow();
-    const planId = state.classPlanId || state.pendingClassPlanReview &&
-      state.pendingClassPlanReview.privatePlan.planId || rid(20);
-    const privatePlan = {
+    const selected = state.selectedClassPlan;
+    if (selected && (selected.status !== 'planned' || selected.setId !== state.setId ||
+        selected.ownerUid !== authState.uid ||
+        selected.ownerEmailCanonical !== String(authState.email).toLowerCase())) {
+      throw new Error('선택한 수업계획이 현재 교사의 planned 계획과 일치하지 않습니다.');
+    }
+    const planId = selected && selected.planId || state.classPlanId ||
+      state.pendingClassPlanReview && state.pendingClassPlanReview.privatePlan.planId || rid(20);
+    const normalizedPlan = {
       ...ClassPlanningCore.normalizePlan({
         className: classInput.value,
         plannedStartAt: new Date(startInput.value).getTime(),
@@ -4716,6 +4806,12 @@ async function plReviewClassPlan() {
       }, { id: state.setId, title: state.set.title }, now),
       planId
     };
+    const privatePlan = selected ? {
+      ...normalizedPlan,
+      planId: selected.planId,
+      revision: selected.revision,
+      createdAtMs: selected.createdAtMs
+    } : normalizedPlan;
     if (privatePlan.plannedStartAt < now - 5 * 60_000) {
       throw new Error('시작 시각은 현재 시각에 가깝거나 미래여야 합니다.');
     }
@@ -4794,6 +4890,49 @@ async function plConfirmClassPlan(event) {
         teacherAuthVersion !== review.authGeneration)) return false;
   const acknowledgedAt = store && typeof store.serverNow === 'function'
     ? store.serverNow() : serverNow();
+  const selected = state.selectedClassPlan;
+  if (selected) {
+    if (!store || typeof store.updateOwnClassPlan !== 'function' ||
+        selected.planId !== review.privatePlan.planId || selected.revision !== review.privatePlan.revision ||
+        selected.status !== 'planned') {
+      alert('선택한 수업계획이 변경되었습니다. 현황판에서 다시 선택해 주세요.');
+      return false;
+    }
+    const updates = {
+      className: review.privatePlan.className,
+      plannedStartAt: review.privatePlan.plannedStartAt,
+      plannedEndAt: review.privatePlan.plannedEndAt,
+      expectedStudents: review.privatePlan.expectedStudents,
+      warningLevel: review.privatePlan.warningLevel,
+      warningAcknowledgedAt: acknowledgedAt
+    };
+    try {
+      const updated = await store.updateOwnClassPlan(selected.planId, selected.revision, updates);
+      if (pl !== state || !AuthCore.isTeacher(teacherState) ||
+          teacherState.uid !== selected.ownerUid ||
+          teacherState.email.toLowerCase() !== selected.ownerEmailCanonical ||
+          (review.authGeneration !== null && teacherAuthVersion !== review.authGeneration) ||
+          !updated || updated.planId !== selected.planId || updated.setId !== state.setId ||
+          updated.status !== 'planned' || updated.revision !== selected.revision + 1 ||
+          updated.ownerUid !== selected.ownerUid ||
+          updated.ownerEmailCanonical !== selected.ownerEmailCanonical) {
+        throw new Error('수업계획이 변경되었거나 현재 교사의 계획이 아닙니다.');
+      }
+      state.selectedClassPlan = { ...updated };
+      state.classPlanId = updated.planId;
+      state.classPlanRevision = updated.revision;
+      state.classPlanPersisted = true;
+      state.reviewedClassPlan = { privatePlan: { ...updated }, publicPlan: null };
+      lsSet('vq_last_label', updated.className);
+      const selectedDialog = $('#pl-plan-dialog');
+      if (selectedDialog && typeof selectedDialog.close === 'function') selectedDialog.close();
+      await plStartSession();
+      return true;
+    } catch (error) {
+      if (pl === state) alert('수업계획 수정 실패: ' + (error && error.message ? error.message : String(error)));
+      return false;
+    }
+  }
   const privatePlan = {
     ...review.privatePlan,
     warningAcknowledgedAt: acknowledgedAt,
@@ -4904,7 +5043,7 @@ function plStartSession() {
     teacherState.uid === authState.uid && teacherState.email === authState.email &&
     (authGeneration === null || teacherAuthVersion === authGeneration);
   const planningEnabled = store && typeof store.createClassPlan === 'function';
-  if (planningEnabled && !state.reviewedClassPlan) {
+  if (planningEnabled && !state.classPlanPersisted && !state.reviewedClassPlan) {
     if (typeof plOpenClassPlanDialog === 'function') plOpenClassPlanDialog();
     return Promise.resolve(null);
   }
