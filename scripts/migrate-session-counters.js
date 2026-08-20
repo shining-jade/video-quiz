@@ -8,15 +8,19 @@ const { reserveReport } = require('./migrate-legacy-ownership.js');
 function parseArgs(argv) {
   const result = {
     projectId: '', targetMode: 'production', adminUid: '', apply: false,
-    confirmProject: '', output: ''
+    confirmProject: '', output: '', lockToken: '', expectedGeneration: '',
+    unlock: false, verifyLock: false
   };
   const fields = {
     '--project': 'projectId', '--target-mode': 'targetMode', '--admin-uid': 'adminUid',
-    '--confirm-project': 'confirmProject', '--output': 'output'
+    '--confirm-project': 'confirmProject', '--output': 'output',
+    '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration'
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--apply') { result.apply = true; continue; }
+    if (argument === '--unlock') { result.unlock = true; continue; }
+    if (argument === '--verify-lock') { result.verifyLock = true; continue; }
     const field = fields[argument];
     if (!field) throw new Error('Unknown argument: ' + argument);
     const value = argv[++index];
@@ -30,6 +34,18 @@ function parseArgs(argv) {
   }
   if (result.apply && result.confirmProject !== result.projectId) {
     throw new Error('--apply requires an exact --confirm-project.');
+  }
+  if ([result.apply, result.unlock, result.verifyLock].filter(Boolean).length > 1) {
+    throw new Error('--apply, --unlock and --verify-lock are mutually exclusive.');
+  }
+  if (result.apply && !result.lockToken) {
+    throw new Error('--apply requires an explicit unpredictable --lock-token.');
+  }
+  if ((result.unlock || result.verifyLock) && (!result.lockToken || !result.expectedGeneration)) {
+    throw new Error('--unlock/--verify-lock require exact --lock-token and --expected-generation.');
+  }
+  if (result.unlock && result.confirmProject !== result.projectId) {
+    throw new Error('--unlock requires an exact --confirm-project.');
   }
   return result;
 }
@@ -64,6 +80,8 @@ function productionDependencies() {
       };
     },
     runSessionCounterMigration: migration.runSessionCounterMigration,
+    unlockSessionCounterMigrationLock: migration.unlockSessionCounterMigrationLock,
+    verifySessionCounterMigrationLock: migration.verifySessionCounterMigrationLock,
     writeLine(line) { process.stdout.write(line + '\n'); }
   };
 }
@@ -77,7 +95,9 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
   const reservation = dependencies.reserveReport(output, JSON.stringify({
     tool: 'session-counter-migration-cli', schemaVersion: 1,
     projectId: options.projectId, targetMode: target.targetMode,
-    mode: options.apply ? 'apply' : 'dry-run', operation: 'session-counter-backfill-and-gate',
+    mode: options.unlock ? 'unlock' : options.verifyLock ? 'verify-lock' : options.apply ? 'apply' : 'dry-run',
+    operation: options.unlock ? 'session-counter-migration-unlock' :
+      options.verifyLock ? 'session-counter-migration-lock-verification' : 'session-counter-backfill-and-gate',
     status: 'reserved-fail-closed', safeToDeployStrictRules: false,
     gate: { path: 'migration_gates/session_counters', created: false }
   }, null, 2) + '\n');
@@ -85,12 +105,39 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
   let report;
   try {
     services = await dependencies.initialize(options.projectId);
-    report = await dependencies.runSessionCounterMigration({
-      db: services.db, projectId: options.projectId, targetMode: target.targetMode,
-      adminUid: options.adminUid, apply: options.apply,
-      confirmProject: options.confirmProject,
-      serverTimestamp: services.serverTimestamp, deleteField: services.deleteField
-    });
+    if (options.unlock) {
+      const lock = await dependencies.unlockSessionCounterMigrationLock({
+        db: services.db, projectId: options.projectId, targetMode: target.targetMode,
+        adminUid: options.adminUid, lockToken: options.lockToken,
+        expectedGeneration: options.expectedGeneration,
+        serverTimestamp: services.serverTimestamp
+      });
+      report = {
+        tool: 'session-counter-migration-cli', schemaVersion: 1,
+        projectId: options.projectId, targetMode: target.targetMode, mode: 'unlock',
+        operation: 'session-counter-migration-unlock', status: 'complete',
+        safeToDeployStrictRules: false, lock
+      };
+    } else if (options.verifyLock) {
+      const lock = await dependencies.verifySessionCounterMigrationLock({
+        db: services.db, projectId: options.projectId, targetMode: target.targetMode,
+        adminUid: options.adminUid, lockToken: options.lockToken,
+        expectedGeneration: options.expectedGeneration
+      });
+      report = {
+        tool: 'session-counter-migration-cli', schemaVersion: 1,
+        projectId: options.projectId, targetMode: target.targetMode, mode: 'verify-lock',
+        operation: 'session-counter-migration-lock-verification', status: 'complete',
+        safeToDeployStrictRules: true, lock
+      };
+    } else {
+      report = await dependencies.runSessionCounterMigration({
+        db: services.db, projectId: options.projectId, targetMode: target.targetMode,
+        adminUid: options.adminUid, apply: options.apply,
+        confirmProject: options.confirmProject, lockToken: options.lockToken,
+        serverTimestamp: services.serverTimestamp, deleteField: services.deleteField
+      });
+    }
     report.targetMode = target.targetMode;
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
   } catch (error) {
@@ -99,7 +146,9 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
     } : {
       tool: 'session-counter-migration-cli', schemaVersion: 1,
       projectId: options.projectId, targetMode: target.targetMode,
-      mode: options.apply ? 'apply' : 'dry-run', operation: 'session-counter-backfill-and-gate',
+      mode: options.unlock ? 'unlock' : options.verifyLock ? 'verify-lock' : options.apply ? 'apply' : 'dry-run',
+      operation: options.unlock ? 'session-counter-migration-unlock' :
+        options.verifyLock ? 'session-counter-migration-lock-verification' : 'session-counter-backfill-and-gate',
       status: 'failed', safeToDeployStrictRules: false,
       gate: { path: 'migration_gates/session_counters', created: false },
       error: String(error && error.message || error)

@@ -5,6 +5,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   const STATUSES = new Set(['planned', 'live', 'ended', 'cancelled']);
   const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
+  const DEFAULT_THRESHOLDS = Object.freeze({ caution: 60, crowded: 120 });
 
   function fail(message) {
     throw new Error(message);
@@ -93,7 +94,8 @@
     return first.start < second.end && second.start < first.end;
   }
 
-  function thresholds(value) {
+  function normalizeThresholds(value) {
+    if (value === undefined || value === null) return { ...DEFAULT_THRESHOLDS };
     object(value, 'thresholds are required.');
     const caution = value.caution;
     const crowded = value.crowded;
@@ -118,7 +120,7 @@
 
   function summarizeWindow(plans, candidate, suppliedThresholds) {
     if (!Array.isArray(plans)) fail('plans must be an array.');
-    const limits = thresholds(suppliedThresholds);
+    const limits = normalizeThresholds(suppliedThresholds);
     const candidateStudents = planExpectedStudents(candidate);
     if (candidate.status === 'cancelled') {
       return { overlappingClasses: 0, expectedConcurrentStudents: 0, level: 'green', canProceed: true };
@@ -198,5 +200,13 @@
     return actual;
   }
 
-  return { normalizePlan, overlaps, summarizeWindow, publicProjection, applyActuals };
+  return {
+    DEFAULT_THRESHOLDS,
+    normalizeThresholds,
+    normalizePlan,
+    overlaps,
+    summarizeWindow,
+    publicProjection,
+    applyActuals
+  };
 });

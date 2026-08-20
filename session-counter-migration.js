@@ -2,6 +2,7 @@
 
 const ACTIVE_STATUSES = new Set(['allocating', 'active', 'live']);
 const GATE_PATH = 'migration_gates/session_counters';
+const LOCK_PATH = 'migration_gates/session_counter_migration';
 const GATE_KEYS = [
   'complete', 'projectId', 'environment', 'rulesVersion',
   'preflightNonEndedLegacyCount', 'verifiedAt', 'updatedAt', 'completedByUid'
@@ -37,6 +38,76 @@ function updateTimeGeneration(snapshot) {
     throw new Error('Session counter gate is missing an authoritative updateTime generation.');
   }
   return String(value.seconds) + ':' + String(value.nanoseconds);
+}
+
+function verifyMigrationLockSnapshot(snapshot, expected, expectedGeneration) {
+  if (!snapshot || !snapshot.exists) throw new Error('Session counter migration lock is missing.');
+  const data = snapshot.data() || {};
+  if (data.locked !== true || data.lockToken !== expected.lockToken ||
+      data.projectId !== expected.projectId || data.targetMode !== expected.targetMode ||
+      data.lockedByUid !== expected.adminUid || !exactTimestamp(data.lockedAt)) {
+    throw new Error('Session counter migration lock token or target identity is invalid.');
+  }
+  const evidence = {
+    path: LOCK_PATH, locked: true, lockToken: data.lockToken,
+    projectId: data.projectId, targetMode: data.targetMode,
+    updateTimeGeneration: updateTimeGeneration(snapshot)
+  };
+  if (expectedGeneration && evidence.updateTimeGeneration !== expectedGeneration) {
+    throw new Error('Session counter migration lock generation changed after audit.');
+  }
+  return evidence;
+}
+
+async function acquireSessionCounterMigrationLock({
+  db, projectId, targetMode, adminUid, lockToken, serverTimestamp
+}) {
+  const ref = db.doc(LOCK_PATH);
+  await db.runTransaction(async transaction => {
+    const snapshot = await transaction.get(ref);
+    if (snapshot.exists && snapshot.data().locked === true) {
+      verifyMigrationLockSnapshot(snapshot, { projectId, targetMode, adminUid, lockToken });
+      return;
+    }
+    transaction.set(ref, {
+      locked: true, lockToken, projectId, targetMode,
+      lockedAt: serverTimestamp(), lockedByUid: adminUid
+    });
+  });
+  return verifyMigrationLockSnapshot(await ref.get(), {
+    projectId, targetMode, adminUid, lockToken
+  });
+}
+
+async function verifySessionCounterMigrationLock({
+  db, projectId, targetMode, adminUid, lockToken, expectedGeneration
+}) {
+  return verifyMigrationLockSnapshot(await db.doc(LOCK_PATH).get(), {
+    projectId, targetMode, adminUid, lockToken
+  }, expectedGeneration);
+}
+
+async function unlockSessionCounterMigrationLock({
+  db, projectId, targetMode, adminUid, lockToken, expectedGeneration, serverTimestamp
+}) {
+  if (!lockToken || !expectedGeneration) throw new Error('Exact lock token and generation are required.');
+  const ref = db.doc(LOCK_PATH);
+  await db.runTransaction(async transaction => {
+    const snapshot = await transaction.get(ref);
+    verifyMigrationLockSnapshot(snapshot, {
+      projectId, targetMode, adminUid, lockToken
+    }, expectedGeneration);
+    transaction.set(ref, {
+      ...snapshot.data(), locked: false,
+      unlockedAt: serverTimestamp(), unlockedByUid: adminUid
+    });
+  });
+  const snapshot = await ref.get();
+  const data = snapshot.data() || {};
+  if (data.locked !== false || data.lockToken !== lockToken || data.projectId !== projectId ||
+      data.targetMode !== targetMode || data.unlockedByUid !== adminUid ||
+      !exactTimestamp(data.unlockedAt)) throw new Error('Session counter migration unlock readback failed.');
+  return { ...data, path: LOCK_PATH, updateTimeGeneration: updateTimeGeneration(snapshot) };
 }
 
 function verifyGateSnapshot(snapshot, { projectId, targetMode }, expectedGeneration) {
@@ -139,6 +210,7 @@ function reportBase({ projectId, targetMode, apply }) {
     mode: apply ? 'apply' : 'dry-run', status: apply ? 'running' : 'complete',
     plannedCount: 0, appliedCount: 0, reclassifiedCount: 0,
     concurrentlySkipped: [], concurrentlySkippedCount: 0,
+    lock: { path: LOCK_PATH, locked: false },
     gate: { path: GATE_PATH, created: false },
     safeToDeployStrictRules: false
   };
@@ -146,7 +218,7 @@ function reportBase({ projectId, targetMode, apply }) {
 
 async function runSessionCounterMigration({
   db, projectId, targetMode = 'production', adminUid, apply = false,
-  confirmProject = '', serverTimestamp, deleteField
+  confirmProject = '', serverTimestamp, deleteField, lockToken = ''
 }) {
   if (!db || typeof db.collection !== 'function' || typeof db.runTransaction !== 'function') {
     throw new Error('Admin Firestore DB is required.');
@@ -160,6 +232,12 @@ async function runSessionCounterMigration({
   }
   const report = reportBase({ projectId, targetMode, apply });
   try {
+    const exactLockToken = lockToken || ['session-counter', projectId, targetMode, adminUid].join(':');
+    if (apply) {
+      report.lock = await acquireSessionCounterMigrationLock({
+        db, projectId, targetMode, adminUid, lockToken: exactLockToken, serverTimestamp
+      });
+    }
     const gateRef = db.doc(GATE_PATH);
     const existingGate = await gateRef.get();
     if (existingGate.exists) {
@@ -170,7 +248,13 @@ async function runSessionCounterMigration({
         record.issue !== 'invalid-student-identity').length;
       report.gate = evidence;
       report.status = 'complete';
-      report.safeToDeployStrictRules = apply && current.audit.safe;
+      if (apply) {
+        report.lock = await verifySessionCounterMigrationLock({
+          db, projectId, targetMode, adminUid, lockToken: exactLockToken,
+          expectedGeneration: report.lock.updateTimeGeneration
+        });
+      }
+      report.safeToDeployStrictRules = apply && current.audit.safe && report.lock.locked === true;
       if (apply && !current.audit.safe) {
         throw new Error('Completed session counter gate conflicts with authoritative session audit.');
       }
@@ -184,6 +268,10 @@ async function runSessionCounterMigration({
     if (!apply) return report;
     for (const item of planned) {
       const result = await db.runTransaction(async transaction => {
+        const lockSnapshot = await transaction.get(db.doc(LOCK_PATH));
+        verifyMigrationLockSnapshot(lockSnapshot, {
+          projectId, targetMode, adminUid, lockToken: exactLockToken
+        }, report.lock.updateTimeGeneration);
         const sessionRef = db.doc('sessions/' + item.sessionId);
         const studentsRef = db.collection('sessions/' + item.sessionId + '/students');
         const sessionSnapshot = await transaction.get(sessionRef);
@@ -217,6 +305,10 @@ async function runSessionCounterMigration({
       return report;
     }
     await db.runTransaction(async transaction => {
+      const lockSnapshot = await transaction.get(db.doc(LOCK_PATH));
+      verifyMigrationLockSnapshot(lockSnapshot, {
+        projectId, targetMode, adminUid, lockToken: exactLockToken
+      }, report.lock.updateTimeGeneration);
       const gateSnapshot = await transaction.get(gateRef);
       if (gateSnapshot.exists) throw new Error('Session counter gate appeared during preflight.');
       const sessionsSnapshot = await transaction.get(db.collection('sessions'));
@@ -243,12 +335,16 @@ async function runSessionCounterMigration({
     const gateReadback = await gateRef.get();
     report.gate = verifyGateSnapshot(gateReadback, { projectId, targetMode });
     const afterGate = await scanSessions(db);
+    report.lock = await verifySessionCounterMigrationLock({
+      db, projectId, targetMode, adminUid, lockToken: exactLockToken,
+      expectedGeneration: report.lock.updateTimeGeneration
+    });
     const stableGate = verifyGateSnapshot(
       await gateRef.get(), { projectId, targetMode }, report.gate.updateTimeGeneration
     );
     report.gate = stableGate;
     report.audit = afterGate.audit;
-    report.safeToDeployStrictRules = afterGate.audit.safe;
+    report.safeToDeployStrictRules = afterGate.audit.safe && report.lock.locked === true;
     report.status = 'complete';
     return report;
   } catch (error) {
@@ -264,10 +360,14 @@ async function runSessionCounterMigration({
 
 module.exports = {
   ACTIVE_STATUSES,
+  acquireSessionCounterMigrationLock,
   buildAudit,
   inspectSession,
   runSessionCounterMigration,
   scanSessions,
   updateTimeGeneration,
+  unlockSessionCounterMigrationLock,
+  verifyMigrationLockSnapshot,
+  verifySessionCounterMigrationLock,
   verifyGateSnapshot
 };

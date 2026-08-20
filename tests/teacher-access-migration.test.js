@@ -20,6 +20,7 @@ function googleUser(uid, email, displayName = '교사') {
 
 function fakeDb(initial, options = {}) {
   const docs = new Map(Object.entries(initial));
+  const versions = new Map([...docs.keys()].map(key => [key, 1]));
   const writes = [];
   const collectionReads = new Map();
   let transactionCount = 0;
@@ -27,7 +28,8 @@ function fakeDb(initial, options = {}) {
     exists: docs.has(documentPath),
     id: documentPath.split('/').at(-1),
     ref: { path: documentPath },
-    data: () => docs.get(documentPath)
+    data: () => docs.get(documentPath),
+    updateTime: { seconds: versions.get(documentPath) || 0, nanoseconds: 0 }
   });
   const directChildren = collectionPath => [...docs.keys()]
     .filter(documentPath => documentPath.startsWith(collectionPath + '/') &&
@@ -59,6 +61,7 @@ function fakeDb(initial, options = {}) {
       const result = await handler(transaction);
       for (const [documentPath, value] of pending) {
         docs.set(documentPath, value);
+        versions.set(documentPath, (versions.get(documentPath) || 0) + 1);
         writes.push({ path: documentPath, value });
       }
       return result;
@@ -92,6 +95,7 @@ test('legacy enabled state maps to exact active or suspended authoritative allow
   }), {
     uid: 'uid-active', emailCanonical: 'active@school.kr', displayName: '홍교사',
     status: 'active', enabled: true, role: 'teacher', administrativeHold: false,
+    revision: 1,
     approvedAt: at, approvedByUid: 'admin-a', updatedAt: at, updatedByUid: 'admin-a'
   });
   assert.equal(migration.buildAllowance({
@@ -158,6 +162,7 @@ test('apply writes exact compatibility and authoritative records, then retries i
   assert.deepEqual(db.docs.get('teacher_allowances/uid-b'), {
     uid: 'uid-b', emailCanonical: 'b@school.kr', displayName: '박교사',
     status: 'suspended', enabled: false, role: 'admin', administrativeHold: true,
+    revision: 1,
     approvedAt: db.docs.get('teacher_allowances/uid-b').approvedAt,
     approvedByUid: 'admin-a', updatedAt: db.docs.get('teacher_allowances/uid-b').updatedAt,
     updatedByUid: 'admin-a'
@@ -168,6 +173,34 @@ test('apply writes exact compatibility and authoritative records, then retries i
   assert.equal(retry.appliedCount, 0);
   assert.equal(retry.safeToDeployStrictRules, true);
   assert.equal(db.writes.length, writeCount);
+});
+
+test('apply holds exact generation-bound migration lock until explicit token unlock', async () => {
+  const db = fakeDb({
+    'teacher_allowlist/a@school.kr': { enabled: true, role: 'teacher' }
+  });
+  const report = await migration.runTeacherAccessMigration({
+    db, auth: fakeAuth([googleUser('uid-a', 'a@school.kr')]),
+    projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    apply: true, confirmProject: 'demo-video-quiz', lockToken: 'exact-lock-token',
+    serverTimestamp: () => timestamp(1000)
+  });
+  assert.equal(report.lock.locked, true);
+  assert.equal(report.lock.lockToken, 'exact-lock-token');
+  assert.match(report.lock.updateTimeGeneration, /^\d+:\d+$/);
+  assert.equal(db.docs.get('migration_gates/teacher_access_status').locked, true);
+  await assert.rejects(migration.unlockTeacherAccessGate({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'wrong', expectedGeneration: report.lock.updateTimeGeneration,
+    serverTimestamp: () => timestamp(2000)
+  }), /token/i);
+  const unlocked = await migration.unlockTeacherAccessGate({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'exact-lock-token', expectedGeneration: report.lock.updateTimeGeneration,
+    serverTimestamp: () => timestamp(2000)
+  });
+  assert.equal(unlocked.locked, false);
+  assert.equal(db.docs.get('migration_gates/teacher_access_status').lockToken, 'exact-lock-token');
 });
 
 test('Auth display name remains stable after legacy-only profile fields are removed', async () => {
@@ -194,8 +227,8 @@ test('transaction reread reclassifies a concurrent enabled change instead of res
   const db = fakeDb({
     'teacher_allowlist/a@school.kr': { enabled: true, role: 'teacher' }
   }, {
-    beforeTransaction({ docs }) {
-      if (!raced) {
+    beforeTransaction({ docs, transactionCount }) {
+      if (!raced && transactionCount === 2) {
         raced = true;
         docs.set('teacher_allowlist/a@school.kr', { enabled: false, role: 'teacher' });
       }
@@ -258,6 +291,19 @@ test('CLI validates target and output before Admin initialization and keeps publ
   assert.throws(() => cli.parseArgs([
     '--project', 'demo-video-quiz', '--apply', '--admin-uid', 'admin-a'
   ]), /confirm-project/i);
+  assert.throws(() => cli.parseArgs([
+    '--project', 'demo-video-quiz', '--apply', '--confirm-project', 'demo-video-quiz',
+    '--admin-uid', 'admin-a'
+  ]), /lock-token/i);
+  assert.deepEqual(cli.parseArgs([
+    '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+    '--unlock', '--confirm-project', 'demo-video-quiz', '--lock-token', 'token-a',
+    '--expected-generation', '4:0'
+  ]), {
+    projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    apply: false, confirmProject: 'demo-video-quiz', output: '', lockToken: 'token-a',
+    expectedGeneration: '4:0', unlock: true, verifyLock: false
+  });
   assert.throws(() => cli.validateTarget({ projectId: 'video-quiz-65798', targetMode: 'production' }, {
     FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
   }), /stale/i);
@@ -290,6 +336,44 @@ test('CLI validates target and output before Admin initialization and keeps publ
     assert.equal(JSON.parse(fs.readFileSync(successPath, 'utf8')).status, 'complete');
     assert.equal(fs.existsSync(successPath + '.reserved'), false);
     assert.equal(fs.existsSync(successPath + '.pending'), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CLI verifies and unlocks only the exact reported lock generation', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'teacher-access-lock-'));
+  let initializeCount = 0;
+  let unlocked;
+  try {
+    const output = path.join(directory, 'unlock.json');
+    const report = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--unlock', '--confirm-project', 'demo-video-quiz', '--lock-token', 'token-a',
+      '--expected-generation', '4:0', '--output', output
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() {
+        initializeCount += 1;
+        return { db: {}, serverTimestamp() {}, close() {} };
+      },
+      async unlockTeacherAccessGate(options) {
+        unlocked = options;
+        return { locked: false, lockToken: 'token-a', updateTimeGeneration: '5:0' };
+      },
+      writeLine() {}
+    });
+    assert.equal(initializeCount, 1);
+    assert.equal(unlocked.lockToken, 'token-a');
+    assert.equal(unlocked.expectedGeneration, '4:0');
+    assert.equal(report.operation, 'teacher-access-status-unlock');
+    assert.equal(report.status, 'complete');
+    assert.equal(report.gate.locked, false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), report);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

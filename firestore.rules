@@ -56,6 +56,20 @@ service cloud.firestore {
         data.deletionRequestedAt is timestamp;
     }
 
+    function isSuspendedTeacher() {
+      let currentExists = exists(teacherAllowancePath());
+      let data = currentExists ? get(teacherAllowancePath()).data : {};
+      return verifiedEmail() && currentExists &&
+        [data.uid, data.emailCanonical, data.status, data.enabled, data.role] ==
+          [request.auth.uid, request.auth.token.get('email', ''),
+            'suspended', false, 'teacher'] &&
+        data.administrativeHold == true && data.revision is int && data.revision > 0;
+    }
+
+    function isStoppedTeacherForSafeEnd() {
+      return isDeletionPendingTeacher() || isSuspendedTeacher();
+    }
+
     function isAdmin() {
       let currentExists = exists(teacherAllowancePath());
       let approved = currentExists
@@ -141,6 +155,25 @@ service cloud.firestore {
         after.diff(before).affectedKeys().hasOnly(['status', 'revision', 'updatedAt']);
     }
 
+    function validOwnTeacherRequestResubmission(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return isOwnTeacherRequest(uid) &&
+        !exists(teacherAllowancePath()) && !exists(legacyAllowancePath()) &&
+        before.status in ['cancelled', 'rejected'] && after.status == 'pending' &&
+        validTeacherRequestProfile(before, uid) && validTeacherRequestProfile(after, uid) &&
+        before.emailCanonical == request.auth.token.email &&
+        after.emailCanonical == before.emailCanonical && after.uid == before.uid &&
+        after.displayName == before.displayName && after.createdAt == before.createdAt &&
+        after.revision == before.revision + 1 && after.updatedAt == request.time &&
+        !('decidedAt' in after) && !('decidedByUid' in after) &&
+        !('decisionReason' in after) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'organization', 'note', 'status', 'revision', 'updatedAt',
+          'decidedAt', 'decidedByUid', 'decisionReason'
+        ]);
+    }
+
     function validApprovedTeacherAllowance(uid, data, requestData) {
       return data.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
@@ -167,7 +200,7 @@ service cloud.firestore {
       let after = request.resource.data;
       let allowanceTarget = /databases/$(database)/documents/teacher_allowances/$(uid);
       let legacyTarget = /databases/$(database)/documents/teacher_allowlist/$(after.emailCanonical);
-      return isAdmin() &&
+      return isAdmin() && teacherAccessMigrationUnlocked() &&
         before.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'organization', 'note',
           'status', 'revision', 'createdAt', 'updatedAt'
@@ -408,7 +441,7 @@ service cloud.firestore {
     function validTeacherAllowanceUpdate(uid) {
       let before = resource.data;
       let after = request.resource.data;
-      return before.status == 'active'
+      return validAdminTeacherAllowanceMutation(uid) || (before.status == 'active'
         ? (after.status == 'deletion_pending'
             ? validOwnTeacherDeletionRequest(uid)
             : validTeacherSuspension(uid))
@@ -418,7 +451,47 @@ service cloud.firestore {
                 : (before.administrativeHold == false && after.administrativeHold == true
                     ? validTeacherDeletionAdministrativeHold(uid)
                     : validOwnTeacherDeletionTimestampSettlement(uid)))
-            : validTeacherRestore(uid));
+            : validTeacherRestore(uid)));
+    }
+
+    function teacherAccessMigrationUnlocked() {
+      let path = /databases/$(database)/documents/migration_gates/teacher_access_status;
+      return !exists(path) || get(path).data.get('locked', false) == false;
+    }
+
+    function validAdminSyncedLegacyAllowance(email, enabled, role) {
+      let path = /databases/$(database)/documents/teacher_allowlist/$(email);
+      return existsAfter(path) &&
+        getAfter(path).data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        getAfter(path).data.enabled == enabled && getAfter(path).data.role == role &&
+        getAfter(path).data.updatedAt == request.time &&
+        getAfter(path).data.updatedByUid == request.auth.uid;
+    }
+
+    function validAdminTeacherAllowanceMutation(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let active = after.status == 'active';
+      return isAdmin() && teacherAccessMigrationUnlocked() &&
+        validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
+        before.status in ['active', 'suspended'] && after.status in ['active', 'suspended'] &&
+        after.uid == before.uid && after.emailCanonical == before.emailCanonical &&
+        after.displayName == before.displayName && after.approvedAt == before.approvedAt &&
+        after.approvedByUid == before.approvedByUid &&
+        after.enabled == active && after.administrativeHold == !active &&
+        after.revision == before.get('revision', 0) + 1 &&
+        after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
+        (uid != request.auth.uid || (after.status == 'active' && after.role == 'admin')) &&
+        (active
+          ? !('suspendedAt' in after) && !('suspendedByUid' in after) &&
+            !('suspensionReason' in after)
+          : after.suspendedAt == request.time && after.suspendedByUid == request.auth.uid &&
+            after.suspensionReason is string && after.suspensionReason.size() <= 200) &&
+        validAdminSyncedLegacyAllowance(before.emailCanonical, after.enabled, after.role) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'enabled', 'role', 'administrativeHold', 'revision',
+          'suspendedAt', 'suspendedByUid', 'suspensionReason', 'updatedAt', 'updatedByUid'
+        ]);
     }
 
     function counterMigrationUnlocked() {
@@ -453,6 +526,11 @@ service cloud.firestore {
 
     function legacySessionCounterCompatibilityOpen() {
       return !sessionCounterMigrationComplete();
+    }
+
+    function sessionCounterMigrationUnlocked() {
+      let path = /databases/$(database)/documents/migration_gates/session_counter_migration;
+      return !exists(path) || get(path).data.get('locked', true) == false;
     }
 
     function validStoredCounterGateUnlocked(data) {
@@ -802,7 +880,7 @@ service cloud.firestore {
       let sessionPath = /databases/$(database)/documents/sessions/$(sessionId);
       return getAfter(sessionPath).data.teacherUid == request.auth.uid &&
         (isApprovedTeacher() ||
-          (getAfter(sessionPath).data.status == 'ended' && isDeletionPendingTeacher()));
+          (getAfter(sessionPath).data.status == 'ended' && isStoppedTeacherForSafeEnd()));
     }
 
     function sessionExists(sessionId) {
@@ -1095,7 +1173,7 @@ service cloud.firestore {
     }
 
     function ownsSessionForSafeDeletionEnd(sessionId) {
-      return isDeletionPendingTeacher() &&
+      return isStoppedTeacherForSafeEnd() &&
         exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
         get(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
     }
@@ -1288,9 +1366,33 @@ service cloud.firestore {
         request.resource.data.registeredStudentCount == resource.data.registeredStudentCount + 1 &&
         request.resource.data.studentCountRevision == resource.data.studentCountRevision + 1 &&
         request.resource.data.lastStudentUid == request.auth.uid &&
+        validAttachedPublicPlanCountIncrement(sessionId) &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'registeredStudentCount', 'studentCountRevision', 'lastStudentUid'
         ]);
+    }
+
+    function validAttachedPublicPlanCountIncrement(sessionId) {
+      let attached = 'classPlanId' in resource.data || 'classPlanRevision' in resource.data;
+      let planId = resource.data.get('classPlanId', '');
+      let publicPath = classPlanPublicPath(planId);
+      let publicBefore = attached && exists(publicPath) ? get(publicPath).data : {};
+      let publicAfter = attached && existsAfter(publicPath) ? getAfter(publicPath).data : {};
+      return attached ? (
+        resource.data.classPlanId is string && resource.data.classPlanRevision is int &&
+        request.resource.data.classPlanId == resource.data.classPlanId &&
+        request.resource.data.classPlanRevision == resource.data.classPlanRevision &&
+        publicBefore.planId == planId && publicBefore.status == 'live' &&
+        publicBefore.sessionId == sessionId &&
+        publicBefore.revision == resource.data.classPlanRevision &&
+        publicBefore.get('actualParticipants', 0) ==
+          resource.data.registeredStudentCount &&
+        publicAfter.actualParticipants ==
+          request.resource.data.registeredStudentCount &&
+        publicAfter.diff(publicBefore).affectedKeys().hasOnly([
+          'actualParticipants'
+        ])
+      ) : true;
     }
 
     function validSessionPlanAttach(sessionId) {
@@ -1355,7 +1457,7 @@ service cloud.firestore {
             !('actualEndedAt' in data) && !('actualParticipants' in data)
           : data.status == 'live'
             ? ('sessionId' in data) && ('actualStartedAt' in data) &&
-              !('actualEndedAt' in data) && !('actualParticipants' in data)
+              !('actualEndedAt' in data)
             : ('sessionId' in data) && ('actualStartedAt' in data) &&
               ('actualEndedAt' in data) && ('actualParticipants' in data) &&
               data.actualEndedAt >= data.actualStartedAt);
@@ -1525,7 +1627,7 @@ service cloud.firestore {
       let afterData = getAfter(classPlanPrivatePath(planId)).data;
       let publicBefore = get(classPlanPublicPath(planId)).data;
       let publicAfter = getAfter(classPlanPublicPath(planId)).data;
-      return isDeletionPendingTeacher() &&
+      return isStoppedTeacherForSafeEnd() &&
         beforeData.ownerUid == request.auth.uid &&
         beforeData.ownerEmailCanonical == request.auth.token.email &&
         beforeData.status == 'live' && afterData.status == 'ended' &&
@@ -1540,11 +1642,44 @@ service cloud.firestore {
 
     function validClassPlanUpdate(planId) {
       let allowancePath = teacherAllowancePath();
-      let deletionPending = exists(allowancePath) &&
-        get(allowancePath).data.status == 'deletion_pending';
-      return deletionPending
+      let stopped = exists(allowancePath) &&
+        get(allowancePath).data.status in ['deletion_pending', 'suspended'];
+      return stopped
         ? validDeletionPendingClassPlanFinish(planId)
         : validApprovedClassPlanUpdate(planId);
+    }
+
+    function validStudentPublicPlanCountUpdate(planId) {
+      let sessionPath = /databases/$(database)/documents/sessions/$(resource.data.sessionId);
+      let studentPath = /databases/$(database)/documents/sessions/$(resource.data.sessionId)/students/$(request.auth.uid);
+      let sessionBefore = exists(sessionPath) ? get(sessionPath).data : {};
+      let sessionAfter = existsAfter(sessionPath) ? getAfter(sessionPath).data : {};
+      return anonymousStudent() && resource.data.planId == planId &&
+        resource.data.status == 'live' && resource.data.sessionId is string &&
+        sessionBefore.classPlanId == planId &&
+        sessionBefore.classPlanRevision == resource.data.revision &&
+        sessionAfter.classPlanId == planId &&
+        sessionAfter.classPlanRevision == resource.data.revision &&
+        sessionAfter.registeredStudentCount == sessionBefore.registeredStudentCount + 1 &&
+        sessionAfter.studentCountRevision == sessionBefore.studentCountRevision + 1 &&
+        !exists(studentPath) && existsAfter(studentPath) &&
+        getAfter(studentPath).data.uid == request.auth.uid &&
+        request.resource.data.actualParticipants == sessionAfter.registeredStudentCount &&
+        resource.data.get('actualParticipants', 0) == sessionBefore.registeredStudentCount &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['actualParticipants']);
+    }
+
+    function validClassPlanPublicMirrorUpdate(planId) {
+      let privateBefore = get(classPlanPrivatePath(planId)).data;
+      let privateAfter = getAfter(classPlanPrivatePath(planId)).data;
+      return (isApprovedTeacher() || isStoppedTeacherForSafeEnd()) &&
+        privateBefore.ownerUid == request.auth.uid &&
+        privateBefore.ownerEmailCanonical == request.auth.token.email &&
+        privateBefore.revision == resource.data.revision &&
+        privateAfter.revision == resource.data.revision + 1 &&
+        privateAfter.updatedAt == request.time &&
+        validClassPlanPublic(request.resource.data, planId) &&
+        matchingClassPlanPair(privateAfter, request.resource.data);
     }
 
     match /teacher_access_requests/{uid} {
@@ -1553,6 +1688,7 @@ service cloud.firestore {
         request.query.limit != null && request.query.limit <= 100;
       allow create: if validPendingTeacherRequest(uid);
       allow update: if validOwnTeacherRequestCancellation(uid) ||
+        validOwnTeacherRequestResubmission(uid) ||
         validAdminRequestDecision(uid);
       allow delete: if false;
       allow read, write: if false;
@@ -1562,23 +1698,23 @@ service cloud.firestore {
       allow get: if (verifiedEmail() && request.auth.uid == uid &&
           resource.data.uid == uid && resource.data.emailCanonical == request.auth.token.email) || isAdmin();
       allow list: if isAdmin();
-      allow create: if isAdmin() &&
+      allow create: if isAdmin() && teacherAccessMigrationUnlocked() &&
         existsAfter(/databases/$(database)/documents/teacher_access_requests/$(uid)) &&
         validApprovedTeacherAllowance(
           uid,
           request.resource.data,
           getAfter(/databases/$(database)/documents/teacher_access_requests/$(uid)).data
         );
-      allow update: if validTeacherAllowanceUpdate(uid);
+      allow update: if teacherAccessMigrationUnlocked() && validTeacherAllowanceUpdate(uid);
       allow delete: if false;
       allow read, write: if false;
     }
 
     match /teacher_allowlist/{email} {
       allow get, list: if isAdmin();
-      allow create: if isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email);
+      allow create: if teacherAccessMigrationUnlocked() && isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email);
       allow update: if validOwnTeacherDeletionLegacyAllowance(email) ||
-        (isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email) &&
+        (teacherAccessMigrationUnlocked() && isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email) &&
           !protectsCurrentAdmin(email));
       allow delete: if false;
       allow read, write: if false;
@@ -1597,21 +1733,33 @@ service cloud.firestore {
     }
 
     match /migration_gates/session_counters {
-      allow get: if isDeletionPendingTeacher() || isApprovedTeacher() || isAdmin();
+      allow get: if isStoppedTeacherForSafeEnd() || isApprovedTeacher() || isAdmin();
+      allow list, create, update, delete: if false;
+      allow read, write: if false;
+    }
+
+    match /migration_gates/session_counter_migration {
+      allow get: if isAdmin();
+      allow list, create, update, delete: if false;
+      allow read, write: if false;
+    }
+
+    match /migration_gates/teacher_access_status {
+      allow get: if isAdmin();
       allow list, create, update, delete: if false;
       allow read, write: if false;
     }
 
     match /class_plans_private/{planId} {
       allow get: if isAdmin() ||
-        ((isApprovedTeacher() || isDeletionPendingTeacher()) &&
+        ((isApprovedTeacher() || isStoppedTeacherForSafeEnd()) &&
           resource.data.ownerUid == request.auth.uid);
       allow list: if (isAdmin() ||
           (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid)) &&
         request.query.limit != null && request.query.limit <= 100 &&
         resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
         resource.data.plannedStartAt < request.time + duration.value(32, 'd');
-      allow list: if isDeletionPendingTeacher() &&
+      allow list: if isStoppedTeacherForSafeEnd() &&
         resource.data.ownerUid == request.auth.uid && resource.data.status == 'live' &&
         request.query.limit != null && request.query.limit <= 101;
       allow create: if validClassPlanCreate(planId);
@@ -1622,7 +1770,7 @@ service cloud.firestore {
 
     match /class_plans_public/{planId} {
       allow get: if (isApprovedTeacher() ||
-          (isDeletionPendingTeacher() && exists(classPlanPrivatePath(planId)) &&
+          (isStoppedTeacherForSafeEnd() && exists(classPlanPrivatePath(planId)) &&
             get(classPlanPrivatePath(planId)).data.ownerUid == request.auth.uid)) &&
         validClassPlanPublic(resource.data, planId);
       allow list: if isApprovedTeacher() && request.query.limit != null &&
@@ -1630,7 +1778,8 @@ service cloud.firestore {
         resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
         resource.data.plannedStartAt < request.time + duration.value(32, 'd');
       allow create: if validClassPlanCreate(planId);
-      allow update: if validClassPlanUpdate(planId);
+      allow update: if validStudentPublicPlanCountUpdate(planId) ||
+        validClassPlanPublicMirrorUpdate(planId);
       allow delete: if false;
       allow read, write: if false;
     }
@@ -1645,7 +1794,7 @@ service cloud.firestore {
           (resource.data.lifecycleState == 'active' ||
             (resource.data.lifecycleState in ['trashed', 'purging'] &&
               (resource.data.ownerUid == request.auth.uid || isAdmin())))) ||
-        (isDeletionPendingTeacher() && resource.data.ownerUid == request.auth.uid &&
+        (isStoppedTeacherForSafeEnd() && resource.data.ownerUid == request.auth.uid &&
           request.query.limit != null && request.query.limit <= 101);
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
@@ -1717,7 +1866,7 @@ service cloud.firestore {
           (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
       allow list: if isAdmin() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid) ||
-          (isDeletionPendingTeacher() && resource.data.teacherUid == request.auth.uid &&
+          (isStoppedTeacherForSafeEnd() && resource.data.teacherUid == request.auth.uid &&
           resource.data.status in ['allocating', 'active', 'live'] && request.query.limit != null &&
           request.query.limit <= 101);
       allow create: if isApprovedTeacher() &&
@@ -1802,7 +1951,8 @@ service cloud.firestore {
             studentId == request.auth.uid &&
             (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
         allow list: if isAdmin() || ownsSession(sessionId);
-        allow create: if anonymousStudent() && validStudent(studentId) &&
+        allow create: if sessionCounterMigrationUnlocked() &&
+          anonymousStudent() && validStudent(studentId) &&
           existsAfter(/databases/$(database)/documents/sessions/$(sessionId)) &&
           getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.registeredStudentCount ==
             get(/databases/$(database)/documents/sessions/$(sessionId)).data.registeredStudentCount + 1 &&
@@ -1875,10 +2025,24 @@ service cloud.firestore {
       }
     }
 
+    match /config/class_planning {
+      allow get: if isApprovedTeacher();
+      allow list, delete: if false;
+      allow create, update: if isAdmin() &&
+        request.resource.data.keys().hasAll(['caution', 'crowded', 'updatedAt', 'updatedByUid']) &&
+        request.resource.data.keys().hasOnly(['caution', 'crowded', 'updatedAt', 'updatedByUid']) &&
+        request.resource.data.caution is int && request.resource.data.caution >= 1 &&
+        request.resource.data.crowded is int &&
+        request.resource.data.crowded > request.resource.data.caution &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.updatedByUid == request.auth.uid;
+      allow read, write: if false;
+    }
+
     match /config/{document} {
       allow list: if false;
       allow get, create, update, delete: if isAdmin() &&
-        document != 'legacy_owner';
+        document != 'legacy_owner' && document != 'class_planning';
       allow read, write: if false;
     }
 

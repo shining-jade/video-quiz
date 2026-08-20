@@ -286,6 +286,30 @@ test('counter migration 운영 문서는 staged lock migration strict unlock 순
   assert.match(guide, /gate가 없거나 잠겨 있으면[^\n]*collaborator\/image[^\n]*parent[^\n]*(거부|차단)/);
 });
 
+test('teacher access release guide fixes compatibility-head migration verify unlock order with no join gap', () => {
+  const guide = read('docs/TEACHER-ACCESS-CLASS-PLANNING.md');
+  const rules = read('firestore.rules');
+  const ordered = [
+    '호환 head Firestore Rules를 먼저 배포',
+    '교사 승인 migration apply',
+    '세션 counter apply',
+    'strict Firestore Rules와 정적 앱을 배포',
+    '두 `--verify-lock`',
+    '명시 해제'
+  ];
+  let cursor = -1;
+  for (const marker of ordered) {
+    const next = guide.indexOf(marker);
+    assert.ok(next > cursor, `missing or out-of-order: ${marker}`);
+    cursor = next;
+  }
+  assert.match(guide, /--apply.*--lock-token <ACCESS_LOCK_TOKEN>/);
+  assert.match(guide, /--apply.*--lock-token <COUNTER_LOCK_TOKEN>/);
+  assert.match(guide, /--verify-lock.*--expected-generation <ACCESS_LOCK_GENERATION>/);
+  assert.match(guide, /--unlock.*--expected-generation <COUNTER_LOCK_GENERATION>/);
+  assert.match(rules, /allow create: if sessionCounterMigrationUnlocked\(\)[\s\S]{0,100}?anonymousStudent\(\)/);
+});
+
 test('공동 편집과 휴지통 공개 문구는 무료 정리의 한계와 보존 범위를 설명한다', () => {
   const readme = read('README.md');
   const handoff = read('docs/HANDOFF-2026-08-14.md');

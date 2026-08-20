@@ -114,6 +114,7 @@ test('apply recounts authoritative student documents and creates the exact compl
   const report = await migration.runSessionCounterMigration({
     db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
     apply: true, confirmProject: 'demo-video-quiz',
+    lockToken: 'counter-lock-a',
     serverTimestamp: () => timestamp(1000), deleteField: () => DELETE
   });
   assert.deepEqual(db.docs.get('sessions/a'), {
@@ -128,6 +129,9 @@ test('apply recounts authoritative student documents and creates the exact compl
     completedByUid: 'admin-a'
   });
   assert.equal(report.appliedCount, 1);
+  assert.equal(report.lock.locked, true);
+  assert.equal(report.lock.lockToken, 'counter-lock-a');
+  assert.match(report.lock.updateTimeGeneration, /^100:\d+$/);
   assert.equal(report.gate.updateTimeGeneration, '100:1');
   assert.equal(report.safeToDeployStrictRules, true);
   assert.equal(db.writes.at(-1).path, 'migration_gates/session_counters');
@@ -139,8 +143,8 @@ test('transaction recount re-reads a concurrent join and never installs a stale 
     'sessions/a': baseSession('live'),
     'sessions/a/students/student-a': { uid: 'student-a' }
   }, {
-    beforeTransaction({ docs, setValue }) {
-      if (!raced) {
+    beforeTransaction({ transactionCount, docs, setValue }) {
+      if (!raced && transactionCount === 2) {
         raced = true;
         setValue('sessions/a/students/student-b', { uid: 'student-b' });
       }
@@ -149,12 +153,37 @@ test('transaction recount re-reads a concurrent join and never installs a stale 
   const report = await migration.runSessionCounterMigration({
     db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
     apply: true, confirmProject: 'demo-video-quiz',
+    lockToken: 'counter-lock-a',
     serverTimestamp: () => timestamp(1000), deleteField: () => DELETE
   });
   assert.equal(db.docs.get('sessions/a').registeredStudentCount, 2);
   assert.equal(db.docs.get('sessions/a').studentCountRevision, 2);
   assert.equal(report.reclassifiedCount, 1);
   assert.equal(report.safeToDeployStrictRules, true);
+});
+
+test('counter migration lock is generation-bound and only exact token unlock succeeds', async () => {
+  const db = fakeDb({
+    'sessions/a': { ...baseSession('live'), registeredStudentCount: 0, studentCountRevision: 0 }
+  });
+  const report = await migration.runSessionCounterMigration({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    apply: true, confirmProject: 'demo-video-quiz', lockToken: 'counter-lock-a',
+    serverTimestamp: () => timestamp(1000), deleteField: () => DELETE
+  });
+  assert.equal(db.docs.get('migration_gates/session_counter_migration').locked, true);
+  await assert.rejects(migration.unlockSessionCounterMigrationLock({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'wrong', expectedGeneration: report.lock.updateTimeGeneration,
+    serverTimestamp: () => timestamp(2000)
+  }), /token/i);
+  const unlocked = await migration.unlockSessionCounterMigrationLock({
+    db, projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
+    lockToken: 'counter-lock-a', expectedGeneration: report.lock.updateTimeGeneration,
+    serverTimestamp: () => timestamp(2000)
+  });
+  assert.equal(unlocked.locked, false);
+  assert.equal(unlocked.lockToken, 'counter-lock-a');
 });
 
 test('malformed student identity or counter mismatch keeps the gate absent and report unsafe', async () => {
@@ -190,7 +219,9 @@ test('an exact existing completion gate is idempotent, but a wrong target gate i
   });
   assert.equal(retry.appliedCount, 0);
   assert.equal(retry.safeToDeployStrictRules, true);
-  assert.deepEqual(exact.writes, []);
+  assert.deepEqual(exact.writes.map(write => write.path), [
+    'migration_gates/session_counter_migration'
+  ]);
 
   const wrong = fakeDb({
     'migration_gates/session_counters': { ...gate, projectId: 'other-project' },
@@ -226,6 +257,10 @@ test('CLI enforces exact targets and output reservation before Admin init, prese
   assert.throws(() => cli.parseArgs([
     '--project', 'demo-video-quiz', '--apply', '--admin-uid', 'admin-a'
   ]), /confirm-project/i);
+  assert.throws(() => cli.parseArgs([
+    '--project', 'demo-video-quiz', '--apply', '--confirm-project', 'demo-video-quiz',
+    '--admin-uid', 'admin-a'
+  ]), /lock-token/i);
   assert.throws(() => cli.validateTarget({ projectId: 'video-quiz-65798', targetMode: 'emulator' }, {
     FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080', FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
   }), /demo/i);
@@ -258,6 +293,37 @@ test('CLI enforces exact targets and output reservation before Admin init, prese
       writeLine() { throw new Error('stdout failed after publication'); }
     }), /stdout failed/);
     assert.equal(JSON.parse(fs.readFileSync(success, 'utf8')).status, 'complete');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('counter CLI publishes exact-generation explicit unlock evidence', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'session-counter-unlock-'));
+  try {
+    const output = path.join(directory, 'unlock.json');
+    let unlockOptions;
+    const report = await cli.main([
+      '--project', 'demo-video-quiz', '--target-mode', 'emulator', '--admin-uid', 'admin-a',
+      '--unlock', '--confirm-project', 'demo-video-quiz', '--lock-token', 'counter-lock-a',
+      '--expected-generation', '100:1', '--output', output
+    ], {
+      environment: {
+        FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080',
+        FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099'
+      },
+      reserveReport: cli.reserveReport,
+      async initialize() { return { db: {}, serverTimestamp() {}, close() {} }; },
+      async unlockSessionCounterMigrationLock(options) {
+        unlockOptions = options;
+        return { locked: false, lockToken: 'counter-lock-a', updateTimeGeneration: '100:2' };
+      },
+      writeLine() {}
+    });
+    assert.equal(unlockOptions.expectedGeneration, '100:1');
+    assert.equal(report.operation, 'session-counter-migration-unlock');
+    assert.equal(report.lock.locked, false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), report);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

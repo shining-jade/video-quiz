@@ -17,15 +17,17 @@
 
 1. Firestore와 Firebase Auth 대상 프로젝트를 확인하고 Firestore export/백업 및 현재 Rules 원문을 보존합니다.
 2. `pnpm test`와 `pnpm test:rules`를 실행해 Node 전체와 Firestore/Admin Emulator 전체가 통과하는지 확인합니다.
-3. 교사 승인 migration을 production dry-run하고 durable 보고서를 검토합니다.
-4. 새 출력 경로로 교사 승인 migration apply를 실행하고 post-audit의 모든 mismatch가 0이며 `safeToDeployStrictRules: true`인지 확인합니다.
-5. 세션 counter maintenance dry-run으로 모든 `allocating|active|live` 세션과 실제 `students` 하위 문서를 스캔합니다.
-6. 새 출력 경로로 세션 counter apply를 실행합니다. 이 작업은 transaction에서 학생을 다시 세고, 최종 zero-issue preflight 뒤에만 `migration_gates/session_counters`를 기록합니다.
-7. 세션 보고서의 `gate.updateTimeGeneration`, `preflightNonEndedLegacyCount: 0`, `safeToDeployStrictRules: true`를 확인합니다.
-8. strict Firestore Rules를 배포합니다.
-9. 정적 앱을 배포합니다.
-10. 관리자 1명, 일반 교사 2명, 겹치는 수업 2개와 학생 세션 2개로 실제 브라우저 smoke를 수행합니다.
-11. rollback commit, 배포 전 Rules, 백업 위치와 모든 migration 보고서를 같은 운영 기록에 보존합니다.
+3. **호환 head Firestore Rules를 먼저 배포**합니다. 이 Rules는 legacy 세션의 안전 종료는 허용하지만 counter 없는 신규 join은 이미 거부하고, 두 migration lock이 활성화되면 allowance 관리와 모든 신규 join을 닫습니다. 이 단계를 건너뛰면 join 없는 구간을 증명할 수 없습니다.
+4. 교사 승인 migration을 production dry-run하고 durable 보고서를 검토합니다.
+5. 예측 불가능한 access lock token을 정한 뒤 새 출력 경로로 교사 승인 migration apply를 실행합니다. post-audit mismatch가 0이고 `safeToDeployStrictRules: true`인지 확인하되 lock은 해제하지 않습니다.
+6. 세션 counter maintenance dry-run으로 모든 `allocating|active|live` 세션과 실제 `students` 하위 문서를 스캔합니다.
+7. 별도의 예측 불가능한 counter lock token으로 세션 counter apply를 실행합니다. CLI는 `migration_gates/session_counter_migration`을 먼저 잠그고 정확한 updateTime generation에 scan/recount/post-audit를 묶은 뒤에만 completion gate를 기록합니다.
+8. 두 보고서의 lock token/generation, session `gate.updateTimeGeneration`, `preflightNonEndedLegacyCount: 0`, `safeToDeployStrictRules: true`를 확인합니다.
+9. strict Firestore Rules와 정적 앱을 배포합니다.
+10. 배포 직후 두 `--verify-lock`을 실행해 apply 보고서와 **같은 token과 generation**임을 다시 확인합니다. 하나라도 바뀌었으면 사후 audit 뒤 race가 있었으므로 안전을 주장하지 말고 중단합니다.
+11. 검증된 access lock과 session lock을 각각 apply 보고서의 정확한 token/generation으로 명시 해제합니다. session completion gate는 삭제하지 않습니다.
+12. 관리자 1명, 일반 교사 2명, 겹치는 수업 2개와 학생 세션 2개로 실제 브라우저 smoke를 수행합니다.
+13. rollback commit, 배포 전 Rules, 백업 위치와 모든 migration·verify·unlock 보고서를 같은 운영 기록에 보존합니다.
 
 활성 legacy 세션, 누락 counter, 학생 문서 UID 불일치, 잘못된 allowance UID/email/role/status/Timestamp, Auth 조회 실패, 부분 스캔, gate generation 변경 또는 `safeToDeployStrictRules !== true`가 하나라도 있으면 즉시 중단합니다.
 
@@ -54,7 +56,7 @@ pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode producti
 Apply와 post-audit:
 
 ```powershell
-pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --apply --confirm-project video-quiz-65798 --output teacher-access-apply.json
+pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --apply --confirm-project video-quiz-65798 --lock-token <ACCESS_LOCK_TOKEN> --output teacher-access-apply.json
 ```
 
 다음을 모두 확인합니다.
@@ -63,6 +65,7 @@ pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode producti
 - `safeToDeployStrictRules: true`
 - `audit.invalidLegacyCount`, `missingAuthUserCount`, `invalidAuthIdentityCount`, `missingAllowanceCount`, `allowanceMismatchCount`, `legacyCompatibilityMismatchCount`, `orphanAllowanceCount`가 모두 0
 - `concurrentlySkippedCount: 0` 또는 skip 사유를 해결한 새 보고서가 최종적으로 clean
+- `lock.locked: true`, 정확한 `lock.lockToken`, 비어 있지 않은 `lock.updateTimeGeneration`
 
 Transaction은 초기 scan 뒤 legacy와 allowance를 다시 읽습니다. 그 사이 활성 상태가 바뀌면 현재 값으로 재분류하며 stale 활성 권한을 복원하지 않습니다. 오류 뒤 재시도는 새 출력 경로를 사용합니다.
 
@@ -76,20 +79,21 @@ Dry-run maintenance scan:
 pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --output session-counters-dry-run.json
 ```
 
-Apply, post-audit, completion gate:
+Apply, generation-bound lock, post-audit, completion gate:
 
 ```powershell
-pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --apply --confirm-project video-quiz-65798 --output session-counters-apply.json
+pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --apply --confirm-project video-quiz-65798 --lock-token <COUNTER_LOCK_TOKEN> --output session-counters-apply.json
 ```
 
 Apply 내부 순서는 고정되어 있습니다.
 
-1. 모든 non-ended session/student scan
-2. 세션별 transaction recount/CAS
-3. 모든 non-ended session/student post-audit
-4. 같은 transaction에서 전체 preflight가 0일 때만 `migration_gates/session_counters` 생성
-5. 서버 readback의 정확한 `updateTimeGeneration` 기록
-6. 최종 전수 재감사와 같은 gate generation 재확인
+1. `migration_gates/session_counter_migration`을 exact token으로 잠그고 서버 `updateTimeGeneration` 기록
+2. 같은 lock generation 아래 모든 non-ended session/student scan
+3. 매 transaction에서 lock generation 재확인 후 recount/CAS
+4. 모든 non-ended session/student post-audit
+5. lock generation이 그대로이고 전체 preflight가 0일 때만 `migration_gates/session_counters` 생성
+6. completion gate 서버 readback의 정확한 `updateTimeGeneration` 기록
+7. 최종 전수 재감사 뒤 lock과 completion gate generation을 모두 재확인
 
 다음을 모두 확인합니다.
 
@@ -99,10 +103,11 @@ Apply 내부 순서는 고정되어 있습니다.
 - `gate.created: true`, `gate.projectId: "video-quiz-65798"`, `gate.targetMode: "production"`
 - `gate.rulesVersion: "session-counters-v1"`와 비어 있지 않은 `gate.updateTimeGeneration`
 - `safeToDeployStrictRules: true`
+- `lock.locked: true`, 정확한 `lock.lockToken`, 비어 있지 않은 `lock.updateTimeGeneration`
 
 이미 exact gate가 존재하면 clean 상태에서만 멱등 성공합니다. 다른 project/environment의 gate, invalid gate, gate 이후 발견된 counter 문제는 덮어쓰지 않고 중단합니다.
 
-## 4. strict Rules와 정적 앱
+## 4. strict Rules·정적 앱과 같은-generation 해제
 
 두 apply 보고서가 모두 안전할 때만 아래 운영 단계를 수행합니다. 명령 실행 전 Firebase CLI의 현재 프로젝트와 로그인 계정을 별도 확인합니다.
 
@@ -110,6 +115,22 @@ Apply 내부 순서는 고정되어 있습니다.
 firebase deploy --only firestore:rules --project video-quiz-65798
 git push origin main
 ```
+
+배포 뒤 apply 보고서의 값을 그대로 사용해 lock을 다시 검증합니다.
+
+```powershell
+pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <ACCESS_LOCK_TOKEN> --expected-generation <ACCESS_LOCK_GENERATION> --output teacher-access-release-verify.json
+pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <COUNTER_LOCK_TOKEN> --expected-generation <COUNTER_LOCK_GENERATION> --output session-counter-release-verify.json
+```
+
+두 verify 보고서가 complete일 때만 exact token/generation으로 명시 해제합니다.
+
+```powershell
+pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --unlock --confirm-project video-quiz-65798 --lock-token <ACCESS_LOCK_TOKEN> --expected-generation <ACCESS_LOCK_GENERATION> --output teacher-access-unlock.json
+pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --unlock --confirm-project video-quiz-65798 --lock-token <COUNTER_LOCK_TOKEN> --expected-generation <COUNTER_LOCK_GENERATION> --output session-counter-unlock.json
+```
+
+호환 head Rules가 counter migration보다 먼저 배포되므로 counter 없는 legacy session에는 어느 시점에도 신규 학생이 들어갈 수 없습니다. session lock은 이미 counter가 있는 세션의 join까지 유지보수 동안 닫아 scan/apply/post-audit 사이의 틈을 제거합니다.
 
 이 문서는 명령의 승인 자체가 아닙니다. 실제 merge, push, migration apply와 deploy는 독립 보안 검토 및 운영 담당자의 명시 승인 뒤 수행합니다.
 

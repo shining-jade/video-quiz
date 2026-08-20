@@ -132,6 +132,15 @@ test('summarizeWindow returns advisory levels at the caution and crowded boundar
   }
 });
 
+test('planning thresholds have one validated default source', () => {
+  assert.deepEqual(core.DEFAULT_THRESHOLDS, { caution: 60, crowded: 120 });
+  assert.deepEqual(core.normalizeThresholds(), { caution: 60, crowded: 120 });
+  assert.deepEqual(core.normalizeThresholds({ caution: 75, crowded: 150 }), {
+    caution: 75, crowded: 150
+  });
+  assert.throws(() => core.normalizeThresholds({ caution: 150, crowded: 75 }));
+});
+
 test('summarizeWindow gives any non-cancelled low-count overlap a caution advisory', () => {
   const candidate = privatePlan({ planId: 'candidate-low', expectedStudents: 1 });
   const other = privatePlan({ planId: 'other-low', expectedStudents: 1 });

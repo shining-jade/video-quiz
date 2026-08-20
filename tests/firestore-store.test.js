@@ -1277,6 +1277,37 @@ test('승인 프로브는 교사 보호 문서가 거부되면 미승인으로 �
   ]).probeTeacherAllowance('admin@school.kr'), { enabled: true, role: 'admin' });
 });
 
+test('수업 혼잡 임계값은 서버 설정을 검증하고 문서가 없을 때 한 곳의 기본값을 쓴다', async () => {
+  const values = new Map([
+    ['config/class_planning', { caution: 75, crowded: 150 }]
+  ]);
+  const writes = [];
+  const db = {
+    doc(path) {
+      return {
+        async get() {
+          return { exists: values.has(path), data: () => values.get(path) };
+        },
+        async set(value) { writes.push([path, value]); }
+      };
+    }
+  };
+  const serverValue = Symbol('server-time');
+  const store = loadStoreModule().createFirestoreStore(db, {
+    serverTimestamp() { return serverValue; }
+  }, () => 0);
+  assert.deepEqual(await store.getClassPlanningThresholds(), { caution: 75, crowded: 150 });
+  values.delete('config/class_planning');
+  assert.deepEqual(await store.getClassPlanningThresholds(), { caution: 60, crowded: 120 });
+  await store.updateClassPlanningThresholds({ caution: 80, crowded: 160 }, { uid: 'admin-a' });
+  assert.deepEqual(writes, [['config/class_planning', {
+    caution: 80, crowded: 160, updatedAt: serverValue, updatedByUid: 'admin-a'
+  }]]);
+  await assert.rejects(store.updateClassPlanningThresholds(
+    { caution: 200, crowded: 100 }, { uid: 'admin-a' }
+  ));
+});
+
 function pendingTeacherRequest(patch = {}) {
   const storedAt = { toMillis: () => 1_000 };
   return {
@@ -2123,30 +2154,27 @@ test('admin approval lifecycle rejects non-admin, wrong UID, overlong reason, an
   assert.equal(fake.value('teacher_allowlist/teacher@school.kr').enabled, true);
 });
 
-test('allowance API canonicalizes email and writes audited admin changes', async () => {
+test('allowance listing exposes migrated UID revision and email-only mutation APIs fail closed', async () => {
+  const approvedAt = { toMillis: () => 1 };
   const fake = makeFirestoreFake({
-    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' },
+    'teacher_allowlist/new@school.kr': { enabled: true, role: 'teacher' },
+    'teacher_allowances/new-uid': activeTeacherAllowance({
+      uid: 'new-uid', emailCanonical: 'new@school.kr', revision: 3,
+      approvedAt, approvedByUid: 'admin-uid', updatedAt: approvedAt, updatedByUid: 'admin-uid'
+    })
   });
   const store = createStore(fake);
   const admin = { uid: 'admin-uid', email: 'ADMIN@School.KR', role: 'admin', authGeneration: 7 };
 
-  await store.upsertTeacherAllowance(' New@School.KR ', 'teacher', admin);
-  const stored = fake.value('teacher_allowlist/new@school.kr');
-  assert.equal(stored.enabled, true);
-  assert.equal(stored.role, 'teacher');
-  assert.equal(stored.updatedByUid, 'admin-uid');
-  assert.equal(stored.updatedAt.toMillis(), 50_000);
-
   const allowances = await store.listTeacherAllowances(admin);
-  assert.deepEqual(allowances['admin@school.kr'], { enabled: true, role: 'admin' });
+  assert.deepEqual(allowances['admin@school.kr'], { enabled: true, role: 'admin', migrated: false });
+  assert.equal(allowances['new@school.kr'].uid, 'new-uid');
+  assert.equal(allowances['new@school.kr'].revision, 3);
+  assert.equal(allowances['new@school.kr'].migrated, true);
   assert.equal(allowances['new@school.kr'].role, 'teacher');
-
-  await store.disableTeacherAllowance('new@school.kr', admin);
-  assert.equal(fake.value('teacher_allowlist/new@school.kr').enabled, false);
-  await assert.rejects(
-    store.disableTeacherAllowance('ADMIN@School.KR', admin),
-    /자기 계정/
-  );
+  await assert.rejects(store.upsertTeacherAllowance('new@school.kr', 'teacher', admin), /이메일 전용/);
+  await assert.rejects(store.disableTeacherAllowance('new@school.kr', admin), /이메일 전용/);
 });
 
 test('휴지통 자동 정리는 counter migration gate가 해제된 경우에만 허용된다', async () => {
@@ -2188,24 +2216,15 @@ test('휴지통 만료 판정은 동기화된 serverNow를 사용하고 client c
   assert.equal(result.started, true);
 });
 
-test('allowance API rejects non-admin, invalid role, empty email and stale auth generation before writes', async () => {
+test('legacy email-only allowance API rejects every caller before writes', async () => {
   const fake = makeFirestoreFake({
     'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
   });
   const store = createStore(fake);
-  await assert.rejects(store.upsertTeacherAllowance('x@school.kr', 'owner', {
-    uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
-  }), /역할/);
-  await assert.rejects(store.upsertTeacherAllowance('', 'teacher', {
-    uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
-  }), /이메일/);
-  await assert.rejects(store.upsertTeacherAllowance('x@school.kr', 'teacher', {
-    uid: 'teacher-uid', email: 'teacher@school.kr', role: 'teacher'
-  }), /관리자/);
   await assert.rejects(store.upsertTeacherAllowance('x@school.kr', 'teacher', {
     uid: 'admin-uid', email: 'admin@school.kr', role: 'admin',
     authGeneration: 2, currentAuthGeneration: 3
-  }), /로그인/);
+  }), /이메일 전용/);
   assert.equal(fake.value('teacher_allowlist/x@school.kr'), undefined);
 });
 
@@ -4697,6 +4716,93 @@ test('세션 종료는 타이머 제출 유예 중에도 parent와 안전한 end
   assert.equal(fake.calls().filter(call => call.operation === 'batchCommit').length, 0);
 });
 
+test('admin allowance mutation requires exact UID email and revision and atomically syncs legacy', async () => {
+  const approvedAt = { toMillis: () => 1 };
+  const fake = makeFirestoreFake({
+    'teacher_allowances/admin-uid': activeTeacherAllowance({
+      uid: 'admin-uid', emailCanonical: 'admin@school.kr', displayName: '관리자',
+      role: 'admin', revision: 7, approvedAt, approvedByUid: 'root',
+      updatedAt: approvedAt, updatedByUid: 'root'
+    }),
+    'teacher_allowances/teacher-a': activeTeacherAllowance({
+      revision: 4, approvedAt, approvedByUid: 'admin-uid',
+      updatedAt: approvedAt, updatedByUid: 'admin-uid'
+    }),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' },
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' }
+  });
+  const store = createStore(fake);
+
+  const changed = await store.adminUpdateTeacherAllowance({
+    uid: 'teacher-a', emailCanonical: 'teacher@school.kr', expectedRevision: 4,
+    status: 'active', role: 'admin'
+  }, teacherRequestAdmin);
+
+  assert.equal(changed.uid, 'teacher-a');
+  assert.equal(changed.emailCanonical, 'teacher@school.kr');
+  assert.equal(changed.revision, 5);
+  assert.equal(changed.role, 'admin');
+  assert.deepEqual(fake.value('teacher_allowlist/teacher@school.kr').role, 'admin');
+  await assert.rejects(store.adminUpdateTeacherAllowance({
+    uid: 'teacher-a', emailCanonical: 'teacher@school.kr', expectedRevision: 4,
+    status: 'suspended', role: 'admin'
+  }, teacherRequestAdmin), /revision/);
+  await assert.rejects(store.adminUpdateTeacherAllowance({
+    uid: 'teacher-a', emailCanonical: 'other@school.kr', expectedRevision: 5,
+    status: 'suspended', role: 'admin'
+  }, teacherRequestAdmin), /email|신원/);
+});
+
+test('admin allowance mutation fails closed while teacher access migration lock is active', async () => {
+  const approvedAt = { toMillis: () => 1 };
+  const fake = makeFirestoreFake({
+    'migration_gates/teacher_access_status': {
+      locked: true, lockToken: 'lock-1', projectId: 'demo-video-quiz', targetMode: 'emulator'
+    },
+    'teacher_allowances/admin-uid': activeTeacherAllowance({
+      uid: 'admin-uid', emailCanonical: 'admin@school.kr', displayName: '관리자',
+      role: 'admin', revision: 1, approvedAt, approvedByUid: 'root',
+      updatedAt: approvedAt, updatedByUid: 'root'
+    }),
+    'teacher_allowances/teacher-a': activeTeacherAllowance({
+      revision: 2, approvedAt, approvedByUid: 'admin-uid',
+      updatedAt: approvedAt, updatedByUid: 'admin-uid'
+    }),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' },
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' }
+  });
+
+  await assert.rejects(createStore(fake).adminUpdateTeacherAllowance({
+    uid: 'teacher-a', emailCanonical: 'teacher@school.kr', expectedRevision: 2,
+    status: 'suspended', role: 'teacher', reason: 'hold'
+  }, teacherRequestAdmin), /migration|마이그레이션|잠금/);
+  assert.equal(fake.value('teacher_allowances/teacher-a').status, 'active');
+});
+
+test('cancelled or rejected teacher request resubmits as pending with immutable identity and next revision', async () => {
+  for (const status of ['cancelled', 'rejected']) {
+    const decided = status === 'rejected' ? {
+      decidedAt: { toMillis: () => 2 }, decidedByUid: 'admin-uid', decisionReason: 'retry'
+    } : {};
+    const fake = makeFirestoreFake({
+      'teacher_access_requests/teacher-a': pendingTeacherRequest({ status, revision: 6, ...decided })
+    });
+    const saved = await createStore(fake).resubmitTeacherRequest('teacher-a', 6, {
+      emailCanonical: 'teacher@school.kr', displayName: '김교사',
+      organization: '2학년', note: '다시 신청'
+    });
+    const stored = fake.value('teacher_access_requests/teacher-a');
+    assert.equal(saved.status, 'pending');
+    assert.equal(stored.revision, 7);
+    assert.equal(stored.uid, 'teacher-a');
+    assert.equal(stored.emailCanonical, 'teacher@school.kr');
+    assert.equal(stored.organization, '2학년');
+    assert.equal(Object.hasOwn(stored, 'decidedAt'), false);
+    assert.equal(Object.hasOwn(stored, 'decidedByUid'), false);
+    assert.equal(Object.hasOwn(stored, 'decisionReason'), false);
+  }
+});
+
 test('attached live allocation abort는 server pair를 확인해 거부하고 ambiguous reload는 attach를 재개한다', async () => {
   const pair = storedClassPlanPair({
     status: 'live', revision: 2, sessionId: 'attached', actualStartedAtMs: 12_000
@@ -4822,6 +4928,33 @@ test('학생 최초 join만 parent counter와 exact pair로 증가하고 재가�
   assert.equal(fake.calls().filter(call =>
     call.operation === 'transactionUpdate' && call.path === 'sessions/a'
   ).length, 2);
+});
+
+test('attached live session join atomically mirrors exact participant count to public plan only', async () => {
+  const pair = storedClassPlanPair({
+    status: 'live', revision: 2, sessionId: 'a', actualStartedAtMs: 10_000
+  });
+  pair.storedPrivate.actualStartedAt = { toMillis: () => 10_000 };
+  pair.storedPublic.actualStartedAt = { toMillis: () => 10_000 };
+  delete pair.storedPrivate.actualStartedAtMs;
+  delete pair.storedPublic.actualStartedAtMs;
+  const fake = makeFirestoreFake({
+    'sessions/a': {
+      teacherUid: 'teacher-a', setId: 'set-a', status: 'live',
+      registeredStudentCount: 0, studentCountRevision: 0,
+      classPlanId: 'plan-a', classPlanRevision: 2
+    },
+    'class_plans_private/plan-a': pair.storedPrivate,
+    'class_plans_public/plan-a': pair.storedPublic
+  });
+
+  await createStore(fake).joinStudent('a', 'student-1', { name: '가' });
+
+  assert.equal(fake.value('sessions/a').registeredStudentCount, 1);
+  assert.equal(fake.value('class_plans_public/plan-a').actualParticipants, 1);
+  assert.equal(fake.value('class_plans_private/plan-a').actualParticipants, undefined);
+  assert.equal(fake.value('class_plans_public/plan-a').revision, 2);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 1);
 });
 
 test('세션 종료 재시도는 이미 확정된 ended 시각과 참여 집계를 다시 쓰지 않는다', async () => {
@@ -12426,6 +12559,39 @@ test('close freezes writes, reloads the accepted revision, grades it, then persi
   ]);
 });
 
+test('관리자 계정 UI는 행의 UID email revision으로 authoritative API만 호출한다', async () => {
+  const calls = [];
+  const context = {
+    adm: { allowances: {
+      'teacher@school.kr': {
+        uid: 'teacher-uid', emailCanonical: 'teacher@school.kr', revision: 8,
+        enabled: true, status: 'active', role: 'teacher'
+      }
+    } },
+    teacherAuthVersion: 4,
+    teacherState: { uid: 'admin-uid', email: 'admin@school.kr', role: 'admin', status: 'admin' },
+    AuthCore: { isAdmin(state) { return state && state.role === 'admin'; } },
+    maintenanceCanonicalEmail(value) { return String(value || '').trim().toLowerCase(); },
+    store: {
+      async adminUpdateTeacherAllowance(change, actor) { calls.push([change, actor]); return { ...change, revision: 9 }; }
+    },
+    async admTeacherAccounts() {},
+    admRenderBody() {}
+  };
+  loadStageFunctions(['admSaveTeacherAllowance'], context);
+
+  assert.equal(await context.admSaveTeacherAllowance(
+    'teacher-uid', 'teacher@school.kr', 8, 'admin', true
+  ), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0][0])), {
+    uid: 'teacher-uid', emailCanonical: 'teacher@school.kr', expectedRevision: 8,
+    role: 'admin', status: 'active', reason: ''
+  });
+  await assert.rejects(context.admSaveTeacherAllowance(
+    '', 'teacher@school.kr', 8, 'teacher', false
+  ), /UID/);
+});
+
 test('approved teacher dashboard shows today\'s schedule and counts without identities', async () => {
   const panel = { innerHTML: '', isConnected: true };
   let publicReads = 0;
@@ -12494,6 +12660,7 @@ test('admin dashboard alone renders teacher identity and stale dashboard work ca
     store: {
       serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
       async probeTeacherAllowance() { return { enabled: true, role: 'admin' }; },
+      async listPublicPlans() { return {}; },
       listAdminPlans() { return new Promise(resolve => { resolvePlans = resolve; }); },
       async listOwnClassPlans() { return {}; }
     }
@@ -12560,6 +12727,42 @@ test('teacher dashboard stops outside protected home and exposes one explicit re
   context.location.hash = '#/join';
   await context.retryTeacherDashboard();
   assert.equal(calls, 2);
+});
+
+test('teacher dashboard consumes bounded public plan listener updates and unsubscribes on cleanup', async () => {
+  const panel = { innerHTML: '', isConnected: true };
+  let nextPlans;
+  let unsubscribed = 0;
+  const teacher = { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' };
+  const context = {
+    teacherDashboard: null, teacherUser: { uid: 'teacher-a' }, teacherState: teacher,
+    teacherAuthVersion: 2, clockUserId: 'teacher-a', location: { hash: '#/' },
+    ClassPlanningCore: require('../class-planning-core.js'), AuthCore: require('../auth-core.js'),
+    document: { body: { contains() { return true; } }, getElementById(id) { return id === 'teacher-dashboard' ? panel : null; } },
+    onCleanup() {},
+    store: {
+      serverNow() { return Date.UTC(2026, 7, 20, 1, 15); },
+      async listPublicPlans() { return {}; },
+      async listOwnClassPlans() { return {}; },
+      subscribePublicPlans(from, to, limit, next) {
+        assert.equal(limit, 100);
+        assert.ok(to > from);
+        nextPlans = next;
+        return () => { unsubscribed += 1; };
+      }
+    }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'renderTeacherDashboard', 'startTeacherDashboard'], context);
+
+  await context.startTeacherDashboard(teacher);
+  nextPlans({ live: {
+    planId: 'live', setId: 'set1', setTitleSnapshot: '세트', className: '1반',
+    plannedStartAt: Date.UTC(2026, 7, 20, 1), plannedEndAt: Date.UTC(2026, 7, 20, 2),
+    expectedStudents: 30, actualParticipants: 3, status: 'live'
+  } });
+  assert.match(panel.innerHTML, /실제 참여 3명/);
+  context.stopTeacherDashboard();
+  assert.equal(unsubscribed, 1);
 });
 
 test('auth changes synchronously retract populated teacher dashboard DOM before A-to-B or sign-out awaits', async () => {

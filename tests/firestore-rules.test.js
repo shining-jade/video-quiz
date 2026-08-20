@@ -1064,6 +1064,75 @@ rulesTest('teacher-access: admin approval lifecycle alone may suspend and restor
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
 });
 
+rulesTest('teacher-access: exact UID email revision admin mutation changes authoritative role atomically', async () => {
+  await adminWrite('teacher_allowances/owner-uid', {
+    ...(await adminRead('teacher_allowances/owner-uid')), revision: 4
+  });
+  const adminStore = emulatorStore(actorFirestore('admin'));
+  const result = await adminStore.adminUpdateTeacherAllowance({
+    uid: 'owner-uid', emailCanonical: 'owner@school.kr', expectedRevision: 4,
+    status: 'active', role: 'admin'
+  }, requestAdminIdentity);
+  assert.equal(result.revision, 5);
+  assert.equal((await adminRead('teacher_allowances/owner-uid')).role, 'admin');
+  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).role, 'admin');
+  await assert.rejects(adminStore.adminUpdateTeacherAllowance({
+    uid: 'owner-uid', emailCanonical: 'owner@school.kr', expectedRevision: 4,
+    status: 'suspended', role: 'admin'
+  }, requestAdminIdentity));
+  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'quiz_sets/set1')));
+});
+
+rulesTest('teacher-access: active migration lock blocks both legacy and UID allowance client mutations', async () => {
+  await adminWrite('migration_gates/teacher_access_status', {
+    locked: true, lockToken: 'lock-token-1', projectId, targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(1), lockedByUid: 'admin-uid'
+  });
+  const admin = actorFirestore('admin');
+  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/owner@school.kr'), {
+    enabled: false, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
+  await assertFails(updateDoc(doc(admin, 'teacher_allowances/owner-uid'), {
+    status: 'suspended', enabled: false, administrativeHold: true, revision: 1,
+    suspendedAt: serverTimestamp(), suspendedByUid: 'admin-uid', suspensionReason: 'hold',
+    updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
+});
+
+rulesTest('teacher-access: owner resubmits rejected and cancelled requests but cannot drift identity or revision', async () => {
+  const uid = 'retry-uid';
+  const email = 'retry@school.kr';
+  const owner = googleContext(uid, email);
+  const store = emulatorStore(owner);
+  for (const [status, revision] of [['cancelled', 2], ['rejected', 7]]) {
+    await adminWrite(`teacher_access_requests/${uid}`, {
+      uid, emailCanonical: email, displayName: '재신청 교사', organization: '', note: '',
+      status, revision, createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2),
+      ...(status === 'rejected' ? {
+        decidedAt: Timestamp.fromMillis(2), decidedByUid: 'admin-uid', decisionReason: 'retry'
+      } : {})
+    });
+    const saved = await store.resubmitTeacherRequest(uid, revision, {
+      emailCanonical: email, displayName: '재신청 교사', organization: '2학년', note: '재신청'
+    });
+    assert.equal(saved.status, 'pending');
+    const current = await adminRead(`teacher_access_requests/${uid}`);
+    assert.equal(current.revision, revision + 1);
+    assert.equal(current.decidedAt, undefined);
+    await assert.rejects(store.resubmitTeacherRequest(uid, revision, {
+      emailCanonical: email, displayName: '재신청 교사', organization: '', note: ''
+    }));
+  }
+  await adminWrite(`teacher_access_requests/${uid}`, {
+    uid, emailCanonical: email, displayName: '재신청 교사', organization: '', note: '',
+    status: 'cancelled', revision: 20,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2)
+  });
+  await assert.rejects(store.resubmitTeacherRequest(uid, 20, {
+    emailCanonical: 'other@school.kr', displayName: '재신청 교사', organization: '', note: ''
+  }));
+});
+
 rulesTest('teacher-deletion: own request, immediate denial, safe live end, hold-aware cancellation, and no client purge', async () => {
   const owner = actorFirestore('owner');
   const other = actorFirestore('otherTeacher');
@@ -1147,6 +1216,35 @@ rulesTest('teacher-deletion: own request, immediate denial, safe live end, hold-
   await assertFails(deleteDoc(doc(owner, 'teacher_allowances/owner-uid')));
   await assertFails(deleteDoc(doc(admin, 'teacher_allowances/owner-uid')));
   await assertFails(deleteDoc(doc(admin, 'teacher_access_requests/owner-uid')));
+});
+
+rulesTest('suspended owner may list and safely finish only existing own live session and plan', async () => {
+  const now = Date.now();
+  await writeClassPlanPairDisabled('suspended-plan', {
+    status: 'live', revision: 2, sessionId: 'suspended-session',
+    actualStartedAt: Timestamp.fromMillis(now)
+  });
+  await adminWrite('sessions/suspended-session', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', activationLeaseUntil: Timestamp.fromMillis(now + 60_000),
+    registeredStudentCount: 0, studentCountRevision: 0,
+    classPlanId: 'suspended-plan', classPlanRevision: 2
+  });
+  await adminWrite('sessions/suspended-session/meta/live', liveQuestion(0));
+  const adminStore = emulatorStore(actorFirestore('admin'));
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  await adminStore.suspendTeacher('owner-uid', 'hold', requestAdminIdentity);
+
+  const readiness = await ownerStore.getTeacherDeletionReadiness('owner-uid');
+  assert.ok(readiness.blockingSessions.some(item => item.sessionId === 'suspended-session'));
+  await ownerStore.resolveTeacherDeletionSession('owner-uid', 'suspended-session');
+  assert.equal((await adminRead('sessions/suspended-session')).status, 'ended');
+  assert.equal((await adminRead('class_plans_public/suspended-plan')).status, 'ended');
+  await assertFails(setDoc(doc(actorFirestore('owner'), 'sessions/suspended-new'), {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'live',
+    registeredStudentCount: 0, studentCountRevision: 0,
+    activationLeaseUntil: Timestamp.fromMillis(now + 60_000)
+  }));
 });
 
 rulesTest('teacher-deletion: cancellation closes at the exact request.time boundary and rejects malformed revision/timestamps', async () => {
@@ -1745,6 +1843,86 @@ rulesTest('등록 학생 live listener는 atomic endSession의 ended projection�
     'answers.0': { answer: 0, submitted: true, revision: 2 }
   }));
   await assertFails(getDoc(doc(actorFirestore('anonymous'), 'sessions/s1/meta/live')));
+});
+
+rulesTest('attached session student join atomically mirrors public actual participants and rejects forge or replay', async () => {
+  const now = Date.now();
+  await writeClassPlanPairDisabled('join-plan', {
+    status: 'live', revision: 2, sessionId: 'join-plan-session',
+    actualStartedAt: Timestamp.fromMillis(now)
+  });
+  await adminWrite('sessions/join-plan-session', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', activationLeaseUntil: Timestamp.fromMillis(now + 60_000),
+    registeredStudentCount: 0, studentCountRevision: 0,
+    classPlanId: 'join-plan', classPlanRevision: 2
+  });
+  await adminWrite('sessions/join-plan-session/meta/live', liveQuestion(0));
+  const student = actorFirestore('anonymous');
+  const store = emulatorStore(student);
+
+  await store.joinStudent('join-plan-session', 'new-student-uid', {
+    name: '신규', grade: 1, klass: 1, num: 1
+  });
+  assert.equal((await adminRead('sessions/join-plan-session')).registeredStudentCount, 1);
+  assert.equal((await adminRead('class_plans_public/join-plan')).actualParticipants, 1);
+  assert.equal((await adminRead('class_plans_private/join-plan')).actualParticipants, undefined);
+
+  await assertFails(updateDoc(doc(student, 'class_plans_public/join-plan'), {
+    actualParticipants: 99
+  }));
+  await store.joinStudent('join-plan-session', 'new-student-uid', {
+    name: '신규 수정', grade: 1, klass: 1, num: 1
+  });
+  assert.equal((await adminRead('sessions/join-plan-session')).registeredStudentCount, 1);
+  assert.equal((await adminRead('class_plans_public/join-plan')).actualParticipants, 1);
+});
+
+rulesTest('session counter migration lock closes every new join until exact server unlock', async () => {
+  const now = Date.now();
+  await adminWrite('sessions/counter-lock-session', {
+    teacherUid: actors.owner.uid, teacherEmail: actors.owner.email, setId: 'set1',
+    status: 'live', activationLeaseUntil: Timestamp.fromMillis(now + 60_000),
+    registeredStudentCount: 0, studentCountRevision: 0
+  });
+  await adminWrite('sessions/counter-lock-session/meta/live', liveQuestion(0));
+  await adminWrite('migration_gates/session_counter_migration', {
+    locked: true, lockToken: 'counter-lock-a', projectId, targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(now), lockedByUid: actors.admin.uid
+  });
+  const store = emulatorStore(actorFirestore('anonymous'));
+  await assert.rejects(store.joinStudent('counter-lock-session', actors.anonymous.uid, {
+    name: '잠금 학생', grade: 1, klass: 1, num: 1
+  }));
+  assert.equal((await adminRead('sessions/counter-lock-session')).registeredStudentCount, 0);
+
+  await adminWrite('migration_gates/session_counter_migration', {
+    locked: false, lockToken: 'counter-lock-a', projectId, targetMode: 'emulator',
+    lockedAt: Timestamp.fromMillis(now), lockedByUid: actors.admin.uid,
+    unlockedAt: Timestamp.fromMillis(now + 1), unlockedByUid: actors.admin.uid
+  });
+  await store.joinStudent('counter-lock-session', actors.anonymous.uid, {
+    name: '잠금 해제 학생', grade: 1, klass: 1, num: 1
+  });
+  assert.equal((await adminRead('sessions/counter-lock-session')).registeredStudentCount, 1);
+});
+
+rulesTest('class planning thresholds are teacher-readable and exact admin-only server-time writes', async () => {
+  await adminWrite('config/class_planning', {
+    caution: 60, crowded: 120,
+    updatedAt: Timestamp.fromMillis(1), updatedByUid: actors.admin.uid
+  });
+  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'config/class_planning')));
+  await assertFails(getDoc(doc(actorFirestore('anonymous'), 'config/class_planning')));
+  await assertFails(updateDoc(doc(actorFirestore('owner'), 'config/class_planning'), {
+    caution: 70, crowded: 140, updatedAt: serverTimestamp(), updatedByUid: actors.owner.uid
+  }));
+  await assertSucceeds(updateDoc(doc(actorFirestore('admin'), 'config/class_planning'), {
+    caution: 70, crowded: 140, updatedAt: serverTimestamp(), updatedByUid: actors.admin.uid
+  }));
+  await assertFails(updateDoc(doc(actorFirestore('admin'), 'config/class_planning'), {
+    caution: 150, crowded: 100, updatedAt: serverTimestamp(), updatedByUid: actors.admin.uid
+  }));
 });
 
 rulesTest('join/end transaction barrier에서 종료가 이기면 join 재시도는 fail closed되고 live가 stranded되지 않는다', async () => {

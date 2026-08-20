@@ -3,9 +3,10 @@
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 const ALLOWANCE_KEYS = [
   'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
-  'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid'
+  'administrativeHold', 'revision', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid'
 ].sort();
 const LEGACY_KEYS = ['enabled', 'role', 'updatedAt', 'updatedByUid'].sort();
+const GATE_PATH = 'migration_gates/teacher_access_status';
 
 function canonicalEmail(value) {
   const email = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -60,6 +61,7 @@ function buildAllowance({ emailCanonical, legacy, user, adminUid, at }) {
     enabled: active,
     role: legacy.role,
     administrativeHold: !active,
+    revision: 1,
     approvedAt: at,
     approvedByUid: adminUid,
     updatedAt: at,
@@ -76,8 +78,90 @@ function allowanceCoherent(value, desired) {
     value.emailCanonical === desired.emailCanonical && value.displayName === desired.displayName &&
     value.status === desired.status && value.enabled === desired.enabled &&
     value.role === desired.role && value.administrativeHold === desired.administrativeHold &&
+    value.revision === desired.revision &&
     timestampValid(value.approvedAt) && validUid(value.approvedByUid) &&
     timestampValid(value.updatedAt) && validUid(value.updatedByUid);
+}
+
+function updateTimeGeneration(snapshot) {
+  const value = snapshot && snapshot.updateTime;
+  if (!value || !Number.isInteger(value.seconds) || !Number.isInteger(value.nanoseconds)) {
+    throw new Error('Teacher access migration gate is missing authoritative updateTime generation.');
+  }
+  return String(value.seconds) + ':' + String(value.nanoseconds);
+}
+
+function verifyTeacherAccessGateSnapshot(snapshot, expected, expectedGeneration) {
+  if (!snapshot || !snapshot.exists) throw new Error('Teacher access migration gate is missing.');
+  const data = snapshot.data() || {};
+  if (data.locked !== true || data.lockToken !== expected.lockToken ||
+      data.projectId !== expected.projectId || data.targetMode !== expected.targetMode ||
+      data.lockedByUid !== expected.adminUid || !timestampValid(data.lockedAt)) {
+    throw new Error('Teacher access migration gate token or target identity is invalid.');
+  }
+  const evidence = {
+    path: GATE_PATH, locked: true, lockToken: data.lockToken,
+    projectId: data.projectId, targetMode: data.targetMode,
+    updateTimeGeneration: updateTimeGeneration(snapshot)
+  };
+  if (expectedGeneration && evidence.updateTimeGeneration !== expectedGeneration) {
+    throw new Error('Teacher access migration gate generation changed after audit.');
+  }
+  return evidence;
+}
+
+async function acquireTeacherAccessGate({ db, projectId, targetMode, adminUid, lockToken, serverTimestamp }) {
+  const gateRef = db.doc(GATE_PATH);
+  await db.runTransaction(async transaction => {
+    const snapshot = await transaction.get(gateRef);
+    if (snapshot.exists) {
+      const data = snapshot.data() || {};
+      if (data.locked === true) {
+        if (data.lockToken !== lockToken || data.projectId !== projectId ||
+            data.targetMode !== targetMode || data.lockedByUid !== adminUid) {
+          throw new Error('Teacher access migration gate is held by another exact token or target.');
+        }
+        return;
+      }
+    }
+    transaction.set(gateRef, {
+      locked: true, lockToken, projectId, targetMode,
+      lockedAt: serverTimestamp(), lockedByUid: adminUid
+    });
+  });
+  return verifyTeacherAccessGateSnapshot(await gateRef.get(), {
+    projectId, targetMode, adminUid, lockToken
+  });
+}
+
+async function verifyTeacherAccessGate({ db, projectId, targetMode, adminUid, lockToken, expectedGeneration }) {
+  return verifyTeacherAccessGateSnapshot(await db.doc(GATE_PATH).get(), {
+    projectId, targetMode, adminUid, lockToken
+  }, expectedGeneration);
+}
+
+async function unlockTeacherAccessGate({
+  db, projectId, targetMode, adminUid, lockToken, expectedGeneration, serverTimestamp
+}) {
+  if (!lockToken || !expectedGeneration) throw new Error('Exact lock token and generation are required.');
+  const gateRef = db.doc(GATE_PATH);
+  await db.runTransaction(async transaction => {
+    const snapshot = await transaction.get(gateRef);
+    verifyTeacherAccessGateSnapshot(snapshot, {
+      projectId, targetMode, adminUid, lockToken
+    }, expectedGeneration);
+    const before = snapshot.data() || {};
+    transaction.set(gateRef, {
+      ...before, locked: false,
+      unlockedAt: serverTimestamp(), unlockedByUid: adminUid
+    });
+  });
+  const snapshot = await gateRef.get();
+  const data = snapshot.data() || {};
+  if (data.locked !== false || data.lockToken !== lockToken || data.projectId !== projectId ||
+      data.targetMode !== targetMode || data.unlockedByUid !== adminUid ||
+      !timestampValid(data.unlockedAt)) throw new Error('Teacher access migration unlock readback failed.');
+  return { ...data, path: GATE_PATH, updateTimeGeneration: updateTimeGeneration(snapshot) };
 }
 
 function legacyCoherent(value, desired) {
@@ -181,7 +265,7 @@ async function scanAccessState({ db, auth, adminUid, at }) {
 
 async function runTeacherAccessMigration({
   db, auth, projectId, targetMode = 'production', adminUid, apply = false,
-  confirmProject = '', serverTimestamp
+  confirmProject = '', serverTimestamp, lockToken = ''
 }) {
   if (!db || typeof db.collection !== 'function' || typeof db.runTransaction !== 'function') {
     throw new Error('Admin Firestore DB is required.');
@@ -200,6 +284,12 @@ async function runTeacherAccessMigration({
     safeToDeployStrictRules: false
   };
   try {
+    const exactLockToken = lockToken || ['teacher-access', projectId, targetMode, adminUid].join(':');
+    if (apply) {
+      report.lock = await acquireTeacherAccessGate({
+        db, projectId, targetMode, adminUid, lockToken: exactLockToken, serverTimestamp
+      });
+    }
     const initialAt = serverTimestamp();
     const initial = await scanAccessState({ db, auth, adminUid, at: initialAt });
     report.plannedCount = initial.planned.length;
@@ -213,6 +303,10 @@ async function runTeacherAccessMigration({
         continue;
       }
       const result = await db.runTransaction(async transaction => {
+        const gateSnapshot = await transaction.get(db.doc(GATE_PATH));
+        verifyTeacherAccessGateSnapshot(gateSnapshot, {
+          projectId, targetMode, adminUid, lockToken: exactLockToken
+        }, report.lock.updateTimeGeneration);
         const legacyRef = db.doc('teacher_allowlist/' + item.emailCanonical);
         const allowanceRef = db.doc('teacher_allowances/' + item.user.uid);
         const legacySnapshot = await transaction.get(legacyRef);
@@ -257,7 +351,11 @@ async function runTeacherAccessMigration({
       throw error;
     }
     report.audit = final.audit;
-    report.safeToDeployStrictRules = final.audit.safe === true;
+    report.lock = await verifyTeacherAccessGate({
+      db, projectId, targetMode, adminUid, lockToken: exactLockToken,
+      expectedGeneration: report.lock.updateTimeGeneration
+    });
+    report.safeToDeployStrictRules = final.audit.safe === true && report.lock.locked === true;
     report.status = 'complete';
     return report;
   } catch (error) {
@@ -278,10 +376,15 @@ async function runTeacherAccessMigration({
 }
 
 module.exports = {
+  acquireTeacherAccessGate,
   allowanceCoherent,
   buildAllowance,
   canonicalEmail,
   legacyCoherent,
   runTeacherAccessMigration,
-  scanAccessState
+  scanAccessState,
+  unlockTeacherAccessGate,
+  updateTimeGeneration,
+  verifyTeacherAccessGate,
+  verifyTeacherAccessGateSnapshot
 };

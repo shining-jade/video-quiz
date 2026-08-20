@@ -1418,6 +1418,7 @@ let teacherRequestScreen = null;
 let teacherRequestReroute = null;
 let adminTeacherRequestScreen = null;
 let teacherDashboard = null;
+let classPlanningThresholds = ClassPlanningCore.normalizeThresholds();
 let teacherDeletionScreen = null;
 
 function teacherStateFromAllowance(user, allowance) {
@@ -1974,8 +1975,7 @@ function screenHome() {
   }
   if (teacherUser && teacherState && teacherState.status === 'suspended') {
     if (typeof stopTeacherDashboard === 'function') stopTeacherDashboard();
-    APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><h1 style="font-size:22px">교사 계정 사용 중지</h1>' +
-      '<div class="notice bad">관리자 중지 상태입니다. 새 저장·복사·수업 시작은 허용되지 않습니다. 관리자에게 복구를 요청해 주세요.</div></div></div>';
+    if (typeof screenTeacherDeletion === 'function') screenTeacherDeletion();
     return;
   }
   if (teacherUser && teacherState && teacherState.status === 'unapproved' && teacherUser.emailVerified &&
@@ -2032,6 +2032,9 @@ function stopTeacherDashboard() {
   const state = teacherDashboard;
   if (!state) return false;
   state.stopped = true;
+  (state.unsubscribers || []).splice(0).forEach(unsubscribe => {
+    try { if (typeof unsubscribe === 'function') unsubscribe(); } catch (error) { console.warn(error); }
+  });
   if (teacherDashboard === state) teacherDashboard = null;
   return true;
 }
@@ -2063,7 +2066,9 @@ function renderTeacherDashboard(plans, identity, isAdmin, ownPlans) {
   let warningLevel = 'green';
   activePlans.forEach(plan => {
     try {
-      const summary = ClassPlanningCore.summarizeWindow(activePlans, plan, { caution: 60, crowded: 120 });
+      const thresholds = typeof classPlanningThresholds === 'object'
+        ? classPlanningThresholds : ClassPlanningCore.DEFAULT_THRESHOLDS;
+      const summary = ClassPlanningCore.summarizeWindow(activePlans, plan, thresholds);
       peakExpected = Math.max(peakExpected, summary.expectedConcurrentStudents);
       if (summary.level === 'crowded' || (summary.level === 'caution' && warningLevel === 'green')) {
         warningLevel = summary.level;
@@ -2135,7 +2140,8 @@ function startTeacherDashboard(identity) {
   const state = teacherDashboard = {
     uid: stateIdentity.uid, email: stateIdentity.email, authGeneration, panel, isAdmin,
     identity: { uid: stateIdentity.uid, email: stateIdentity.email, role: stateIdentity.role },
-    stopped: false, error: '', promise: null, publicPlans: {}, ownPlans: {}
+    stopped: false, error: '', promise: null, publicPlans: {}, privatePlans: {}, ownPlans: {},
+    unsubscribers: []
   };
   const isCurrent = () => teacherDashboard === state && !state.stopped &&
     AuthCore.isTeacher(teacherState) && teacherState.uid === state.uid &&
@@ -2176,24 +2182,65 @@ function startTeacherDashboard(identity) {
           throw new Error('관리자 권한을 서버에서 다시 확인하지 못했습니다.');
         }
       }
-      const readPlans = state.isAdmin ? store.listAdminPlans : store.listPublicPlans;
-      if (typeof readPlans !== 'function' || typeof store.listOwnClassPlans !== 'function') {
+      if (typeof store.listPublicPlans !== 'function' || typeof store.listOwnClassPlans !== 'function' ||
+          (state.isAdmin && typeof store.listAdminPlans !== 'function')) {
         throw new Error('수업 현황 조회를 준비하지 못했습니다.');
       }
-      const [plans, ownPlans] = await Promise.all([
-        readPlans.call(store, from, to, 100),
-        store.listOwnClassPlans(from, to, 100, state.identity)
+      const [publicPlans, privatePlans, ownPlans, thresholds] = await Promise.all([
+        store.listPublicPlans(from, to, 100),
+        state.isAdmin ? store.listAdminPlans(from, to, 100) : Promise.resolve({}),
+        store.listOwnClassPlans(from, to, 100, state.identity),
+        typeof store.getClassPlanningThresholds === 'function'
+          ? store.getClassPlanningThresholds()
+          : Promise.resolve(ClassPlanningCore.DEFAULT_THRESHOLDS)
       ]);
       if (!isCurrent()) return false;
+      classPlanningThresholds = ClassPlanningCore.normalizeThresholds(thresholds);
       state.error = '';
-      const todayPlans = Object.fromEntries(Object.entries(plans || {}).filter(([, plan]) => plan &&
+      const today = plans => Object.fromEntries(Object.entries(plans || {}).filter(([, plan]) => plan &&
         ['planned', 'live'].includes(plan.status) &&
         (plan.status === 'live' || Number(plan.plannedStartAt) >= dayStart)));
-      state.publicPlans = todayPlans;
-      state.ownPlans = Object.fromEntries(Object.entries(ownPlans || {}).filter(([planId, own]) =>
-        todayPlans[planId] && own && own.planId === planId && own.status === todayPlans[planId].status
-      ));
-      return renderTeacherDashboard(todayPlans, state.identity, state.isAdmin, state.ownPlans);
+      const mergeAdmin = () => state.isAdmin
+        ? Object.fromEntries(Object.entries(state.privatePlans).map(([planId, plan]) => {
+            const publicPlan = state.publicRawPlans[planId] || {};
+            return [planId, {
+              ...plan,
+              ...(Number.isSafeInteger(publicPlan.actualParticipants) && publicPlan.actualParticipants >= 0
+                ? { actualParticipants: publicPlan.actualParticipants } : {})
+            }];
+          }))
+        : state.publicRawPlans;
+      const refresh = () => {
+        if (!isCurrent()) return false;
+        state.publicPlans = mergeAdmin();
+        state.ownPlans = Object.fromEntries(Object.entries(state.rawOwnPlans || {}).filter(([planId, own]) =>
+          state.publicPlans[planId] && own && own.planId === planId && own.status === state.publicPlans[planId].status
+        ));
+        return renderTeacherDashboard(state.publicPlans, state.identity, state.isAdmin, state.ownPlans);
+      };
+      state.publicRawPlans = today(publicPlans);
+      state.privatePlans = today(privatePlans);
+      state.rawOwnPlans = ownPlans || {};
+      refresh();
+      const listenerError = error => {
+        if (!isCurrent()) return;
+        console.warn('teacher dashboard live listener', error);
+      };
+      if (typeof store.subscribePublicPlans === 'function') {
+        state.unsubscribers.push(store.subscribePublicPlans(from, to, 100, plans => {
+          if (!isCurrent()) return;
+          state.publicRawPlans = today(plans);
+          refresh();
+        }, listenerError));
+      }
+      if (state.isAdmin && typeof store.subscribeAdminPlans === 'function') {
+        state.unsubscribers.push(store.subscribeAdminPlans(from, to, 100, plans => {
+          if (!isCurrent()) return;
+          state.privatePlans = today(plans);
+          refresh();
+        }, listenerError));
+      }
+      return true;
     } catch (error) {
       if (!isCurrent()) return false;
       state.error = error && error.message ? error.message : String(error);
@@ -2263,7 +2310,17 @@ function renderTeacherDeletion(state) {
       '<p class="sub">30일 전에는 요청을 철회할 수 있습니다. 별도 관리자 중지가 있으면 철회 뒤 suspended 상태가 유지됩니다.</p>' +
       '<button class="btn" onclick="cancelTeacherDeletion()"' + (state.busy ? ' disabled' : '') + '>탈퇴 요청 철회</button>';
   } else if (allowance.status === 'suspended' || teacherState.status === 'suspended') {
-    action = '<div class="notice bad">탈퇴 요청은 철회됐지만 별도 관리자 중지가 유지됩니다. 관리자에게 복구를 요청해 주세요.</div>';
+    const sessionRows = (Array.isArray(readiness.blockingSessions) ? readiness.blockingSessions : [])
+      .filter(session => session && typeof session.sessionId === 'string' &&
+        ['allocating', 'active', 'live', 'plan_live'].includes(session.status))
+      .map(session => '<li><span><b>' + safe(session.label || session.code || session.sessionId) +
+        '</b> <span class="hint">' + safe(session.status) + '</span></span> ' +
+        '<button class="btn sm" onclick="resolveTeacherDeletionSession(' +
+        safe(JSON.stringify(session.sessionId)) + ')"' +
+        (state.busy || state.resolvingSessionId ? ' disabled' : '') + '>안전 종료</button></li>').join('');
+    action = '<div class="notice bad">관리자 중지 상태입니다. 새 저장·복사·수업 시작은 차단되며 기존 자기 세션은 안전 종료만 할 수 있습니다.</div>' +
+      (sessionRows ? '<h2 style="font-size:17px;margin-top:16px">내 종료 필요 세션</h2><ul>' + sessionRows + '</ul>' : '') +
+      '<p class="sub">관리자에게 복구를 요청해 주세요.</p>';
   } else {
     action = '<p class="sub">아래 문구를 정확히 입력해야 요청할 수 있습니다.</p>' +
       '<label class="f" for="teacher-deletion-ack">확인 문구<input id="teacher-deletion-ack" autocomplete="off" placeholder="계정 사용 종료 요청"' +
@@ -2287,8 +2344,8 @@ function resolveTeacherDeletionSession(sessionId) {
   const target = sessions.find(session => session && session.sessionId === exactSessionId &&
     ['allocating', 'active', 'live', 'plan_live'].includes(session.status));
   if (!teacherDeletionScreenIsCurrent(state) || !target || state.busy || state.resolvingSessionId ||
-      !state.allowance || state.allowance.status !== 'deletion_pending' ||
-      !teacherState || teacherState.status !== 'deletion_pending' ||
+      !state.allowance || !['deletion_pending', 'suspended'].includes(state.allowance.status) ||
+      !teacherState || !['deletion_pending', 'suspended'].includes(teacherState.status) ||
       typeof store.resolveTeacherDeletionSession !== 'function') return Promise.resolve(false);
   state.resolvingSessionId = exactSessionId;
   state.error = '';
@@ -2467,9 +2524,17 @@ function renderTeacherRequest(state) {
       '<button class="btn danger" onclick="cancelTeacherRequest()"' + (busy ? ' disabled' : '') + '>' + (state.cancelling ? '신청 취소 중…' : '신청 취소') + '</button></div></div>';
   } else if (request.status === 'rejected') {
     body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice bad" role="status">신청이 승인되지 않았습니다.' +
-      (request.decisionReason ? ' 사유: ' + esc(request.decisionReason) : ' 관리자에게 문의해 주세요.') + '</div>' + status + '</div>';
+      (request.decisionReason ? ' 사유: ' + esc(request.decisionReason) : ' 관리자에게 문의해 주세요.') + '</div>' + status +
+      '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
+      '<div class="field"><label class="f">소속 (선택)<input name="organization" maxlength="120" value="' + esc(request.organization || '') + '"' + (busy ? ' disabled' : '') + '></label></div>' +
+      '<div class="field"><label class="f">메모 (선택)<textarea name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(request.note || '') + '</textarea></label></div>' +
+      '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>다시 신청</button></form></div>';
   } else if (request.status === 'cancelled') {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice" role="status">신청이 취소되었습니다. 다시 신청하려면 관리자에게 재신청 가능 여부를 문의해 주세요.</div>' + status + '</div>';
+    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice" role="status">신청이 취소되었습니다. 현재 Google 신원을 유지한 채 다시 신청할 수 있습니다.</div>' + status +
+      '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
+      '<div class="field"><label class="f">소속 (선택)<input name="organization" maxlength="120" value="' + esc(request.organization || '') + '"' + (busy ? ' disabled' : '') + '></label></div>' +
+      '<div class="field"><label class="f">메모 (선택)<textarea name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(request.note || '') + '</textarea></label></div>' +
+      '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>다시 신청</button></form></div>';
   } else {
     body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice info" role="status">승인 상태를 서버에서 다시 확인해 주세요.</div>' + status +
       '<button class="btn" onclick="refreshTeacherRequestStatus()"' + (busy ? ' disabled' : '') + '>승인 상태 새로고침</button></div>';
@@ -2506,7 +2571,9 @@ function screenTeacherRequest() {
 function submitTeacherRequestForm(event) {
   if (event && typeof event.preventDefault === 'function') event.preventDefault();
   const state = teacherRequestScreen;
-  if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling || state.request) return Promise.resolve(false);
+  const resubmitting = !!state.request && ['cancelled', 'rejected'].includes(state.request.status);
+  if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling ||
+      (state.request && !resubmitting)) return Promise.resolve(false);
   const form = event && event.currentTarget;
   const fields = form && form.elements ? form.elements : {};
   state.draft = Object.assign({}, state.draft, {
@@ -2525,7 +2592,13 @@ function submitTeacherRequestForm(event) {
   }
   state.submitting = true; state.error = ''; state.message = '';
   renderTeacherRequest(state);
-  return store.submitTeacherRequest(request).then(saved => {
+  const write = resubmitting
+    ? store.resubmitTeacherRequest(state.uid, state.request.revision, {
+        emailCanonical: request.emailCanonical, displayName: request.displayName,
+        organization: request.organization, note: request.note
+      })
+    : store.submitTeacherRequest(request);
+  return write.then(saved => {
     if (!teacherRequestScreenIsCurrent(state)) return false;
     state.request = saved || request;
     state.submitting = false;
@@ -5080,8 +5153,13 @@ async function plReviewClassPlan() {
         100
       );
       if (!sameContext()) return false;
+      const thresholds = typeof store.getClassPlanningThresholds === 'function'
+        ? await store.getClassPlanningThresholds()
+        : ClassPlanningCore.DEFAULT_THRESHOLDS;
+      if (!sameContext()) return false;
+      classPlanningThresholds = ClassPlanningCore.normalizeThresholds(thresholds);
       summary = ClassPlanningCore.summarizeWindow(
-        Object.values(plans || {}), privatePlan, { caution: 60, crowded: 120 }
+        Object.values(plans || {}), privatePlan, classPlanningThresholds
       );
       const levelLabel = summary.level === 'crowded' ? '빨강' :
         summary.level === 'caution' ? '노랑' : '초록';
@@ -8168,21 +8246,26 @@ function admTeacherAccounts() {
     });
     state.loadingAllowances = false;
     const rows = Object.entries(state.allowances).sort(([a], [b]) => a.localeCompare(b)).map(([email, allowance]) => {
-      const self = email === maintenanceCanonicalEmail(teacherState.email);
+      const uid = String(allowance.uid || '');
+      const revision = Number(allowance.revision);
+      const authoritative = allowance.migrated === true && uid && Number.isSafeInteger(revision) && revision > 0;
+      const self = uid === teacherState.uid;
       const role = allowance.role === 'admin' ? 'admin' : 'teacher';
       const enabled = allowance.enabled === true;
-      return '<div class="row" style="justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)" data-teacher-email="' + esc(email) + '">' +
-        '<span><b>' + esc(email) + '</b> <span class="hint">' + (enabled ? '활성' : '비활성') + '</span></span>' +
+      const locked = self || !authoritative;
+      return '<div class="row" style="justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)" data-teacher-uid="' + esc(uid) + '" data-teacher-email="' + esc(email) + '" data-teacher-revision="' + (authoritative ? revision : '') + '">' +
+        '<span><b>' + esc(email) + '</b> <span class="hint">' + (enabled ? '활성' : '비활성') +
+        (authoritative ? ' · UID ' + esc(uid) + ' · revision ' + revision : ' · UID migration 필요') + '</span></span>' +
         '<span class="row" style="gap:6px"><select data-teacher-role="' + esc(email) + '"' + (self ? ' disabled' : '') + '>' +
           '<option value="teacher"' + (role === 'teacher' ? ' selected' : '') + '>teacher</option>' +
           '<option value="admin"' + (role === 'admin' ? ' selected' : '') + '>admin</option></select>' +
-          '<button class="btn sm" data-teacher-save="' + esc(email) + '"' + (self ? ' disabled title="현재 관리자 계정은 보호됩니다."' : '') + '>저장</button>' +
-          '<button class="btn sm danger" data-teacher-disable="' + esc(email) + '"' + (self ? ' disabled title="현재 관리자 계정은 보호됩니다."' : '') + '>비활성화</button></span></div>';
+          '<button class="btn sm" data-teacher-save="1"' + (locked ? ' disabled title="UID migration 또는 현재 관리자 보호로 잠겼습니다."' : '') + '>저장</button>' +
+          '<button class="btn sm danger" data-teacher-disable="1"' + (locked ? ' disabled title="UID migration 또는 현재 관리자 보호로 잠겼습니다."' : '') + '>비활성화</button></span></div>';
     }).join('');
     const maintenanceWarning = typeof trashMaintenance !== 'undefined' && trashMaintenance && trashMaintenance.warning
       ? '<div class="notice bad">휴지통 자동 정리 실패' + (trashMaintenance.failedSetId ? ' (' + esc(trashMaintenance.failedSetId) + ')' : '') + ': ' + esc(trashMaintenance.warning) + ' <button class="btn sm" onclick="runTrashMaintenancePage()">재시도</button></div>' : '';
     return '<div class="card"><h2>승인 교사 계정</h2><p class="sub">승인된 Google 계정만 교사 화면을 사용할 수 있습니다. 현재 관리자 계정은 자기 역할 하향·비활성화가 잠겨 있습니다.</p>' + maintenanceWarning +
-      '<form id="adm-teacher-add" class="row" style="margin:10px 0"><input id="adm-teacher-email" type="email" placeholder="교사 Google 이메일" required style="flex:1 1 260px"><select id="adm-teacher-role"><option value="teacher">teacher</option><option value="admin">admin</option></select><button class="btn primary" type="submit">승인 추가</button></form>' +
+      '<div class="notice info">신규 교사는 권한 신청 탭에서 정확한 Google UID 신청을 승인하세요. 이메일만으로 계정을 추가할 수 없습니다.</div>' +
       '<div id="adm-teacher-error" class="notice bad" style="display:none"></div><div id="adm-teacher-list">' + (rows || '<div class="empty">등록된 계정이 없습니다.</div>') + '</div></div>';
   }).catch(error => {
     state.loadingAllowances = false;
@@ -8360,17 +8443,28 @@ function retryAdminTeacherRequests() {
   return renderAdminTeacherRequests();
 }
 
-async function admSaveTeacherAllowance(email, role, enabled) {
+async function admSaveTeacherAllowance(uid, email, revision, role, enabled) {
   if (!AuthCore.isAdmin(teacherState)) throw new Error('관리자 권한이 필요합니다.');
+  if (typeof uid !== 'string' || !uid || uid.includes('/') || uid.length > 128) throw new Error('유효한 UID가 필요합니다.');
   const normalized = maintenanceCanonicalEmail(email);
   if (!normalized || !normalized.includes('@')) throw new Error('유효한 이메일을 입력해 주세요.');
-  const self = normalized === maintenanceCanonicalEmail(teacherState.email);
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('유효한 revision이 필요합니다.');
+  const row = adm && adm.allowances && adm.allowances[normalized];
+  if (!row || row.uid !== uid || row.emailCanonical !== normalized || row.revision !== revision) {
+    throw new Error('계정 행의 UID/email/revision이 변경되었습니다.');
+  }
+  const self = uid === teacherState.uid;
   if (self && (enabled === false || role === 'teacher')) throw new Error('현재 관리자 계정은 자기 계정을 낮추거나 비활성화할 수 없습니다.');
   if (enabled === false && adm && adm.allowances && adm.allowances[normalized] && adm.allowances[normalized].role === 'admin' &&
       typeof confirm === 'function' && !confirm(normalized + ' 관리자 계정을 비활성화할까요?')) return false;
   const actor = Object.assign({}, teacherState, { authGeneration: teacherAuthVersion, currentAuthGeneration: teacherAuthVersion });
-  if (enabled === false) await store.disableTeacherAllowance(normalized, actor);
-  else await store.upsertTeacherAllowance(normalized, role === 'admin' ? 'admin' : 'teacher', actor);
+  if (!store.adminUpdateTeacherAllowance) throw new Error('authoritative allowance API를 사용할 수 없습니다.');
+  await store.adminUpdateTeacherAllowance({
+    uid, emailCanonical: normalized, expectedRevision: revision,
+    role: role === 'admin' ? 'admin' : 'teacher',
+    status: enabled === false ? 'suspended' : 'active',
+    reason: enabled === false ? '관리자 UI 중지' : ''
+  }, actor);
   await admTeacherAccounts();
   if (typeof admRenderBody === 'function') admRenderBody();
   return true;
@@ -8384,22 +8478,23 @@ function admAccountsView() {
   return admTeacherAccounts().then(markup => {
     if (adm !== state) return;
     body.innerHTML = markup;
-    const form = $('#adm-teacher-add');
-    if (form) form.onsubmit = async event => {
-      event.preventDefault();
-      try { await admSaveTeacherAllowance($('#adm-teacher-email').value, $('#adm-teacher-role').value, true); }
-      catch (error) { const box = $('#adm-teacher-error'); if (box) { box.textContent = error.message; box.style.display = 'block'; } }
-    };
     body.querySelectorAll('[data-teacher-save]').forEach(button => {
       button.onclick = () => {
-        const row = button.closest('[data-teacher-email]');
+        const row = button.closest('[data-teacher-uid]');
         const roleSelect = row && row.querySelector('[data-teacher-role]');
-        return admSaveTeacherAllowance(button.dataset.teacherSave, roleSelect ? roleSelect.value : 'teacher', true)
+        return admSaveTeacherAllowance(row && row.dataset.teacherUid, row && row.dataset.teacherEmail,
+          Number(row && row.dataset.teacherRevision), roleSelect ? roleSelect.value : 'teacher', true)
           .catch(error => alert(error.message));
       };
     });
     body.querySelectorAll('[data-teacher-disable]').forEach(button => {
-      button.onclick = () => admSaveTeacherAllowance(button.dataset.teacherDisable, 'teacher', false).catch(error => alert(error.message));
+      button.onclick = () => {
+        const row = button.closest('[data-teacher-uid]');
+        const roleSelect = row && row.querySelector('[data-teacher-role]');
+        return admSaveTeacherAllowance(row && row.dataset.teacherUid, row && row.dataset.teacherEmail,
+          Number(row && row.dataset.teacherRevision), roleSelect ? roleSelect.value : 'teacher', false)
+          .catch(error => alert(error.message));
+      };
     });
   }).catch(error => { body.innerHTML = '<div class="card"><div class="empty">계정 목록을 불러오지 못했습니다: ' + esc(error.message) + '</div></div>'; });
 }

@@ -548,6 +548,47 @@
       });
     }
 
+    async function resubmitTeacherRequest(uid, expectedRevision, input) {
+      const exactUid = assertUid(uid);
+      const revision = assertExpectedRevision(expectedRevision);
+      const value = input || {};
+      const exactEmail = canonicalTeacherEmail(value.emailCanonical);
+      const displayName = String(value.displayName || '').trim();
+      const organization = String(value.organization || '');
+      const note = String(value.note || '');
+      if (!exactEmail || exactEmail !== value.emailCanonical) {
+        throw new Error('현재 verified canonical email 신원이 필요합니다.');
+      }
+      if (!displayName || displayName.length > 80 || organization.length > 120 || note.length > 500) {
+        throw new Error('교사 재신청 입력 범위가 유효하지 않습니다.');
+      }
+      const reference = db.doc('teacher_access_requests/' + exactUid);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists) throw new Error('교사 신청 문서가 없습니다.');
+        const request = assertStoredTeacherRequest(snapshot.data(), exactUid);
+        if (!['cancelled', 'rejected'].includes(request.status)) {
+          throw new Error('cancelled 또는 rejected 신청만 다시 제출할 수 있습니다.');
+        }
+        if (request.revision !== revision) throw new Error('교사 신청 revision이 변경되었습니다.');
+        if (request.emailCanonical !== exactEmail || request.displayName !== displayName) {
+          throw new Error('교사 신청 UID/email/displayName 신원을 바꿀 수 없습니다.');
+        }
+        const deletion = deleteFieldValue();
+        transaction.update(reference, {
+          status: 'pending', revision: revision + 1,
+          organization, note,
+          decidedAt: deletion, decidedByUid: deletion, decisionReason: deletion,
+          updatedAt: fieldValue.serverTimestamp()
+        });
+        return {
+          ...request, status: 'pending', revision: revision + 1,
+          organization, note, decidedAt: undefined, decidedByUid: undefined,
+          decisionReason: undefined
+        };
+      });
+    }
+
     function assertDecision(decision) {
       const value = decision || {};
       if (!value || !['approved', 'rejected'].includes(value.status)) {
@@ -741,7 +782,7 @@
           const revision = allowanceRevision(allowance);
           const requestedAtMs = timestampMillis(allowance.deletionRequestedAt);
           const existingEligibleAtMs = timestampMillis(allowance.purgeEligibleAt);
-          if (allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
+          if (!['deletion_pending', 'suspended'].includes(allowance.status) || allowance.enabled !== false ||
               revision !== first.revision || requestedAtMs === null) {
             throw new Error('탈퇴 요청 상태가 eligibility timestamp 정착 전에 변경되었습니다.');
           }
@@ -1228,6 +1269,11 @@
       const publicComparable = { ...publicValue };
       delete publicComparable.createdAtMs;
       delete publicComparable.updatedAtMs;
+      const livePublicCount = privateValue.status === 'live' &&
+        privateValue.actualParticipants === undefined &&
+        Number.isSafeInteger(publicComparable.actualParticipants) &&
+        publicComparable.actualParticipants >= 0;
+      if (livePublicCount) delete publicComparable.actualParticipants;
       const comparableKeys = Object.keys(publicComparable);
       const expectedKeys = Object.keys(expected);
       const mismatch = expectedKeys.find(key =>
@@ -1466,8 +1512,49 @@
       return listClassPlans('class_plans_public', from, to, limit);
     }
 
+    async function getClassPlanningThresholds() {
+      const snapshot = await db.doc('config/class_planning').get({ source: 'server' });
+      return classPlanning.normalizeThresholds(snapshot.exists ? snapshot.data() : undefined);
+    }
+
+    async function updateClassPlanningThresholds(input, actor) {
+      const thresholds = classPlanning.normalizeThresholds(input);
+      const uid = assertUid(actor && actor.uid);
+      await db.doc('config/class_planning').set({
+        ...thresholds,
+        updatedAt: fieldValue.serverTimestamp(),
+        updatedByUid: uid
+      });
+      return thresholds;
+    }
+
     function listAdminPlans(from, to, limit) {
       return listClassPlans('class_plans_private', from, to, limit);
+    }
+
+    function subscribeClassPlans(collectionName, from, to, limit, next, error) {
+      const window = classPlanWindow(from, to, limit);
+      if (typeof next !== 'function') throw new Error('class plan listener callback이 필요합니다.');
+      return db.collection(collectionName)
+        .where('plannedStartAt', '>=', new Date(window.start))
+        .where('plannedStartAt', '<', new Date(window.end))
+        .orderBy('plannedStartAt', 'asc')
+        .limit(window.count)
+        .onSnapshot(snapshot => {
+          const values = {};
+          snapshot.docs.forEach(document => {
+            values[document.id] = classPlanClientValue(document.data(), document.id);
+          });
+          next(values);
+        }, error);
+    }
+
+    function subscribePublicPlans(from, to, limit, next, error) {
+      return subscribeClassPlans('class_plans_public', from, to, limit, next, error);
+    }
+
+    function subscribeAdminPlans(from, to, limit, next, error) {
+      return subscribeClassPlans('class_plans_private', from, to, limit, next, error);
     }
 
     async function getOwnClassPlan(planId, identity) {
@@ -1665,48 +1752,33 @@
 
     async function listTeacherAllowances(actor) {
       await requireCurrentAdmin(actor);
-      const snapshot = await db.collection('teacher_allowlist').get();
-      return Object.fromEntries(snapshot.docs.map(document => [
-        canonicalTeacherEmail(document.id), allowanceData(document)
+      const [legacySnapshot, authoritativeSnapshot] = await Promise.all([
+        db.collection('teacher_allowlist').get({ source: 'server' }),
+        db.collection('teacher_allowances').get({ source: 'server' })
+      ]);
+      const result = Object.fromEntries(legacySnapshot.docs.map(document => [
+        canonicalTeacherEmail(document.id), { ...allowanceData(document), migrated: false }
       ]));
+      authoritativeSnapshot.docs.forEach(document => {
+        const data = document.data() || {};
+        const email = canonicalTeacherEmail(data.emailCanonical);
+        if (!email || data.uid !== document.id || !['teacher', 'admin'].includes(data.role)) return;
+        result[email] = {
+          ...teacherAllowanceValue(document), uid: document.id, emailCanonical: email,
+          revision: allowanceRevision(data), migrated: true
+        };
+      });
+      return result;
     }
 
     async function upsertTeacherAllowance(email, role, actor) {
-      const current = await requireCurrentAdmin(actor);
-      const normalizedEmail = canonicalTeacherEmail(email);
-      if (!normalizedEmail || !normalizedEmail.includes('@')) {
-        throw new Error('유효한 이메일을 입력해 주세요.');
-      }
-      validateAllowanceRole(role);
-      if (normalizedEmail === current.email && role !== 'admin') {
-        throw new Error('현재 관리자 계정은 자기 계정을 teacher로 낮출 수 없습니다.');
-      }
-      await db.doc('teacher_allowlist/' + normalizedEmail).set({
-        enabled: true,
-        role,
-        updatedAt: fieldValue.serverTimestamp(),
-        updatedByUid: current.uid
-      }, { merge: true });
-      return db.doc('teacher_allowlist/' + normalizedEmail).get({ source: 'server' })
-        .then(allowanceData);
+      void email; void role; void actor;
+      throw new Error('이메일 전용 allowance 변경은 폐쇄되었습니다. exact UID/email/revision API를 사용하세요.');
     }
 
     async function disableTeacherAllowance(email, actor) {
-      const current = await requireCurrentAdmin(actor);
-      const normalizedEmail = canonicalTeacherEmail(email);
-      if (!normalizedEmail || !normalizedEmail.includes('@')) {
-        throw new Error('유효한 이메일을 입력해 주세요.');
-      }
-      if (normalizedEmail === current.email) {
-        throw new Error('현재 관리자 계정은 자기 계정을 비활성화할 수 없습니다.');
-      }
-      await db.doc('teacher_allowlist/' + normalizedEmail).set({
-        enabled: false,
-        updatedAt: fieldValue.serverTimestamp(),
-        updatedByUid: current.uid
-      }, { merge: true });
-      return db.doc('teacher_allowlist/' + normalizedEmail).get({ source: 'server' })
-        .then(allowanceData);
+      void email; void actor;
+      throw new Error('이메일 전용 allowance 변경은 폐쇄되었습니다. exact UID/email/revision API를 사용하세요.');
     }
 
     async function getCounterMigrationState() {
@@ -2585,6 +2657,14 @@
         if (!['active', 'live'].includes(session.status)) {
           throw new Error('종료된 session에는 학생이 참여할 수 없습니다.');
         }
+        let publicPlanReference = null;
+        if (session.classPlanId !== undefined || session.classPlanRevision !== undefined) {
+          const planId = assertPlanId(session.classPlanId);
+          if (!Number.isSafeInteger(session.classPlanRevision) || session.classPlanRevision < 1) {
+            throw new Error('session class plan revision이 유효하지 않습니다.');
+          }
+          publicPlanReference = db.doc('class_plans_public/' + planId);
+        }
         const student = {
           ...(profile || {}),
           uid: authUid,
@@ -2597,6 +2677,9 @@
             studentCountRevision: revision + 1,
             lastStudentUid: authUid
           });
+          if (publicPlanReference) {
+            transaction.update(publicPlanReference, { actualParticipants: count + 1 });
+          }
         }
         return student;
       });
@@ -3074,6 +3157,77 @@
       });
     }
 
+    async function requireTeacherAccessMigrationUnlocked(transaction) {
+      const gate = await transaction.get(db.doc('migration_gates/teacher_access_status'));
+      if (gate.exists && (gate.data() || {}).locked === true) {
+        throw new Error('teacher access migration 잠금 중에는 관리자 계정을 변경할 수 없습니다.');
+      }
+    }
+
+    async function adminUpdateTeacherAllowance(change, actor) {
+      const value = change || {};
+      const uid = assertUid(value.uid);
+      const email = canonicalTeacherEmail(value.emailCanonical);
+      const expectedRevision = assertExpectedRevision(value.expectedRevision);
+      const role = value.role;
+      const status = value.status;
+      const reason = String(value.reason || '');
+      if (!email || email !== value.emailCanonical) throw new Error('정확한 canonical email이 필요합니다.');
+      validateAllowanceRole(role);
+      if (!['active', 'suspended'].includes(status)) throw new Error('active 또는 suspended 상태만 허용됩니다.');
+      if (reason.length > 200) throw new Error('중지 사유는 200자 이하여야 합니다.');
+      const allowanceRef = db.doc('teacher_allowances/' + uid);
+      return db.runTransaction(async transaction => {
+        const admin = await requireTransactionAdmin(transaction, actor);
+        await requireTeacherAccessMigrationUnlocked(transaction);
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        if (!allowanceSnapshot.exists) throw new Error('teacher allowance 승인 문서가 없습니다.');
+        const allowance = allowanceSnapshot.data() || {};
+        if (allowance.uid !== uid || allowance.emailCanonical !==
+            canonicalTeacherEmail(allowance.emailCanonical) ||
+            !['teacher', 'admin'].includes(allowance.role)) {
+          throw new Error('teacher allowance identity 신원이 일치하지 않습니다.');
+        }
+        const currentRevision = allowanceRevision(allowance);
+        if (currentRevision !== expectedRevision) throw new Error('teacher allowance revision이 변경되었습니다.');
+        if (allowance.emailCanonical !== email) throw new Error('teacher allowance email 신원이 일치하지 않습니다.');
+        if (allowance.status === 'deletion_pending') throw new Error('deletion_pending 교사는 이 API로 변경할 수 없습니다.');
+        if (admin.uid === uid && (status !== 'active' || role !== 'admin')) {
+          throw new Error('현재 관리자 계정은 자기 역할을 낮추거나 중지할 수 없습니다.');
+        }
+        const legacyRef = db.doc('teacher_allowlist/' + email);
+        const legacySnapshot = await transaction.get(legacyRef);
+        if (!legacySnapshot.exists) throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
+        const legacy = legacySnapshot.data() || {};
+        if (legacy.role !== allowance.role || legacy.enabled !== allowance.enabled) {
+          throw new Error('legacy allowance와 authoritative allowance가 일치하지 않습니다.');
+        }
+        const next = { ...allowance };
+        next.status = status;
+        next.enabled = status === 'active';
+        next.role = role;
+        next.administrativeHold = status === 'suspended';
+        next.revision = currentRevision + 1;
+        next.updatedAt = fieldValue.serverTimestamp();
+        next.updatedByUid = admin.uid;
+        if (status === 'suspended') {
+          next.suspendedAt = fieldValue.serverTimestamp();
+          next.suspendedByUid = admin.uid;
+          next.suspensionReason = reason;
+        } else {
+          delete next.suspendedAt;
+          delete next.suspendedByUid;
+          delete next.suspensionReason;
+        }
+        transaction.set(allowanceRef, next);
+        transaction.set(legacyRef, {
+          enabled: next.enabled, role: next.role,
+          updatedAt: fieldValue.serverTimestamp(), updatedByUid: admin.uid
+        });
+        return { ...next };
+      });
+    }
+
     function writeBoard(sessionId, board, studentScores) {
       if (!studentScores) {
         return db.doc('sessions/' + sessionId + '/meta/board').set({ scores: board });
@@ -3093,6 +3247,7 @@
       submitTeacherRequest,
       getOwnTeacherRequest,
       cancelTeacherRequest,
+      resubmitTeacherRequest,
       getOwnTeacherAllowance,
       requestTeacherDeletion,
       cancelTeacherDeletion,
@@ -3107,13 +3262,18 @@
       createClassPlan,
       updateOwnClassPlan,
       cancelOwnClassPlan,
+      getClassPlanningThresholds,
+      updateClassPlanningThresholds,
       listPublicPlans,
       listAdminPlans,
+      subscribePublicPlans,
+      subscribeAdminPlans,
       getOwnClassPlan,
       listOwnClassPlans,
       attachPlanToSession,
       finishClassPlan,
       listTeacherAllowances,
+      adminUpdateTeacherAllowance,
       upsertTeacherAllowance,
       disableTeacherAllowance,
       getCounterMigrationState,
