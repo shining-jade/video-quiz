@@ -9393,6 +9393,72 @@ test('same-user request refresh synchronously clears the previous request screen
   await applying;
 });
 
+test('overlapping same-user request refresh keeps the reroute marker for only the newest auth generation', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: 'A 신청 화면 teacher-a@school.kr' };
+  const resolvers = [];
+  const routes = [];
+  const context = {
+    authReady: true, location: { hash: '#/' }, teacherRequestReroute: null,
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    teacherRequestScreen: { uid: 'teacher-a', draft: { displayName: 'A', organization: 'A', note: 'A' } },
+    teacherAuthVersion: 0, clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    store: { async probeTeacherAllowance() { return null; } }, reconcileTeacherRoute() {}, retractProtectedTeacherScreen() {},
+    router() { routes.push(context.teacherUser && context.teacherUser.uid); app.innerHTML = 'route:' + (context.teacherUser && context.teacherUser.uid); }, console
+  };
+  loadStageFunctions(['teacherRequestRouteIsCurrent', 'clearTeacherRequestScreen', 'applyTeacherUser'], context);
+  const user = { uid: 'teacher-a', email: 'teacher-a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolvers.push(resolve); }); } };
+
+  const first = context.applyTeacherUser(user);
+  const second = context.applyTeacherUser(user);
+  await Promise.resolve();
+  resolvers[1]({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await second;
+  resolvers[0]({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await first;
+
+  assert.deepEqual(routes, ['teacher-a']);
+  assert.equal(app.innerHTML, 'route:teacher-a');
+  assert.equal(context.teacherRequestReroute, null);
+});
+
+test('A request refresh followed by B routes only B after B allowance resolution and leaves no stale request DOM', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const app = { innerHTML: 'A 신청 화면 teacher-a@school.kr 사유 A' };
+  const resolvers = {};
+  const routes = [];
+  const context = {
+    authReady: true, location: { hash: '#/' }, teacherRequestReroute: null,
+    teacherUser: { uid: 'teacher-a', email: 'teacher-a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', status: 'unapproved' },
+    teacherRequestScreen: { uid: 'teacher-a', draft: { displayName: 'A', organization: '사유 A', note: '메모 A' } },
+    teacherAuthVersion: 0, clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    store: { async probeTeacherAllowance() { return null; } }, reconcileTeacherRoute() {}, retractProtectedTeacherScreen() {},
+    router() { routes.push(context.teacherUser && context.teacherUser.uid); app.innerHTML = 'route:' + (context.teacherUser && context.teacherUser.uid); }, console
+  };
+  loadStageFunctions(['teacherRequestRouteIsCurrent', 'clearTeacherRequestScreen', 'applyTeacherUser'], context);
+  const user = uid => ({ uid, email: uid + '@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolvers[uid] = resolve; }); } });
+
+  const applyingA = context.applyTeacherUser(user('teacher-a'));
+  const applyingB = context.applyTeacherUser(user('teacher-b'));
+  await Promise.resolve();
+  resolvers['teacher-b']({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applyingB;
+  resolvers['teacher-a']({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applyingA;
+
+  assert.deepEqual(routes, ['teacher-b']);
+  assert.equal(app.innerHTML, 'route:teacher-b');
+  assert.doesNotMatch(app.innerHTML, /teacher-a|사유 A|인증 상태/);
+});
+
 test('admin request guard rejects the same admin screen after switching away from the requests tab or body', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const body = {};

@@ -1401,6 +1401,7 @@ let teacherAuthVersion = 0;
 let appliedTeacherState = AuthCore.teacherState(null, null);
 let trashMaintenance = null;
 let teacherRequestScreen = null;
+let teacherRequestReroute = null;
 let adminTeacherRequestScreen = null;
 
 function maintenanceCanonicalEmail(value) {
@@ -1612,8 +1613,16 @@ async function applyTeacherUser(user) {
   if (heartbeatState) heartbeatState.stopActivationHeartbeat();
   if (typeof stopTrashMaintenance === 'function') stopTrashMaintenance();
   const updateVersion = ++teacherAuthVersion;
+  const requestRouteActive = typeof teacherRequestRouteIsCurrent === 'function'
+    ? teacherRequestRouteIsCurrent()
+    : (typeof location === 'undefined' || ['#/', '', '#'].includes(String(location.hash || '#/')));
+  const observerUid = user && !user.isAnonymous ? String(user.uid || '') : '';
+  const inheritedTeacherRequestReroute = typeof teacherRequestReroute !== 'undefined' && teacherRequestReroute;
   const clearedTeacherRequest = typeof clearTeacherRequestScreen === 'function'
     ? clearTeacherRequestScreen(true) : false;
+  if (requestRouteActive && (clearedTeacherRequest || inheritedTeacherRequestReroute)) {
+    teacherRequestReroute = { authGeneration: updateVersion, uid: observerUid };
+  }
   if (typeof authReady !== 'undefined' && authReady && previousUid && (!user || user.uid !== previousUid)) {
     retractProtectedTeacherScreen();
   }
@@ -1673,7 +1682,11 @@ async function applyTeacherUser(user) {
   renderTeacherAuthArea();
   if (typeof authReady !== 'undefined' && authReady) {
     reconcileTeacherRoute(previousState, teacherState);
-    if (clearedTeacherRequest && typeof teacherRequestRouteIsCurrent === 'function' && teacherRequestRouteIsCurrent()) router();
+    const reroute = typeof teacherRequestReroute !== 'undefined' ? teacherRequestReroute : null;
+    if (reroute && reroute.authGeneration === updateVersion && reroute.uid === observerUid) {
+      teacherRequestReroute = null;
+      if (requestRouteActive) router();
+    }
   }
   appliedTeacherState = teacherState;
   return true;
