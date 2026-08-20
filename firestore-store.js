@@ -647,6 +647,188 @@
       return allowance;
     }
 
+    function allowanceRevision(value) {
+      const revision = value && value.revision === undefined ? 0 : value.revision;
+      if (!Number.isSafeInteger(revision) || revision < 0 || revision >= Number.MAX_SAFE_INTEGER) {
+        throw new Error('teacher allowance revision이 유효하지 않습니다.');
+      }
+      return revision;
+    }
+
+    function teacherAllowanceValue(snapshot) {
+      if (!snapshot || !snapshot.exists) return null;
+      const value = { ...(snapshot.data() || {}) };
+      [
+        'approvedAt', 'updatedAt', 'suspendedAt',
+        'deletionRequestedAt', 'purgeEligibleAt'
+      ].forEach(field => {
+        const millis = timestampMillis(value[field]);
+        if (millis !== null) value[field + 'Ms'] = millis;
+      });
+      return value;
+    }
+
+    function assertDeletionTeacherAllowance(snapshot, uid) {
+      const allowance = assertAllowanceIdentity(snapshot, uid);
+      if (allowance.role !== 'teacher') throw new Error('teacher 계정만 탈퇴를 요청할 수 있습니다.');
+      if (allowance.emailCanonical !== canonicalTeacherEmail(allowance.emailCanonical)) {
+        throw new Error('teacher allowance canonical email이 유효하지 않습니다.');
+      }
+      return allowance;
+    }
+
+    function deleteFieldValue() {
+      if (!fieldValue || typeof fieldValue.delete !== 'function') {
+        throw new Error('Firestore delete field sentinel이 준비되지 않았습니다.');
+      }
+      return fieldValue.delete();
+    }
+
+    async function getOwnTeacherAllowance(uid) {
+      const exactUid = assertUid(uid);
+      const snapshot = await db.doc('teacher_allowances/' + exactUid).get({ source: 'server' });
+      if (!snapshot.exists) return null;
+      assertDeletionTeacherAllowance(snapshot, exactUid);
+      return teacherAllowanceValue(snapshot);
+    }
+
+    async function requestTeacherDeletion(uid) {
+      const exactUid = assertUid(uid);
+      const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      const first = await db.runTransaction(async transaction => {
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = assertDeletionTeacherAllowance(allowanceSnapshot, exactUid);
+        const legacyRef = db.doc('teacher_allowlist/' + allowance.emailCanonical);
+        if (allowance.status === 'deletion_pending' && allowance.enabled === false) {
+          const requestedAtMs = timestampMillis(allowance.deletionRequestedAt);
+          const purgeEligibleAtMs = timestampMillis(allowance.purgeEligibleAt);
+          if (requestedAtMs === null) throw new Error('탈퇴 요청 server timestamp가 유효하지 않습니다.');
+          if (purgeEligibleAtMs !== null) {
+            if (purgeEligibleAtMs !== requestedAtMs + 30 * 24 * 60 * 60 * 1000) {
+              throw new Error('탈퇴 정리 eligibility timestamp가 정확히 30일이 아닙니다.');
+            }
+            return { settled: true };
+          }
+          return { settled: false, revision: allowanceRevision(allowance), requestedAtMs };
+        }
+        if (allowance.status !== 'active' || allowance.enabled !== true ||
+            allowance.administrativeHold !== false) {
+          throw new Error('administrative hold가 없는 active teacher만 탈퇴를 요청할 수 있습니다.');
+        }
+        const revision = allowanceRevision(allowance) + 1;
+        const timestamp = fieldValue.serverTimestamp();
+        transaction.update(allowanceRef, {
+          status: 'deletion_pending',
+          enabled: false,
+          revision,
+          deletionRequestedAt: timestamp,
+          purgeEligibleAt: deleteFieldValue(),
+          updatedAt: timestamp,
+          updatedByUid: exactUid
+        });
+        transaction.set(legacyRef, {
+          enabled: false,
+          role: 'teacher',
+          updatedAt: fieldValue.serverTimestamp(),
+          updatedByUid: exactUid
+        });
+        return { settled: false, revision };
+      });
+      if (!first.settled) {
+        await db.runTransaction(async transaction => {
+          const snapshot = await transaction.get(allowanceRef);
+          const allowance = assertDeletionTeacherAllowance(snapshot, exactUid);
+          const revision = allowanceRevision(allowance);
+          const requestedAtMs = timestampMillis(allowance.deletionRequestedAt);
+          const existingEligibleAtMs = timestampMillis(allowance.purgeEligibleAt);
+          if (allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
+              revision !== first.revision || requestedAtMs === null) {
+            throw new Error('탈퇴 요청 상태가 eligibility timestamp 정착 전에 변경되었습니다.');
+          }
+          const exactEligibleAtMs = requestedAtMs + 30 * 24 * 60 * 60 * 1000;
+          if (!Number.isSafeInteger(exactEligibleAtMs)) throw new Error('탈퇴 정리 timestamp 범위를 넘었습니다.');
+          if (existingEligibleAtMs !== null) {
+            if (existingEligibleAtMs !== exactEligibleAtMs) {
+              throw new Error('탈퇴 정리 eligibility timestamp가 정확히 30일이 아닙니다.');
+            }
+            return;
+          }
+          transaction.update(allowanceRef, {
+            purgeEligibleAt: new Date(exactEligibleAtMs),
+            revision: revision + 1,
+            updatedAt: fieldValue.serverTimestamp(),
+            updatedByUid: exactUid
+          });
+        });
+      }
+      const saved = await allowanceRef.get({ source: 'server' });
+      return teacherAllowanceValue(saved);
+    }
+
+    async function cancelTeacherDeletion(uid) {
+      const exactUid = assertUid(uid);
+      const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      await db.runTransaction(async transaction => {
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = assertDeletionTeacherAllowance(allowanceSnapshot, exactUid);
+        const legacyRef = db.doc('teacher_allowlist/' + allowance.emailCanonical);
+        const revision = allowanceRevision(allowance);
+        const requestedAtMs = timestampMillis(allowance.deletionRequestedAt);
+        const purgeEligibleAtMs = timestampMillis(allowance.purgeEligibleAt);
+        if (allowance.status !== 'deletion_pending' || allowance.enabled !== false ||
+            requestedAtMs === null ||
+            (purgeEligibleAtMs !== null &&
+              purgeEligibleAtMs !== requestedAtMs + 30 * 24 * 60 * 60 * 1000)) {
+          throw new Error('정확한 deletion_pending 탈퇴 요청만 철회할 수 있습니다.');
+        }
+        if (purgeEligibleAtMs !== null && serverNow() >= purgeEligibleAtMs) {
+          throw new Error('30일 정리 eligible 경계 이후에는 탈퇴 요청을 철회할 수 없습니다.');
+        }
+        const held = allowance.administrativeHold === true;
+        const deletion = deleteFieldValue();
+        const update = {
+          status: held ? 'suspended' : 'active',
+          enabled: !held,
+          revision: revision + 1,
+          deletionRequestedAt: deletion,
+          purgeEligibleAt: deletion,
+          updatedAt: fieldValue.serverTimestamp(),
+          updatedByUid: exactUid
+        };
+        if (!held) {
+          update.suspendedAt = deletion;
+          update.suspendedByUid = deletion;
+          update.suspensionReason = deletion;
+        }
+        transaction.update(allowanceRef, update);
+        if (!held) {
+          transaction.set(legacyRef, {
+            enabled: true,
+            role: 'teacher',
+            updatedAt: fieldValue.serverTimestamp(),
+            updatedByUid: exactUid
+          });
+        }
+      });
+      return getOwnTeacherAllowance(exactUid);
+    }
+
+    async function getTeacherDeletionReadiness(uid) {
+      const exactUid = assertUid(uid);
+      const maximum = 101;
+      const [sets, sessions] = await Promise.all([
+        db.collection('quiz_sets').where('ownerUid', '==', exactUid).limit(maximum).get({ source: 'server' }),
+        db.collection('sessions').where('teacherUid', '==', exactUid)
+          .where('status', 'in', ['active', 'live']).limit(maximum).get({ source: 'server' })
+      ]);
+      return {
+        ownedSetCount: Math.min(sets.docs.length, 100),
+        liveSessionCount: Math.min(sessions.docs.length, 100),
+        ownedSetLimitReached: sets.docs.length > 100,
+        liveSessionLimitReached: sessions.docs.length > 100
+      };
+    }
+
     async function suspendTeacher(uid, reason, adminIdentity) {
       const exactUid = assertUid(uid);
       const suspensionReason = String(reason || '');
@@ -661,14 +843,18 @@
         if (!legacySnapshot.exists || legacySnapshot.data().role !== 'teacher') {
           throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
         }
-        if (allowance.status !== 'active' || allowance.enabled !== true) {
-          throw new Error('active 교사만 중지할 수 있습니다.');
+        if (!['active', 'deletion_pending'].includes(allowance.status) ||
+            (allowance.status === 'active' ? allowance.enabled !== true : allowance.enabled !== false)) {
+          throw new Error('active 또는 deletion_pending 교사만 중지할 수 있습니다.');
         }
+        const pendingDeletion = allowance.status === 'deletion_pending';
         const timestamp = fieldValue.serverTimestamp();
         transaction.set(allowanceRef, {
           ...allowance,
-          status: 'suspended',
+          status: pendingDeletion ? 'deletion_pending' : 'suspended',
           enabled: false,
+          administrativeHold: true,
+          revision: allowanceRevision(allowance) + 1,
           suspendedAt: timestamp,
           suspendedByUid: admin.uid,
           suspensionReason,
@@ -708,6 +894,8 @@
         delete restored.suspensionReason;
         restored.status = 'active';
         restored.enabled = true;
+        restored.administrativeHold = false;
+        restored.revision = allowanceRevision(allowance) + 1;
         restored.updatedAt = fieldValue.serverTimestamp();
         restored.updatedByUid = admin.uid;
         transaction.set(allowanceRef, restored);
@@ -2758,6 +2946,10 @@
       submitTeacherRequest,
       getOwnTeacherRequest,
       cancelTeacherRequest,
+      getOwnTeacherAllowance,
+      requestTeacherDeletion,
+      cancelTeacherDeletion,
+      getTeacherDeletionReadiness,
       listPendingTeacherRequests,
       decideTeacherRequest,
       suspendTeacher,

@@ -45,6 +45,17 @@ service cloud.firestore {
         : validLegacyTeacherAllowance());
     }
 
+    function isDeletionPendingTeacher() {
+      let currentExists = exists(teacherAllowancePath());
+      let data = currentExists ? get(teacherAllowancePath()).data : {};
+      return verifiedEmail() && currentExists &&
+        [data.uid, data.emailCanonical, data.status, data.enabled, data.role] ==
+          [request.auth.uid, request.auth.token.get('email', ''),
+            'deletion_pending', false, 'teacher'] &&
+        data.administrativeHold is bool && data.revision is int && data.revision > 0 &&
+        data.deletionRequestedAt is timestamp;
+    }
+
     function isAdmin() {
       let currentExists = exists(teacherAllowancePath());
       let approved = currentExists
@@ -191,7 +202,8 @@ service cloud.firestore {
         data.administrativeHold is bool && data.approvedAt is timestamp &&
         data.approvedByUid is string && data.approvedByUid.size() > 0 &&
         data.updatedAt is timestamp && data.updatedByUid is string &&
-        data.updatedByUid.size() > 0;
+        data.updatedByUid.size() > 0 &&
+        (!('revision' in data) || isPositiveSafeRevision(data.revision));
     }
 
     function validLifecycleLegacyAllowance(email, enabled) {
@@ -207,21 +219,24 @@ service cloud.firestore {
     function validTeacherSuspension(uid) {
       let before = resource.data;
       let after = request.resource.data;
-      return isAdmin() && before.role == 'teacher' &&
+      return before.status == 'active' && before.enabled == true && before.role == 'teacher' &&
+        isAdmin() &&
         validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
-        before.status == 'active' && before.enabled == true &&
         after.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
           'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
-          'suspendedAt', 'suspendedByUid', 'suspensionReason'
+          'suspendedAt', 'suspendedByUid', 'suspensionReason', 'revision'
         ]) &&
         after.status == 'suspended' && after.enabled == false &&
+        after.administrativeHold == true &&
+        after.revision == before.get('revision', 0) + 1 &&
         after.suspendedAt == request.time && after.suspendedByUid == request.auth.uid &&
         after.suspensionReason is string && after.suspensionReason.size() <= 200 &&
         after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
         validLifecycleLegacyAllowance(before.emailCanonical, false) &&
         after.diff(before).affectedKeys().hasOnly([
-          'status', 'enabled', 'suspendedAt', 'suspendedByUid', 'suspensionReason',
+          'status', 'enabled', 'administrativeHold', 'revision',
+          'suspendedAt', 'suspendedByUid', 'suspensionReason',
           'updatedAt', 'updatedByUid'
         ]);
     }
@@ -229,25 +244,179 @@ service cloud.firestore {
     function validTeacherRestore(uid) {
       let before = resource.data;
       let after = request.resource.data;
-      return isAdmin() && before.role == 'teacher' &&
+      return before.status == 'suspended' && before.enabled == false && before.role == 'teacher' &&
+        isAdmin() &&
         validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
         before.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
           'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
-          'suspendedAt', 'suspendedByUid', 'suspensionReason'
+          'suspendedAt', 'suspendedByUid', 'suspensionReason', 'revision'
         ]) &&
-        before.status == 'suspended' && before.enabled == false &&
         after.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
-          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid'
+          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
+          'revision'
         ]) &&
-        after.status == 'active' && after.enabled == true &&
+        after.status == 'active' && after.enabled == true && after.administrativeHold == false &&
+        after.revision == before.get('revision', 0) + 1 &&
         after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
         validLifecycleLegacyAllowance(before.emailCanonical, true) &&
         after.diff(before).affectedKeys().hasOnly([
-          'status', 'enabled', 'suspendedAt', 'suspendedByUid', 'suspensionReason',
+          'status', 'enabled', 'administrativeHold', 'revision',
+          'suspendedAt', 'suspendedByUid', 'suspensionReason',
           'updatedAt', 'updatedByUid'
         ]);
+    }
+
+    function deletionAllowanceKeysOnly(data) {
+      return data.keys().hasOnly([
+        'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
+        'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
+        'revision', 'deletionRequestedAt', 'purgeEligibleAt',
+        'suspendedAt', 'suspendedByUid', 'suspensionReason'
+      ]);
+    }
+
+    function ownDeletionIdentity(uid, data) {
+      return verifiedEmail() && request.auth.uid == uid && data.role == 'teacher' &&
+        data.uid == uid && data.emailCanonical == request.auth.token.email;
+    }
+
+    function validStoredDeletionPendingShape(uid, data) {
+      return data.uid == uid && data.role == 'teacher' &&
+        validStoredTeacherAllowance(uid, data) &&
+        deletionAllowanceKeysOnly(data) && data.status == 'deletion_pending' &&
+        data.enabled == false && data.revision is int && data.revision > 0 &&
+        data.deletionRequestedAt is timestamp &&
+        (!('purgeEligibleAt' in data) ||
+          (data.purgeEligibleAt is timestamp &&
+            data.purgeEligibleAt == data.deletionRequestedAt + duration.value(30, 'd')));
+    }
+
+    function validDeletionPendingShape(uid, data) {
+      return ownDeletionIdentity(uid, data) && validStoredDeletionPendingShape(uid, data);
+    }
+
+    function validOwnTeacherDeletionRequest(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return ownDeletionIdentity(uid, before) && validStoredTeacherAllowance(uid, before) &&
+        before.status == 'active' && before.enabled == true && before.role == 'teacher' &&
+        before.administrativeHold == false && validDeletionPendingShape(uid, after) &&
+        !('purgeEligibleAt' in after) && after.deletionRequestedAt == request.time &&
+        after.revision == before.get('revision', 0) + 1 &&
+        after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
+        validLifecycleLegacyAllowance(before.emailCanonical, false) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'enabled', 'revision', 'deletionRequestedAt', 'purgeEligibleAt',
+          'updatedAt', 'updatedByUid'
+        ]);
+    }
+
+    function validOwnTeacherDeletionTimestampSettlement(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return validDeletionPendingShape(uid, before) && validDeletionPendingShape(uid, after) &&
+        !('purgeEligibleAt' in before) &&
+        after.purgeEligibleAt == before.deletionRequestedAt + duration.value(30, 'd') &&
+        after.revision == before.revision + 1 && after.updatedAt == request.time &&
+        after.updatedByUid == request.auth.uid &&
+        after.diff(before).affectedKeys().hasOnly([
+          'purgeEligibleAt', 'revision', 'updatedAt', 'updatedByUid'
+        ]);
+    }
+
+    function validOwnTeacherDeletionCancellation(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let held = before.administrativeHold == true;
+      return verifiedEmail() && request.auth.uid == uid &&
+        before.uid == uid && before.emailCanonical == request.auth.token.email &&
+        before.role == 'teacher' &&
+        before.status == 'deletion_pending' && before.enabled == false &&
+        before.revision is int && before.revision > 0 &&
+        before.deletionRequestedAt is timestamp &&
+        (!('purgeEligibleAt' in before) ||
+          (before.purgeEligibleAt is timestamp &&
+            before.purgeEligibleAt == before.deletionRequestedAt + duration.value(30, 'd'))) &&
+        (!('purgeEligibleAt' in before) || request.time < before.purgeEligibleAt) &&
+        !('deletionRequestedAt' in after) && !('purgeEligibleAt' in after) &&
+        (held
+          ? after.status == 'suspended' && after.enabled == false &&
+            after.suspendedAt == before.suspendedAt &&
+            after.suspendedByUid == before.suspendedByUid &&
+            after.suspensionReason == before.suspensionReason
+          : after.status == 'active' && after.enabled == true &&
+            !('suspendedAt' in after) && !('suspendedByUid' in after) &&
+            !('suspensionReason' in after) &&
+            validLifecycleLegacyAllowance(before.emailCanonical, true)) &&
+        after.revision == before.revision + 1 && after.updatedAt == request.time &&
+        after.updatedByUid == request.auth.uid &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'enabled', 'revision', 'deletionRequestedAt', 'purgeEligibleAt',
+          'updatedAt', 'updatedByUid'
+        ]);
+    }
+
+    function validTeacherDeletionAdministrativeHold(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.status == 'deletion_pending' && before.enabled == false &&
+        before.administrativeHold == false && before.uid == uid && before.role == 'teacher' &&
+        before.revision is int && before.revision > 0 && before.deletionRequestedAt is timestamp &&
+        after.uid == before.uid && after.emailCanonical == before.emailCanonical &&
+        after.displayName == before.displayName && after.role == before.role &&
+        after.administrativeHold == true && after.status == 'deletion_pending' &&
+        after.enabled == false && after.deletionRequestedAt == before.deletionRequestedAt &&
+        after.get('purgeEligibleAt', null) == before.get('purgeEligibleAt', null) &&
+        after.revision == before.revision + 1 && after.suspendedAt == request.time &&
+        after.suspendedByUid == request.auth.uid && after.suspensionReason is string &&
+        after.suspensionReason.size() <= 200 && after.updatedAt == request.time &&
+        after.updatedByUid == request.auth.uid &&
+        validLifecycleLegacyAllowance(before.emailCanonical, false) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'administrativeHold', 'revision', 'suspendedAt', 'suspendedByUid',
+          'suspensionReason', 'updatedAt', 'updatedByUid'
+        ]) && isAdmin();
+    }
+
+    function validOwnTeacherDeletionLegacyAllowance(email) {
+      let allowancePath = teacherAllowancePath();
+      let before = get(allowancePath).data;
+      let after = getAfter(allowancePath).data;
+      return verifiedEmail() && email == request.auth.token.email &&
+        exists(allowancePath) && existsAfter(allowancePath) &&
+        request.resource.data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        request.resource.data.role == 'teacher' &&
+        request.resource.data.enabled == after.enabled &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.updatedByUid == request.auth.uid &&
+        before.uid == request.auth.uid && after.uid == request.auth.uid &&
+        before.emailCanonical == email && after.emailCanonical == email &&
+        before.role == 'teacher' && after.role == 'teacher' &&
+        after.revision == before.get('revision', 0) + 1 &&
+        ((before.status == 'active' && before.enabled == true &&
+            after.status == 'deletion_pending' && after.enabled == false &&
+            after.deletionRequestedAt == request.time) ||
+          (before.status == 'deletion_pending' && before.enabled == false &&
+            after.status in ['active', 'suspended'] &&
+            !('deletionRequestedAt' in after) && !('purgeEligibleAt' in after)));
+    }
+
+    function validTeacherAllowanceUpdate(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.status == 'active'
+        ? (after.status == 'deletion_pending'
+            ? validOwnTeacherDeletionRequest(uid)
+            : validTeacherSuspension(uid))
+        : (before.status == 'deletion_pending'
+            ? (after.status in ['active', 'suspended']
+                ? validOwnTeacherDeletionCancellation(uid)
+                : (before.administrativeHold == false && after.administrativeHold == true
+                    ? validTeacherDeletionAdministrativeHold(uid)
+                    : validOwnTeacherDeletionTimestampSettlement(uid)))
+            : validTeacherRestore(uid));
     }
 
     function counterMigrationUnlocked() {
@@ -627,6 +796,13 @@ service cloud.firestore {
         getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
     }
 
+    function ownsSessionAfterForLiveMutation(sessionId) {
+      let sessionPath = /databases/$(database)/documents/sessions/$(sessionId);
+      return getAfter(sessionPath).data.teacherUid == request.auth.uid &&
+        (isApprovedTeacher() ||
+          (getAfter(sessionPath).data.status == 'ended' && isDeletionPendingTeacher()));
+    }
+
     function sessionExists(sessionId) {
       return exists(/databases/$(database)/documents/sessions/$(sessionId));
     }
@@ -916,6 +1092,12 @@ service cloud.firestore {
         validEndedLiveData(request.resource.data);
     }
 
+    function ownsSessionForSafeDeletionEnd(sessionId) {
+      return isDeletionPendingTeacher() &&
+        exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
+        get(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
+    }
+
     function currentQuestionKey(sessionId) {
       return string(get(
         /databases/$(database)/documents/sessions/$(sessionId)/meta/live
@@ -1070,6 +1252,17 @@ service cloud.firestore {
               validSessionPlanFinish(sessionId)
             )
           : validLegacySessionTransition(sessionId));
+    }
+
+    function validDeletionPendingSessionEnd(sessionId) {
+      return ownsSessionForSafeDeletionEnd(sessionId) &&
+        (sessionHasCounterFields(resource.data)
+          ? sessionHasCounterFields(request.resource.data) &&
+            validSessionCounter(resource.data) && validSessionCounter(request.resource.data) &&
+            (validSessionEnd(sessionId) || validSessionEndRepair(sessionId) ||
+              validSessionPlanFinish(sessionId))
+          : validLegacySessionTransition(sessionId) &&
+            request.resource.data.status == 'ended');
     }
 
     function validStudentCounterIncrement(sessionId) {
@@ -1299,13 +1492,11 @@ service cloud.firestore {
         ]);
     }
 
-    function validClassPlanUpdate(planId) {
+    function validApprovedClassPlanUpdate(planId) {
       let beforeData = get(classPlanPrivatePath(planId)).data;
       let afterData = getAfter(classPlanPrivatePath(planId)).data;
       let publicAfter = getAfter(classPlanPublicPath(planId)).data;
-      return isApprovedTeacher() && exists(classPlanPrivatePath(planId)) &&
-        exists(classPlanPublicPath(planId)) && existsAfter(classPlanPrivatePath(planId)) &&
-        existsAfter(classPlanPublicPath(planId)) && validClassPlanPrivate(afterData, planId) &&
+      return isApprovedTeacher() && validClassPlanPrivate(afterData, planId) &&
         classPlanPublicKeysOnly(publicAfter) && matchingClassPlanPair(afterData, publicAfter) &&
         beforeData.ownerUid == request.auth.uid &&
         beforeData.ownerEmailCanonical == request.auth.token.email &&
@@ -1316,6 +1507,33 @@ service cloud.firestore {
           ? validPlannedClassPlanTransition(beforeData, afterData) ||
             validClassPlanAttach(beforeData, afterData)
           : beforeData.status == 'live' && validClassPlanFinish(beforeData, afterData));
+    }
+
+    function validDeletionPendingClassPlanFinish(planId) {
+      let beforeData = get(classPlanPrivatePath(planId)).data;
+      let afterData = getAfter(classPlanPrivatePath(planId)).data;
+      let publicBefore = get(classPlanPublicPath(planId)).data;
+      let publicAfter = getAfter(classPlanPublicPath(planId)).data;
+      return isDeletionPendingTeacher() &&
+        beforeData.ownerUid == request.auth.uid &&
+        beforeData.ownerEmailCanonical == request.auth.token.email &&
+        beforeData.status == 'live' && afterData.status == 'ended' &&
+        sameClassPlanIdentity(beforeData, afterData) &&
+        afterData.revision == beforeData.revision + 1 &&
+        afterData.updatedAt == request.time &&
+        publicAfter.diff(publicBefore).affectedKeys().hasOnly([
+          'status', 'actualEndedAt', 'actualParticipants', 'revision', 'updatedAt'
+        ]) && matchingClassPlanPair(afterData, publicAfter) &&
+        validClassPlanFinish(beforeData, afterData);
+    }
+
+    function validClassPlanUpdate(planId) {
+      let allowancePath = teacherAllowancePath();
+      let deletionPending = exists(allowancePath) &&
+        get(allowancePath).data.status == 'deletion_pending';
+      return deletionPending
+        ? validDeletionPendingClassPlanFinish(planId)
+        : validApprovedClassPlanUpdate(planId);
     }
 
     match /teacher_access_requests/{uid} {
@@ -1330,7 +1548,9 @@ service cloud.firestore {
     }
 
     match /teacher_allowances/{uid} {
-      allow get, list: if isAdmin();
+      allow get: if (verifiedEmail() && request.auth.uid == uid &&
+          resource.data.uid == uid && resource.data.emailCanonical == request.auth.token.email) || isAdmin();
+      allow list: if isAdmin();
       allow create: if isAdmin() &&
         existsAfter(/databases/$(database)/documents/teacher_access_requests/$(uid)) &&
         validApprovedTeacherAllowance(
@@ -1338,7 +1558,7 @@ service cloud.firestore {
           request.resource.data,
           getAfter(/databases/$(database)/documents/teacher_access_requests/$(uid)).data
         );
-      allow update: if validTeacherSuspension(uid) || validTeacherRestore(uid);
+      allow update: if validTeacherAllowanceUpdate(uid);
       allow delete: if false;
       allow read, write: if false;
     }
@@ -1346,8 +1566,9 @@ service cloud.firestore {
     match /teacher_allowlist/{email} {
       allow get, list: if isAdmin();
       allow create: if isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email);
-      allow update: if isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email) &&
-        !protectsCurrentAdmin(email);
+      allow update: if validOwnTeacherDeletionLegacyAllowance(email) ||
+        (isAdmin() && canonicalAllowanceId(email) && validAllowanceDocument(email) &&
+          !protectsCurrentAdmin(email));
       allow delete: if false;
       allow read, write: if false;
     }
@@ -1365,14 +1586,15 @@ service cloud.firestore {
     }
 
     match /migration_gates/session_counters {
-      allow get: if isApprovedTeacher() || isAdmin();
+      allow get: if isDeletionPendingTeacher() || isApprovedTeacher() || isAdmin();
       allow list, create, update, delete: if false;
       allow read, write: if false;
     }
 
     match /class_plans_private/{planId} {
       allow get: if isAdmin() ||
-        (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid);
+        ((isApprovedTeacher() || isDeletionPendingTeacher()) &&
+          resource.data.ownerUid == request.auth.uid);
       allow list: if (isAdmin() ||
           (isApprovedTeacher() && resource.data.ownerUid == request.auth.uid)) &&
         request.query.limit != null && request.query.limit <= 100 &&
@@ -1385,7 +1607,10 @@ service cloud.firestore {
     }
 
     match /class_plans_public/{planId} {
-      allow get: if isApprovedTeacher() && validClassPlanPublic(resource.data, planId);
+      allow get: if (isApprovedTeacher() ||
+          (isDeletionPendingTeacher() && exists(classPlanPrivatePath(planId)) &&
+            get(classPlanPrivatePath(planId)).data.ownerUid == request.auth.uid)) &&
+        validClassPlanPublic(resource.data, planId);
       allow list: if isApprovedTeacher() && request.query.limit != null &&
         request.query.limit <= 100 &&
         resource.data.plannedStartAt >= request.time - duration.value(1448, 'm') &&
@@ -1401,11 +1626,13 @@ service cloud.firestore {
         (!exists(/databases/$(database)/documents/quiz_sets/$(setId)) ||
           activeSet(setId) || ownsSet(setId) || isAdmin() ||
           setId.matches('^__teacher_allowance_probe__.*$'));
-      allow list: if isApprovedTeacher() &&
-        resource.data.keys().hasAll(['lifecycleState']) &&
-        (resource.data.lifecycleState == 'active' ||
-          (resource.data.lifecycleState in ['trashed', 'purging'] &&
-            (resource.data.ownerUid == request.auth.uid || isAdmin())));
+      allow list: if (isApprovedTeacher() &&
+          resource.data.keys().hasAll(['lifecycleState']) &&
+          (resource.data.lifecycleState == 'active' ||
+            (resource.data.lifecycleState in ['trashed', 'purging'] &&
+              (resource.data.ownerUid == request.auth.uid || isAdmin())))) ||
+        (isDeletionPendingTeacher() && resource.data.ownerUid == request.auth.uid &&
+          request.query.limit != null && request.query.limit <= 101);
       allow create: if isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
@@ -1470,12 +1697,15 @@ service cloud.firestore {
     }
 
     match /sessions/{sessionId} {
-      allow get: if isAdmin() || ownsSession(sessionId) ||
+      allow get: if ownsSessionForSafeDeletionEnd(sessionId) || ownsSession(sessionId) || isAdmin() ||
         (isApprovedTeacher() && !sessionExists(sessionId)) ||
         (anonymousStudent() &&
           (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
       allow list: if isAdmin() ||
-        (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid);
+        (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid) ||
+        (isDeletionPendingTeacher() && resource.data.teacherUid == request.auth.uid &&
+          resource.data.status in ['active', 'live'] && request.query.limit != null &&
+          request.query.limit <= 101);
       allow create: if isApprovedTeacher() &&
         request.resource.data.teacherUid == request.auth.uid &&
         request.resource.data.teacherEmail == request.auth.token.email &&
@@ -1490,7 +1720,14 @@ service cloud.firestore {
               request.time + duration.value(120, 's')));
       allow update: if request.resource.data.teacherUid == resource.data.teacherUid &&
         request.resource.data.teacherEmail == resource.data.teacherEmail &&
-        (validStudentCounterIncrement(sessionId) || validOwnedSessionUpdate(sessionId));
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'registeredStudentCount', 'studentCountRevision', 'lastStudentUid'
+        ]) && validStudentCounterIncrement(sessionId);
+      allow update: if request.resource.data.teacherUid == resource.data.teacherUid &&
+        request.resource.data.teacherEmail == resource.data.teacherEmail &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'registeredStudentCount', 'studentCountRevision', 'lastStudentUid'
+        ]) && (validDeletionPendingSessionEnd(sessionId) || validOwnedSessionUpdate(sessionId));
       allow delete: if !('classPlanId' in resource.data) &&
         !('classPlanRevision' in resource.data) &&
         (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted' &&
@@ -1516,12 +1753,12 @@ service cloud.firestore {
       }
 
       match /meta/live {
-        allow get: if isAdmin() || ownsSession(sessionId) ||
+        allow get: if ownsSessionForSafeDeletionEnd(sessionId) || ownsSession(sessionId) || isAdmin() ||
           (isRegisteredStudent(sessionId) &&
             (validLiveData(resource.data) || validEndedLiveData(resource.data)));
         allow list: if isAdmin() || ownsSession(sessionId);
         allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data);
-        allow update: if ownsSessionAfter(sessionId) &&
+        allow update: if ownsSessionAfterForLiveMutation(sessionId) &&
           ((validLiveData(request.resource.data) &&
               validLiveUpdateTransition() && validAcceptingTransition()) ||
             validAtomicSessionEndLive(sessionId));

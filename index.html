@@ -759,6 +759,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="auth-core.js"></script>
 <script src="teacher-access-request-core.js"></script>
 <script src="class-planning-core.js"></script>
+<script src="teacher-deletion-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
@@ -1417,6 +1418,18 @@ let teacherRequestScreen = null;
 let teacherRequestReroute = null;
 let adminTeacherRequestScreen = null;
 let teacherDashboard = null;
+let teacherDeletionScreen = null;
+
+function teacherStateFromAllowance(user, allowance) {
+  const state = AuthCore.teacherState(user, allowance);
+  if (user && !user.isAnonymous && user.emailVerified && allowance &&
+      allowance.uid === user.uid &&
+      allowance.emailCanonical === String(user.email || '').trim().toLowerCase() &&
+      ['deletion_pending', 'suspended'].includes(allowance.status)) {
+    return { status: allowance.status, uid: user.uid, email: user.email || '', role: '' };
+  }
+  return state;
+}
 
 function maintenanceCanonicalEmail(value) {
   if (typeof CollaborationTrashCore !== 'undefined' && CollaborationTrashCore.canonicalEmail) {
@@ -1680,11 +1693,25 @@ async function applyTeacherUser(user) {
         console.error(error);
       }
     }
+    if (!nextAllowance && normalizedEmail && typeof store.getOwnTeacherAllowance === 'function') {
+      try {
+        const ownAllowance = await store.getOwnTeacherAllowance(nextUser.uid);
+        if (ownAllowance && ownAllowance.uid === nextUser.uid &&
+            ownAllowance.emailCanonical === normalizedEmail &&
+            ['deletion_pending', 'suspended'].includes(ownAllowance.status)) {
+          nextAllowance = ownAllowance;
+        }
+      } catch (error) {
+        if (!error || String(error.code || '').indexOf('permission-denied') < 0) console.error(error);
+      }
+    }
   }
   if (updateVersion !== teacherAuthVersion) return false;
   teacherUser = nextUser;
   teacherAllowance = nextAllowance;
-  teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  teacherState = typeof teacherStateFromAllowance === 'function'
+    ? teacherStateFromAllowance(teacherUser, teacherAllowance)
+    : AuthCore.teacherState(teacherUser, teacherAllowance);
   if (AuthCore.isTeacher(teacherState) &&
       typeof recoverPendingAllocationsForTeacher === 'function') {
     await recoverPendingAllocationsForTeacher(teacherState);
@@ -1737,7 +1764,9 @@ async function applyTeacherUser(user) {
 function setTeacherAllowance(allowance) {
   const previousState = appliedTeacherState;
   teacherAllowance = allowance || null;
-  teacherState = AuthCore.teacherState(teacherUser, teacherAllowance);
+  teacherState = typeof teacherStateFromAllowance === 'function'
+    ? teacherStateFromAllowance(teacherUser, teacherAllowance)
+    : AuthCore.teacherState(teacherUser, teacherAllowance);
   if (AuthCore.isAdmin(previousState) && !AuthCore.isAdmin(teacherState) &&
       typeof clearTeacherDashboard === 'function') {
     clearTeacherDashboard();
@@ -1937,6 +1966,18 @@ window.addEventListener('hashchange', router);
    4. 홈
    ══════════════════════════════════════════════════════════════════════ */
 function screenHome() {
+  if (teacherUser && teacherState && teacherState.status === 'deletion_pending' &&
+      typeof screenTeacherDeletion === 'function') {
+    if (typeof stopTeacherDashboard === 'function') stopTeacherDashboard();
+    screenTeacherDeletion();
+    return;
+  }
+  if (teacherUser && teacherState && teacherState.status === 'suspended') {
+    if (typeof stopTeacherDashboard === 'function') stopTeacherDashboard();
+    APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><h1 style="font-size:22px">교사 계정 사용 중지</h1>' +
+      '<div class="notice bad">관리자 중지 상태입니다. 새 저장·복사·수업 시작은 허용되지 않습니다. 관리자에게 복구를 요청해 주세요.</div></div></div>';
+    return;
+  }
   if (teacherUser && teacherState && teacherState.status === 'unapproved' && teacherUser.emailVerified &&
       typeof screenTeacherRequest === 'function') {
     if (typeof stopTeacherDashboard === 'function') stopTeacherDashboard();
@@ -1965,6 +2006,10 @@ function screenHome() {
     '</div>' +
     (canShowTeacherDashboard
       ? '<section id="teacher-dashboard" class="teacher-dashboard card" aria-live="polite"><div class="empty">오늘의 수업 현황을 불러오는 중…</div></section>'
+      : '') +
+    (canShowTeacherDashboard && teacherState.role === 'teacher'
+      ? '<div class="card" style="margin-top:20px"><h2>교사 계정 관리</h2><p class="sub">계정 사용 종료를 요청하면 즉시 새 저장·복사·수업 시작이 중지됩니다.</p>' +
+        '<button class="btn danger" onclick="screenTeacherDeletion()">계정 사용 종료 요청</button></div>'
       : '') +
     '<div class="card" style="margin-top:20px">' +
       '<h2>진행 흐름</h2>' +
@@ -2004,7 +2049,7 @@ function renderTeacherDashboard(plans, identity, isAdmin, ownPlans) {
   if (!panel) return false;
   const escape = value => typeof esc === 'function' ? esc(value) : String(value == null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .split('"').join('&quot;').split("'").join('&#39;');
   const validPlans = Object.values(plans || {}).filter(plan => plan &&
     ['planned', 'live'].includes(plan.status) &&
     Number.isSafeInteger(plan.plannedStartAt) && Number.isSafeInteger(plan.plannedEndAt) &&
@@ -2167,6 +2212,159 @@ function retryTeacherDashboard() {
   const identity = state.identity;
   stopTeacherDashboard();
   return startTeacherDashboard(identity);
+}
+
+function teacherDeletionScreenIsCurrent(state) {
+  const route = typeof location === 'undefined' ? '#/' : String(location.hash || '#/');
+  return teacherDeletionScreen === state && !!state && teacherAuthVersion === state.authGeneration &&
+    !!teacherUser && teacherUser.uid === state.uid && !!teacherState && teacherState.uid === state.uid &&
+    ['teacher', 'deletion_pending', 'suspended'].includes(teacherState.status) &&
+    ['#/', '#', ''].includes(route);
+}
+
+function renderTeacherDeletion(state) {
+  if (!state || !teacherDeletionScreenIsCurrent(state)) return false;
+  const safe = value => typeof esc === 'function' ? esc(value) : String(value == null ? '' : value);
+  const readiness = state.readiness || {
+    ownedSetCount: 0, liveSessionCount: 0, ownedSetLimitReached: false, liveSessionLimitReached: false
+  };
+  const owned = readiness.ownedSetLimitReached ? '100개 이상' : readiness.ownedSetCount + '개';
+  const live = readiness.liveSessionLimitReached ? '100개 이상' : readiness.liveSessionCount + '개';
+  const message = state.error
+    ? '<div class="notice bad" role="alert">' + safe(state.error) + '</div>'
+    : state.message ? '<div class="notice info" role="status">' + safe(state.message) + '</div>' : '';
+  const allowance = state.allowance || {};
+  let action = '';
+  if (allowance.status === 'deletion_pending' || teacherState.status === 'deletion_pending') {
+    const eligibleAt = allowance.purgeEligibleAtMs ||
+      (allowance.purgeEligibleAt && typeof allowance.purgeEligibleAt.toMillis === 'function'
+        ? allowance.purgeEligibleAt.toMillis() : null);
+    action = '<div class="notice bad"><b>탈퇴 대기 중 — 계정은 안전하게 중지되었습니다.</b><br>' +
+      '새 저장·복사·수업계획·수업 시작은 차단됩니다. 기존 진행 세션은 종료만 할 수 있습니다.' +
+      (eligibleAt ? '<br>관리자 정리 가능 시각: ' + safe(new Date(eligibleAt).toLocaleString('ko-KR')) :
+        '<br>정확한 관리자 정리 시각을 서버에서 다시 확인해야 합니다.') + '</div>' +
+      '<p class="sub">30일 전에는 요청을 철회할 수 있습니다. 별도 관리자 중지가 있으면 철회 뒤 suspended 상태가 유지됩니다.</p>' +
+      '<button class="btn" onclick="cancelTeacherDeletion()"' + (state.busy ? ' disabled' : '') + '>탈퇴 요청 철회</button>';
+  } else if (allowance.status === 'suspended' || teacherState.status === 'suspended') {
+    action = '<div class="notice bad">탈퇴 요청은 철회됐지만 별도 관리자 중지가 유지됩니다. 관리자에게 복구를 요청해 주세요.</div>';
+  } else {
+    action = '<p class="sub">아래 문구를 정확히 입력해야 요청할 수 있습니다.</p>' +
+      '<label class="f" for="teacher-deletion-ack">확인 문구<input id="teacher-deletion-ack" autocomplete="off" placeholder="계정 사용 종료 요청"' +
+      (state.busy ? ' disabled' : '') + '></label>' +
+      '<button class="btn danger" onclick="requestTeacherDeletion(document.getElementById(\'teacher-deletion-ack\'))"' +
+      (state.busy ? ' disabled' : '') + '>계정 사용 종료 요청</button>';
+  }
+  APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><h1 style="font-size:22px">교사 계정 사용 종료</h1>' +
+    '<p class="sub">자동 삭제는 실행하지 않습니다. 관리자가 30일 경과와 모든 blocker 해소를 다시 감사한 뒤 명시적으로 정리합니다.</p>' +
+    '<div class="notice info"><b>소유 세트 ' + safe(owned) + '</b> · <b>진행 중 세션 ' + safe(live) +
+    '</b><br>소유 세트는 다른 승인 교사에게 이전하거나 휴지통 정리를 완료해야 합니다. 진행 중 세션은 안전하게 종료해 주세요.</div>' +
+    message + action + '</div></div>';
+  return true;
+}
+
+function screenTeacherDeletion() {
+  if (!teacherUser || !teacherState ||
+      !['teacher', 'deletion_pending', 'suspended'].includes(teacherState.status)) return Promise.resolve(false);
+  const state = teacherDeletionScreen = {
+    uid: teacherUser.uid,
+    authGeneration: teacherAuthVersion,
+    allowance: teacherAllowance || null,
+    readiness: null,
+    busy: false,
+    error: '',
+    message: ''
+  };
+  if (typeof onCleanup === 'function') onCleanup(() => {
+    if (teacherDeletionScreen === state) teacherDeletionScreen = null;
+  });
+  renderTeacherDeletion(state);
+  return Promise.all([
+    typeof store.getOwnTeacherAllowance === 'function'
+      ? store.getOwnTeacherAllowance(state.uid) : Promise.resolve(state.allowance),
+    store.getTeacherDeletionReadiness(state.uid)
+  ]).then(([allowance, readiness]) => {
+    if (!teacherDeletionScreenIsCurrent(state)) return false;
+    if (!allowance || allowance.uid !== state.uid) throw new Error('현재 계정 allowance를 서버에서 확인하지 못했습니다.');
+    state.allowance = allowance;
+    state.readiness = readiness;
+    renderTeacherDeletion(state);
+    return true;
+  }).catch(error => {
+    if (!teacherDeletionScreenIsCurrent(state)) return false;
+    state.error = error && error.message ? error.message : '탈퇴 준비 상태를 불러오지 못했습니다.';
+    renderTeacherDeletion(state);
+    return false;
+  });
+}
+
+function requestTeacherDeletion(acknowledgmentInput) {
+  const state = teacherDeletionScreen;
+  if (!teacherDeletionScreenIsCurrent(state) || state.busy ||
+      !state.allowance || state.allowance.status !== 'active') return Promise.resolve(false);
+  if (!acknowledgmentInput || String(acknowledgmentInput.value || '') !== '계정 사용 종료 요청') {
+    alert('확인 문구 “계정 사용 종료 요청”을 정확히 입력해 주세요.');
+    return Promise.resolve(false);
+  }
+  state.busy = true;
+  state.error = '';
+  state.message = '';
+  renderTeacherDeletion(state);
+  return store.requestTeacherDeletion(state.uid).then(allowance => {
+    if (!teacherDeletionScreenIsCurrent(state)) return false;
+    state.busy = false;
+    state.allowance = allowance;
+    state.message = '탈퇴 요청을 저장했고 교사 기능을 즉시 중지했습니다.';
+    if (typeof setTeacherAllowance === 'function') setTeacherAllowance(allowance);
+    renderTeacherDeletion(state);
+    return true;
+  }).catch(async error => {
+    if (!teacherDeletionScreenIsCurrent(state)) return false;
+    state.busy = false;
+    try {
+      const allowance = await store.getOwnTeacherAllowance(state.uid);
+      if (!teacherDeletionScreenIsCurrent(state)) return false;
+      if (allowance && allowance.status === 'deletion_pending') {
+        state.allowance = allowance;
+        state.message = '요청은 안전하게 중지 상태로 반영됐습니다. 정확한 정리 시각을 서버에서 다시 확인해 주세요.';
+        state.error = '';
+        if (typeof setTeacherAllowance === 'function') setTeacherAllowance(allowance);
+        renderTeacherDeletion(state);
+        return false;
+      }
+    } catch (reloadError) {
+      if (typeof console !== 'undefined' && console.error) console.error(reloadError);
+    }
+    state.error = error && error.message ? error.message : '탈퇴 요청을 저장하지 못했습니다.';
+    renderTeacherDeletion(state);
+    return false;
+  });
+}
+
+function cancelTeacherDeletion() {
+  const state = teacherDeletionScreen;
+  if (!teacherDeletionScreenIsCurrent(state) || state.busy || !state.allowance ||
+      state.allowance.status !== 'deletion_pending') return Promise.resolve(false);
+  if (typeof confirm === 'function' && !confirm('계정 사용 종료 요청을 철회할까요?')) return Promise.resolve(false);
+  state.busy = true;
+  state.error = '';
+  renderTeacherDeletion(state);
+  return store.cancelTeacherDeletion(state.uid).then(allowance => {
+    if (!teacherDeletionScreenIsCurrent(state)) return false;
+    state.busy = false;
+    state.allowance = allowance;
+    state.message = allowance.status === 'suspended'
+      ? '탈퇴 요청을 철회했습니다. 별도 관리자 중지는 유지됩니다.'
+      : '탈퇴 요청을 철회하고 교사 권한을 복구했습니다.';
+    if (typeof setTeacherAllowance === 'function') setTeacherAllowance(allowance);
+    renderTeacherDeletion(state);
+    return true;
+  }).catch(error => {
+    if (!teacherDeletionScreenIsCurrent(state)) return false;
+    state.busy = false;
+    state.error = error && error.message ? error.message : '탈퇴 요청을 철회하지 못했습니다.';
+    renderTeacherDeletion(state);
+    return false;
+  });
 }
 
 function teacherRequestRouteIsCurrent() {

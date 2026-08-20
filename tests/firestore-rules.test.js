@@ -254,7 +254,7 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
 function emulatorStore(modularDb, pauseFirstLiveAccess, pauseAccess, nowFn = Date.now) {
   return createFirestoreStore(
     compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess),
-    { serverTimestamp, delete() { throw new Error('not used'); } },
+    { serverTimestamp, delete: deleteField },
     nowFn
   );
 }
@@ -952,7 +952,7 @@ rulesTest('teacher-access: admin approval lists only bounded pending teacher req
     where('status', '==', 'pending'),
     queryLimit(50)
   )));
-  await assertFails(getDoc(doc(owner, 'teacher_allowances/owner-uid')));
+  await assertSucceeds(getDoc(doc(owner, 'teacher_allowances/owner-uid')));
   await assertFails(getDocs(collection(owner, 'teacher_allowances')));
 
   await assertFails(setDoc(doc(admin, 'teacher_allowances/pending-a'), {
@@ -1062,6 +1062,120 @@ rulesTest('teacher-access: admin approval lifecycle alone may suspend and restor
 
   await adminWrite('teacher_allowances/owner-uid', undefined);
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
+});
+
+rulesTest('teacher-deletion: own request, immediate denial, safe live end, hold-aware cancellation, and no client purge', async () => {
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const admin = actorFirestore('admin');
+  const ownerStore = emulatorStore(owner);
+  const adminStore = emulatorStore(admin);
+
+  await adminWrite('teacher_access_requests/owner-uid', {
+    uid: 'owner-uid', emailCanonical: 'owner@school.kr', displayName: '소유 교사',
+    organization: '', note: '', status: 'approved', revision: 2,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2),
+    decidedAt: Timestamp.fromMillis(2), decidedByUid: 'admin-uid', decisionReason: ''
+  });
+  await writeClassPlanPairDisabled('deletion-plan', {
+    status: 'live', revision: 2, sessionId: 'deletion-live',
+    actualStartedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('sessions/deletion-live', {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', registeredStudentCount: 0, studentCountRevision: 0,
+    createdAt: Timestamp.fromMillis(1), activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000),
+    classPlanId: 'deletion-plan', classPlanRevision: 2
+  });
+  await adminWrite('sessions/deletion-live/meta/live', liveQuestion(0));
+
+  await assertSucceeds(getDoc(doc(owner, 'teacher_allowances/owner-uid')));
+  await assertFails(getDoc(doc(other, 'teacher_allowances/owner-uid')));
+  await assertFails(getDocs(collection(owner, 'teacher_allowances')));
+  await assertFails(updateDoc(doc(owner, 'teacher_allowances/owner-uid'), {
+    status: 'deletion_pending', enabled: false, revision: 99,
+    deletionRequestedAt: serverTimestamp(), purgeEligibleAt: serverTimestamp(),
+    updatedAt: serverTimestamp(), updatedByUid: 'owner-uid'
+  }));
+
+  const requested = await ownerStore.requestTeacherDeletion('owner-uid');
+  assert.equal(requested.status, 'deletion_pending');
+  const pending = await adminRead('teacher_allowances/owner-uid');
+  assert.equal(pending.enabled, false);
+  assert.equal(pending.revision, 2);
+  assert.equal(pending.purgeEligibleAt.toMillis() - pending.deletionRequestedAt.toMillis(), 30 * 24 * 60 * 60 * 1000);
+  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).enabled, false);
+
+  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), { title: 'blocked-save' }));
+  await assertFails(setDoc(doc(owner, 'sessions/deletion-new'), {
+    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', registeredStudentCount: 0, studentCountRevision: 0,
+    createdAt: serverTimestamp(), activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+  }));
+  const readiness = await ownerStore.getTeacherDeletionReadiness('owner-uid');
+  assert.equal(readiness.ownedSetCount > 0, true);
+  assert.equal(readiness.liveSessionCount > 0, true);
+
+  await ownerStore.endSession('deletion-live').catch(error => {
+    throw new Error('safe-end stage: ' + error.message, { cause: error });
+  });
+  assert.equal((await adminRead('sessions/deletion-live')).status, 'ended');
+  assert.equal((await adminRead('sessions/deletion-live/meta/live')).status, 'ended');
+  const finishedPlan = await ownerStore.finishClassPlan('deletion-plan', 'deletion-live', {
+    expectedRevision: 2
+  }).catch(error => {
+    throw new Error('safe-plan-finish stage: ' + error.message, { cause: error });
+  });
+  assert.equal(finishedPlan.status, 'ended');
+  assert.equal((await adminRead('sessions/deletion-live')).classPlanRevision, 3);
+
+  await adminStore.suspendTeacher('owner-uid', 'independent-hold', requestAdminIdentity).catch(error => {
+    throw new Error('admin-hold stage: ' + error.message, { cause: error });
+  });
+  const held = await adminRead('teacher_allowances/owner-uid');
+  assert.equal(held.status, 'deletion_pending');
+  assert.equal(held.administrativeHold, true);
+  assert.equal(held.revision, 3);
+
+  const cancelled = await ownerStore.cancelTeacherDeletion('owner-uid').catch(error => {
+    throw new Error('cancel stage: ' + error.message, { cause: error });
+  });
+  assert.equal(cancelled.status, 'suspended');
+  assert.equal(cancelled.enabled, false);
+  assert.equal(cancelled.administrativeHold, true);
+  assert.equal(cancelled.revision, 4);
+  assert.equal(Object.hasOwn(cancelled, 'deletionRequestedAt'), false);
+  assert.equal(Object.hasOwn(cancelled, 'purgeEligibleAt'), false);
+
+  await assertFails(deleteDoc(doc(owner, 'teacher_allowances/owner-uid')));
+  await assertFails(deleteDoc(doc(admin, 'teacher_allowances/owner-uid')));
+  await assertFails(deleteDoc(doc(admin, 'teacher_access_requests/owner-uid')));
+});
+
+rulesTest('teacher-deletion: cancellation closes at the exact request.time boundary and rejects malformed revision/timestamps', async () => {
+  const uid = 'old-deletion-uid';
+  const email = 'old-deletion@school.kr';
+  const requestedAt = Timestamp.fromMillis(1);
+  const purgeEligibleAt = Timestamp.fromMillis(30 * 24 * 60 * 60 * 1000 + 1);
+  await adminWrite(`teacher_allowances/${uid}`, {
+    uid, emailCanonical: email, displayName: '기한 경과 교사',
+    status: 'deletion_pending', enabled: false, role: 'teacher', administrativeHold: false,
+    revision: 2, approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
+    deletionRequestedAt: requestedAt, purgeEligibleAt,
+    updatedAt: Timestamp.fromMillis(2), updatedByUid: uid
+  });
+  await adminWrite(`teacher_allowlist/${email}`, { enabled: false, role: 'teacher' });
+  const teacher = googleContext(uid, email);
+
+  await assertFails(updateDoc(doc(teacher, `teacher_allowances/${uid}`), {
+    status: 'active', enabled: true, revision: 3,
+    deletionRequestedAt: deleteField(), purgeEligibleAt: deleteField(),
+    updatedAt: serverTimestamp(), updatedByUid: uid
+  }));
+  await assertFails(updateDoc(doc(teacher, `teacher_allowances/${uid}`), {
+    revision: 2.5, updatedAt: serverTimestamp(), updatedByUid: uid
+  }));
 });
 
 rulesTest('미승인 계정과 학생은 원본 세트를 읽지 못한다', async () => {
