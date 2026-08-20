@@ -617,9 +617,9 @@
       if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
         throw new Error('신청 조회 limit 개수는 1~100이어야 합니다.');
       }
-      if (adminIdentity) await requireCurrentAdmin(adminIdentity);
+      await requireCurrentAdmin(adminIdentity);
       const snapshot = await db.collection('teacher_access_requests')
-        .where('status', '==', 'pending').limit(count).get();
+        .where('status', '==', 'pending').limit(count).get({ source: 'server' });
       const values = {};
       snapshot.docs.forEach(document => {
         assertStoredTeacherRequest(document.data(), document.id, 'pending');

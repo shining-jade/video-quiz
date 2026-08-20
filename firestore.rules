@@ -13,8 +13,9 @@ service cloud.firestore {
     function verifiedEmail() {
       return signedIn() &&
         request.auth.token.email is string &&
-        request.auth.token.email_verified == true &&
-        request.auth.token.firebase.sign_in_provider == 'google.com';
+        [request.auth.token.email_verified,
+          request.auth.token.firebase.sign_in_provider] ==
+        [true, 'google.com'];
     }
 
     function legacyAllowancePath() {
@@ -26,7 +27,9 @@ service cloud.firestore {
     }
 
     function validActiveTeacherAllowance(data) {
-      return data.status == 'active' && data.role in ['teacher', 'admin'];
+      return [data.uid, data.emailCanonical, data.status] ==
+        [request.auth.uid, request.auth.token.email, 'active'] &&
+        data.role in ['teacher', 'admin'];
     }
 
     function validLegacyTeacherAllowance() {
@@ -96,7 +99,7 @@ service cloud.firestore {
     function validPendingTeacherRequest(uid) {
       let data = request.resource.data;
       return isOwnTeacherRequest(uid) &&
-        !isApprovedTeacher() &&
+        !exists(teacherAllowancePath()) && !exists(legacyAllowancePath()) &&
         data.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'organization', 'note',
           'status', 'revision', 'createdAt', 'updatedAt'

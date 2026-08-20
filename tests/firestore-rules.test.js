@@ -477,6 +477,76 @@ rulesTest('teacher-access: teacher request rejects wrong identity, privileged fi
     pendingTeacherRequestDocument('owner-uid', 'owner@school.kr')));
 });
 
+rulesTest('teacher-access: authoritative allowance binds the current UID and exact canonical Google email for teacher and admin', async () => {
+  await adminWrite('teacher_allowlist/new-owner@school.kr', {
+    enabled: true, role: 'teacher'
+  });
+  await adminWrite('teacher_allowlist/new-admin@school.kr', {
+    enabled: true, role: 'admin'
+  });
+  const changedTeacherEmail = googleContext('owner-uid', 'new-owner@school.kr');
+  const changedAdminEmail = googleContext('admin-uid', 'new-admin@school.kr');
+  const missingEmail = testEnvironment.authenticatedContext('owner-uid', {
+    email_verified: true,
+    firebase: { sign_in_provider: 'google.com' }
+  }).firestore();
+  const missingVerified = testEnvironment.authenticatedContext('owner-uid', {
+    email: 'owner@school.kr',
+    firebase: { sign_in_provider: 'google.com' }
+  }).firestore();
+  const missingProvider = testEnvironment.authenticatedContext('admin-uid', {
+    email: 'admin@school.kr',
+    email_verified: true
+  }).firestore();
+
+  await assertFails(getDoc(doc(changedTeacherEmail, 'quiz_sets/set1')));
+  await assertFails(getDocs(query(
+    collection(changedAdminEmail, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
+  await assertFails(getDoc(doc(missingEmail, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(missingVerified, 'quiz_sets/set1')));
+  await assertFails(getDocs(query(
+    collection(missingProvider, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
+});
+
+rulesTest('teacher-access: any authoritative lifecycle record or migrated suspended legacy record blocks a new request', async () => {
+  const suspendedUid = 'suspended-requester-uid';
+  const suspendedEmail = 'suspended-requester@school.kr';
+  await adminWrite(`teacher_allowances/${suspendedUid}`, {
+    uid: suspendedUid,
+    emailCanonical: suspendedEmail,
+    displayName: '중지 교사',
+    status: 'suspended',
+    enabled: false,
+    role: 'teacher',
+    administrativeHold: true,
+    approvedAt: Timestamp.fromMillis(1),
+    approvedByUid: 'admin-uid',
+    updatedAt: Timestamp.fromMillis(2),
+    updatedByUid: 'admin-uid',
+    suspendedAt: Timestamp.fromMillis(2),
+    suspendedByUid: 'admin-uid',
+    suspensionReason: 'leave'
+  });
+  const suspended = googleContext(suspendedUid, suspendedEmail);
+  await assertFails(setDoc(doc(suspended, `teacher_access_requests/${suspendedUid}`),
+    pendingTeacherRequestDocument(suspendedUid, suspendedEmail)));
+
+  const legacyUid = 'legacy-suspended-uid';
+  const legacyEmail = 'legacy-suspended@school.kr';
+  await adminWrite(`teacher_allowlist/${legacyEmail}`, {
+    enabled: false, role: 'teacher'
+  });
+  const legacySuspended = googleContext(legacyUid, legacyEmail);
+  await assertFails(setDoc(doc(legacySuspended, `teacher_access_requests/${legacyUid}`),
+    pendingTeacherRequestDocument(legacyUid, legacyEmail)));
+});
+
 rulesTest('teacher-access: admin approval lists only bounded pending teacher requests and atomically approves or rejects', async () => {
   await adminWrite('teacher_access_requests/pending-a', {
     uid: 'pending-a', emailCanonical: 'pending-a@school.kr', displayName: 'A교사',

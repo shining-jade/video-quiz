@@ -252,8 +252,8 @@ function makeFirestoreFake(initial = {}, options = {}) {
     return {
       id: path.split('/').at(-1),
       path,
-      async get() {
-        calls.push({ operation: 'getCollection', path, filters: clone(filters) });
+      async get(optionsArg) {
+        calls.push({ operation: 'getCollection', path, filters: clone(filters), options: clone(optionsArg) });
         return querySnapshot(path, documents, filters);
       },
       where(field, operator, value) {
@@ -1463,6 +1463,20 @@ test('admin rejection is atomic, increments the exact pending revision, and crea
   assert.equal(successFake.value('teacher_allowlist/teacher@school.kr'), undefined);
 });
 
+test('admin approval list rejects an omitted identity before reading request profiles', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/sensitive': pendingTeacherRequest({
+      uid: 'sensitive', emailCanonical: 'sensitive@school.kr', note: 'private-note'
+    })
+  });
+
+  await assert.rejects(
+    createStore(fake).listPendingTeacherRequests(50),
+    /관리자/
+  );
+  assert.equal(fake.calls().some(call => call.operation === 'getCollection'), false);
+});
+
 test('admin approval list is bounded to pending teacher requests and requires current admin authority', async () => {
   const fake = makeFirestoreFake({
     'teacher_access_requests/a': pendingTeacherRequest({ uid: 'a', emailCanonical: 'a@school.kr' }),
@@ -1478,10 +1492,109 @@ test('admin approval list is bounded to pending teacher requests and requires cu
   assert.ok(fake.calls().some(call => call.operation === 'where' &&
     call.path === 'teacher_access_requests' && call.field === 'status' &&
     call.operator === '==' && call.value === 'pending'));
+  assert.ok(fake.calls().some(call => call.operation === 'getCollection' &&
+    call.path === 'teacher_access_requests' && call.options?.source === 'server'));
   await assert.rejects(store.listPendingTeacherRequests(100, {
     uid: 'teacher-a', email: 'teacher@school.kr', role: 'teacher'
   }), /관리자/);
   await assert.rejects(store.listPendingTeacherRequests(101, teacherRequestAdmin), /limit|개수/);
+});
+
+test('admin approval list returns no request profile when current admin authority is stale or offline', async t => {
+  const sensitiveRequest = pendingTeacherRequest({
+    uid: 'sensitive-teacher',
+    emailCanonical: 'sensitive@school.kr',
+    note: 'private-note'
+  });
+
+  await t.test('stale authoritative admin allowance overrides active legacy cache', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_access_requests/sensitive-teacher': sensitiveRequest,
+      'teacher_allowances/admin-uid': {
+        uid: 'admin-uid', emailCanonical: 'admin@school.kr', status: 'suspended',
+        enabled: false, role: 'admin'
+      },
+      'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+    });
+
+    await assert.rejects(
+      createStore(fake).listPendingTeacherRequests(50, teacherRequestAdmin),
+      /더 이상 유효하지|관리자/
+    );
+    assert.equal(fake.calls().some(call => call.operation === 'getCollection'), false);
+  });
+
+  await t.test('offline server authority check never reaches request query', async () => {
+    const unavailable = Object.assign(new Error('offline'), { code: 'unavailable' });
+    let queryReads = 0;
+    const db = {
+      doc() {
+        return { get(options) {
+          assert.equal(options?.source, 'server');
+          return Promise.reject(unavailable);
+        } };
+      },
+      collection() {
+        queryReads += 1;
+        throw new Error('request query must not run');
+      }
+    };
+    const store = loadStoreModule().createFirestoreStore(db, {
+      serverTimestamp() { return SERVER_TIMESTAMP; }
+    }, () => 0);
+
+    await assert.rejects(
+      store.listPendingTeacherRequests(50, teacherRequestAdmin),
+      unavailable
+    );
+    assert.equal(queryReads, 0);
+  });
+
+  await t.test('cache-only request query cannot return email or note after server admin validation', async () => {
+    const unavailable = Object.assign(new Error('server unavailable'), { code: 'unavailable' });
+    const adminAllowance = {
+      uid: 'admin-uid', emailCanonical: 'admin@school.kr', status: 'active',
+      enabled: true, role: 'admin'
+    };
+    let queryOptions;
+    const queryRef = {
+      where() { return this; },
+      limit() { return this; },
+      get(options) {
+        queryOptions = options;
+        if (options?.source === 'server') return Promise.reject(unavailable);
+        return Promise.resolve({
+          docs: [{
+            id: 'sensitive-teacher',
+            data: () => sensitiveRequest
+          }]
+        });
+      }
+    };
+    const db = {
+      doc(path) {
+        return { get(options) {
+          assert.equal(options?.source, 'server');
+          return Promise.resolve(path === 'teacher_allowances/admin-uid'
+            ? { exists: true, data: () => adminAllowance }
+            : { exists: false, data: () => undefined });
+        } };
+      },
+      collection(path) {
+        assert.equal(path, 'teacher_access_requests');
+        return queryRef;
+      }
+    };
+    const store = loadStoreModule().createFirestoreStore(db, {
+      serverTimestamp() { return SERVER_TIMESTAMP; }
+    }, () => 0);
+
+    await assert.rejects(
+      store.listPendingTeacherRequests(50, teacherRequestAdmin),
+      unavailable
+    );
+    assert.deepEqual(queryOptions, { source: 'server' });
+  });
 });
 
 test('admin approval lifecycle suspends and restores the exact teacher identity in one transaction', async () => {
