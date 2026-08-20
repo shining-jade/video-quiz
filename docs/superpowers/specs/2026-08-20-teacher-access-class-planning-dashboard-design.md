@@ -138,6 +138,7 @@ UID와 canonical email은 인증 토큰과 일치해야 한다. 일반 신청자
 ### 기존 승인 교사 문서 확장
 
 - `status: active | suspended | deletion_pending`
+- `administrativeHold: boolean` — 탈퇴 대기 중에도 관리자가 별도로 중지했는지 보존
 - `approvedAt`, `approvedByUid`
 - `suspendedAt`, `suspendedByUid`, `suspensionReason`
 - `deletionRequestedAt`, `purgeEligibleAt`
