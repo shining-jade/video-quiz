@@ -132,6 +132,17 @@ test('summarizeWindow returns advisory levels at the caution and crowded boundar
   }
 });
 
+test('summarizeWindow gives any non-cancelled low-count overlap a caution advisory', () => {
+  const candidate = privatePlan({ planId: 'candidate-low', expectedStudents: 1 });
+  const other = privatePlan({ planId: 'other-low', expectedStudents: 1 });
+  assert.deepEqual(core.summarizeWindow([other], candidate, { caution: 60, crowded: 120 }), {
+    overlappingClasses: 1,
+    expectedConcurrentStudents: 2,
+    level: 'caution',
+    canProceed: true
+  });
+});
+
 test('publicProjection whitelists dashboard-safe fields without owner or arbitrary private data', () => {
   const projection = core.publicProjection(privatePlan({
     status: 'ended', actualStartedAtMs: 20_050, actualEndedAtMs: 21_700, actualParticipants: 31,

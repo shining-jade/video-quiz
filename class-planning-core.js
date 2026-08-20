@@ -135,7 +135,7 @@
       expectedConcurrentStudents += students;
     }
     const level = expectedConcurrentStudents >= limits.crowded ? 'crowded' :
-      expectedConcurrentStudents >= limits.caution ? 'caution' : 'green';
+      (overlappingClasses > 0 || expectedConcurrentStudents >= limits.caution) ? 'caution' : 'green';
     return { overlappingClasses, expectedConcurrentStudents, level, canProceed: true };
   }
 
