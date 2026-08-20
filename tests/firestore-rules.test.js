@@ -136,6 +136,15 @@ async function adminWrite(path, value) {
   });
 }
 
+async function adminRead(path) {
+  let value;
+  await testEnvironment.withSecurityRulesDisabled(async context => {
+    const snapshot = await getDoc(doc(context.firestore(), path));
+    value = snapshot.exists() ? snapshot.data() : undefined;
+  });
+  return value;
+}
+
 function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
   let paused = false;
   let pathPaused = false;
@@ -208,14 +217,17 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
           empty: snapshot.empty
         };
       };
-      return {
+      const queryReference = target => ({
         path,
-        get() { return collectionSnapshot(modularCollection); },
+        get() { return collectionSnapshot(target); },
+        where(field, operator, value) {
+          return queryReference(query(target, where(field, operator, value)));
+        },
         limit(count) {
-          const limited = query(modularCollection, queryLimit(count));
-          return { get() { return collectionSnapshot(limited); } };
+          return queryReference(query(target, queryLimit(count)));
         }
-      };
+      });
+      return queryReference(modularCollection);
     },
     batch() {
       const batch = writeBatch(modularDb);
@@ -262,6 +274,24 @@ async function seedFirestore() {
       setDoc(doc(db, 'teacher_allowlist/admin@school.kr'), {
         enabled: true,
         role: 'admin'
+      }),
+      setDoc(doc(db, 'teacher_allowances/owner-uid'), {
+        uid: 'owner-uid', emailCanonical: 'owner@school.kr', displayName: '소유 교사',
+        status: 'active', enabled: true, role: 'teacher', administrativeHold: false,
+        approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
+        updatedAt: Timestamp.fromMillis(1), updatedByUid: 'admin-uid'
+      }),
+      setDoc(doc(db, 'teacher_allowances/other-teacher-uid'), {
+        uid: 'other-teacher-uid', emailCanonical: 'other@school.kr', displayName: '다른 교사',
+        status: 'active', enabled: true, role: 'teacher', administrativeHold: false,
+        approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
+        updatedAt: Timestamp.fromMillis(1), updatedByUid: 'admin-uid'
+      }),
+      setDoc(doc(db, 'teacher_allowances/admin-uid'), {
+        uid: 'admin-uid', emailCanonical: 'admin@school.kr', displayName: '관리자',
+        status: 'active', enabled: true, role: 'admin', administrativeHold: false,
+        approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
+        updatedAt: Timestamp.fromMillis(1), updatedByUid: 'admin-uid'
       }),
       setDoc(doc(db, 'migration_gates/set_counters'), {
         locked: false,
@@ -371,6 +401,222 @@ beforeEach(async () => {
 
 after(async () => {
   if (testEnvironment) await testEnvironment.cleanup();
+});
+
+function pendingTeacherRequestDocument(uid, emailCanonical, patch = {}) {
+  return {
+    uid,
+    emailCanonical,
+    displayName: '신청 교사',
+    organization: '1학년',
+    note: '보건 수업',
+    status: 'pending',
+    revision: 1,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...patch
+  };
+}
+
+const requestAdminIdentity = {
+  uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
+};
+
+rulesTest('teacher-access: teacher request owner may create, server-read, and cancel only the exact own pending request', async () => {
+  const unapproved = actorFirestore('unapproved');
+  const ownRef = doc(unapproved, 'teacher_access_requests/unapproved-uid');
+  await assertSucceeds(setDoc(ownRef, pendingTeacherRequestDocument(
+    'unapproved-uid', 'blocked@school.kr'
+  )));
+  await assertSucceeds(getDoc(ownRef));
+  await assertFails(getDoc(doc(unapproved, 'teacher_access_requests/owner-uid')));
+  await assertFails(setDoc(doc(unapproved, 'teacher_access_requests/other-uid'),
+    pendingTeacherRequestDocument('other-uid', 'blocked@school.kr')));
+  await assertFails(updateDoc(ownRef, {
+    status: 'approved', revision: 2, updatedAt: serverTimestamp()
+  }));
+  await assertSucceeds(updateDoc(ownRef, {
+    status: 'cancelled', revision: 2, updatedAt: serverTimestamp()
+  }));
+  await assertFails(updateDoc(ownRef, {
+    displayName: '변조', revision: 3, updatedAt: serverTimestamp()
+  }));
+});
+
+rulesTest('teacher-access: teacher request rejects wrong identity, privileged fields, duplicate overwrite, student, and signed-out access', async () => {
+  const unapproved = actorFirestore('unapproved');
+  const student = actorFirestore('student');
+  const signedOut = testEnvironment.unauthenticatedContext().firestore();
+  const ownPath = 'teacher_access_requests/unapproved-uid';
+
+  await assertFails(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
+    'unapproved-uid', 'other@school.kr'
+  )));
+  await assertFails(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
+    'unapproved-uid', 'blocked@school.kr', { decidedByUid: 'forged-admin' }
+  )));
+  await assertFails(setDoc(doc(student, 'teacher_access_requests/student-uid'),
+    pendingTeacherRequestDocument('student-uid', 'student@school.kr')));
+  await assertFails(setDoc(doc(signedOut, 'teacher_access_requests/no-user'),
+    pendingTeacherRequestDocument('no-user', 'none@school.kr')));
+
+  await assertSucceeds(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
+    'unapproved-uid', 'blocked@school.kr'
+  )));
+  await assertFails(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
+    'unapproved-uid', 'blocked@school.kr', { note: 'overwrite' }
+  )));
+  await assertFails(getDoc(doc(student, ownPath)));
+  await assertFails(getDoc(doc(signedOut, ownPath)));
+
+  const owner = actorFirestore('owner');
+  await assertFails(setDoc(doc(owner, 'teacher_access_requests/owner-uid'),
+    pendingTeacherRequestDocument('owner-uid', 'owner@school.kr')));
+  await adminWrite('teacher_allowances/owner-uid', undefined);
+  await assertFails(setDoc(doc(owner, 'teacher_access_requests/owner-uid'),
+    pendingTeacherRequestDocument('owner-uid', 'owner@school.kr')));
+});
+
+rulesTest('teacher-access: admin approval lists only bounded pending teacher requests and atomically approves or rejects', async () => {
+  await adminWrite('teacher_access_requests/pending-a', {
+    uid: 'pending-a', emailCanonical: 'pending-a@school.kr', displayName: 'A교사',
+    organization: '', note: '', status: 'pending', revision: 3,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('teacher_access_requests/pending-b', {
+    uid: 'pending-b', emailCanonical: 'pending-b@school.kr', displayName: 'B교사',
+    organization: '', note: '', status: 'pending', revision: 1,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
+  });
+  const admin = actorFirestore('admin');
+  const owner = actorFirestore('owner');
+
+  await assertSucceeds(getDocs(query(
+    collection(admin, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
+  await assertFails(getDocs(collection(admin, 'teacher_access_requests')));
+  await assertFails(getDocs(query(
+    collection(admin, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(101)
+  )));
+  await assertFails(getDocs(query(
+    collection(owner, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
+  await assertFails(getDoc(doc(owner, 'teacher_allowances/owner-uid')));
+  await assertFails(getDocs(collection(owner, 'teacher_allowances')));
+
+  await assertFails(setDoc(doc(admin, 'teacher_allowances/pending-a'), {
+    uid: 'pending-a',
+    emailCanonical: 'pending-a@school.kr',
+    displayName: 'A교사',
+    status: 'active',
+    enabled: true,
+    role: 'teacher',
+    administrativeHold: false,
+    approvedAt: serverTimestamp(),
+    approvedByUid: 'admin-uid',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+
+  const store = emulatorStore(admin);
+  await store.decideTeacherRequest(
+    'pending-a', 3, { status: 'approved', reason: 'approved-school' }, requestAdminIdentity
+  );
+  const approvedRequest = await adminRead('teacher_access_requests/pending-a');
+  const approvedAllowance = await adminRead('teacher_allowances/pending-a');
+  const approvedLegacy = await adminRead('teacher_allowlist/pending-a@school.kr');
+  assert.equal(approvedRequest.status, 'approved');
+  assert.equal(approvedRequest.revision, 4);
+  assert.equal(approvedAllowance.status, 'active');
+  assert.equal(approvedAllowance.uid, 'pending-a');
+  assert.equal(approvedAllowance.emailCanonical, 'pending-a@school.kr');
+  assert.equal(approvedLegacy.enabled, true);
+
+  await store.decideTeacherRequest(
+    'pending-b', 1, { status: 'rejected', reason: 'not-current-staff' }, requestAdminIdentity
+  );
+  const rejectedRequest = await adminRead('teacher_access_requests/pending-b');
+  assert.equal(rejectedRequest.status, 'rejected');
+  assert.equal(rejectedRequest.revision, 2);
+  assert.equal(await adminRead('teacher_allowances/pending-b'), undefined);
+});
+
+rulesTest('teacher-access: admin approval rejects stale, wrong-email, and non-pending mutations without partial allowance writes', async () => {
+  await adminWrite('teacher_access_requests/stale-teacher', {
+    uid: 'stale-teacher', emailCanonical: 'stale@school.kr', displayName: '교사',
+    organization: '', note: '', status: 'pending', revision: 2,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('teacher_access_requests/wrong-email', {
+    uid: 'wrong-email', emailCanonical: 'Wrong@School.KR', displayName: '교사',
+    organization: '', note: '', status: 'pending', revision: 1,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('teacher_access_requests/already-rejected', {
+    uid: 'already-rejected', emailCanonical: 'rejected@school.kr', displayName: '교사',
+    organization: '', note: '', status: 'rejected', revision: 2,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1),
+    decidedAt: Timestamp.fromMillis(2), decidedByUid: 'admin-uid', decisionReason: ''
+  });
+  const store = emulatorStore(actorFirestore('admin'));
+
+  await assert.rejects(store.decideTeacherRequest(
+    'stale-teacher', 1, { status: 'approved' }, requestAdminIdentity
+  ));
+  await assert.rejects(store.decideTeacherRequest(
+    'wrong-email', 1, { status: 'approved' }, requestAdminIdentity
+  ));
+  await assert.rejects(store.decideTeacherRequest(
+    'already-rejected', 2, { status: 'approved' }, requestAdminIdentity
+  ));
+  assert.equal((await adminRead('teacher_access_requests/stale-teacher')).status, 'pending');
+  assert.equal(await adminRead('teacher_allowances/stale-teacher'), undefined);
+  assert.equal(await adminRead('teacher_allowances/wrong-email'), undefined);
+  assert.equal(await adminRead('teacher_allowances/already-rejected'), undefined);
+});
+
+rulesTest('teacher-access: admin approval lifecycle alone may suspend and restore while authoritative status overrides legacy fallback', async () => {
+  const adminStore = emulatorStore(actorFirestore('admin'));
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const owner = actorFirestore('owner');
+
+  await assert.rejects(ownerStore.suspendTeacher(
+    'owner-uid', 'forged', { uid: 'owner-uid', email: 'owner@school.kr', role: 'admin' }
+  ));
+  await assertFails(updateDoc(doc(owner, 'teacher_allowances/owner-uid'), {
+    status: 'suspended', enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'owner-uid'
+  }));
+  const admin = actorFirestore('admin');
+  await assertFails(updateDoc(doc(admin, 'teacher_allowances/owner-uid'), {
+    status: 'suspended',
+    enabled: false,
+    suspendedAt: serverTimestamp(),
+    suspendedByUid: 'admin-uid',
+    suspensionReason: 'standalone',
+    updatedAt: serverTimestamp(),
+    updatedByUid: 'admin-uid'
+  }));
+
+  await adminStore.suspendTeacher('owner-uid', 'leave', requestAdminIdentity);
+  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'suspended');
+  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).enabled, false);
+  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
+
+  await adminWrite('teacher_allowlist/owner@school.kr', { enabled: true, role: 'teacher' });
+  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
+
+  await adminStore.restoreTeacher('owner-uid', requestAdminIdentity);
+  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'active');
+  await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
+
+  await adminWrite('teacher_allowances/owner-uid', undefined);
+  await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
 });
 
 rulesTest('미승인 계정과 학생은 원본 세트를 읽지 못한다', async () => {

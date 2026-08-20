@@ -877,6 +877,25 @@ test('browser Firestore store exposes no legacy owner probe or migration write A
   assert.equal(Object.prototype.hasOwnProperty.call(store, 'migrateLegacyOwnership'), false);
 });
 
+test('teacher request browser API resolves the access core loaded after firestore-store', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'firestore-store.js'), 'utf8');
+  const context = {
+    FirestoreCore: require('../firestore-core.js'),
+    CollaborationTrashCore: require('../collaboration-trash-core.js'),
+    TextEncoder
+  };
+  vm.runInNewContext(source, context);
+  context.TeacherAccessRequestCore = require('../teacher-access-request-core.js');
+  const fake = makeFirestoreFake();
+  const store = context.FirestoreStore.createFirestoreStore(
+    fake.db, fake.fieldValue, () => 1_000
+  );
+
+  await store.submitTeacherRequest(teacherRequestInput());
+
+  assert.equal(fake.value('teacher_access_requests/teacher-a').status, 'pending');
+});
+
 test('캐시된 YouTube API가 콜백보다 먼저 준비돼도 대기 작업을 즉시 실행한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const context = {
@@ -1221,6 +1240,317 @@ test('승인 프로브는 교사 보호 문서가 거부되면 미승인으로 �
     () => Promise.resolve({ exists: false, id: 'teacher', data() {} }),
     () => Promise.resolve({ exists: false, id: 'admin', data() {} })
   ]).probeTeacherAllowance('admin@school.kr'), { enabled: true, role: 'admin' });
+});
+
+function pendingTeacherRequest(patch = {}) {
+  const storedAt = { toMillis: () => 1_000 };
+  return {
+    uid: 'teacher-a',
+    emailCanonical: 'teacher@school.kr',
+    displayName: '김교사',
+    organization: '1학년',
+    note: '보건 수업',
+    status: 'pending',
+    revision: 3,
+    createdAt: storedAt,
+    updatedAt: storedAt,
+    ...patch
+  };
+}
+
+function teacherRequestInput(patch = {}) {
+  return {
+    uid: 'teacher-a',
+    emailCanonical: 'teacher@school.kr',
+    displayName: '김교사',
+    organization: '1학년',
+    note: '보건 수업',
+    status: 'pending',
+    revision: 1,
+    createdAtMs: 1_000,
+    updatedAtMs: 1_000,
+    ...patch
+  };
+}
+
+const teacherRequestAdmin = {
+  uid: 'admin-uid', email: 'ADMIN@School.KR', role: 'admin'
+};
+
+test('teacher request submit, server read, and exact-revision cancellation preserve owner identity', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  await store.submitTeacherRequest(teacherRequestInput());
+  const submitted = fake.value('teacher_access_requests/teacher-a');
+  assert.deepEqual({
+    ...submitted,
+    createdAt: submitted.createdAt.toMillis(),
+    updatedAt: submitted.updatedAt.toMillis()
+  }, {
+    uid: 'teacher-a',
+    emailCanonical: 'teacher@school.kr',
+    displayName: '김교사',
+    organization: '1학년',
+    note: '보건 수업',
+    status: 'pending',
+    revision: 1,
+    createdAt: 50_000,
+    updatedAt: 50_000
+  });
+
+  assert.deepEqual(await store.getOwnTeacherRequest('teacher-a'), {
+    uid: 'teacher-a',
+    emailCanonical: 'teacher@school.kr',
+    displayName: '김교사',
+    organization: '1학년',
+    note: '보건 수업',
+    status: 'pending',
+    revision: 1,
+    createdAtMs: 50_000,
+    updatedAtMs: 50_000
+  });
+
+  await store.cancelTeacherRequest('teacher-a', 1);
+  const cancelled = fake.value('teacher_access_requests/teacher-a');
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.revision, 2);
+  assert.equal(cancelled.uid, 'teacher-a');
+  assert.equal(cancelled.emailCanonical, 'teacher@school.kr');
+  assert.equal(cancelled.updatedAt.toMillis(), 50_000);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 2);
+});
+
+test('teacher request submit and cancellation reject duplicates, privileged fields, stale revisions, and identity drift', async () => {
+  const existing = pendingTeacherRequest();
+  const fake = makeFirestoreFake({ 'teacher_access_requests/teacher-a': existing });
+  const store = createStore(fake);
+
+  await assert.rejects(store.submitTeacherRequest(teacherRequestInput()), /이미 존재|existing/);
+  await assert.rejects(store.submitTeacherRequest(teacherRequestInput({
+    decidedByUid: 'forged-admin'
+  })), /허용되지 않은|invalid/i);
+  await assert.rejects(store.cancelTeacherRequest('teacher-a', 2), /revision|리비전/);
+  fake.emit('teacher_access_requests/teacher-a', pendingTeacherRequest({ uid: 'teacher-b' }));
+  await assert.rejects(store.cancelTeacherRequest('teacher-a', 3), /identity|UID|신원/);
+  assert.equal(fake.value('teacher_access_requests/teacher-a').status, 'pending');
+});
+
+test('admin approval atomically updates the teacher request and both authoritative and legacy allowances', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+
+  await store.decideTeacherRequest(
+    'teacher-a', 3, { status: 'approved', reason: 'approved-school' }, teacherRequestAdmin
+  );
+
+  const request = fake.value('teacher_access_requests/teacher-a');
+  assert.equal(request.status, 'approved');
+  assert.equal(request.revision, 4);
+  assert.equal(request.decidedByUid, 'admin-uid');
+  assert.equal(request.decisionReason, 'approved-school');
+  assert.equal(request.decidedAt.toMillis(), 50_000);
+  assert.equal(request.updatedAt.toMillis(), 50_000);
+
+  const allowance = fake.value('teacher_allowances/teacher-a');
+  assert.deepEqual({
+    ...allowance,
+    approvedAt: allowance.approvedAt.toMillis(),
+    updatedAt: allowance.updatedAt.toMillis()
+  }, {
+    uid: 'teacher-a',
+    emailCanonical: 'teacher@school.kr',
+    displayName: '김교사',
+    status: 'active',
+    enabled: true,
+    role: 'teacher',
+    administrativeHold: false,
+    approvedAt: 50_000,
+    approvedByUid: 'admin-uid',
+    updatedAt: 50_000,
+    updatedByUid: 'admin-uid'
+  });
+  const legacy = fake.value('teacher_allowlist/teacher@school.kr');
+  assert.equal(legacy.enabled, true);
+  assert.equal(legacy.role, 'teacher');
+  assert.equal(legacy.updatedByUid, 'admin-uid');
+  assert.equal(legacy.updatedAt.toMillis(), 50_000);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 1);
+});
+
+test('admin approval or rejection commits nothing for stale revision, noncanonical request email, or allowance identity mismatch', async t => {
+  const cases = [
+    {
+      name: 'stale revision', expectedRevision: 2,
+      initial: { 'teacher_access_requests/teacher-a': pendingTeacherRequest() }
+    },
+    {
+      name: 'noncanonical request email', expectedRevision: 3,
+      initial: { 'teacher_access_requests/teacher-a': pendingTeacherRequest({ emailCanonical: 'Teacher@School.KR' }) }
+    },
+    {
+      name: 'allowance identity mismatch', expectedRevision: 3,
+      initial: {
+        'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+        'teacher_allowances/teacher-a': {
+          uid: 'teacher-a', emailCanonical: 'other@school.kr', status: 'suspended',
+          enabled: false, role: 'teacher'
+        }
+      }
+    },
+    {
+      name: 'already authoritative allowance', expectedRevision: 3,
+      initial: {
+        'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+        'teacher_allowances/teacher-a': {
+          uid: 'teacher-a', emailCanonical: 'teacher@school.kr', displayName: '김교사',
+          status: 'suspended', enabled: false, role: 'teacher', administrativeHold: false,
+          approvedAt: { toMillis: () => 1 }, approvedByUid: 'first-admin',
+          updatedAt: { toMillis: () => 1 }, updatedByUid: 'first-admin',
+          suspendedAt: { toMillis: () => 1 }, suspendedByUid: 'first-admin',
+          suspensionReason: ''
+        }
+      }
+    }
+  ];
+
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const fake = makeFirestoreFake({
+        ...entry.initial,
+        'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+      });
+      const before = clone(entry.initial);
+      const store = createStore(fake);
+      await assert.rejects(store.decideTeacherRequest(
+        'teacher-a', entry.expectedRevision, { status: 'approved' }, teacherRequestAdmin
+      ));
+      assert.deepEqual(fake.value('teacher_access_requests/teacher-a'), before['teacher_access_requests/teacher-a']);
+      assert.deepEqual(fake.value('teacher_allowances/teacher-a'), before['teacher_allowances/teacher-a']);
+      assert.equal(fake.value('teacher_allowlist/teacher@school.kr'), undefined);
+    });
+  }
+});
+
+test('admin rejection is atomic, increments the exact pending revision, and creates no allowance', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  }, { failTransactionAt: 1 });
+  const store = createStore(fake);
+
+  await assert.rejects(store.decideTeacherRequest(
+    'teacher-a', 3, { status: 'rejected', reason: 'not-current-staff' }, teacherRequestAdmin
+  ), /planned transaction failure/);
+  assert.equal(fake.value('teacher_access_requests/teacher-a').status, 'pending');
+  assert.equal(fake.value('teacher_allowances/teacher-a'), undefined);
+
+  const successFake = makeFirestoreFake({
+    'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  await createStore(successFake).decideTeacherRequest(
+    'teacher-a', 3, { status: 'rejected', reason: 'not-current-staff' }, teacherRequestAdmin
+  );
+  const rejected = successFake.value('teacher_access_requests/teacher-a');
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(rejected.revision, 4);
+  assert.equal(rejected.decisionReason, 'not-current-staff');
+  assert.equal(successFake.value('teacher_allowances/teacher-a'), undefined);
+  assert.equal(successFake.value('teacher_allowlist/teacher@school.kr'), undefined);
+});
+
+test('admin approval list is bounded to pending teacher requests and requires current admin authority', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/a': pendingTeacherRequest({ uid: 'a', emailCanonical: 'a@school.kr' }),
+    'teacher_access_requests/b': pendingTeacherRequest({ uid: 'b', emailCanonical: 'b@school.kr' }),
+    'teacher_access_requests/c': pendingTeacherRequest({ uid: 'c', emailCanonical: 'c@school.kr', status: 'cancelled' }),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+
+  const requests = await store.listPendingTeacherRequests(1, teacherRequestAdmin);
+  assert.deepEqual(Object.keys(requests), ['a']);
+  assert.equal(requests.a.createdAtMs, 1_000);
+  assert.ok(fake.calls().some(call => call.operation === 'where' &&
+    call.path === 'teacher_access_requests' && call.field === 'status' &&
+    call.operator === '==' && call.value === 'pending'));
+  await assert.rejects(store.listPendingTeacherRequests(100, {
+    uid: 'teacher-a', email: 'teacher@school.kr', role: 'teacher'
+  }), /관리자/);
+  await assert.rejects(store.listPendingTeacherRequests(101, teacherRequestAdmin), /limit|개수/);
+});
+
+test('admin approval lifecycle suspends and restores the exact teacher identity in one transaction', async () => {
+  const approvedAt = { toMillis: () => 1_000 };
+  const allowance = {
+    uid: 'teacher-a',
+    emailCanonical: 'teacher@school.kr',
+    displayName: '김교사',
+    status: 'active',
+    enabled: true,
+    role: 'teacher',
+    administrativeHold: false,
+    approvedAt,
+    approvedByUid: 'first-admin',
+    updatedAt: approvedAt,
+    updatedByUid: 'first-admin'
+  };
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': allowance,
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' },
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+
+  await store.suspendTeacher('teacher-a', 'leave', teacherRequestAdmin);
+  const suspended = fake.value('teacher_allowances/teacher-a');
+  assert.equal(suspended.status, 'suspended');
+  assert.equal(suspended.enabled, false);
+  assert.equal(suspended.suspensionReason, 'leave');
+  assert.equal(suspended.suspendedByUid, 'admin-uid');
+  assert.equal(suspended.suspendedAt.toMillis(), 50_000);
+  assert.equal(fake.value('teacher_allowlist/teacher@school.kr').enabled, false);
+
+  await store.restoreTeacher('teacher-a', teacherRequestAdmin);
+  const restored = fake.value('teacher_allowances/teacher-a');
+  assert.equal(restored.status, 'active');
+  assert.equal(restored.enabled, true);
+  assert.equal(Object.hasOwn(restored, 'suspendedAt'), false);
+  assert.equal(Object.hasOwn(restored, 'suspendedByUid'), false);
+  assert.equal(Object.hasOwn(restored, 'suspensionReason'), false);
+  assert.equal(restored.uid, 'teacher-a');
+  assert.equal(restored.emailCanonical, 'teacher@school.kr');
+  assert.equal(fake.value('teacher_allowlist/teacher@school.kr').enabled, true);
+  assert.equal(fake.calls().filter(call => call.operation === 'runTransaction').length, 2);
+});
+
+test('admin approval lifecycle rejects non-admin, wrong UID, overlong reason, and deletion-pending restore without writes', async () => {
+  const approvedAt = { toMillis: () => 1 };
+  const allowance = {
+    uid: 'teacher-a', emailCanonical: 'teacher@school.kr', displayName: '김교사',
+    status: 'active', enabled: true, role: 'teacher', administrativeHold: false,
+    approvedAt, approvedByUid: 'admin-uid', updatedAt: approvedAt,
+    updatedByUid: 'admin-uid'
+  };
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-a': allowance,
+    'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' },
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+  const teacher = { uid: 'teacher-a', email: 'teacher@school.kr', role: 'teacher' };
+
+  await assert.rejects(store.suspendTeacher('teacher-a', 'x', teacher), /관리자/);
+  await assert.rejects(store.suspendTeacher('teacher-b', 'x', teacherRequestAdmin), /allowance|승인|문서/);
+  await assert.rejects(store.suspendTeacher('teacher-a', 'x'.repeat(201), teacherRequestAdmin), /200/);
+  fake.emit('teacher_allowances/teacher-a', { ...allowance, status: 'deletion_pending', enabled: false });
+  await assert.rejects(store.restoreTeacher('teacher-a', teacherRequestAdmin), /deletion|탈퇴/);
+  assert.equal(fake.value('teacher_allowances/teacher-a').status, 'deletion_pending');
+  assert.equal(fake.value('teacher_allowlist/teacher@school.kr').enabled, true);
 });
 
 test('allowance API canonicalizes email and writes audited admin changes', async () => {

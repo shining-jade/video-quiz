@@ -5,10 +5,13 @@
   const collaboration = typeof module === 'object' && module.exports
     ? require('./collaboration-trash-core.js')
     : root.CollaborationTrashCore;
-  const api = factory(core, collaboration);
+  const teacherAccess = typeof module === 'object' && module.exports
+    ? require('./teacher-access-request-core.js')
+    : root.TeacherAccessRequestCore;
+  const api = factory(core, collaboration, teacherAccess);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, collaboration) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (core, collaboration, teacherAccess) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
   const SAFE_REQUEST_BYTES = 8_000_000;
@@ -356,6 +359,359 @@
 
     const canonicalTeacherEmail = email => String(email == null ? '' : email).trim().toLowerCase();
 
+    function teacherAccessCore() {
+      const value = teacherAccess ||
+        (typeof globalThis !== 'undefined' && globalThis.TeacherAccessRequestCore);
+      if (!value || typeof value.validateRequest !== 'function') {
+        throw new Error('TeacherAccessRequestCore가 준비되지 않았습니다.');
+      }
+      return value;
+    }
+
+    const teacherRequestBaseKeys = [
+      'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+      'status', 'revision', 'createdAt', 'updatedAt'
+    ];
+    const teacherRequestDecisionKeys = teacherRequestBaseKeys.concat([
+      'decidedAt', 'decidedByUid', 'decisionReason'
+    ]);
+
+    const ownKeysOnly = (value, allowed) => {
+      const keys = Object.keys(value || {});
+      return keys.length === allowed.length && keys.every(key => allowed.includes(key));
+    };
+
+    function teacherRequestValue(snapshot) {
+      if (!snapshot || !snapshot.exists) return null;
+      const data = snapshot.data() || {};
+      const value = { ...data };
+      const createdAtMs = timestampMillis(data.createdAt);
+      const updatedAtMs = timestampMillis(data.updatedAt);
+      delete value.createdAt;
+      delete value.updatedAt;
+      value.createdAtMs = createdAtMs;
+      value.updatedAtMs = updatedAtMs;
+      if (Object.prototype.hasOwnProperty.call(data, 'decidedAt')) {
+        value.decidedAtMs = timestampMillis(data.decidedAt);
+        delete value.decidedAt;
+      }
+      return value;
+    }
+
+    function assertStoredTeacherRequest(data, uid, requiredStatus) {
+      const value = data || {};
+      const decided = value.status !== 'pending' && value.status !== 'cancelled';
+      const allowed = decided ? teacherRequestDecisionKeys : teacherRequestBaseKeys;
+      if (!ownKeysOnly(value, allowed)) {
+        throw new Error('교사 신청 문서에 허용되지 않은 필드가 있습니다.');
+      }
+      const request = {
+        ...value,
+        createdAtMs: timestampMillis(value.createdAt),
+        updatedAtMs: timestampMillis(value.updatedAt)
+      };
+      delete request.createdAt;
+      delete request.updatedAt;
+      if (Object.prototype.hasOwnProperty.call(value, 'decidedAt')) {
+        request.decidedAtMs = timestampMillis(value.decidedAt);
+        delete request.decidedAt;
+      }
+      const validation = teacherAccessCore().validateRequest(request);
+      if (!validation.ok || request.uid !== uid ||
+          request.emailCanonical !== canonicalTeacherEmail(request.emailCanonical)) {
+        throw new Error('교사 신청 신원 또는 문서 형식이 유효하지 않습니다.');
+      }
+      if (requiredStatus && request.status !== requiredStatus) {
+        throw new Error(requiredStatus + ' 교사 신청만 처리할 수 있습니다.');
+      }
+      return request;
+    }
+
+    function assertNewTeacherRequest(request) {
+      const value = request || {};
+      const allowed = [
+        'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+        'status', 'revision', 'createdAtMs', 'updatedAtMs'
+      ];
+      const validation = teacherAccessCore().validateRequest(value);
+      if (!ownKeysOnly(value, allowed) || !validation.ok || value.status !== 'pending' ||
+          value.revision !== 1 || value.emailCanonical !== canonicalTeacherEmail(value.emailCanonical)) {
+        throw new Error('invalid 교사 신청: 허용되지 않은 필드 또는 신원 값입니다.');
+      }
+      return value;
+    }
+
+    function assertUid(uid) {
+      if (typeof uid !== 'string' || !uid) throw new Error('교사 UID가 필요합니다.');
+      return uid;
+    }
+
+    function assertExpectedRevision(revision) {
+      if (!Number.isSafeInteger(revision) || revision < 1) {
+        throw new Error('정확한 positive safe integer revision이 필요합니다.');
+      }
+      return revision;
+    }
+
+    function assertAdminIdentity(actor) {
+      const value = actor || {};
+      const email = canonicalTeacherEmail(value.email);
+      if (!value.uid || !email || value.role !== 'admin') {
+        throw new Error('관리자 계정만 교사 신청과 승인 상태를 변경할 수 있습니다.');
+      }
+      if (value.authGeneration != null && value.currentAuthGeneration != null &&
+          value.authGeneration !== value.currentAuthGeneration) {
+        throw new Error('로그인 상태가 변경되어 다시 시도해 주세요.');
+      }
+      return { ...value, email };
+    }
+
+    function validAuthoritativeAdmin(data, actor) {
+      return !!data && data.uid === actor.uid &&
+        data.emailCanonical === actor.email && data.status === 'active' &&
+        data.enabled === true && data.role === 'admin';
+    }
+
+    function validLegacyAdmin(data) {
+      return !!data && data.enabled === true && data.role === 'admin';
+    }
+
+    async function requireTransactionAdmin(transaction, actor) {
+      const current = assertAdminIdentity(actor);
+      const authoritativeRef = db.doc('teacher_allowances/' + current.uid);
+      const legacyRef = db.doc('teacher_allowlist/' + current.email);
+      const authoritativeSnapshot = await transaction.get(authoritativeRef);
+      const legacySnapshot = await transaction.get(legacyRef);
+      const authoritative = authoritativeSnapshot.exists ? authoritativeSnapshot.data() : null;
+      const legacy = legacySnapshot.exists ? legacySnapshot.data() : null;
+      if (authoritativeSnapshot.exists
+        ? !validAuthoritativeAdmin(authoritative, current)
+        : !validLegacyAdmin(legacy)) {
+        throw new Error('현재 계정의 관리자 승인이 더 이상 유효하지 않습니다.');
+      }
+      return current;
+    }
+
+    async function submitTeacherRequest(request) {
+      const value = assertNewTeacherRequest(request);
+      const reference = db.doc('teacher_access_requests/' + value.uid);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (snapshot.exists) throw new Error('교사 신청이 이미 존재합니다.');
+        transaction.set(reference, {
+          uid: value.uid,
+          emailCanonical: value.emailCanonical,
+          displayName: value.displayName,
+          organization: value.organization,
+          note: value.note,
+          status: 'pending',
+          revision: 1,
+          createdAt: fieldValue.serverTimestamp(),
+          updatedAt: fieldValue.serverTimestamp()
+        });
+        return { ...value };
+      });
+    }
+
+    async function getOwnTeacherRequest(uid) {
+      const exactUid = assertUid(uid);
+      const snapshot = await db.doc('teacher_access_requests/' + exactUid).get({ source: 'server' });
+      if (!snapshot.exists) return null;
+      assertStoredTeacherRequest(snapshot.data(), exactUid);
+      return teacherRequestValue(snapshot);
+    }
+
+    async function cancelTeacherRequest(uid, expectedRevision) {
+      const exactUid = assertUid(uid);
+      const revision = assertExpectedRevision(expectedRevision);
+      const reference = db.doc('teacher_access_requests/' + exactUid);
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists) throw new Error('교사 신청 문서가 없습니다.');
+        const request = assertStoredTeacherRequest(snapshot.data(), exactUid, 'pending');
+        if (request.revision !== revision) throw new Error('교사 신청 revision이 변경되었습니다.');
+        if (request.revision >= Number.MAX_SAFE_INTEGER) throw new Error('교사 신청 revision이 범위를 넘었습니다.');
+        transaction.update(reference, {
+          status: 'cancelled',
+          revision: request.revision + 1,
+          updatedAt: fieldValue.serverTimestamp()
+        });
+        return { ...request, status: 'cancelled', revision: request.revision + 1 };
+      });
+    }
+
+    function assertDecision(decision) {
+      const value = decision || {};
+      if (!value || !['approved', 'rejected'].includes(value.status)) {
+        throw new Error('approved 또는 rejected 결정만 허용됩니다.');
+      }
+      const reason = String(value.reason == null ? value.decisionReason || '' : value.reason);
+      if (reason.length > 200) throw new Error('decision reason 사유는 200자 이하여야 합니다.');
+      return { status: value.status, reason };
+    }
+
+    async function decideTeacherRequest(uid, expectedRevision, decision, adminIdentity) {
+      const exactUid = assertUid(uid);
+      const revision = assertExpectedRevision(expectedRevision);
+      const normalized = assertDecision(decision);
+      const requestRef = db.doc('teacher_access_requests/' + exactUid);
+      const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      return db.runTransaction(async transaction => {
+        const admin = await requireTransactionAdmin(transaction, adminIdentity);
+        const requestSnapshot = await transaction.get(requestRef);
+        if (!requestSnapshot.exists) throw new Error('교사 신청 문서가 없습니다.');
+        const request = assertStoredTeacherRequest(requestSnapshot.data(), exactUid, 'pending');
+        if (request.revision !== revision) throw new Error('교사 신청 revision이 변경되었습니다.');
+        if (request.revision >= Number.MAX_SAFE_INTEGER) throw new Error('교사 신청 revision이 범위를 넘었습니다.');
+        const legacyRef = db.doc('teacher_allowlist/' + request.emailCanonical);
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const legacySnapshot = await transaction.get(legacyRef);
+        const allowance = allowanceSnapshot.exists ? allowanceSnapshot.data() : null;
+        const legacy = legacySnapshot.exists ? legacySnapshot.data() : null;
+        if (allowanceSnapshot.exists) {
+          if (allowance.uid !== exactUid || allowance.emailCanonical !== request.emailCanonical ||
+              allowance.role !== 'teacher') {
+            throw new Error('기존 teacher allowance identity가 신청 신원과 일치하지 않습니다.');
+          }
+          throw new Error('기존 teacher allowance 승인 문서가 이미 존재합니다.');
+        }
+        if (legacySnapshot.exists && legacy.role !== 'teacher') {
+          throw new Error('기존 legacy allowance identity가 신청 신원과 일치하지 않습니다.');
+        }
+        transaction.update(requestRef, {
+          status: normalized.status,
+          revision: request.revision + 1,
+          decidedAt: fieldValue.serverTimestamp(),
+          decidedByUid: admin.uid,
+          decisionReason: normalized.reason,
+          updatedAt: fieldValue.serverTimestamp()
+        });
+        if (normalized.status === 'approved') {
+          const timestamp = fieldValue.serverTimestamp();
+          transaction.set(allowanceRef, {
+            uid: exactUid,
+            emailCanonical: request.emailCanonical,
+            displayName: request.displayName,
+            status: 'active',
+            enabled: true,
+            role: 'teacher',
+            administrativeHold: false,
+            approvedAt: timestamp,
+            approvedByUid: admin.uid,
+            updatedAt: timestamp,
+            updatedByUid: admin.uid
+          });
+          transaction.set(legacyRef, {
+            enabled: true,
+            role: 'teacher',
+            updatedAt: fieldValue.serverTimestamp(),
+            updatedByUid: admin.uid
+          });
+        }
+        return { ...request, status: normalized.status, revision: request.revision + 1 };
+      });
+    }
+
+    async function listPendingTeacherRequests(limit, adminIdentity) {
+      const count = limit == null ? 50 : Number(limit);
+      if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
+        throw new Error('신청 조회 limit 개수는 1~100이어야 합니다.');
+      }
+      if (adminIdentity) await requireCurrentAdmin(adminIdentity);
+      const snapshot = await db.collection('teacher_access_requests')
+        .where('status', '==', 'pending').limit(count).get();
+      const values = {};
+      snapshot.docs.forEach(document => {
+        assertStoredTeacherRequest(document.data(), document.id, 'pending');
+        values[document.id] = teacherRequestValue(document);
+      });
+      return values;
+    }
+
+    function assertAllowanceIdentity(snapshot, uid) {
+      if (!snapshot.exists) throw new Error('teacher allowance 승인 문서가 없습니다.');
+      const allowance = snapshot.data() || {};
+      if (allowance.uid !== uid ||
+          allowance.emailCanonical !== canonicalTeacherEmail(allowance.emailCanonical) ||
+          !allowance.emailCanonical || allowance.role !== 'teacher') {
+        throw new Error('teacher allowance identity 신원이 일치하지 않습니다.');
+      }
+      return allowance;
+    }
+
+    async function suspendTeacher(uid, reason, adminIdentity) {
+      const exactUid = assertUid(uid);
+      const suspensionReason = String(reason || '');
+      if (suspensionReason.length > 200) throw new Error('중지 사유는 200자 이하여야 합니다.');
+      const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      return db.runTransaction(async transaction => {
+        const admin = await requireTransactionAdmin(transaction, adminIdentity);
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = assertAllowanceIdentity(allowanceSnapshot, exactUid);
+        const legacyRef = db.doc('teacher_allowlist/' + allowance.emailCanonical);
+        const legacySnapshot = await transaction.get(legacyRef);
+        if (!legacySnapshot.exists || legacySnapshot.data().role !== 'teacher') {
+          throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
+        }
+        if (allowance.status !== 'active' || allowance.enabled !== true) {
+          throw new Error('active 교사만 중지할 수 있습니다.');
+        }
+        const timestamp = fieldValue.serverTimestamp();
+        transaction.set(allowanceRef, {
+          ...allowance,
+          status: 'suspended',
+          enabled: false,
+          suspendedAt: timestamp,
+          suspendedByUid: admin.uid,
+          suspensionReason,
+          updatedAt: timestamp,
+          updatedByUid: admin.uid
+        });
+        transaction.set(legacyRef, {
+          enabled: false,
+          role: 'teacher',
+          updatedAt: fieldValue.serverTimestamp(),
+          updatedByUid: admin.uid
+        });
+      });
+    }
+
+    async function restoreTeacher(uid, adminIdentity) {
+      const exactUid = assertUid(uid);
+      const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      return db.runTransaction(async transaction => {
+        const admin = await requireTransactionAdmin(transaction, adminIdentity);
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = assertAllowanceIdentity(allowanceSnapshot, exactUid);
+        const legacyRef = db.doc('teacher_allowlist/' + allowance.emailCanonical);
+        const legacySnapshot = await transaction.get(legacyRef);
+        if (!legacySnapshot.exists || legacySnapshot.data().role !== 'teacher') {
+          throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
+        }
+        if (allowance.status === 'deletion_pending') {
+          throw new Error('deletion_pending 탈퇴 대기 교사는 복구할 수 없습니다.');
+        }
+        if (allowance.status !== 'suspended' || allowance.enabled !== false) {
+          throw new Error('suspended 교사만 복구할 수 있습니다.');
+        }
+        const restored = { ...allowance };
+        delete restored.suspendedAt;
+        delete restored.suspendedByUid;
+        delete restored.suspensionReason;
+        restored.status = 'active';
+        restored.enabled = true;
+        restored.updatedAt = fieldValue.serverTimestamp();
+        restored.updatedByUid = admin.uid;
+        transaction.set(allowanceRef, restored);
+        transaction.set(legacyRef, {
+          enabled: true,
+          role: 'teacher',
+          updatedAt: fieldValue.serverTimestamp(),
+          updatedByUid: admin.uid
+        });
+      });
+    }
+
     function allowanceData(snapshot) {
       if (!snapshot || !snapshot.exists) return null;
       const data = snapshot.data() || {};
@@ -368,21 +724,19 @@
     }
 
     async function requireCurrentAdmin(actor) {
-      const value = actor || {};
-      const email = canonicalTeacherEmail(value.email);
-      if (!value.uid || !email || value.role !== 'admin') {
-        throw new Error('관리자 계정만 승인 교사 목록을 변경할 수 있습니다.');
-      }
-      if (value.authGeneration != null && value.currentAuthGeneration != null &&
-          value.authGeneration !== value.currentAuthGeneration) {
-        throw new Error('로그인 상태가 변경되어 다시 시도해 주세요.');
-      }
-      const snapshot = await db.doc('teacher_allowlist/' + email).get({ source: 'server' });
-      const allowance = allowanceData(snapshot);
-      if (!allowance || allowance.enabled !== true || allowance.role !== 'admin') {
+      const value = assertAdminIdentity(actor);
+      const authoritativeSnapshot = await db.doc('teacher_allowances/' + value.uid)
+        .get({ source: 'server' });
+      const legacySnapshot = await db.doc('teacher_allowlist/' + value.email)
+        .get({ source: 'server' });
+      const authoritative = authoritativeSnapshot.exists ? authoritativeSnapshot.data() : null;
+      const legacy = legacySnapshot.exists ? legacySnapshot.data() : null;
+      if (authoritativeSnapshot.exists
+        ? !validAuthoritativeAdmin(authoritative, value)
+        : !validLegacyAdmin(legacy)) {
         throw new Error('현재 계정의 관리자 승인이 더 이상 유효하지 않습니다.');
       }
-      return { ...value, email, allowance };
+      return { ...value, allowance: authoritative || legacy };
     }
 
     function validateAllowanceRole(role) {
@@ -1667,6 +2021,13 @@
 
     return {
       probeTeacherAllowance,
+      submitTeacherRequest,
+      getOwnTeacherRequest,
+      cancelTeacherRequest,
+      listPendingTeacherRequests,
+      decideTeacherRequest,
+      suspendTeacher,
+      restoreTeacher,
       listTeacherAllowances,
       upsertTeacherAllowance,
       disableTeacherAllowance,

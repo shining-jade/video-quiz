@@ -17,23 +17,40 @@ service cloud.firestore {
         request.auth.token.firebase.sign_in_provider == 'google.com';
     }
 
-    function allowancePath() {
+    function legacyAllowancePath() {
       return /databases/$(database)/documents/teacher_allowlist/$(request.auth.token.email);
     }
 
-    function allowance() {
-      return get(allowancePath());
+    function teacherAllowancePath() {
+      return /databases/$(database)/documents/teacher_allowances/$(request.auth.uid);
+    }
+
+    function validActiveTeacherAllowance(data) {
+      return data.status == 'active' && data.role in ['teacher', 'admin'];
+    }
+
+    function validLegacyTeacherAllowance() {
+      return exists(legacyAllowancePath()) &&
+        get(legacyAllowancePath()).data.enabled == true &&
+        get(legacyAllowancePath()).data.role in ['teacher', 'admin'];
     }
 
     function isApprovedTeacher() {
-      return verifiedEmail() &&
-        exists(allowancePath()) &&
-        allowance().data.enabled == true &&
-        allowance().data.role in ['teacher', 'admin'];
+      let currentExists = exists(teacherAllowancePath());
+      return verifiedEmail() && (currentExists
+        ? validActiveTeacherAllowance(get(teacherAllowancePath()).data)
+        : validLegacyTeacherAllowance());
     }
 
     function isAdmin() {
-      return isApprovedTeacher() && allowance().data.role == 'admin';
+      let currentExists = exists(teacherAllowancePath());
+      let approved = currentExists
+        ? validActiveTeacherAllowance(get(teacherAllowancePath()).data)
+        : validLegacyTeacherAllowance();
+      return verifiedEmail() && approved &&
+        (currentExists
+          ? get(teacherAllowancePath()).data.role
+          : get(legacyAllowancePath()).data.role) == 'admin';
     }
 
     function canonicalAllowanceId(email) {
@@ -54,6 +71,180 @@ service cloud.firestore {
       return email == request.auth.token.email &&
         resource.data.get('role', null) == 'admin' &&
         (!request.resource.data.enabled || request.resource.data.role != 'admin');
+    }
+
+    function isPositiveSafeRevision(value) {
+      return value is int && value > 0 && value <= 9007199254740991;
+    }
+
+    function validTeacherRequestProfile(data, uid) {
+      return data.uid == uid &&
+        data.emailCanonical is string && canonicalAllowanceId(data.emailCanonical) &&
+        data.displayName is string && data.displayName.size() >= 1 &&
+        data.displayName.size() <= 80 &&
+        data.organization is string && data.organization.size() <= 120 &&
+        data.note is string && data.note.size() <= 500 &&
+        data.status in ['pending', 'approved', 'rejected', 'cancelled'] &&
+        isPositiveSafeRevision(data.revision) &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isOwnTeacherRequest(uid) {
+      return verifiedEmail() && request.auth.uid == uid;
+    }
+
+    function validPendingTeacherRequest(uid) {
+      let data = request.resource.data;
+      return isOwnTeacherRequest(uid) &&
+        !isApprovedTeacher() &&
+        data.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+          'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        validTeacherRequestProfile(data, uid) &&
+        data.emailCanonical == request.auth.token.email &&
+        data.status == 'pending' && data.revision == 1 &&
+        data.createdAt == request.time && data.updatedAt == request.time;
+    }
+
+    function validOwnTeacherRequestCancellation(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return isOwnTeacherRequest(uid) &&
+        before.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+          'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        after.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+          'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        validTeacherRequestProfile(before, uid) && validTeacherRequestProfile(after, uid) &&
+        before.emailCanonical == request.auth.token.email &&
+        before.status == 'pending' && after.status == 'cancelled' &&
+        after.revision == before.revision + 1 &&
+        after.createdAt == before.createdAt && after.updatedAt == request.time &&
+        after.diff(before).affectedKeys().hasOnly(['status', 'revision', 'updatedAt']);
+    }
+
+    function validApprovedTeacherAllowance(uid, data, requestData) {
+      return data.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
+          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid'
+        ]) &&
+        data.uid == uid && data.emailCanonical == requestData.emailCanonical &&
+        data.displayName == requestData.displayName && data.status == 'active' &&
+        data.enabled == true && data.role == 'teacher' &&
+        data.administrativeHold == false &&
+        data.approvedAt == request.time && data.approvedByUid == request.auth.uid &&
+        data.updatedAt == request.time && data.updatedByUid == request.auth.uid &&
+        requestData.status == 'approved' && requestData.decidedAt == request.time &&
+        requestData.decidedByUid == request.auth.uid;
+    }
+
+    function validApprovedLegacyAllowance(data) {
+      return data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        data.enabled == true && data.role == 'teacher' &&
+        data.updatedAt == request.time && data.updatedByUid == request.auth.uid;
+    }
+
+    function validAdminRequestDecision(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let allowanceTarget = /databases/$(database)/documents/teacher_allowances/$(uid);
+      let legacyTarget = /databases/$(database)/documents/teacher_allowlist/$(after.emailCanonical);
+      return isAdmin() &&
+        before.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+          'status', 'revision', 'createdAt', 'updatedAt'
+        ]) &&
+        after.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'organization', 'note',
+          'status', 'revision', 'createdAt', 'updatedAt',
+          'decidedAt', 'decidedByUid', 'decisionReason'
+        ]) &&
+        validTeacherRequestProfile(before, uid) && validTeacherRequestProfile(after, uid) &&
+        before.status == 'pending' && after.status in ['approved', 'rejected'] &&
+        after.revision == before.revision + 1 &&
+        after.createdAt == before.createdAt && after.updatedAt == request.time &&
+        after.decidedAt == request.time && after.decidedByUid == request.auth.uid &&
+        after.decisionReason is string && after.decisionReason.size() <= 200 &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'revision', 'updatedAt', 'decidedAt', 'decidedByUid', 'decisionReason'
+        ]) &&
+        (after.status == 'rejected' ||
+          (existsAfter(allowanceTarget) && existsAfter(legacyTarget) &&
+            validApprovedTeacherAllowance(uid, getAfter(allowanceTarget).data, after) &&
+            validApprovedLegacyAllowance(getAfter(legacyTarget).data)));
+    }
+
+    function validStoredTeacherAllowance(uid, data) {
+      return data.uid == uid && data.emailCanonical is string &&
+        canonicalAllowanceId(data.emailCanonical) &&
+        data.displayName is string && data.displayName.size() >= 1 &&
+        data.displayName.size() <= 80 &&
+        data.status in ['active', 'suspended', 'deletion_pending'] &&
+        data.enabled is bool && data.role in ['teacher', 'admin'] &&
+        data.administrativeHold is bool && data.approvedAt is timestamp &&
+        data.approvedByUid is string && data.approvedByUid.size() > 0 &&
+        data.updatedAt is timestamp && data.updatedByUid is string &&
+        data.updatedByUid.size() > 0;
+    }
+
+    function validLifecycleLegacyAllowance(email, enabled) {
+      let target = /databases/$(database)/documents/teacher_allowlist/$(email);
+      return existsAfter(target) &&
+        getAfter(target).data.keys().hasOnly(['enabled', 'role', 'updatedAt', 'updatedByUid']) &&
+        getAfter(target).data.enabled == enabled &&
+        getAfter(target).data.role == 'teacher' &&
+        getAfter(target).data.updatedAt == request.time &&
+        getAfter(target).data.updatedByUid == request.auth.uid;
+    }
+
+    function validTeacherSuspension(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return isAdmin() && before.role == 'teacher' &&
+        validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
+        before.status == 'active' && before.enabled == true &&
+        after.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
+          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
+          'suspendedAt', 'suspendedByUid', 'suspensionReason'
+        ]) &&
+        after.status == 'suspended' && after.enabled == false &&
+        after.suspendedAt == request.time && after.suspendedByUid == request.auth.uid &&
+        after.suspensionReason is string && after.suspensionReason.size() <= 200 &&
+        after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
+        validLifecycleLegacyAllowance(before.emailCanonical, false) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'enabled', 'suspendedAt', 'suspendedByUid', 'suspensionReason',
+          'updatedAt', 'updatedByUid'
+        ]);
+    }
+
+    function validTeacherRestore(uid) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return isAdmin() && before.role == 'teacher' &&
+        validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
+        before.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
+          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
+          'suspendedAt', 'suspendedByUid', 'suspensionReason'
+        ]) &&
+        before.status == 'suspended' && before.enabled == false &&
+        after.keys().hasOnly([
+          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
+          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid'
+        ]) &&
+        after.status == 'active' && after.enabled == true &&
+        after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
+        validLifecycleLegacyAllowance(before.emailCanonical, true) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'enabled', 'suspendedAt', 'suspendedByUid', 'suspensionReason',
+          'updatedAt', 'updatedByUid'
+        ]);
     }
 
     function counterMigrationUnlocked() {
@@ -747,6 +938,31 @@ service cloud.firestore {
         (resource.data.status == 'live' &&
           resource.data.get('activationLeaseUntil', null) is timestamp &&
           request.time > resource.data.get('activationLeaseUntil', null));
+    }
+
+    match /teacher_access_requests/{uid} {
+      allow get: if isOwnTeacherRequest(uid) || isAdmin();
+      allow list: if isAdmin() && resource.data.status == 'pending' &&
+        request.query.limit != null && request.query.limit <= 100;
+      allow create: if validPendingTeacherRequest(uid);
+      allow update: if validOwnTeacherRequestCancellation(uid) ||
+        validAdminRequestDecision(uid);
+      allow delete: if false;
+      allow read, write: if false;
+    }
+
+    match /teacher_allowances/{uid} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() &&
+        existsAfter(/databases/$(database)/documents/teacher_access_requests/$(uid)) &&
+        validApprovedTeacherAllowance(
+          uid,
+          request.resource.data,
+          getAfter(/databases/$(database)/documents/teacher_access_requests/$(uid)).data
+        );
+      allow update: if validTeacherSuspension(uid) || validTeacherRestore(uid);
+      allow delete: if false;
+      allow read, write: if false;
     }
 
     match /teacher_allowlist/{email} {
