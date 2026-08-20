@@ -539,8 +539,11 @@ service cloud.firestore {
 
     function validPublicAnswer(answer, questionType) {
       return answer is map &&
-        answer.keys().hasOnly(['answer', 'answers', 'accept', 'explain']) &&
+        answer.keys().hasOnly(['answer', 'answers', 'accept', 'explain', 'explainImage']) &&
         (!('explain' in answer) || (answer.explain is string && answer.explain.size() <= 1000)) &&
+        (!('explainImage' in answer) ||
+          (answer.explainImage is string && answer.explainImage.size() <= 380100 &&
+            answer.explainImage.matches('^(data:image/|https://).*'))) &&
         ((questionType == 'short' && answer.keys().hasAll(['accept']) &&
             !('answer' in answer) && !('answers' in answer) && validAcceptList(answer.accept)) ||
           (questionType == 'long' && answer.keys().hasAll(['explain']) &&

@@ -154,7 +154,7 @@
     return true;
   }
 
-  function publicAnswer(flatQuestion) {
+  function publicAnswer(flatQuestion, explainImage) {
     const question = flatQuestion || {};
     const type = String(question.type || 'choice');
     const value = {};
@@ -176,6 +176,13 @@
     }
     if (type !== 'long' && typeof question.explain === 'string') {
       value.explain = question.explain.slice(0, 1000);
+    }
+    if (typeof explainImage === 'string' && explainImage) {
+      const permitted = explainImage.startsWith('data:image/') || /^https:\/\//i.test(explainImage);
+      if (!permitted || explainImage.length > 380100) {
+        throw new Error('공개 해설 이미지는 허용된 형식과 크기여야 합니다.');
+      }
+      value.explainImage = explainImage;
     }
     return value;
   }
@@ -245,8 +252,8 @@
     const imageKey = value => {
       const key = String(value == null ? '' : value);
       if (/^\d+$/.test(key)) return 'v0q' + Number(key);
-      const match = /^v(\d+)q(\d+)$/.exec(key);
-      return match ? 'v' + Number(match[1]) + 'q' + Number(match[2]) : null;
+      const match = /^v(\d+)q(\d+)(e?)$/.exec(key);
+      return match ? 'v' + Number(match[1]) + 'q' + Number(match[2]) + match[3] : null;
     };
     const normalizedImages = images => {
       const result = {};

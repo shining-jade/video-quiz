@@ -1507,7 +1507,11 @@ rulesTest('fix-round: live projection rejects private or malformed fields', asyn
     await assertSucceeds(setDoc(live, liveQuestion()));
     await assertSucceeds(setDoc(live, liveQuestion(0, {
       revealed: true,
-      publicAnswer: { answer: 1, explain: '해설' }
+      publicAnswer: { answer: 1, explain: '해설', explainImage: 'https://example.com/explain.png' }
+    })));
+    await assertFails(setDoc(live, liveQuestion(0, {
+      revealed: true,
+      publicAnswer: { answer: 1, explain: '해설', explainImage: 'javascript:alert(1)' }
     })));
   });
 });

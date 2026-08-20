@@ -1045,6 +1045,20 @@ test('공개 답은 필요한 정답 필드만 복사하고 legacy accept를 안
   );
 });
 
+test('해설 이미지는 공개 문항이 아니라 정답 공개 데이터에만 안전하게 포함된다', () => {
+  const { publicQuestion, publicAnswer } = loadStoreModule();
+  const question = { type: 'choice', text: 'Q', choices: ['A', 'B'], answer: 0, explain: '해설' };
+
+  assert.equal('explainImage' in publicQuestion(question, 1, 1, 'https://example.com/question.png'), false);
+  assert.deepEqual(publicAnswer(question, 'data:image/png;base64,AA=='), {
+    answer: 0,
+    explain: '해설',
+    explainImage: 'data:image/png;base64,AA=='
+  });
+  assert.throws(() => publicAnswer(question, 'javascript:alert(1)'), /해설 이미지/);
+  assert.throws(() => publicAnswer(question, 'data:image/png;base64,' + 'A'.repeat(380101)), /해설 이미지/);
+});
+
 test('공개 문항 projection은 편집기와 같은 문자열·이미지 경계를 적용한다', () => {
   const { publicQuestion } = loadStoreModule();
   assert.throws(() => publicQuestion({ type: 'choice', text: 'x'.repeat(1001), choices: [] }, 1, 1), /문항/);
@@ -1678,6 +1692,19 @@ test('다중 영상 세트와 영상별 이미지 키를 보존한다', async ()
   assert.deepEqual(fake.value('quiz_sets/set1').videos, videos);
   assert.equal(fake.value('images/set1/q/v0q0').data, 'img-a');
   assert.equal(fake.value('images/set1/q/v1q0').data, 'img-b');
+});
+
+test('문제 이미지와 해설 이미지는 서로 다른 정규 키로 함께 저장된다', async () => {
+  const fake = makeFirestoreFake();
+  const store = createStore(fake);
+
+  await store.saveQuizSet('set1', { title: '세트', videos: [{ questions: [{}] }] });
+  await store.replaceImages('set1', { v0q0: 'question-image', v0q0e: 'explanation-image' });
+
+  assert.deepEqual(await store.getImages('set1'), {
+    v0q0: 'question-image', v0q0e: 'explanation-image'
+  });
+  assert.equal(await store.getQuestionImage('set1', 'v0q0e'), 'explanation-image');
 });
 
 test('세트 목록과 단건 읽기는 문서 ID를 우선하고 문항 배열을 보존한다', async () => {
