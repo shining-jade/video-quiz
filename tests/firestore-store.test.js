@@ -3405,14 +3405,14 @@ test('allocation과 heartbeat lease는 호출 시작의 보정 서버 시각에 
     'leased-session', 'LEASE1', 'teacher-1', token
   ), true);
   assert.equal(fake.value('sessions/leased-session').status, 'live');
-  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 75_000);
+  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 180_000);
 
   now = 70_000;
   moveClockDuringRenew = true;
   assert.equal(await store.renewSessionActivationLease(
     'leased-session', 'LEASE1', 'teacher-1', token
   ), true);
-  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 85_000);
+  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 190_000);
 });
 
 test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지우며 부분 실패를 재시도한다', async () => {
@@ -5415,14 +5415,16 @@ test('heartbeat는 single-flight이고 stale 완료 뒤 재예약하지 않으�
     teacherState: clone(owner),
     teacherAuthVersion: 12,
     AuthCore: require('../auth-core.js'),
+    SESSION_HEARTBEAT_MS: 60_000,
+    SESSION_ACTIVATION_LEASE_MS: 120_000,
     setTimeout(callback, ms) {
-      assert.equal(ms, 5000);
+      assert.equal(ms, 60000);
       const id = ++nextTimerId;
       timers.set(id, callback);
       return id;
     },
     every(ms, callback) {
-      assert.equal(ms, 5000);
+      assert.equal(ms, 60000);
       const id = ++nextTimerId;
       timers.set(id, callback);
       return id;
@@ -5495,8 +5497,10 @@ test('current heartbeat failure schedules one non-overlapping retry', async () =
     teacherState: clone(owner),
     teacherAuthVersion: 12,
     AuthCore: require('../auth-core.js'),
+    SESSION_HEARTBEAT_MS: 60_000,
+    SESSION_ACTIVATION_LEASE_MS: 120_000,
     setTimeout(callback, ms) {
-      assert.equal(ms, 5000);
+      assert.equal(ms, 60000);
       const id = ++nextTimerId;
       timers.set(id, callback);
       return id;
@@ -5521,6 +5525,62 @@ test('current heartbeat failure schedules one non-overlapping retry', async () =
 
   cleanups[0]();
   assert.equal(timers.has(2), false);
+});
+
+test('무료 Firestore 쓰기를 아끼도록 heartbeat는 60초 간격을 사용한다', () => {
+  const owner = {
+    status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
+  };
+  let delay = 0;
+  const state = { sessionId: 'session-a', code: 'CODE12' };
+  const context = {
+    pl: state,
+    teacherState: clone(owner),
+    teacherAuthVersion: 1,
+    AuthCore: require('../auth-core.js'),
+    SESSION_HEARTBEAT_MS: 60_000,
+    setTimeout(callback, ms) { delay = ms; return 1; },
+    clearTimeout() {},
+    onCleanup() {},
+    store: { async renewSessionActivationLease() { return true; } },
+    toast() {}
+  };
+  loadStageFunctions(['plStartSessionHeartbeat'], context);
+
+  context.plStartSessionHeartbeat(state, owner, 1, 'allocation-token-123456');
+  assert.equal(delay, 60_000);
+});
+
+test('Firestore 무료 사용량 초과는 원인과 재시도 안내를 보여준다', () => {
+  const context = {};
+  loadStageFunctions(['plSessionStartErrorMessage'], context);
+
+  assert.match(
+    context.plSessionStartErrorMessage({ code: 'resource-exhausted', message: 'Quota exceeded.' }),
+    /Firestore 무료 사용량[\s\S]*자동으로 초기화[\s\S]*다시 시도/
+  );
+  assert.equal(
+    context.plSessionStartErrorMessage(new Error('network down')),
+    '반 시작 실패: network down'
+  );
+});
+
+test('문항 미리보기 HTML은 현재 편집값의 질문과 보기를 즉시 반영한다', () => {
+  const context = {
+    esc(value) { return String(value).replace(/</g, '&lt;'); },
+    qType(q) { return q.type || 'choice'; },
+    QTYPES: { choice: '객관식 — 하나 고르기' },
+    LETTERS: ['①', '②', '③', '④']
+  };
+  loadStageFunctions(['mkQuestionPreviewHtml'], context);
+
+  const html = context.mkQuestionPreviewHtml({
+    type: 'choice', text: '지금 입력한 질문?', choices: ['첫째', '둘째'], explain: '해설'
+  }, 3);
+  assert.match(html, /문항 3/);
+  assert.match(html, /지금 입력한 질문\?/);
+  assert.match(html, /①[\s\S]*첫째/);
+  assert.match(html, /②[\s\S]*둘째/);
 });
 
 test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지한다', async () => {

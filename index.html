@@ -272,8 +272,12 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-video-card.active { border-color: var(--accent); }
 .mk-video-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
 .mk-video-head h2 { margin: 0; flex: 1 1 180px; }
-.mk-video-body { display: grid; grid-template-columns: minmax(300px, .85fr) minmax(0, 1.15fr); gap: 18px; align-items: start; }
-.mk-video-preview { position: sticky; top: 68px; min-width: 0; }
+.mk-video-body { display: block; }
+.mk-video-preview { min-width: 0; max-width: 760px; }
+.mk-question-workspace { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 18px; align-items: start; margin-top: 18px; }
+.mk-question-navigator { position: sticky; top: 68px; max-height: calc(100vh - 88px); overflow: auto; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #f8f8ff; }
+.mk-question-navigator h3 { margin-bottom: 4px; }
+.mk-question-editor { min-width: 0; }
 .mk-range-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .mk-range-track { position: relative; height: 42px; margin: 4px 8px 10px; }
 .mk-range-track::before { content: ''; position: absolute; left: 0; right: 0; top: 19px; height: 5px; border-radius: 4px; background: #dfe2ea; }
@@ -298,9 +302,16 @@ textarea { resize: vertical; min-height: 62px; }
 .mk-add-video { border: 2px dashed var(--line); background: transparent; padding: 18px; }
 
 @media (max-width: 900px) {
-  .mk-video-body { grid-template-columns: 1fr; }
-  .mk-video-preview { position: static; }
+  .mk-question-workspace { grid-template-columns: 1fr; }
+  .mk-question-navigator { position: static; max-height: 42vh; }
 }
+.mk-question-preview-card { width: min(900px, 96vw); max-height: 92vh; overflow: auto; padding: 26px; border-radius: 18px; background: #11162d; color: #fff; box-shadow: 0 24px 80px rgba(0,0,0,.38); }
+.mk-question-preview-card .preview-top { display:flex; align-items:center; gap:10px; margin-bottom:18px; }
+.mk-question-preview-card .preview-q { font-size: clamp(22px, 3vw, 36px); font-weight: 800; line-height: 1.35; margin-bottom: 20px; }
+.mk-question-preview-card .preview-choices { display:grid; gap:10px; }
+.mk-question-preview-card .preview-choice { display:flex; gap:12px; align-items:center; padding:14px 16px; border:2px solid rgba(255,255,255,.22); border-radius:12px; background:rgba(255,255,255,.04); }
+.mk-question-preview-card .preview-choice b { display:grid; place-items:center; width:34px; height:34px; flex:none; border-radius:9px; background:rgba(255,255,255,.16); }
+.mk-question-preview-card .preview-actions { display:flex; justify-content:flex-end; margin-top:22px; }
 
 @keyframes qflash { 0%,100% { box-shadow: 0 0 0 0 rgba(67,56,202,0); } 30% { box-shadow: 0 0 0 4px rgba(67,56,202,.35); } }
 .q-card.flash { animation: qflash 1s ease; }
@@ -717,6 +728,8 @@ function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
 
 const PENDING_ALLOCATION_KEY = 'vq_pending_allocations_v1';
 const PENDING_ALLOCATION_RECOVERY_DELAY_MS = 30000;
+const SESSION_HEARTBEAT_MS = 60000;
+const SESSION_ACTIVATION_LEASE_MS = 120000;
 let pendingAllocationRecoveryTimer = null;
 
 function pendingAllocationRead() {
@@ -1683,6 +1696,7 @@ function reconcileTeacherRoute(previous, next) {
 
 function router() {
   if (!authReady) return;
+  mkCloseQuestionPreview();
   runCleanups();
   window.scrollTo(0, 0);
   const raw = location.hash.replace(/^#\/?/, '');
@@ -2598,6 +2612,7 @@ function renderMake() {
       return '<button type="button" class="mk-question-bubble" draggable="true" ' +
         'data-video="' + videoIndex + '" data-question="' + questionIndex + '" data-global-question="' + globalQuestionNumber + '" ' +
         'aria-label="' + esc(label) + '" title="끌어서 순서를 바꾸거나 화살표 키로 이동" ' +
+        'onclick="mkFocusQuestion(' + videoIndex + ',' + questionIndex + ')" ' +
         'ondragstart="mkQuestionDragStart(event,' + videoIndex + ',' + questionIndex + ')" ' +
         'ondragover="mkQuestionDragOver(event)" ondragleave="mkQuestionDragLeave(event)" ' +
         'ondrop="mkQuestionDrop(event,' + videoIndex + ',' + questionIndex + ')" ' +
@@ -2622,6 +2637,7 @@ function renderMake() {
           '<button class="btn sm ghost" onclick="mkMove(' + videoIndex + ',' + questionIndex + ',1)" ' + (questionIndex === video.questions.length - 1 ? 'disabled' : '') + '>↓</button>' +
           '<span class="mk-question-move-tools"><button class="btn sm ghost" onclick="mkMoveQuestion(' + videoIndex + ',' + questionIndex + ',' + (videoIndex - 1) + ',9999)" ' + (videoIndex === 0 ? 'disabled' : '') + '>이전 영상</button>' +
           '<button class="btn sm ghost" onclick="mkMoveQuestion(' + videoIndex + ',' + questionIndex + ',' + (videoIndex + 1) + ',9999)" ' + (videoIndex === mk.videos.length - 1 ? 'disabled' : '') + '>다음 영상</button></span>' +
+          '<button class="btn sm" onclick="mkOpenQuestionPreview(' + videoIndex + ',' + questionIndex + ')">👁 퀴즈 미리보기</button>' +
           '<button class="btn sm danger" onclick="mkDelQuestion(' + videoIndex + ',' + questionIndex + ')">삭제</button></div>' +
         '<div class="field"><label class="f">문항 유형</label><select onchange="mkSetType(' + videoIndex + ',' + questionIndex + ',this.value)">' +
           Object.keys(QTYPES).map(k => '<option value="' + k + '"' + (qType(q) === k ? ' selected' : '') + '>' + QTYPES[k] + '</option>').join('') +
@@ -2653,10 +2669,16 @@ function renderMake() {
         '<div class="mk-range-track"><input data-range-slider="' + videoIndex + '-start" aria-label="영상 ' + (videoIndex + 1) + ' 시작" type="range" min="0" max="' + domain.max + '" value="' + domain.start + '" oninput="mkSetRange(' + videoIndex + ',\'start\',Number(this.value))">' +
         '<input data-range-slider="' + videoIndex + '-end" aria-label="영상 ' + (videoIndex + 1) + ' 종료" type="range" min="0" max="' + domain.max + '" value="' + domain.end + '" oninput="mkSetRange(' + videoIndex + ',\'end\',Number(this.value))"></div>' +
         '<div class="mk-timeline" data-timeline-video="' + videoIndex + '">' + dots + '</div></div>' +
-        '<div><h3 style="margin-bottom:4px">문항</h3><div class="sub">시각은 원본 YouTube 영상 기준입니다. 제목 버블을 끌거나 화살표 키로 순서를 바꿀 수 있습니다.</div>' +
-          '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + finalDropzone + '</div>' +
-          questions + '<button class="btn" onclick="mkAddQuestion(' + videoIndex + ')">＋ 문항 추가</button> ' +
-          '<button class="btn ghost sm" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button></div></div>' +
+        '<div class="mk-question-workspace">' +
+          '<aside class="mk-question-navigator" ondragover="mkQuestionNavigatorDragOver(event)">' +
+            '<h3>문항 순서</h3><div class="sub">제목을 끌어 11번도 1번 앞으로 바로 옮길 수 있습니다.</div>' +
+            '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + finalDropzone + '</div>' +
+            '<button class="btn ghost sm block" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button>' +
+          '</aside>' +
+          '<div class="mk-question-editor">' + questions +
+            '<button class="btn" onclick="mkAddQuestion(' + videoIndex + ')">＋ 문항 추가</button>' +
+          '</div>' +
+        '</div></div>' +
     '</section>';
   }).join('');
 
@@ -2699,6 +2721,62 @@ function renderMake() {
     app.onchange = event => mkMarkDirty(mkHistoryKeyFromEvent(event));
   }
   if (mk.id) mkShowShare();
+}
+
+function mkQuestionNavigatorDragOver(event) {
+  mkQuestionDragOver(event);
+  const navigator = event && event.currentTarget;
+  if (!navigator || !navigator.getBoundingClientRect) return;
+  const rect = navigator.getBoundingClientRect();
+  const edge = Math.min(64, Math.max(32, rect.height * .18));
+  if (event.clientY < rect.top + edge) navigator.scrollTop -= 22;
+  else if (event.clientY > rect.bottom - edge) navigator.scrollTop += 22;
+}
+
+function mkQuestionPreviewHtml(q, number) {
+  const type = qType(q);
+  const choices = Array.isArray(q && q.choices) ? q.choices : [];
+  const typeLabel = QTYPES[type] ? QTYPES[type].split(' —')[0] : '문항';
+  const answerArea = (type === 'short' || type === 'essay')
+    ? '<div class="preview-choice"><span>학생 답안 입력 영역</span></div>'
+    : '<div class="preview-choices">' + choices.map((choice, index) =>
+        '<div class="preview-choice"><b>' +
+          (type === 'ox' ? (['O', 'X'][index] || '') : (LETTERS[index] || index + 1)) +
+          '</b><span>' + esc(choice || '보기 ' + (index + 1)) + '</span></div>'
+      ).join('') + '</div>';
+  return '<div class="preview-top"><span class="tag">문항 ' + number + '</span>' +
+    '<span class="tag mute">' + esc(typeLabel) + '</span></div>' +
+    '<div class="preview-q">' + esc(String(q && q.text || '').trim() || '질문을 입력하세요') + '</div>' +
+    answerArea;
+}
+
+function mkCloseQuestionPreview() {
+  const preview = document.getElementById('mk-question-preview');
+  if (preview && preview.remove) preview.remove();
+}
+
+function mkOpenQuestionPreview(videoIndex, questionIndex) {
+  const video = mk && mk.videos && mk.videos[videoIndex];
+  const q = video && video.questions && video.questions[questionIndex];
+  if (!q) return false;
+  mkCloseQuestionPreview();
+  const number = mk.videos.slice(0, videoIndex)
+    .reduce((count, item) => count + ((item && item.questions) || []).length, 0) + questionIndex + 1;
+  const dialog = document.createElement('div');
+  dialog.id = 'mk-question-preview';
+  dialog.className = 'overlay';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-label', '문항 ' + number + ' 퀴즈 미리보기');
+  dialog.innerHTML = '<div class="mk-question-preview-card">' +
+    mkQuestionPreviewHtml(q, number) +
+    '<div class="preview-actions"><button class="btn primary" onclick="mkCloseQuestionPreview()">닫기</button></div></div>';
+  dialog.addEventListener('click', event => { if (event.target === dialog) mkCloseQuestionPreview(); });
+  dialog.addEventListener('keydown', event => { if (event.key === 'Escape') mkCloseQuestionPreview(); });
+  document.body.appendChild(dialog);
+  const close = dialog.querySelector('button');
+  if (close && close.focus) close.focus();
+  return true;
 }
 
 /* ── 진행 설정 ─────────────────────────────────────────────────────────
@@ -3750,7 +3828,7 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
       stop();
       return false;
     }
-    timerId = setTimeout(heartbeat, 5000);
+    timerId = setTimeout(heartbeat, SESSION_HEARTBEAT_MS);
     state.activationHeartbeatId = timerId;
     return true;
   };
@@ -3779,7 +3857,8 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
         return false;
       }
       state.heartbeatError = error && error.message ? error.message : String(error);
-      toast('학생 접속 유지에 실패했습니다. 15초 안에 접속이 닫힙니다: ' + state.heartbeatError);
+      toast('학생 접속 유지에 실패했습니다. ' + Math.round(SESSION_ACTIVATION_LEASE_MS / 1000) +
+        '초 안에 접속이 닫힙니다: ' + state.heartbeatError);
       schedule();
       return false;
     } finally {
@@ -3790,6 +3869,19 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
   onCleanup(stop);
   schedule();
   return stop;
+}
+
+function plSessionStartErrorMessage(error) {
+  const code = String(error && error.code || '').toLowerCase();
+  const message = String(error && error.message || error || '알 수 없는 오류');
+  if (code.includes('resource-exhausted') || /quota exceeded/i.test(message)) {
+    return 'Firestore 무료 사용량을 모두 사용했습니다. 무료 한도는 자동으로 초기화됩니다. ' +
+      '열려 있는 오래된 진행 화면을 닫고, 잠시 후 또는 다음 날 다시 시도해 주세요.';
+  }
+  if (message === '사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.') {
+    return '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.';
+  }
+  return '반 시작 실패: ' + message;
 }
 
 function plStartSession() {
@@ -3940,9 +4032,11 @@ function plStartSession() {
     if (!allocatedCode) pendingAllocationRemove(sessionId, allocationToken);
     if (pl !== state) return;
     console.error(e);
-    alert(e.message === '사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.'
+    const fallbackMessage = e && e.message === '사용 가능한 반 코드를 만들지 못했습니다. 다시 시도해 주세요.'
       ? '반 코드 발급에 실패했습니다. 잠시 후 다시 시도해 주세요.'
-      : '반 시작 실패: ' + e.message);
+      : '반 시작 실패: ' + (e && e.message ? e.message : String(e));
+    alert(typeof plSessionStartErrorMessage === 'function'
+      ? plSessionStartErrorMessage(e) : fallbackMessage);
   }).finally(() => { if (pl === state) state.startingSession = false; });
 }
 

@@ -181,6 +181,7 @@
   }
 
   function createFirestoreStore(db, fieldValue, nowFn) {
+    const SESSION_ACTIVATION_LEASE_MS = 120_000;
     let serverOffset = 0;
     const serverNow = () => nowFn() + serverOffset;
     const serverTimestampProbe = fieldValue && typeof fieldValue.serverTimestamp === 'function'
@@ -1452,7 +1453,7 @@
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
       const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
-      const activationLeaseUntil = new Date(nowFn() + serverOffset + 15_000);
+      const activationLeaseUntil = new Date(nowFn() + serverOffset + SESSION_ACTIVATION_LEASE_MS);
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionReference);
         const codeSnapshot = await transaction.get(codeReference);
@@ -1478,7 +1479,7 @@
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
       const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
-      const activationLeaseUntil = new Date(nowFn() + serverOffset + 15_000);
+      const activationLeaseUntil = new Date(nowFn() + serverOffset + SESSION_ACTIVATION_LEASE_MS);
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionReference);
         const codeSnapshot = await transaction.get(codeReference);

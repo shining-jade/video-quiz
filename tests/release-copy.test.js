@@ -41,6 +41,33 @@ test('편집기에는 undo/redo와 문항 제목 버블의 드래그·키보드 
   assert.match(html, /다음 영상/);
 });
 
+test('문항 제목 목록은 영상 아래 왼쪽 탐색기로 배치되고 긴 목록을 자동 스크롤한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /class="mk-question-workspace"/);
+  assert.match(html, /class="mk-question-navigator"[\s\S]*?class="mk-question-editor"/);
+  assert.match(html, /\.mk-question-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(220px,\s*320px\)\s+minmax\(0,\s*1fr\)/s);
+  assert.match(html, /\.mk-question-navigator\s*\{[^}]*position:\s*sticky[^}]*overflow:\s*auto/s);
+  assert.match(html, /function mkQuestionNavigatorDragOver\(event\)[\s\S]*?scrollTop/);
+  assert.match(html, /onclick="mkFocusQuestion\(/);
+  assert.match(html, /function mkFocusQuestion\(videoIndex,\s*(?:questionIndex|i)\)[\s\S]*?scrollIntoView/);
+});
+
+test('편집 문항은 저장 전 실제 퀴즈 모양 미리보기를 열 수 있다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /퀴즈 미리보기/);
+  assert.match(html, /function mkOpenQuestionPreview\(videoIndex, questionIndex\)/);
+  assert.match(html, /dialog\.id\s*=\s*'mk-question-preview'/);
+  assert.match(html, /function mkCloseQuestionPreview\(\)/);
+  assert.match(html, /setAttribute\('role',\s*'dialog'\)/);
+});
+
+test('문항 미리보기는 다른 화면으로 이동할 때 남지 않는다', () => {
+  const html = read('index.html');
+  assert.match(html, /function router\(\) \{[\s\S]*?mkCloseQuestionPreview\(\);[\s\S]*?runCleanups\(\);/);
+});
+
 test('사용자 안내는 편집 이력, 교차 영상 이동과 seek 재출제 안전 규칙을 설명한다', () => {
   const readme = read('README.md');
   const handoff = read('docs/HANDOFF-2026-08-14.md');

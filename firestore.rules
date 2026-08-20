@@ -735,7 +735,7 @@ service cloud.firestore {
       return !changed.hasAny(['activationHeartbeatAt']) &&
         (request.resource.data.status != 'live' ||
           (request.resource.data.activationLeaseUntil is timestamp &&
-            request.resource.data.activationLeaseUntil <= request.time + duration.value(15, 's')));
+            request.resource.data.activationLeaseUntil <= request.time + duration.value(120, 's')));
     }
 
     function validSessionAbortTransition() {
@@ -857,7 +857,7 @@ service cloud.firestore {
         (request.resource.data.status != 'live' ||
           (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
             request.resource.data.get('activationLeaseUntil', null) <=
-              request.time + duration.value(15, 's')));
+              request.time + duration.value(120, 's')));
       allow update: if ownsSession(sessionId) &&
         request.resource.data.teacherUid == resource.data.teacherUid &&
         request.resource.data.teacherEmail == resource.data.teacherEmail &&

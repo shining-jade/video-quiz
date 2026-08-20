@@ -590,7 +590,7 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
 rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 접근을 자동 차단한다', async () => {
   const token = 'lease-token-1234567890';
   let synchronizedNow = Date.now();
-  const activationLeaseUntil = synchronizedNow + 15_000;
+  const activationLeaseUntil = synchronizedNow + 120_000;
   let reachedRead;
   let releaseRead;
   const atRead = new Promise(resolve => { reachedRead = resolve; });
@@ -608,7 +608,7 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
     teacherUid: actors.owner.uid,
     teacherEmail: actors.owner.email,
     status: 'allocating',
-    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 180_000)
   }));
   await assertFails(updateDoc(
     doc(actorFirestore('owner'), 'sessions/preseeded-lease'), { status: 'live' }
@@ -649,7 +649,7 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
   }));
 
   await assertFails(updateDoc(doc(owner, 'sessions/lease-race'), {
-    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 180_000)
   }));
 
   let reachedRenewRead;
@@ -657,7 +657,7 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
   const atRenewRead = new Promise(resolve => { reachedRenewRead = resolve; });
   const releaseRenew = new Promise(resolve => { releaseRenewRead = resolve; });
   synchronizedNow = Date.now();
-  const renewedLeaseUntil = synchronizedNow + 15_000;
+  const renewedLeaseUntil = synchronizedNow + 120_000;
   const renewStore = emulatorStore(owner, null, {
     path: 'sessions/lease-race',
     async wait() {
