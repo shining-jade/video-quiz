@@ -67,6 +67,14 @@ test('데스크톱 왼쪽 패널 전체는 문항 편집 스크롤을 따라가�
   assert.match(html, /@media \(max-width:\s*900px\)[\s\S]*?\.mk-video-left\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow:\s*visible/s);
 });
 
+test('문항 해설은 넓게 쓰고 개별 제한 시간 입력은 160px로 줄인다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /class="grid2 mk-explanation-time-grid"[\s\S]*?해설 \(선택\)[\s\S]*?이 문항만 제한 시간 다르게 \(선택\)/);
+  assert.match(html, /\.mk-explanation-time-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+160px/s);
+  assert.match(html, /@media \(max-width:\s*700px\)[\s\S]*?\.mk-explanation-time-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
+});
+
 test('편집 문항은 저장 전 실제 퀴즈 모양 미리보기를 열 수 있다', () => {
   const html = read('index.html');
 

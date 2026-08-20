@@ -182,6 +182,10 @@ textarea { resize: vertical; min-height: 62px; }
 .choice-row .cno { width: 20px; text-align: center; color: var(--ink-3); font-size: 13px; font-weight: 700; flex: none; }
 .choice-row .btn { flex: none; }
 .time-input { width: 110px !important; }
+.mk-explanation-time-grid { grid-template-columns: minmax(0, 1fr) 160px; }
+@media (max-width: 700px) {
+  .mk-explanation-time-grid { grid-template-columns: 1fr; }
+}
 
 /* 숫자 칸 옆에 단위를 붙여 초/분 헷갈리지 않게 */
 .unit-wrap { display: flex; align-items: center; gap: 7px; }
@@ -2645,7 +2649,7 @@ function renderMake() {
         '</select></div>' +
         '<div class="field"><label class="f">질문</label><textarea oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].text=this.value" placeholder="예) 감염병 전파를 막는 가장 기본적인 방법은?">' + esc(q.text) + '</textarea></div>' +
         mkImageField(q, videoIndex, questionIndex) + mkAnswerField(q, videoIndex, questionIndex) +
-        '<div class="grid2"><div class="field"><label class="f">해설 (선택)</label>' +
+        '<div class="grid2 mk-explanation-time-grid"><div class="field"><label class="f">해설 (선택)</label>' +
           '<input type="text" value="' + esc(q.explain) + '" oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].explain=this.value"></div>' +
           '<div class="field"><label class="f">이 문항만 제한 시간 다르게 (선택)</label><div class="unit-wrap">' +
           '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
