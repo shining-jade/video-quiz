@@ -1977,10 +1977,11 @@ rulesTest('active student deletion cannot invalidate a counter audit and cleanup
     locked: true, lockToken: 'counter-lock-delete', projectId, targetMode: 'emulator',
     lockedAt: Timestamp.fromMillis(Date.now()), lockedByUid: actors.admin.uid
   });
-  const scanDuringLock = getDocs(collection(admin, 'sessions/s1/students'));
-  const racedDelete = assertFails(deleteDoc(doc(admin, studentPath)));
-  assert.equal((await assertSucceeds(scanDuringLock)).size, 2);
-  await racedDelete;
+  await assertFails(deleteDoc(doc(admin, studentPath)));
+  const scanAfterDeniedDelete = await assertSucceeds(
+    getDocs(collection(admin, 'sessions/s1/students'))
+  );
+  assert.equal(scanAfterDeniedDelete.size, 2);
   assert.equal((await adminRead(studentPath)).uid, 'student-uid');
 
   await adminWrite('sessions/s1', {
