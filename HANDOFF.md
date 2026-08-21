@@ -1,5 +1,7 @@
 # 인수인계 프롬프트 (Codex 등 다른 도구에 넘길 때)
 
+> 2026-08-21 이메일·비밀번호 교사 인증은 코드·Rules·자동 검증 뒤에도 Firebase Console 설정, 실제 계정/메일, 배포와 브라우저 인수가 **미실행 운영 gate**입니다. [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)의 Email/Password 활성화(기존 Google·Anonymous 유지), `shining-jade.github.io` 승인된 도메인, 한국어 이메일 인증·비밀번호 재설정 템플릿, Node/Emulator 검증 → 호환 Rules → 정적 앱 → Google 관리자·새 이메일 교사 인수 순서를 따르십시오. 인수가 실패하면 Firebase 사용자와 `teacher_allowances`는 그대로 두고 앱과 Rules만 직전 릴리스로 롤백합니다. 실제 콘솔 변경, 계정 생성·메일 발송, deploy/push는 이 문서 작업에서 수행하지 않았습니다.
+
 > 2026-08-20 교사 개인 계정 권한 신청·수업계획·현황판 전환 준비: 운영 migration/deploy/browser 인수는 미실행입니다. [`docs/TEACHER-ACCESS-CLASS-PLANNING.md`](./docs/TEACHER-ACCESS-CLASS-PLANNING.md)의 backup → Emulator → 호환 head Rules 선배포 → access exact lock/apply → session join lock/recount/gate → strict Rules·static app → 같은 generation verify → exact unlock → 관리자 1명·교사 2명·겹친 수업 2개 smoke 순서를 그대로 따르십시오. 두 apply durable 보고서의 `safeToDeployStrictRules: true`와 두 lock token/updateTime generation이 배포 후 verify 보고서까지 같아야 합니다. 진행 중인 legacy session, counter/UID 불일치, partial audit 또는 generation 변경이 하나라도 있으면 배포를 중단합니다.
 
 > OX·이미지 구현은 **끝났습니다.** 이 문서는 남은 검증과 다듬기를 넘길 때 쓰라고 만든 것입니다.

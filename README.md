@@ -41,9 +41,9 @@
 - `admin`만 전체 세션 조회와 보존 기간 삭제를 할 수 있습니다. 퀴즈 세트를 영구 삭제해도 과거 수업의 세션·스냅샷·학생·응답·점수 기록은 보존됩니다.
 - 위에 없는 경로는 Firestore의 기본 거부 동작을 따릅니다.
 
-### 2) Google 교사 로그인과 학생 익명 로그인 설정
+### 2) Google·이메일 교사 로그인과 학생 익명 로그인 설정
 
-Firebase Console → **Authentication → Sign-in method**에서 **Google**(교사용)과 **익명(Anonymous)**(학생용)을 사용 설정합니다. 학생은 Google 로그인 없이 기존 6자리 반 코드로 입장합니다.
+Firebase Console → **Authentication → Sign-in method**에서 **Google**(교사용), **Email/Password**(교사용), **익명(Anonymous)**(학생용)을 사용 설정합니다. Email/Password를 켤 때 Google이나 Anonymous를 끄지 마세요. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
 
 Firestore에 `teacher_allowlist/{정규화된 이메일}` 문서를 만들고 아래처럼 승인합니다. 문서 ID와 로그인 토큰의 이메일이 정확히 일치해야 합니다.
 
@@ -54,7 +54,7 @@ teacher_allowlist/teacher@school.kr
   displayName: "홍길동" # 선택
 ```
 
-교사용 메뉴를 누르면 Google 로그인 창이 열립니다. 미승인·비활성·이메일 미검증 계정은 승인 요청 안내를 봅니다. 같은 승인 Google 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다.
+교사용 메뉴에서는 Google 로그인 또는 이메일 가입·로그인·비밀번호 재설정을 선택할 수 있습니다. 미승인·비활성·이메일 미검증 계정은 승인 요청 안내를 봅니다. 같은 승인 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다. Console 설정, 한국어 이메일 템플릿, 인수와 롤백은 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며, 비밀번호와 재설정 링크는 운영 기록에 남기지 않습니다.
 
 ### 3) 기존 데이터 이전
 
@@ -107,7 +107,7 @@ pnpm migrate:lifecycle -- --project video-quiz-65798 --target-mode production --
 
 **현재 기존 사이트 주소:** https://shining-jade.github.io/video-quiz/
 
-자동 테스트는 통과했습니다. 프로덕션 데이터 이전은 미실행이며, 엄격한 규칙 게시·사이트 배포와 실제 브라우저 인수 검증은 남아 있습니다. 이번 실제 브라우저 검증은 브라우저 제어 연결 오류로 차단되었습니다.
+자동 테스트를 통과한 변경만 배포합니다. 프로덕션 데이터 이전은 미실행이며, 엄격한 규칙 게시·사이트 배포와 실제 브라우저 인수 검증은 남아 있습니다. Firebase Console의 Email/Password 설정과 실제 계정/메일 인수는 별도 운영 gate이며, [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)의 pre-deploy 절차를 완료하기 전에는 실행하지 않습니다.
 
 저장소는 [shining-jade/video-quiz](https://github.com/shining-jade/video-quiz) (Public), `main` 브랜치 루트를 Pages가 서비스합니다.
 

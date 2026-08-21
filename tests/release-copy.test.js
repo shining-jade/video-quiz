@@ -5,6 +5,14 @@ const vm = require('node:vm');
 
 const read = file => fs.readFileSync(file, 'utf8');
 
+test('release docs require Email/Password provider, verification template, reset template, and rollback', () => {
+  const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
+
+  for (const marker of ['Email/Password', '이메일 인증', '비밀번호 재설정', '승인된 도메인', '롤백']) {
+    assert.match(emailAuthDocs, new RegExp(marker));
+  }
+});
+
 test('email authentication validation core loads before the application script', () => {
   const html = read('index.html');
   const coreIndex = html.indexOf('<script src="teacher-email-auth-core.js"></script>');
