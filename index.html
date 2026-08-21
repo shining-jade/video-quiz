@@ -2604,7 +2604,9 @@ function screenHome() {
     return;
   }
   const canShowTeacherDashboard = AuthCore.isTeacher(teacherState);
-  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a>') + '<div class="wrap wide">' +
+  const publicLibraryLink = canShowTeacherDashboard
+    ? '<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a>' : '';
+  APP().innerHTML = topbar(publicLibraryLink) + '<div class="wrap wide">' +
     '<div class="home-hero">' +
       '<h1>영상 퀴즈 실시간 진행 도구</h1>' +
       '<p>영상 속 정해진 순간에 퀴즈가 뜨고, 학생들은 각자 폰으로 그 문제만 풉니다.</p>' +
@@ -3310,12 +3312,16 @@ function screenSetList() {
     }).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
     state.trashCount = Array.isArray(trash) ? trash.length : 0;
     const checks = state.all.map(s => {
-      if (s.ownerUid && teacherState && s.ownerUid === teacherState.uid && store.getPublishedQuizSet) {
-        return store.getPublishedQuizSet(s.id).then(projection => {
-          s.publicationStatus = projection && projection.status === 'published' ? 'published' : 'private';
-          s.publicationRevision = projection && projection.revision || '';
+      if (s.ownerUid && teacherState && s.ownerUid === teacherState.uid && store.getOwnedPublicationStatus) {
+        s.publicationStatus = 'checking';
+        return store.getOwnedPublicationStatus(s.id).then(status => {
+          applyOwnedPublicationStatus(s, status);
           return s;
-        }).catch(() => { s.publicationStatus = 'private'; return s; });
+        }).catch(() => {
+          s.publicationStatus = 'unknown';
+          s.publicationRevision = '';
+          return s;
+        });
       }
       if (!s.ownerUid || !teacherState || !store.canEditQuizSet) return Promise.resolve(s);
       return store.canEditQuizSet(s.id, teacherState).then(ok => { s.isCollaborator = !!ok; return s; }).catch(() => s);
@@ -3384,7 +3390,7 @@ function setListRow(s) {
   const editable = canEditSet(s, teacherState);
   const owner = !!(s.ownerUid && teacherState && s.ownerUid === teacherState.uid);
   const collaborator = !owner && editable;
-  const publicationStatus = owner && ['published', 'moderated'].includes(s.publicationStatus)
+  const publicationStatus = owner && ['published', 'moderated', 'checking', 'unknown'].includes(s.publicationStatus)
     ? s.publicationStatus : 'private';
   const publicationBusy = !!s.publicationBusy;
   const publicationBadge = owner
@@ -3392,6 +3398,10 @@ function setListRow(s) {
       ? '<span class="tag ok" style="margin-right:6px">공개 중</span>'
       : publicationStatus === 'moderated'
         ? '<span class="tag bad" style="margin-right:6px">관리자 공개 중지</span>'
+        : publicationStatus === 'checking'
+          ? '<span class="tag mute" style="margin-right:6px">게시 상태 확인 중</span>'
+          : publicationStatus === 'unknown'
+            ? '<span class="tag warn" style="margin-right:6px">게시 상태 확인 실패</span>'
         : '<span class="tag mute" style="margin-right:6px">비공개</span>') : '';
   const publicationAction = owner && !s.trashedAt && !s.purgeStartedAt
     ? (publicationStatus === 'published'
@@ -3399,6 +3409,11 @@ function setListRow(s) {
         (publicationBusy ? ' disabled' : '') + '>공개 철회</button>'
       : publicationStatus === 'moderated'
         ? ''
+        : publicationStatus === 'unknown'
+          ? '<button class="btn sm" onclick="retryOwnedPublicationStatusFromList(\'' + esc(s.id) + '\')"' +
+            (publicationBusy ? ' disabled' : '') + '>상태 다시 확인</button>'
+        : publicationStatus === 'checking'
+          ? ''
         : '<button class="btn sm" onclick="publishQuizSetFromList(\'' + esc(s.id) + '\')"' +
           (publicationBusy ? ' disabled' : '') + '>공개 자료실에 게시</button>') : '';
   const startAndCopy =
@@ -3453,6 +3468,49 @@ function setCurrentListSet(id) {
   return setList && setList.all && setList.all.find(s => s.id === id);
 }
 
+function applyOwnedPublicationStatus(set, result) {
+  if (!set || !result || result.publicationId !== set.id ||
+      !['private', 'building', 'published', 'withdrawn', 'moderated'].includes(result.status)) {
+    if (set) {
+      set.publicationStatus = 'unknown';
+      set.publicationRevision = '';
+    }
+    return false;
+  }
+  set.publicationStatus = ['published', 'moderated'].includes(result.status)
+    ? result.status : 'private';
+  set.publicationRevision = typeof result.revision === 'string' ? result.revision : '';
+  return true;
+}
+
+function retryOwnedPublicationStatusFromList(setId) {
+  const current = setCurrentListSet(setId);
+  const listState = setList;
+  const uid = teacherState && teacherState.uid;
+  const authGeneration = teacherAuthVersion;
+  if (!current || !uid || current.ownerUid !== uid || current.publicationBusy ||
+      !store.getOwnedPublicationStatus) return Promise.resolve(false);
+  current.publicationBusy = true;
+  current.publicationStatus = 'checking';
+  renderSetList();
+  const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
+    teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
+  return store.getOwnedPublicationStatus(setId).then(result => {
+    if (!isCurrent()) return false;
+    current.publicationBusy = false;
+    const valid = applyOwnedPublicationStatus(current, result);
+    renderSetList();
+    return valid;
+  }).catch(() => {
+    if (!isCurrent()) return false;
+    current.publicationBusy = false;
+    current.publicationStatus = 'unknown';
+    current.publicationRevision = '';
+    renderSetList();
+    return false;
+  });
+}
+
 function publicLibraryActor() {
   return Object.assign({}, teacherState || {}, {
     uid: teacherState && teacherState.uid || teacherUser && teacherUser.uid || '',
@@ -3473,7 +3531,12 @@ function publishQuizSetFromList(setId) {
     return Promise.resolve(false);
   }
   const imageCount = Number.isSafeInteger(current.imageCount) ? current.imageCount : 0;
-  const authorDisplayName = String(current.author || teacherUser && teacherUser.displayName || '').trim() || '표시 이름 없음';
+  const actor = publicLibraryActor();
+  if (!actor.displayName) {
+    alert('교사 표시 이름을 설정한 뒤 공개 자료실에 게시해 주세요.');
+    return Promise.resolve(false);
+  }
+  const authorDisplayName = actor.displayName;
   const notice = '다음 정보를 공개 자료실에 게시할까요?\n\n' +
     '제목: ' + current.title + '\n' +
     '설명: ' + (current.description || '설명 없음') + '\n' +
@@ -3485,23 +3548,25 @@ function publishQuizSetFromList(setId) {
   renderSetList();
   const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
     teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
-  return store.publishQuizSet(setId, publicLibraryActor()).then(() => {
+  return store.publishQuizSet(setId, actor).then(() => {
     if (!isCurrent()) return null;
-    return store.getPublishedQuizSet(setId);
-  }).then(projection => {
-    if (!isCurrent() || !projection || projection.status !== 'published') return false;
-    current.publicationBusy = false;
-    current.publicationStatus = 'published';
-    current.publicationRevision = projection.revision || '';
-    renderSetList();
-    toast('공개 자료실 게시를 확인했습니다.');
-    return true;
-  }).catch(error => {
+    return store.getOwnedPublicationStatus(setId);
+  }).then(status => {
     if (!isCurrent()) return false;
     current.publicationBusy = false;
-    if (error && String(error.message || '').includes('관리자 공개 중지')) {
-      current.publicationStatus = 'moderated';
+    const valid = applyOwnedPublicationStatus(current, status);
+    renderSetList();
+    if (!valid || status.status !== 'published') {
+      alert('게시 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
+      return false;
     }
+    toast('공개 자료실 게시를 확인했습니다.');
+    return true;
+  }).catch(() => {
+    if (!isCurrent()) return false;
+    current.publicationBusy = false;
+    current.publicationStatus = 'unknown';
+    current.publicationRevision = '';
     renderSetList();
     alert('게시 상태를 서버에서 확인하지 못했습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
     return false;
@@ -3522,20 +3587,25 @@ function withdrawQuizSetFromList(setId) {
   renderSetList();
   const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
     teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
-  return store.withdrawPublishedQuizSet(setId, publicLibraryActor()).then(result => {
-    if (!isCurrent() || !result || result.status !== 'withdrawn') return false;
-    return store.getPublishedQuizSet(setId).then(visible => {
-      if (!isCurrent() || visible) return false;
-      current.publicationBusy = false;
-      current.publicationStatus = 'private';
-      current.publicationRevision = '';
-      renderSetList();
-      toast('공개 철회를 서버에서 확인했습니다.');
-      return true;
-    });
+  return store.withdrawPublishedQuizSet(setId, publicLibraryActor()).then(() => {
+    if (!isCurrent()) return null;
+    return store.getOwnedPublicationStatus(setId);
+  }).then(status => {
+    if (!isCurrent()) return false;
+    current.publicationBusy = false;
+    const valid = applyOwnedPublicationStatus(current, status);
+    renderSetList();
+    if (!valid || status.status !== 'withdrawn') {
+      alert('공개 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
+      return false;
+    }
+    toast('공개 철회를 서버에서 확인했습니다.');
+    return true;
   }).catch(() => {
     if (!isCurrent()) return false;
     current.publicationBusy = false;
+    current.publicationStatus = 'unknown';
+    current.publicationRevision = '';
     renderSetList();
     alert('공개 철회 상태를 확인하지 못했습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
     return false;
@@ -3688,7 +3758,14 @@ function openPublishedQuizPreview(publicationId) {
   state.requestId = requestId;
   state.error = '';
   return store.getPublishedQuizSet(publicationId).then(projection => {
-    if (!publicLibraryScreenIsCurrent(state, requestId) || !projection || projection.status !== 'published') return false;
+    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
+    if (!projection || projection.status !== 'published') {
+      state.items = (state.items || []).filter(value => value.publicationId !== publicationId);
+      if (state.preview && state.preview.publicationId === publicationId) state.preview = null;
+      state.error = '공개 미리보기를 찾을 수 없습니다. 게시 상태를 다시 확인해 주세요.';
+      renderPublicQuizLibrary();
+      return false;
+    }
     const safe = publicLibrarySafeSummary(Object.assign({}, item, projection));
     if (!safe) return false;
     const questionTexts = [];
@@ -9468,29 +9545,11 @@ function renderAdminPublishedQuizSets() {
   if (!state) {
     state = adm.publicLibrary = {
       uid: teacherUser && teacherUser.uid || '', authGeneration: teacherAuthVersion,
-      requestId: ++publicLibraryRequestSerial, items: [], busyId: '', loading: true, error: ''
+      requestId: ++publicLibraryRequestSerial, cursor: null,
+      items: [], busyId: '', loading: false, error: ''
     };
     body.innerHTML = '<div class="empty">공개 세트를 불러오는 중…</div>';
-    const requestId = state.requestId;
-    store.listPublishedQuizSets({ limit: 50, cursor: null }).then(result => {
-      if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-      const summaries = (result && Array.isArray(result.items) ? result.items : []).slice(0, 50);
-      return Promise.all(summaries.map(summary => store.getPublishedQuizSet(summary.publicationId)
-        .then(projection => projection && projection.status === 'published' ? projection : null)
-        .catch(() => null))).then(projections => {
-          if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-          state.items = projections.filter(Boolean);
-          state.loading = false;
-          renderAdminPublishedQuizSets();
-          return true;
-        });
-    }).catch(() => {
-      if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-      state.loading = false;
-      state.error = '공개 세트 목록을 불러오지 못했습니다. 다시 시도해 주세요.';
-      renderAdminPublishedQuizSets();
-      return false;
-    });
+    loadAdminPublishedQuizSets(true);
     return true;
   }
   const rows = (state.items || []).map(item => {
@@ -9512,10 +9571,62 @@ function renderAdminPublishedQuizSets() {
           '<button class="btn danger" onclick="adminModeratePublishedQuizFromPanel(\'' + esc(id) + '\',\'' + esc(revision) + '\')"' + (busy ? ' disabled' : '') + '>공개 중지</button>') +
       '</div>';
   }).join('');
-  body.innerHTML = (state.error ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>' : '') +
+  body.innerHTML = (state.error ? '<div class="notice bad" role="alert">' + esc(state.error) +
+      ' <button class="btn sm" onclick="retryAdminPublishedQuizSets()"' +
+      (state.loading || state.busyId ? ' disabled' : '') + '>다시 조회</button></div>' : '') +
     (state.loading ? '<div class="empty">공개 세트를 불러오는 중…</div>' :
-      rows || '<div class="card"><div class="empty">현재 공개 중인 세트가 없습니다.</div></div>');
+      (rows || '<div class="card"><div class="empty">현재 공개 또는 중지된 세트가 없습니다.</div></div>') +
+      (state.cursor ? '<button class="btn" onclick="adminPublishedQuizSetsNextPage()">다음 50개</button>' : ''));
   return true;
+}
+
+function loadAdminPublishedQuizSets(reset) {
+  const state = adm && adm.publicLibrary;
+  if (!adminPublishedScreenIsCurrent(state) || state.loading || state.busyId ||
+      !store.listAdminPublishedQuizSets) return Promise.resolve(false);
+  const requestId = ++publicLibraryRequestSerial;
+  state.requestId = requestId;
+  state.loading = true;
+  state.error = '';
+  if (reset) {
+    state.items = [];
+    state.cursor = null;
+  }
+  const cursor = reset ? null : state.cursor;
+  renderAdminPublishedQuizSets();
+  return store.listAdminPublishedQuizSets({
+    limit: 50, cursor, admin: publicLibraryActor()
+  }).then(result => {
+    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+    const incoming = (result && Array.isArray(result.items) ? result.items : [])
+      .filter(item => item && ['published', 'moderated'].includes(item.status) &&
+        typeof item.publicationId === 'string' && typeof item.revision === 'string')
+      .slice(0, 50);
+    const previous = reset ? [] : state.items || [];
+    const byId = new Map(previous.map(item => [item.publicationId, item]));
+    incoming.forEach(item => byId.set(item.publicationId, item));
+    state.items = [...byId.values()];
+    state.cursor = result && result.nextCursor || null;
+    state.loading = false;
+    renderAdminPublishedQuizSets();
+    return true;
+  }).catch(() => {
+    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+    state.loading = false;
+    state.error = '공개 세트 목록을 불러오지 못했습니다. 다시 시도해 주세요.';
+    renderAdminPublishedQuizSets();
+    return false;
+  });
+}
+
+function retryAdminPublishedQuizSets() {
+  return loadAdminPublishedQuizSets(true);
+}
+
+function adminPublishedQuizSetsNextPage() {
+  const state = adm && adm.publicLibrary;
+  if (!state || !state.cursor) return Promise.resolve(false);
+  return loadAdminPublishedQuizSets(false);
 }
 
 function adminModeratePublishedQuizFromPanel(publicationId, expectedRevision, suppliedReason) {
@@ -9541,8 +9652,10 @@ function adminModeratePublishedQuizFromPanel(publicationId, expectedRevision, su
     if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
     if (!projection || projection.publicationId !== publicationId ||
         projection.revision !== expectedRevision || projection.status !== 'moderated') {
-      state.items = state.items.filter(value => value.publicationId !== publicationId);
-      return false;
+      state.busyId = '';
+      state.error = '공개 중지 결과가 변경되어 목록을 다시 조회합니다.';
+      renderAdminPublishedQuizSets();
+      return loadAdminPublishedQuizSets(true).then(() => false);
     }
     state.items = state.items.map(value => value.publicationId === publicationId ? projection : value);
     state.busyId = '';
@@ -9553,7 +9666,7 @@ function adminModeratePublishedQuizFromPanel(publicationId, expectedRevision, su
     state.busyId = '';
     state.error = '공개 중지 상태를 서버에서 확인하지 못했습니다. 다시 조회해 주세요.';
     renderAdminPublishedQuizSets();
-    return false;
+    return loadAdminPublishedQuizSets(true).then(() => false);
   });
 }
 
@@ -9573,8 +9686,10 @@ function adminRestorePublishedQuizFromPanel(publicationId, expectedRevision) {
     if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
     if (!projection || projection.publicationId !== publicationId ||
         projection.revision !== expectedRevision || projection.status !== 'published') {
-      state.items = state.items.filter(value => value.publicationId !== publicationId);
-      return false;
+      state.busyId = '';
+      state.error = '공개 복구 결과가 변경되어 목록을 다시 조회합니다.';
+      renderAdminPublishedQuizSets();
+      return loadAdminPublishedQuizSets(true).then(() => false);
     }
     state.items = state.items.map(value => value.publicationId === publicationId ? projection : value);
     state.busyId = '';
@@ -9585,7 +9700,7 @@ function adminRestorePublishedQuizFromPanel(publicationId, expectedRevision) {
     state.busyId = '';
     state.error = '공개 복구 상태를 서버에서 확인하지 못했습니다. 다시 조회해 주세요.';
     renderAdminPublishedQuizSets();
-    return false;
+    return loadAdminPublishedQuizSets(true).then(() => false);
   });
 }
 

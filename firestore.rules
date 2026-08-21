@@ -1566,6 +1566,13 @@ service cloud.firestore {
         (!exists(path) || get(path).data.get('status', '') in ['building', 'withdrawn']);
     }
 
+    function ownerMayReadPublicationStatus(setId) {
+      let path = publicationPath(setId);
+      return requesterOwnsPublicationSource(setId) &&
+        (!exists(path) ||
+          get(path).data.get('status', '') in ['building', 'withdrawn', 'moderated']);
+    }
+
     function validPublicationGet(setId) {
       let path = publicationPath(setId);
       return !exists(path)
@@ -1576,7 +1583,7 @@ service cloud.firestore {
             ? (resource.data.get('status', '') == 'building'
               ? validPublicBuildingShape(resource.data, setId)
               : validPublicParentShape(resource.data, setId))
-            : ownerMayReadHiddenPublication(setId) &&
+            : ownerMayReadPublicationStatus(setId) &&
               (resource.data.get('status', '') == 'building'
                 ? validPublicBuildingShape(resource.data, setId)
                 : validPublicParentShape(resource.data, setId));
@@ -2816,8 +2823,9 @@ service cloud.firestore {
 
     match /published_quiz_sets/{setId} {
       allow get: if validPublicationGet(setId);
-      allow list: if isApprovedTeacher() && validPublishedListQuery() &&
-        resource.data.status == 'published';
+      allow list: if validPublishedListQuery() &&
+        ((isApprovedTeacher() && resource.data.status == 'published') ||
+          (isAdmin() && resource.data.status in ['published', 'moderated']));
       allow create: if validBuildingCreate(setId);
       allow update: if validPublicParentUpdate(setId);
       allow delete: if false;

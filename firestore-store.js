@@ -3312,6 +3312,79 @@
       };
     }
 
+    async function getOwnedPublicationStatus(publicationId) {
+      const id = canonicalPublicationId(publicationId, 'publicationId');
+      const snapshot = await db.doc('published_quiz_sets/' + id)
+        .get({ source: 'server' });
+      if (!snapshot.exists) {
+        return { publicationId: id, status: 'private', revision: '' };
+      }
+      const projection = requireStoredProjection(snapshot.data() || {}, id);
+      return {
+        publicationId: id,
+        status: projection.status,
+        revision: projection.revision
+      };
+    }
+
+    function adminPublicationSummary(projection) {
+      return {
+        publicationId: projection.publicationId,
+        status: projection.status,
+        moderationStatus: projection.moderationStatus,
+        revision: projection.revision,
+        title: projection.title,
+        authorDisplayName: projection.authorDisplayName,
+        videoCount: projection.videoCount,
+        questionCount: projection.questionCount,
+        updatedAtMs: publicTimestampMillis(projection.updatedAt, 'updatedAt')
+      };
+    }
+
+    async function listAdminPublishedQuizSets(options) {
+      const config = options || {};
+      const limit = config.limit == null ? 50 : Number(config.limit);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+        throw new Error('관리자 공개 세트 limit은 1~50이어야 합니다.');
+      }
+      if (config.cursor != null &&
+          (!config.cursor || typeof config.cursor.id !== 'string' ||
+           typeof config.cursor.get !== 'function')) {
+        throw new Error('관리자 공개 세트 cursor가 유효하지 않습니다.');
+      }
+      const currentAdmin = assertAdminIdentity(config.admin);
+      const allowanceSnapshot = await db.doc(
+        'teacher_allowances/' + currentAdmin.uid
+      ).get({ source: 'server' });
+      if (!allowanceSnapshot.exists ||
+          !validAuthoritativeAdmin(allowanceSnapshot.data() || {}, currentAdmin)) {
+        throw new Error('authoritative active 관리자 allowance가 유효하지 않습니다.');
+      }
+      let query = db.collection('published_quiz_sets')
+        .where('status', 'in', ['published', 'moderated'])
+        .orderBy('updatedAt', 'desc');
+      if (config.cursor != null) query = query.startAfter(config.cursor);
+      const snapshot = await query.limit(limit).get({ source: 'server' });
+      const items = [];
+      for (const document of snapshot.docs || []) {
+        try {
+          const projection = requireStoredProjection(
+            document.data() || {}, document.id
+          );
+          if (['published', 'moderated'].includes(projection.status)) {
+            items.push(adminPublicationSummary(projection));
+          }
+        } catch (_) {
+          // Malformed rows stay hidden while the raw cursor still advances.
+        }
+      }
+      const last = (snapshot.docs || []).at(-1);
+      return {
+        items,
+        nextCursor: (snapshot.docs || []).length === limit ? last : null
+      };
+    }
+
     async function getPublishedQuizSet(publicationId) {
       const id = canonicalPublicationId(publicationId, 'publicationId');
       const snapshot = await db.doc('published_quiz_sets/' + id)
@@ -4411,6 +4484,8 @@
       adminModeratePublishedQuiz,
       adminRestorePublishedQuiz,
       listPublishedQuizSets,
+      getOwnedPublicationStatus,
+      listAdminPublishedQuizSets,
       getPublishedQuizSet,
       copyPublishedQuizSet,
       startSession,

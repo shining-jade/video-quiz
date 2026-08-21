@@ -4412,6 +4412,67 @@ rulesTest('published projection list requires exact visible status order and bou
   }
 });
 
+rulesTest('owner reads only own moderated parent while admin lists the exact bounded moderation status set', async () => {
+  await seedPublicRulesSource('owner-moderated');
+  await adminWrite('published_quiz_sets/owner-moderated', publicRulesProjection(
+    'owner-moderated', { status: 'moderated', moderationStatus: 'moderated' }
+  ));
+  await adminWrite('published_quiz_audits/owner-moderated', {
+    publicationId: 'owner-moderated', revision: 'rev-1', status: 'moderated',
+    moderatedByUid: actors.admin.uid, moderationReason: 'private reason',
+    moderatedAt: Timestamp.fromMillis(1_000)
+  });
+  await adminWrite('published_quiz_sets/admin-published', publicRulesProjection('admin-published'));
+  await adminWrite('published_quiz_sets/admin-withdrawn', publicRulesProjection(
+    'admin-withdrawn', { status: 'withdrawn' }
+  ));
+
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const admin = actorFirestore('admin');
+  await assertSucceeds(getDoc(doc(owner, 'published_quiz_sets/owner-moderated')));
+  await assertFails(getDoc(doc(other, 'published_quiz_sets/owner-moderated')));
+  await assertFails(getDoc(doc(owner, 'published_quiz_audits/owner-moderated')));
+
+  const exactAdminQuery = db => getDocs(query(
+    collection(db, 'published_quiz_sets'),
+    where('status', 'in', ['published', 'moderated']),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(50)
+  ));
+  const snapshot = await assertSucceeds(exactAdminQuery(admin));
+  assert.deepEqual(snapshot.docs.map(document => document.id).sort(), [
+    'admin-published', 'owner-moderated'
+  ]);
+  const ownerStatus = await emulatorStore(owner).getOwnedPublicationStatus('owner-moderated');
+  assert.deepEqual(ownerStatus, {
+    publicationId: 'owner-moderated', status: 'moderated', revision: 'rev-1'
+  });
+  assert.equal(ownerStatus.moderatedByUid, undefined);
+  assert.equal(ownerStatus.moderationReason, undefined);
+  const adminStore = emulatorStore(admin);
+  const adminPage = await adminStore.listAdminPublishedQuizSets({
+    limit: 50, admin: requestAdminIdentity
+  });
+  assert.deepEqual(adminPage.items.map(item => item.publicationId).sort(), [
+    'admin-published', 'owner-moderated'
+  ]);
+  assert.equal(adminPage.nextCursor, null);
+  await assertFails(exactAdminQuery(other));
+  await assertFails(getDocs(query(
+    collection(admin, 'published_quiz_sets'),
+    where('status', 'in', ['published', 'moderated', 'withdrawn']),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(50)
+  )));
+  await assertFails(getDocs(query(
+    collection(admin, 'published_quiz_sets'),
+    where('status', 'in', ['published', 'moderated']),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(51)
+  )));
+});
+
 rulesTest('published projection owner protocol admits actual building image finalize republish and safety withdrawal shapes', async () => {
   const firstImages = {
     v0q0: 'data:image/png;base64,AAAA',

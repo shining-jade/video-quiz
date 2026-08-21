@@ -215,6 +215,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
       const a = queryComparable(left);
       const b = queryComparable(right);
       if (operator === '==') return a === b;
+      if (operator === 'in') return Array.isArray(right) && right.includes(a);
       if (operator === '>=') return a >= b;
       if (operator === '>') return a > b;
       if (operator === '<=') return a <= b;
@@ -4022,6 +4023,34 @@ test('세트 목록 화면은 소유자 query와 공동편집 shared discovery�
   });
 });
 
+test('세트 목록의 owner publication server lookup failure remains unknown instead of private', async () => {
+  const app = { innerHTML: '' };
+  let renderedStatus = '';
+  const teacher = { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' };
+  const context = {
+    setList: null,
+    teacherState: teacher,
+    store: {
+      async listQuizSets() { return [{ id: 'set-1', ownerUid: 'teacher-1', title: '과학' }]; },
+      async listSharedQuizSets() { return []; },
+      async listTrash() { return []; },
+      async getOwnedPublicationStatus() { throw new Error('offline'); }
+    },
+    onCleanup() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    normSet(value) { return value; },
+    renderSetList() { renderedStatus = context.setList.all[0].publicationStatus; },
+    console
+  };
+  loadStageFunctions(['screenSetList'], context);
+
+  context.screenSetList();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(renderedStatus, 'unknown');
+  assert.equal(context.setList.all[0].publicationStatus, 'unknown');
+});
+
 test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게 렌더링한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const escapeHtml = value => String(value).replace(/[&<>]/g, ch => ({
@@ -4167,13 +4196,13 @@ test('owner publication confirmation is complete and success waits for authorita
   const confirmations = [];
   const notices = [];
   const set = {
-    id: 'set-1', title: '과학 퀴즈', description: '힘과 운동', author: '홍교사',
+    id: 'set-1', title: '과학 퀴즈', description: '힘과 운동', author: '이전 작성자',
     ownerUid: 'owner-1', imageCount: 2, publicationStatus: 'private',
     settings: { revealMode: 'timer' }, videos: [{ questions: [{ text: '문항' }] }]
   };
   const context = {
     setList: { all: [set] },
-    teacherUser: { uid: 'owner-1', displayName: '홍교사' },
+    teacherUser: { uid: 'owner-1', displayName: '현재 표시명' },
     teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
     teacherAuthVersion: 4,
     AuthCore: require('../auth-core.js'),
@@ -4182,33 +4211,59 @@ test('owner publication confirmation is complete and success waits for authorita
         calls.push(['publish', id, actor.uid, actor.displayName]);
         return new Promise(resolve => { resolvePublish = resolve; });
       },
-      async getPublishedQuizSet(id) {
+      async getOwnedPublicationStatus(id) {
         calls.push(['reread', id]);
         return { publicationId: id, status: 'published', revision: 'rev-1' };
       }
     },
     confirm(message) { confirmations.push(message); return true; },
-    renderSetList() {}, toast(message) { notices.push(message); }
+    renderSetList() {}, toast(message) { notices.push(message); }, alert() {}
   };
-  loadStageFunctions(['setCurrentListSet', 'publicLibraryActor', 'publishQuizSetFromList'], context);
+  loadStageFunctions([
+    'setCurrentListSet', 'publicLibraryActor', 'applyOwnedPublicationStatus',
+    'publishQuizSetFromList'
+  ], context);
 
   const publishing = context.publishQuizSetFromList('set-1');
   assert.equal(set.publicationBusy, true);
   assert.match(confirmations[0], /과학 퀴즈/);
   assert.match(confirmations[0], /힘과 운동/);
-  assert.match(confirmations[0], /홍교사/);
+  assert.match(confirmations[0], /현재 표시명/);
+  assert.doesNotMatch(confirmations[0], /이전 작성자/);
   assert.match(confirmations[0], /이미지 2개/);
   assert.match(confirmations[0], /저작권/);
   resolvePublish({ publicationId: 'set-1', status: 'published', revision: 'rev-1' });
 
   assert.equal(await publishing, true);
   assert.deepEqual(calls, [
-    ['publish', 'set-1', 'owner-1', '홍교사'],
+    ['publish', 'set-1', 'owner-1', '현재 표시명'],
     ['reread', 'set-1']
   ]);
   assert.equal(set.publicationBusy, false);
   assert.equal(set.publicationStatus, 'published');
   assert.deepEqual(notices, ['공개 자료실 게시를 확인했습니다.']);
+});
+
+test('owner publish refuses a missing actor display name before confirmation or store write', async () => {
+  const set = { id: 'set-1', title: '과학', ownerUid: 'owner-1', publicationStatus: 'private' };
+  let confirmations = 0;
+  let writes = 0;
+  const alerts = [];
+  const context = {
+    setList: { all: [set] }, teacherUser: { uid: 'owner-1', displayName: '   ' },
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+    teacherAuthVersion: 4, AuthCore: require('../auth-core.js'),
+    store: { async publishQuizSet() { writes += 1; } },
+    confirm() { confirmations += 1; return true; }, renderSetList() {}, toast() {},
+    alert(message) { alerts.push(message); }
+  };
+  loadStageFunctions(['setCurrentListSet', 'publicLibraryActor', 'publishQuizSetFromList'], context);
+
+  assert.equal(await context.publishQuizSetFromList('set-1'), false);
+  assert.equal(confirmations, 0);
+  assert.equal(writes, 0);
+  assert.equal(set.publicationBusy, undefined);
+  assert.match(alerts[0], /표시 이름/);
 });
 
 test('owner withdrawal stays busy until the authoritative published reread is empty', async () => {
@@ -4226,17 +4281,137 @@ test('owner withdrawal stays busy until the authoritative published reread is em
         calls.push(['withdraw', id, actor.uid]);
         return { publicationId: id, status: 'withdrawn', revision: 'rev-1' };
       },
-      async getPublishedQuizSet(id) { calls.push(['reread', id]); return null; }
+      async getOwnedPublicationStatus(id) {
+        calls.push(['reread', id]);
+        return { publicationId: id, status: 'withdrawn', revision: 'rev-1' };
+      }
     },
     confirm() { return true; }, renderSetList() {}, toast(message) { notices.push(message); }, alert() {}
   };
-  loadStageFunctions(['setCurrentListSet', 'publicLibraryActor', 'withdrawQuizSetFromList'], context);
+  loadStageFunctions([
+    'setCurrentListSet', 'publicLibraryActor', 'applyOwnedPublicationStatus',
+    'withdrawQuizSetFromList'
+  ], context);
 
   assert.equal(await context.withdrawQuizSetFromList('set-1'), true);
   assert.deepEqual(calls, [['withdraw', 'set-1', 'owner-1'], ['reread', 'set-1']]);
   assert.equal(set.publicationBusy, false);
   assert.equal(set.publicationStatus, 'private');
   assert.deepEqual(notices, ['공개 철회를 서버에서 확인했습니다.']);
+});
+
+test('owner publication lookup failure is unknown and retry server-refetches instead of enabling publish', async () => {
+  const set = {
+    id: 'set-1', title: '과학 퀴즈', ownerUid: 'owner-1', publicationStatus: 'unknown',
+    settings: { revealMode: 'timer' }, videos: [{ questions: [] }]
+  };
+  let calls = 0;
+  const context = {
+    setList: { all: [set] }, teacherUser: { uid: 'owner-1', displayName: '현재 표시명' },
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+    teacherAuthVersion: 4, AuthCore: require('../auth-core.js'),
+    PlaylistCore: require('../playlist-core.js'), REVEAL_LABEL: { timer: '타이머' },
+    store: { async getOwnedPublicationStatus() {
+      calls += 1;
+      return { publicationId: 'set-1', status: 'moderated', revision: 'rev-7' };
+    } },
+    renderSetList() {}, esc(value) { return String(value); }, fmtDate() { return ''; }, linkTo(value) { return value; }
+  };
+  loadStageFunctions([
+    'canEditSet', 'setCurrentListSet', 'setListRow', 'applyOwnedPublicationStatus',
+    'retryOwnedPublicationStatusFromList'
+  ], context);
+
+  const failedCard = context.setListRow(set);
+  assert.match(failedCard, /게시 상태 확인 실패/);
+  assert.match(failedCard, /상태 다시 확인/);
+  assert.doesNotMatch(failedCard, /공개 자료실에 게시|공개 철회/);
+
+  assert.equal(await context.retryOwnedPublicationStatusFromList('set-1'), true);
+  assert.equal(calls, 1);
+  assert.equal(set.publicationStatus, 'moderated');
+  assert.equal(set.publicationRevision, 'rev-7');
+  assert.equal(set.publicationBusy, false);
+});
+
+test('publish and withdraw mismatches clear busy and reconcile authoritative owner status', async t => {
+  const baseContext = set => ({
+    setList: { all: [set] }, teacherUser: { uid: 'owner-1', displayName: '현재 표시명' },
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+    teacherAuthVersion: 4, AuthCore: require('../auth-core.js'),
+    confirm() { return true; }, renderSetList() {}, toast() {}, alert() {}
+  });
+
+  await t.test('publish mismatch', async () => {
+    const set = { id: 'set-1', title: '과학', ownerUid: 'owner-1', publicationStatus: 'private' };
+    const context = baseContext(set);
+    context.store = {
+      async publishQuizSet() { return { publicationId: 'wrong', status: 'published' }; },
+      async getOwnedPublicationStatus() {
+        return { publicationId: 'set-1', status: 'moderated', revision: 'rev-2' };
+      }
+    };
+    loadStageFunctions([
+      'setCurrentListSet', 'publicLibraryActor', 'applyOwnedPublicationStatus',
+      'publishQuizSetFromList'
+    ], context);
+
+    assert.equal(await context.publishQuizSetFromList('set-1'), false);
+    assert.equal(set.publicationBusy, false);
+    assert.equal(set.publicationStatus, 'moderated');
+  });
+
+  await t.test('withdraw mismatch', async () => {
+    const set = { id: 'set-1', title: '과학', ownerUid: 'owner-1', publicationStatus: 'published' };
+    const context = baseContext(set);
+    context.store = {
+      async withdrawPublishedQuizSet() { return { publicationId: 'wrong', status: 'withdrawn' }; },
+      async getOwnedPublicationStatus() {
+        return { publicationId: 'set-1', status: 'published', revision: 'rev-3' };
+      }
+    };
+    loadStageFunctions([
+      'setCurrentListSet', 'publicLibraryActor', 'applyOwnedPublicationStatus',
+      'withdrawQuizSetFromList'
+    ], context);
+
+    assert.equal(await context.withdrawQuizSetFromList('set-1'), false);
+    assert.equal(set.publicationBusy, false);
+    assert.equal(set.publicationStatus, 'published');
+  });
+});
+
+test('owner publication mutation errors clear busy and fail closed as unknown', async t => {
+  for (const operation of ['publish', 'withdraw']) {
+    await t.test(operation, async () => {
+      const set = {
+        id: 'set-1', title: '과학', ownerUid: 'owner-1',
+        publicationStatus: operation === 'publish' ? 'private' : 'published'
+      };
+      const context = {
+        setList: { all: [set] }, teacherUser: { uid: 'owner-1', displayName: '현재 표시명' },
+        teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+        teacherAuthVersion: 4, AuthCore: require('../auth-core.js'),
+        store: {
+          async publishQuizSet() { throw new Error('race'); },
+          async withdrawPublishedQuizSet() { throw new Error('race'); },
+          async getOwnedPublicationStatus() { throw new Error('must not reach'); }
+        },
+        confirm() { return true; }, renderSetList() {}, toast() {}, alert() {}
+      };
+      loadStageFunctions([
+        'setCurrentListSet', 'publicLibraryActor', 'applyOwnedPublicationStatus',
+        operation === 'publish' ? 'publishQuizSetFromList' : 'withdrawQuizSetFromList'
+      ], context);
+
+      const result = operation === 'publish'
+        ? await context.publishQuizSetFromList('set-1')
+        : await context.withdrawQuizSetFromList('set-1');
+      assert.equal(result, false);
+      assert.equal(set.publicationBusy, false);
+      assert.equal(set.publicationStatus, 'unknown');
+    });
+  }
 });
 
 test('public library renders summary only and copy routes to the new private set', async () => {
@@ -4350,6 +4525,32 @@ test('public library stale list preview and copy completions cannot rerender or 
   resolveCopy({ id: 'copy-stale', visibility: 'private' });
   assert.equal(await copying, false);
   assert.deepEqual(routes, []);
+});
+
+test('missing public preview removes the stale item and preview and reports a retryable error', async () => {
+  const item = {
+    publicationId: 'pub-1', title: '철회된 퀴즈', description: '', authorDisplayName: '홍교사',
+    videoCount: 1, questionCount: 1, updatedAtMs: 1
+  };
+  const context = {
+    publicQuizLibraryState: {
+      uid: 'teacher-a', authGeneration: 2, requestId: 1, items: [item],
+      preview: { ...item, questionTexts: ['오래된 문항'] }, loading: false, error: ''
+    },
+    publicLibraryRequestSerial: 1,
+    teacherUser: { uid: 'teacher-a' },
+    teacherState: { uid: 'teacher-a', role: 'teacher' },
+    teacherAuthVersion: 2, location: { hash: '#/library' },
+    AuthCore: require('../auth-core.js'),
+    store: { async getPublishedQuizSet() { return null; } },
+    renderPublicQuizLibrary() {}
+  };
+  loadStageFunctions(['publicLibrarySafeSummary', 'publicLibraryScreenIsCurrent', 'openPublishedQuizPreview'], context);
+
+  assert.equal(await context.openPublishedQuizPreview('pub-1'), false);
+  assert.deepEqual(context.publicQuizLibraryState.items, []);
+  assert.equal(context.publicQuizLibraryState.preview, null);
+  assert.match(context.publicQuizLibraryState.error, /게시 상태|다시/);
 });
 
 test('teacher A to B auth replacement or signout synchronously clears public library and preview DOM', async () => {
@@ -4470,12 +4671,14 @@ test('stale admin publication load cannot overwrite a different admin tab', asyn
     teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
     AuthCore: require('../auth-core.js'),
     store: {
-      listPublishedQuizSets() { return new Promise(resolve => { resolveList = resolve; }); },
-      async getPublishedQuizSet() { return { publicationId: 'pub-1', status: 'published' }; }
+      listAdminPublishedQuizSets() { return new Promise(resolve => { resolveList = resolve; }); }
     },
     $() { return body; }, esc(value) { return String(value); }
   };
-  loadStageFunctions(['adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets'], context);
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets'
+  ], context);
 
   context.renderAdminPublishedQuizSets();
   context.adm.tab = 'sessions';
@@ -4485,6 +4688,136 @@ test('stale admin publication load cannot overwrite a different admin tab', asyn
   await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(body.innerHTML, '<section>진행 기록 탭</section>');
+});
+
+test('admin publication panel reloads moderated rows and paginates with its bounded cursor', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const cursor = { id: 'pub-50', get() {} };
+  const calls = [];
+  let attempt = 0;
+  const row = (id, status) => ({
+    publicationId: id, title: id, authorDisplayName: '홍교사', revision: 'rev-1', status,
+    moderationStatus: status === 'moderated' ? 'moderated' : 'clear', videoCount: 1, questionCount: 1
+  });
+  const context = {
+    adm: { tab: 'publications', publicLibrary: null },
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: { async listAdminPublishedQuizSets(options) {
+      calls.push({ limit: options.limit, cursor: options.cursor, uid: options.admin.uid });
+      attempt += 1;
+      if (attempt === 1) throw new Error('temporary');
+      if (attempt === 2) return { items: [row('moderated-1', 'moderated')], nextCursor: cursor };
+      return { items: [row('published-51', 'published')], nextCursor: null };
+    } },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets', 'retryAdminPublishedQuizSets', 'adminPublishedQuizSetsNextPage'
+  ], context);
+
+  context.renderAdminPublishedQuizSets();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(body.innerHTML, /다시 조회/);
+  assert.equal(await context.retryAdminPublishedQuizSets(), true);
+  assert.match(body.innerHTML, /moderated-1/);
+  assert.match(body.innerHTML, /관리자 공개 중지/);
+  assert.match(body.innerHTML, /다음 50개/);
+  assert.equal(await context.adminPublishedQuizSetsNextPage(), true);
+  assert.match(body.innerHTML, /moderated-1/);
+  assert.match(body.innerHTML, /published-51/);
+  assert.deepEqual(calls.map(call => [call.limit, call.cursor && call.cursor.id || null, call.uid]), [
+    [50, null, 'admin-1'], [50, null, 'admin-1'], [50, 'pub-50', 'admin-1']
+  ]);
+});
+
+test('admin moderation mismatch clears busy and refetches the authoritative panel', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const initial = {
+    publicationId: 'pub-1', title: '공개 과학', authorDisplayName: '홍교사',
+    revision: 'rev-7', status: 'published', moderationStatus: 'clear', videoCount: 1, questionCount: 2
+  };
+  let reloads = 0;
+  const context = {
+    adm: { tab: 'publications', publicLibrary: {
+      uid: 'admin-1', authGeneration: 3, requestId: 1, items: [initial],
+      cursor: null, busyId: '', loading: false, error: ''
+    } },
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      async adminModeratePublishedQuiz() {
+        return { ...initial, publicationId: 'wrong', status: 'moderated' };
+      },
+      async listAdminPublishedQuizSets() {
+        reloads += 1;
+        return { items: [{ ...initial, revision: 'rev-8' }], nextCursor: null };
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets', 'adminModeratePublishedQuizFromPanel'
+  ], context);
+
+  assert.equal(await context.adminModeratePublishedQuizFromPanel('pub-1', 'rev-7', '사유'), false);
+  assert.equal(context.adm.publicLibrary.busyId, '');
+  assert.equal(reloads, 1);
+  assert.equal(context.adm.publicLibrary.items[0].revision, 'rev-8');
+});
+
+test('admin moderation and restore race errors clear busy and server-refetch', async t => {
+  for (const operation of ['moderate', 'restore']) {
+    await t.test(operation, async () => {
+      const body = { innerHTML: '', querySelectorAll() { return []; } };
+      const status = operation === 'moderate' ? 'published' : 'moderated';
+      const row = {
+        publicationId: 'pub-1', title: '공개 과학', authorDisplayName: '홍교사',
+        revision: 'rev-7', status,
+        moderationStatus: status === 'moderated' ? 'moderated' : 'clear',
+        videoCount: 1, questionCount: 2
+      };
+      let reloads = 0;
+      const context = {
+        adm: { tab: 'publications', publicLibrary: {
+          uid: 'admin-1', authGeneration: 3, requestId: 1, items: [row],
+          cursor: null, busyId: '', loading: false, error: ''
+        } },
+        teacherUser: { uid: 'admin-1' },
+        teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+        teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+        AuthCore: require('../auth-core.js'),
+        store: {
+          async adminModeratePublishedQuiz() { throw new Error('race'); },
+          async adminRestorePublishedQuiz() { throw new Error('race'); },
+          async listAdminPublishedQuizSets() {
+            reloads += 1;
+            return { items: [row], nextCursor: null };
+          }
+        },
+        $() { return body; }, esc(value) { return String(value); }
+      };
+      loadStageFunctions([
+        'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+        'loadAdminPublishedQuizSets',
+        operation === 'moderate'
+          ? 'adminModeratePublishedQuizFromPanel' : 'adminRestorePublishedQuizFromPanel'
+      ], context);
+
+      const result = operation === 'moderate'
+        ? await context.adminModeratePublishedQuizFromPanel('pub-1', 'rev-7', '사유')
+        : await context.adminRestorePublishedQuizFromPanel('pub-1', 'rev-7');
+      assert.equal(result, false);
+      assert.equal(context.adm.publicLibrary.busyId, '');
+      assert.equal(reloads, 1);
+    });
+  }
 });
 
 test('공유 세트 진행 화면은 시작·사본만 제공하고 소유자에게만 편집 링크를 표시한다', () => {
@@ -14524,6 +14857,24 @@ test('request-marker home router and dashboard rerender are mutually exclusive',
   assert.deepEqual(events, ['router']);
 });
 
+test('home exposes the public-library link only to an active approved teacher', () => {
+  const app = { innerHTML: '' };
+  const context = {
+    teacherUser: null, teacherState: null, AuthCore: require('../auth-core.js'),
+    APP() { return app; }, topbar(extra) { return '<nav>' + (extra || '') + '</nav>'; },
+    startTeacherDashboard() {}, stopTeacherDashboard() {}
+  };
+  loadStageFunctions(['screenHome'], context);
+
+  context.screenHome();
+  assert.doesNotMatch(app.innerHTML, /#\/library|공개 자료실/);
+
+  context.teacherUser = { uid: 'teacher-a' };
+  context.teacherState = { uid: 'teacher-a', role: 'teacher', status: 'teacher' };
+  context.screenHome();
+  assert.match(app.innerHTML, /href="#\/library"[^>]*>🌐 공개 자료실/);
+});
+
 const PublicQuizLibraryCore = require('../public-quiz-library-core.js');
 
 function publicLibraryActor(uid = 'owner', email = 'owner@school.kr', overrides = {}) {
@@ -15066,6 +15417,79 @@ test('public projection list and get return only validated published rows with a
   assert.ok(calls.some(call => call.operation === 'where' && call.field === 'status' && call.value === 'published'));
   assert.ok(calls.some(call => call.operation === 'orderBy' && call.field === 'updatedAt' && call.direction === 'desc'));
   assert.ok(calls.some(call => call.operation === 'startAfter' && call.values[0].id === 'pub-2'));
+});
+
+test('owner status probe returns only minimal authoritative state and never audit or projection fields', async () => {
+  const fake = makeFirestoreFake({
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', {
+      patch: { status: 'moderated', moderationStatus: 'moderated' }
+    }),
+    'published_quiz_audits/set-1': {
+      publicationId: 'set-1', revision: 'rev-1', status: 'moderated',
+      moderatedByUid: 'admin-secret', moderationReason: 'private reason',
+      moderatedAt: new Timestamp(1_000)
+    }
+  });
+  const store = createStore(fake);
+
+  const status = await store.getOwnedPublicationStatus('set-1');
+
+  assert.deepEqual(status, {
+    publicationId: 'set-1', status: 'moderated', revision: 'rev-1'
+  });
+  assert.equal(JSON.stringify(status).includes('admin-secret'), false);
+  assert.equal(JSON.stringify(status).includes('private reason'), false);
+  assert.equal(status.title, undefined);
+  assert.deepEqual(await store.getOwnedPublicationStatus('missing-set'), {
+    publicationId: 'missing-set', status: 'private', revision: ''
+  });
+  assert.equal(fake.calls().some(call => call.path === 'published_quiz_audits/set-1'), false);
+});
+
+test('admin publication list is exact authenticated status-set query with bounded cursor pagination', async () => {
+  const admin = publicLibraryActor('admin', 'admin@school.kr', {
+    displayName: '관리자', role: 'admin'
+  });
+  const fake = makeFirestoreFake({
+    'teacher_allowances/admin': publicLibraryAllowance('admin', 'admin@school.kr', { role: 'admin' }),
+    'published_quiz_sets/pub-1': publicLibraryProjection('pub-1', { updatedAtMs: 400 }),
+    'published_quiz_sets/mod-1': publicLibraryProjection('mod-1', {
+      updatedAtMs: 300, patch: { status: 'moderated', moderationStatus: 'moderated' }
+    }),
+    'published_quiz_sets/pub-2': publicLibraryProjection('pub-2', { updatedAtMs: 200 }),
+    'published_quiz_sets/withdrawn': publicLibraryProjection('withdrawn', {
+      updatedAtMs: 500, patch: { status: 'withdrawn' }
+    })
+  });
+  const store = createStore(fake);
+
+  const first = await store.listAdminPublishedQuizSets({ limit: 2, admin });
+  assert.deepEqual(first.items.map(item => [item.publicationId, item.status]), [
+    ['pub-1', 'published'], ['mod-1', 'moderated']
+  ]);
+  assert.equal(first.nextCursor.id, 'mod-1');
+  const second = await store.listAdminPublishedQuizSets({
+    limit: 2, cursor: first.nextCursor, admin
+  });
+  assert.deepEqual(second.items.map(item => item.publicationId), ['pub-2']);
+  assert.equal(second.nextCursor, null);
+  assert.deepEqual(Object.keys(first.items[1]).sort(), [
+    'authorDisplayName', 'moderationStatus', 'publicationId', 'questionCount', 'revision',
+    'status', 'title', 'updatedAtMs', 'videoCount'
+  ]);
+  await assert.rejects(
+    () => store.listAdminPublishedQuizSets({ limit: 51, admin }), /1.*50|limit/
+  );
+  await assert.rejects(
+    () => store.listAdminPublishedQuizSets({
+      limit: 50, admin: { ...admin, role: 'teacher' }
+    }), /관리자|admin/
+  );
+  const calls = fake.calls();
+  assert.ok(calls.some(call => call.operation === 'where' && call.field === 'status' &&
+    call.operator === 'in' && JSON.stringify(call.value) === '["published","moderated"]'));
+  assert.ok(calls.some(call => call.operation === 'get' && call.path === 'teacher_allowances/admin'));
+  assert.ok(calls.some(call => call.operation === 'startAfter' && call.values[0].id === 'mod-1'));
 });
 
 test('public list advances its DocumentSnapshot cursor when the page boundary row is malformed', async () => {
