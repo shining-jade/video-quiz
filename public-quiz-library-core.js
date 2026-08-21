@@ -28,7 +28,7 @@
   const QUESTION_PART_KEYS = QUESTION_KEYS.concat([
     'questionKey', 'videoKey', 'revision', 'buildToken'
   ]);
-  const STATUSES = new Set(['building', 'published', 'withdrawn', 'moderated']);
+  const STATUSES = new Set(['building', 'cancelled', 'published', 'withdrawn', 'moderated']);
   const MODERATION_STATUSES = new Set(['clear', 'moderated']);
   const QUESTION_TYPES = new Set(['choice', 'multi', 'ox', 'short', 'long']);
   const REVEAL_MODES = new Set(['instant', 'timer', 'manual', 'never']);
@@ -378,7 +378,9 @@
     const updatedAtMs = timestampMillis(value.updatedAt);
     if (value.publishedAt !== null && publishedAtMs === null) errors.push('publishedAt is invalid.');
     if (updatedAtMs === null) errors.push('updatedAt is invalid.');
-    if (value.status !== 'building' && value.publishedAt === null) errors.push('visible history requires publishedAt.');
+    if (!['building', 'cancelled'].includes(value.status) && value.publishedAt === null) {
+      errors.push('visible history requires publishedAt.');
+    }
     if (publishedAtMs !== null && updatedAtMs !== null && updatedAtMs < publishedAtMs) {
       errors.push('updatedAt cannot precede publishedAt.');
     }
@@ -422,7 +424,7 @@
     const updatedAtMs = timestampMillis(value.updatedAt);
     if (value.publishedAt !== null && publishedAtMs === null) errors.push('publishedAt is invalid.');
     if (updatedAtMs === null) errors.push('updatedAt is invalid.');
-    if (value.status !== 'building' && value.publishedAt === null) {
+    if (!['building', 'cancelled'].includes(value.status) && value.publishedAt === null) {
       errors.push('visible history requires publishedAt.');
     }
     if (publishedAtMs !== null && updatedAtMs !== null && updatedAtMs < publishedAtMs) {

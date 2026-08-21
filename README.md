@@ -43,7 +43,7 @@
 
 ### 2) Google·이메일 교사 로그인과 학생 익명 로그인 설정
 
-공개 퀴즈 자료실은 기존 세트를 자동 공개하지 않는 private by default 기능입니다. 소유자가 게시한 비식별 projection만 승인 교사에게 보이며, 다른 교사는 원본 권한이 아닌 독립 사본을 만듭니다. 휴지통·중지·탈퇴·purge 전 공개 사본 철회, Rules-before-app 배포, privacy smoke와 롤백의 authoritative 절차는 [`docs/PUBLIC-QUIZ-LIBRARY.md`](./docs/PUBLIC-QUIZ-LIBRARY.md)를 따르세요.
+공개 퀴즈 자료실은 기존 세트를 자동 공개하지 않는 private by default 기능입니다. 소유자가 게시한 비식별 projection만 승인 교사에게 보이며, 다른 교사는 원본 권한이 아닌 독립 사본을 만듭니다. 휴지통·중지·탈퇴·purge 전 공개 사본 철회, lifecycle gate, index 선배포, Rules-before-app 배포, privacy smoke와 롤백의 authoritative 절차는 [`docs/PUBLIC-QUIZ-LIBRARY.md`](./docs/PUBLIC-QUIZ-LIBRARY.md)를 따르세요. 운영 배포 전에는 새 출력 경로를 지정한 `pnpm audit:public-library -- --project <exact-project-id> --target-mode production --max-documents <bounded-count> --output <new-report>.json` read-only 감사가 완전하고 안전해야 합니다.
 
 Firebase Console에서는 기존 **Google**(교사용)과 **익명(Anonymous)**(학생용)을 유지합니다. **Email/Password**(교사용)는 Firebase Password Policy 최소 길이 8·Enforcement `Require`를 확인하고, 호환 Rules → migration lock/apply → strict UID Rules·정적 앱 → 같은 generation verify → exact unlock을 모두 마친 뒤에만 활성화합니다. 이 순서는 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며 Google이나 Anonymous를 끄지 않습니다. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
 

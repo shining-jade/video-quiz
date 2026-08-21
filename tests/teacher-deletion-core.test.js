@@ -263,11 +263,13 @@ function firestoreFake(initial = {}, options = {}) {
       const tx = {
         get: async ref => snapshot(ref.path),
         set(ref, value, config) { staged.push({ ref, value, config }); },
-        update(ref, value) { staged.push({ ref, value, config: { merge: true } }); }
+        update(ref, value) { staged.push({ ref, value, config: { merge: true } }); },
+        delete(ref) { staged.push({ ref, remove: true }); }
       };
       const output = await callback(tx);
       for (const item of staged) {
-        docs.set(item.ref.path, item.config && item.config.merge
+        if (item.remove) docs.delete(item.ref.path);
+        else docs.set(item.ref.path, item.config && item.config.merge
           ? apply(docs.get(item.ref.path), item.value) : resolve(item.value));
       }
       return output;
@@ -309,14 +311,14 @@ test('store request uses a server timestamp then settles the exact 30-day Timest
   assert.equal(saved.purgeEligibleAt.toMillis(), 50_000 + DAYS_30_MS);
   assert.equal(saved.updatedByUid, 'teacher-a');
   assert.equal(fake.read('teacher_allowlist/teacher@school.kr').enabled, false);
-  assert.equal(fake.calls().filter(call => call.operation === 'transaction').length, 2);
+  assert.equal(fake.calls().filter(call => call.operation === 'transaction').length, 3);
 });
 
 test('store request leaves an immediately disabled recoverable state when exact eligibility settlement fails', async () => {
   const fake = firestoreFake({
     'teacher_allowances/teacher-a': storedAllowance(),
     'teacher_allowlist/teacher@school.kr': { enabled: true, role: 'teacher' }
-  }, { failTransaction: 2 });
+  }, { failTransaction: 3 });
   const store = createFirestoreStore(fake.db, fake.fieldValue, () => 49_000);
 
   await assert.rejects(store.requestTeacherDeletion('teacher-a'), /transaction|settle|timestamp|failure/i);

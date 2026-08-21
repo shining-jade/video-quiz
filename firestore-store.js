@@ -757,22 +757,57 @@
       const initialSnapshot = await allowanceRef.get({ source: 'server' });
       const initialAllowance = assertDeletionTeacherAllowance(initialSnapshot, exactUid);
       const initialRevision = allowanceRevision(initialAllowance);
+      const operationActor = lifecycleActor || {
+        uid: exactUid,
+        email: initialAllowance.emailCanonical,
+        role: 'teacher'
+      };
+      let lifecycleOperationId = '';
       if (initialAllowance.status === 'active') {
-        const actor = lifecycleActor || {
-          uid: exactUid,
-          email: initialAllowance.emailCanonical,
-          role: 'teacher'
-        };
-        assertLifecycleOperationCurrent(actor);
-        await withdrawOwnedPublicationsForLifecycle(
-          exactUid, initialRevision, 'teacher-deletion-pending', actor
+        assertLifecycleOperationCurrent(operationActor);
+        lifecycleOperationId = await acquirePublicationLifecycleLock(
+          exactUid, initialRevision, 'teacher-deletion-pending', operationActor
         );
-        assertLifecycleOperationCurrent(actor);
+        try {
+          await withdrawOwnedPublicationsForLifecycle(
+            exactUid, initialRevision, 'teacher-deletion-pending', {
+              ...operationActor, lifecycleOperationId
+            }
+          );
+        } catch (error) {
+          try {
+            await releasePublicationLifecycleLock(
+              exactUid, initialRevision, 'teacher-deletion-pending',
+              operationActor, lifecycleOperationId
+            );
+          } catch (_) {
+            // A failed release leaves the exact retry-adoptable lock fail-closed.
+          }
+          throw error;
+        }
+        assertLifecycleOperationCurrent(operationActor);
       }
+      const lifecycleLockRef = db.doc('publication_lifecycle_locks/' + exactUid);
+      const lifecycleGateRef = db.doc('publication_lifecycle_gates/current');
       const first = await db.runTransaction(async transaction => {
         const allowanceSnapshot = await transaction.get(allowanceRef);
         const allowance = assertDeletionTeacherAllowance(allowanceSnapshot, exactUid);
         const legacyRef = db.doc('teacher_allowlist/' + allowance.emailCanonical);
+        if (lifecycleOperationId) {
+          const lockSnapshot = await transaction.get(lifecycleLockRef);
+          const gateSnapshot = await transaction.get(lifecycleGateRef);
+          requireLifecycleAllowance(
+            allowanceSnapshot, exactUid, initialRevision, initialAllowance
+          );
+          requireLifecycleLock(
+            lockSnapshot, exactUid, allowance, 'teacher-deletion-pending',
+            operationActor, lifecycleOperationId
+          );
+          requireLifecycleLock(
+            gateSnapshot, exactUid, allowance, 'teacher-deletion-pending',
+            operationActor, lifecycleOperationId
+          );
+        }
         if (allowance.status === 'deletion_pending' && allowance.enabled === false) {
           const requestedAtMs = timestampMillis(allowance.deletionRequestedAt);
           const purgeEligibleAtMs = timestampMillis(allowance.purgeEligibleAt);
@@ -792,7 +827,7 @@
         if (allowanceRevision(allowance) !== initialRevision) {
           throw new Error('publication preflight 뒤 teacher allowance revision이 변경되었습니다.');
         }
-        assertLifecycleOperationCurrent(lifecycleActor);
+        assertLifecycleOperationCurrent(operationActor);
         const revision = allowanceRevision(allowance) + 1;
         const timestamp = fieldValue.serverTimestamp();
         transaction.update(allowanceRef, {
@@ -811,7 +846,23 @@
           updatedAt: fieldValue.serverTimestamp(),
           updatedByUid: exactUid
         });
+        if (lifecycleOperationId) {
+          transaction.delete(lifecycleLockRef);
+          transaction.delete(lifecycleGateRef);
+        }
         return { settled: false, revision };
+      }).catch(async error => {
+        if (lifecycleOperationId) {
+          try {
+            await releasePublicationLifecycleLock(
+              exactUid, initialRevision, 'teacher-deletion-pending',
+              operationActor, lifecycleOperationId
+            );
+          } catch (_) {
+            // A failed release leaves the exact retry-adoptable lock fail-closed.
+          }
+        }
+        throw error;
       });
       if (!first.settled) {
         await db.runTransaction(async transaction => {
@@ -1072,10 +1123,28 @@
       const initialSnapshot = await allowanceRef.get({ source: 'server' });
       const initialAllowance = assertAllowanceIdentity(initialSnapshot, exactUid);
       const initialRevision = allowanceRevision(initialAllowance);
-      if (['active', 'deletion_pending'].includes(initialAllowance.status)) {
-        await withdrawOwnedPublicationsForLifecycle(
+      let lifecycleOperationId = '';
+      if (initialAllowance.status === 'active') {
+        lifecycleOperationId = await acquirePublicationLifecycleLock(
           exactUid, initialRevision, 'teacher-suspension', adminIdentity
         );
+        try {
+          await withdrawOwnedPublicationsForLifecycle(
+            exactUid, initialRevision, 'teacher-suspension', {
+              ...adminIdentity, lifecycleOperationId
+            }
+          );
+        } catch (error) {
+          try {
+            await releasePublicationLifecycleLock(
+              exactUid, initialRevision, 'teacher-suspension',
+              adminIdentity, lifecycleOperationId
+            );
+          } catch (_) {
+            // A failed release leaves the exact retry-adoptable lock fail-closed.
+          }
+          throw error;
+        }
       }
       assertLifecycleOperationCurrent(adminIdentity);
       return db.runTransaction(async transaction => {
@@ -1095,6 +1164,20 @@
           throw new Error('publication preflight 뒤 teacher allowance revision이 변경되었습니다.');
         }
         assertLifecycleOperationCurrent(adminIdentity);
+        const lifecycleLockRef = db.doc('publication_lifecycle_locks/' + exactUid);
+        const lifecycleGateRef = db.doc('publication_lifecycle_gates/current');
+        if (lifecycleOperationId) {
+          const lockSnapshot = await transaction.get(lifecycleLockRef);
+          const gateSnapshot = await transaction.get(lifecycleGateRef);
+          requireLifecycleLock(
+            lockSnapshot, exactUid, allowance, 'teacher-suspension',
+            adminIdentity, lifecycleOperationId
+          );
+          requireLifecycleLock(
+            gateSnapshot, exactUid, allowance, 'teacher-suspension',
+            adminIdentity, lifecycleOperationId
+          );
+        }
         const pendingDeletion = allowance.status === 'deletion_pending';
         const timestamp = fieldValue.serverTimestamp();
         transaction.set(allowanceRef, {
@@ -1116,6 +1199,22 @@
           updatedAt: fieldValue.serverTimestamp(),
           updatedByUid: admin.uid
         });
+        if (lifecycleOperationId) {
+          transaction.delete(lifecycleLockRef);
+          transaction.delete(lifecycleGateRef);
+        }
+      }).catch(async error => {
+        if (lifecycleOperationId) {
+          try {
+            await releasePublicationLifecycleLock(
+              exactUid, initialRevision, 'teacher-suspension',
+              adminIdentity, lifecycleOperationId
+            );
+          } catch (_) {
+            // A failed release leaves the exact retry-adoptable lock fail-closed.
+          }
+        }
+        throw error;
       });
     }
 
@@ -1958,9 +2057,18 @@
 
     function lifecycleWithdrawalWrite(publicSnapshot, publicationId) {
       if (!publicSnapshot || !publicSnapshot.exists) return null;
+      const raw = publicSnapshot.data() || {};
       const projection = requireStoredProjection(
-        publicSnapshot.data() || {}, publicationId
+        raw, publicationId
       );
+      if (projection.status === 'building') {
+        return {
+          ...raw,
+          status: 'cancelled',
+          moderationStatus: 'clear',
+          updatedAt: fieldValue.serverTimestamp()
+        };
+      }
       if (projection.status !== 'published') return null;
       const withdrawn = {
         ...projection,
@@ -2645,15 +2753,21 @@
       if (value instanceof Date && Number.isSafeInteger(value.getTime()) && value.getTime() >= 0) {
         return String(value.getTime());
       }
+      if (value && typeof value.toMillis === 'function') {
+        const millis = value.toMillis();
+        if (!Number.isSafeInteger(millis) || millis < 0) return '';
+        if (Number.isInteger(value.nanoseconds) && value.nanoseconds >= 0 &&
+            value.nanoseconds < 1_000_000_000) {
+          const revision = millis + ':' + value.nanoseconds;
+          return revision.length <= 200 ? revision : '';
+        }
+        return String(millis);
+      }
       if (value && Number.isInteger(value.seconds) && value.seconds >= 0 &&
           Number.isInteger(value.nanoseconds) && value.nanoseconds >= 0 &&
           value.nanoseconds < 1_000_000_000) {
         const revision = value.seconds + ':' + value.nanoseconds;
         return revision.length <= 200 ? revision : '';
-      }
-      if (value && typeof value.toMillis === 'function') {
-        const millis = value.toMillis();
-        if (Number.isSafeInteger(millis) && millis >= 0) return String(millis);
       }
       return '';
     }
@@ -2681,7 +2795,7 @@
 
     function storedProjectionAllowedKeys(status) {
       const allowed = new Set(publicLibraryCore().PUBLIC_PARENT_KEYS);
-      if (status === 'building') {
+      if (status === 'building' || status === 'cancelled') {
         allowed.add('buildToken');
         allowed.add('buildVideoCount');
         allowed.add('buildQuestionCount');
@@ -2707,7 +2821,7 @@
       if (requiredStatus && projection.status !== requiredStatus) {
         throw new Error(requiredStatus + ' 공개 projection만 처리할 수 있습니다.');
       }
-      if (status === 'building' &&
+      if ((status === 'building' || status === 'cancelled') &&
           (typeof raw.buildToken !== 'string' || !raw.buildToken ||
            !Number.isSafeInteger(raw.buildVideoCount) || raw.buildVideoCount < 0 ||
            !Number.isSafeInteger(raw.buildQuestionCount) || raw.buildQuestionCount < 0 ||
@@ -2989,6 +3103,12 @@
       return rebuilt;
     }
 
+    function assertNoPublicationLifecycleLock(snapshot) {
+      if (snapshot && snapshot.exists) {
+        throw new Error('소유자 publication lifecycle 작업 중에는 게시할 수 없습니다.');
+      }
+    }
+
     async function publishQuizSet(setId, actor) {
       const publicationId = canonicalPublicationId(setId, 'setId');
       const currentActor = actor || {};
@@ -2998,12 +3118,17 @@
       const source = quizSetValue(sourceSnapshot);
       if (!source) throw new Error('게시할 원본 세트를 찾을 수 없습니다.');
       const ownerAllowanceRef = db.doc('teacher_allowances/' + String(source.ownerUid || ''));
-      const [allowanceSnapshot, imageSnapshot, existingSnapshot] = await Promise.all([
+      const ownerLockRef = db.doc(
+        'publication_lifecycle_locks/' + String(source.ownerUid || '')
+      );
+      const [allowanceSnapshot, lockSnapshot, imageSnapshot, existingSnapshot] = await Promise.all([
         ownerAllowanceRef.get({ source: 'server' }),
+        ownerLockRef.get({ source: 'server' }),
         db.collection('images/' + publicationId + '/q').get({ source: 'server' }),
         publicRef.get({ source: 'server' })
       ]);
       requireActiveSourceOwner(source, allowanceSnapshot, currentActor);
+      assertNoPublicationLifecycleLock(lockSnapshot);
       const revision = requireContentRevision(source);
       const privateImages = privatePublicationImages(imageSnapshot);
       if (Object.keys(privateImages).length !== source.imageCount) {
@@ -3072,11 +3197,13 @@
       const initialized = await db.runTransaction(async transaction => {
         const latestSourceSnapshot = await transaction.get(sourceRef);
         const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
+        const latestLockSnapshot = await transaction.get(ownerLockRef);
         const latestPublicSnapshot = await transaction.get(publicRef);
         const latestSource = quizSetValue(latestSourceSnapshot);
         requireMatchingPublicationSource(
           latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
         );
+        assertNoPublicationLifecycleLock(latestLockSnapshot);
         const latestRaw = latestPublicSnapshot.exists ? latestPublicSnapshot.data() || {} : null;
         if (!publicationProjectionFingerprint(existingRaw, latestRaw)) {
           throw new Error('공개 projection이 게시 준비 중 변경되었습니다.');
@@ -3129,12 +3256,14 @@
         await db.runTransaction(async transaction => {
           const latestSourceSnapshot = await transaction.get(sourceRef);
           const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
+          const latestLockSnapshot = await transaction.get(ownerLockRef);
           const parentSnapshot = await transaction.get(publicRef);
           const childSnapshot = await transaction.get(childRef);
           const latestSource = quizSetValue(latestSourceSnapshot);
           requireMatchingPublicationSource(
             latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
           );
+          assertNoPublicationLifecycleLock(latestLockSnapshot);
           if (!parentSnapshot.exists) throw new Error('building 공개 projection이 사라졌습니다.');
           const parentRaw = parentSnapshot.data() || {};
           const parent = requireStoredProjection(parentRaw, publicationId, 'building');
@@ -3179,11 +3308,13 @@
       const finalized = await db.runTransaction(async transaction => {
         const latestSourceSnapshot = await transaction.get(sourceRef);
         const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
+        const latestLockSnapshot = await transaction.get(ownerLockRef);
         const latestPublicSnapshot = await transaction.get(publicRef);
         const latestSource = quizSetValue(latestSourceSnapshot);
         requireMatchingPublicationSource(
           latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
         );
+        assertNoPublicationLifecycleLock(latestLockSnapshot);
         if (!latestPublicSnapshot.exists) throw new Error('building 공개 projection이 없습니다.');
         const parentRaw = latestPublicSnapshot.data() || {};
         const parent = requireStoredProjection(parentRaw, publicationId, 'building');
@@ -3508,6 +3639,120 @@
       return allowance;
     }
 
+    function lifecycleLockValue(ownerUid, allowance, reason, operationId, actor) {
+      return {
+        ownerUid,
+        ownerEmailCanonical: allowance.emailCanonical,
+        allowanceRevision: allowanceRevision(allowance),
+        allowanceRole: allowance.role,
+        allowanceStatus: allowance.status,
+        allowanceEnabled: allowance.enabled,
+        reason,
+        operationId,
+        initiatedByUid: actor.uid,
+        initiatedByRole: actor.role,
+        createdAt: fieldValue.serverTimestamp()
+      };
+    }
+
+    function requireLifecycleLock(snapshot, ownerUid, allowance, reason, actor, operationId) {
+      if (!snapshot || !snapshot.exists) {
+        throw new Error('publication lifecycle lock이 없습니다. 작업을 다시 시작해 주세요.');
+      }
+      const lock = snapshot.data() || {};
+      const exact = lock.ownerUid === ownerUid &&
+        lock.ownerEmailCanonical === allowance.emailCanonical &&
+        lock.allowanceRevision === allowanceRevision(allowance) &&
+        lock.allowanceRole === allowance.role &&
+        lock.allowanceStatus === allowance.status &&
+        lock.allowanceEnabled === allowance.enabled &&
+        lock.reason === reason && lock.initiatedByUid === actor.uid &&
+        lock.initiatedByRole === actor.role &&
+        typeof lock.operationId === 'string' && lock.operationId.length > 0 &&
+        (!operationId || lock.operationId === operationId);
+      if (!exact) {
+        throw new Error('publication lifecycle lock 신원 또는 allowance binding이 변경되었습니다.');
+      }
+      return lock;
+    }
+
+    async function acquirePublicationLifecycleLock(
+      ownerUid, expectedAllowanceRevision, reason, actor
+    ) {
+      const uid = assertUid(ownerUid);
+      const operationActor = assertLifecycleOperationCurrent(actor);
+      const allowanceRef = db.doc('teacher_allowances/' + uid);
+      const lockRef = db.doc('publication_lifecycle_locks/' + uid);
+      const gateRef = db.doc('publication_lifecycle_gates/current');
+      const proposedOperationId = createLiveToken();
+      return db.runTransaction(async transaction => {
+        if (operationActor.uid !== uid) {
+          await requireTransactionAdmin(transaction, operationActor);
+        }
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = requireLifecycleAllowance(
+          allowanceSnapshot, uid, expectedAllowanceRevision
+        );
+        const actorEmail = canonicalTeacherEmail(operationActor.email);
+        if (operationActor.uid === uid &&
+            (actorEmail !== allowance.emailCanonical ||
+             !['teacher', 'admin'].includes(operationActor.role))) {
+          throw new Error('publication lifecycle lock 소유자 신원이 일치하지 않습니다.');
+        }
+        const lockSnapshot = await transaction.get(lockRef);
+        const gateSnapshot = await transaction.get(gateRef);
+        if (lockSnapshot.exists) {
+          const lock = requireLifecycleLock(
+            lockSnapshot, uid, allowance, reason, operationActor
+          );
+          requireLifecycleLock(
+            gateSnapshot, uid, allowance, reason, operationActor, lock.operationId
+          );
+          return lock.operationId;
+        }
+        if (gateSnapshot.exists) {
+          throw new Error('다른 publication lifecycle 작업이 진행 중입니다. 다시 시도해 주세요.');
+        }
+        const lockValue = lifecycleLockValue(
+          uid, allowance, reason, proposedOperationId, operationActor
+        );
+        transaction.set(lockRef, lockValue);
+        transaction.set(gateRef, lockValue);
+        return proposedOperationId;
+      });
+    }
+
+    async function releasePublicationLifecycleLock(
+      ownerUid, expectedAllowanceRevision, reason, actor, operationId
+    ) {
+      const uid = assertUid(ownerUid);
+      const operationActor = assertLifecycleOperationCurrent(actor);
+      const allowanceRef = db.doc('teacher_allowances/' + uid);
+      const lockRef = db.doc('publication_lifecycle_locks/' + uid);
+      const gateRef = db.doc('publication_lifecycle_gates/current');
+      return db.runTransaction(async transaction => {
+        if (operationActor.uid !== uid) {
+          await requireTransactionAdmin(transaction, operationActor);
+        }
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const allowance = requireLifecycleAllowance(
+          allowanceSnapshot, uid, expectedAllowanceRevision
+        );
+        const lockSnapshot = await transaction.get(lockRef);
+        const gateSnapshot = await transaction.get(gateRef);
+        if (!lockSnapshot.exists) return false;
+        requireLifecycleLock(
+          lockSnapshot, uid, allowance, reason, operationActor, operationId
+        );
+        requireLifecycleLock(
+          gateSnapshot, uid, allowance, reason, operationActor, operationId
+        );
+        transaction.delete(lockRef);
+        transaction.delete(gateRef);
+        return true;
+      });
+    }
+
     async function auditOwnedPublications(ownerUid, limit, cursor) {
       const uid = assertUid(ownerUid);
       const count = limit == null ? 50 : Number(limit);
@@ -3519,8 +3764,7 @@
         throw new Error('소유 publication 감사 cursor가 유효하지 않습니다.');
       }
       let query = db.collection('quiz_sets')
-        .where('ownerUid', '==', uid)
-        .where('lifecycleState', 'in', ['active', 'trashed', 'purging']);
+        .where('ownerUid', '==', uid);
       if (typeof query.orderBy === 'function') query = query.orderBy('ownerUid', 'asc');
       if (cursor != null) {
         if (typeof query.startAfter !== 'function') {
@@ -3577,7 +3821,24 @@
         throw new Error('lifecycle 철회 사유는 1~200자여야 합니다.');
       }
       const operationActor = assertLifecycleOperationCurrent(actor);
+      if (!operationActor.lifecycleOperationId) {
+        const lifecycleOperationId = await acquirePublicationLifecycleLock(
+          uid, expectedRevision, lifecycleReason, operationActor
+        );
+        const lockedActor = { ...operationActor, lifecycleOperationId };
+        try {
+          return await withdrawOwnedPublicationsForLifecycle(
+            uid, expectedRevision, lifecycleReason, lockedActor
+          );
+        } finally {
+          await releasePublicationLifecycleLock(
+            uid, expectedRevision, lifecycleReason, operationActor, lifecycleOperationId
+          );
+        }
+      }
       const allowanceRef = db.doc('teacher_allowances/' + uid);
+      const lockRef = db.doc('publication_lifecycle_locks/' + uid);
+      const gateRef = db.doc('publication_lifecycle_gates/current');
       const startingSnapshot = await allowanceRef.get({ source: 'server' });
       const starting = requireLifecycleAllowance(
         startingSnapshot, uid, expectedRevision
@@ -3596,10 +3857,23 @@
 
       const rereadBoundAllowance = async () => {
         assertLifecycleOperationCurrent(operationActor);
-        const snapshot = await allowanceRef.get({ source: 'server' });
-        return requireLifecycleAllowance(
+        const [snapshot, lockSnapshot, gateSnapshot] = await Promise.all([
+          allowanceRef.get({ source: 'server' }),
+          lockRef.get({ source: 'server' }),
+          gateRef.get({ source: 'server' })
+        ]);
+        const allowance = requireLifecycleAllowance(
           snapshot, uid, expectedRevision, starting
         );
+        requireLifecycleLock(
+          lockSnapshot, uid, allowance, lifecycleReason,
+          operationActor, operationActor.lifecycleOperationId
+        );
+        requireLifecycleLock(
+          gateSnapshot, uid, allowance, lifecycleReason,
+          operationActor, operationActor.lifecycleOperationId
+        );
+        return allowance;
       };
 
       let withdrawnCount = 0;
@@ -3610,17 +3884,27 @@
           await rereadBoundAllowance();
           const page = await auditOwnedPublications(uid, 50, cursor);
           for (const item of page.items) {
-            if (item.status !== 'published') continue;
+            if (!['published', 'building'].includes(item.status)) continue;
             assertLifecycleOperationCurrent(operationActor);
             const sourceRef = db.doc('quiz_sets/' + item.publicationId);
             const publicRef = db.doc('published_quiz_sets/' + item.publicationId);
             const changed = await db.runTransaction(async transaction => {
               if (!ownerOperation) await requireTransactionAdmin(transaction, operationActor);
               const allowanceSnapshot = await transaction.get(allowanceRef);
+              const lockSnapshot = await transaction.get(lockRef);
+              const gateSnapshot = await transaction.get(gateRef);
               const sourceSnapshot = await transaction.get(sourceRef);
               const publicSnapshot = await transaction.get(publicRef);
-              requireLifecycleAllowance(
+              const boundAllowance = requireLifecycleAllowance(
                 allowanceSnapshot, uid, expectedRevision, starting
+              );
+              requireLifecycleLock(
+                lockSnapshot, uid, boundAllowance, lifecycleReason,
+                operationActor, operationActor.lifecycleOperationId
+              );
+              requireLifecycleLock(
+                gateSnapshot, uid, boundAllowance, lifecycleReason,
+                operationActor, operationActor.lifecycleOperationId
               );
               assertLifecycleOperationCurrent(operationActor);
               const source = quizSetValue(sourceSnapshot);
@@ -3635,7 +3919,7 @@
               const projection = requireStoredProjection(
                 publicSnapshot.data() || {}, item.publicationId
               );
-              if (projection.status !== 'published') return false;
+              if (!['published', 'building'].includes(projection.status)) return false;
               if (requireContentRevision(source) !== projection.revision) {
                 throw new Error('lifecycle 철회 source/publication revision이 변경되었습니다.');
               }
@@ -4643,6 +4927,7 @@
         throw new Error('현재 관리자 계정은 자기 역할을 낮추거나 중지할 수 없습니다.');
       }
       const allowanceRef = db.doc('teacher_allowances/' + uid);
+      let lifecycleOperationId = '';
       if (status === 'suspended') {
         const initialSnapshot = await allowanceRef.get({ source: 'server' });
         const initialAllowance = requireLifecycleAllowance(
@@ -4654,9 +4939,25 @@
         if (initialAllowance.status === 'deletion_pending') {
           throw new Error('deletion_pending 교사는 이 API로 변경할 수 없습니다.');
         }
-        await withdrawOwnedPublicationsForLifecycle(
+        lifecycleOperationId = await acquirePublicationLifecycleLock(
           uid, expectedRevision, 'teacher-suspension', actor
         );
+        try {
+          await withdrawOwnedPublicationsForLifecycle(
+            uid, expectedRevision, 'teacher-suspension', {
+              ...actor, lifecycleOperationId
+            }
+          );
+        } catch (error) {
+          try {
+            await releasePublicationLifecycleLock(
+              uid, expectedRevision, 'teacher-suspension', actor, lifecycleOperationId
+            );
+          } catch (_) {
+            // A failed release leaves the exact retry-adoptable lock fail-closed.
+          }
+          throw error;
+        }
         assertLifecycleOperationCurrent(actor);
       }
       return db.runTransaction(async transaction => {
@@ -4678,6 +4979,20 @@
           throw new Error('현재 관리자 계정은 자기 역할을 낮추거나 중지할 수 없습니다.');
         }
         assertLifecycleOperationCurrent(actor);
+        const lifecycleLockRef = db.doc('publication_lifecycle_locks/' + uid);
+        const lifecycleGateRef = db.doc('publication_lifecycle_gates/current');
+        if (lifecycleOperationId) {
+          const lockSnapshot = await transaction.get(lifecycleLockRef);
+          const gateSnapshot = await transaction.get(lifecycleGateRef);
+          requireLifecycleLock(
+            lockSnapshot, uid, allowance, 'teacher-suspension',
+            actor, lifecycleOperationId
+          );
+          requireLifecycleLock(
+            gateSnapshot, uid, allowance, 'teacher-suspension',
+            actor, lifecycleOperationId
+          );
+        }
         const legacyRef = db.doc('teacher_allowlist/' + email);
         const legacySnapshot = await transaction.get(legacyRef);
         if (!legacySnapshot.exists) throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
@@ -4707,7 +5022,22 @@
           uid, enabled: next.enabled, role: next.role,
           updatedAt: fieldValue.serverTimestamp(), updatedByUid: transactionAdmin.uid
         });
+        if (lifecycleOperationId) {
+          transaction.delete(lifecycleLockRef);
+          transaction.delete(lifecycleGateRef);
+        }
         return { ...next };
+      }).catch(async error => {
+        if (lifecycleOperationId) {
+          try {
+            await releasePublicationLifecycleLock(
+              uid, expectedRevision, 'teacher-suspension', actor, lifecycleOperationId
+            );
+          } catch (_) {
+            // A failed release leaves the exact retry-adoptable lock fail-closed.
+          }
+        }
+        throw error;
       });
     }
 

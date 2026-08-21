@@ -4412,6 +4412,84 @@ rulesTest('published projection list requires exact visible status order and bou
   }
 });
 
+rulesTest('publication lifecycle gate deterministically closes list get children and races', async () => {
+  const publicationId = 'gate-interleave';
+  await seedPublicRulesSource(publicationId);
+  await seedPublishedRulesProjection(publicationId);
+  const admin = actorFirestore('admin');
+  const other = actorFirestore('otherTeacher');
+  const owner = actorFirestore('owner');
+  const publicQuery = db => getDocs(query(
+    collection(db, 'published_quiz_sets'),
+    where('status', '==', 'published'),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(50)
+  ));
+  await assertSucceeds(publicQuery(other));
+  await assertSucceeds(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
+
+  const lock = {
+    ownerUid: actors.owner.uid,
+    ownerEmailCanonical: actors.owner.email,
+    allowanceRevision: 0,
+    allowanceRole: 'teacher',
+    allowanceStatus: 'active',
+    allowanceEnabled: true,
+    reason: 'teacher-suspension',
+    operationId: 'deterministic-lifecycle-operation',
+    initiatedByUid: actors.admin.uid,
+    initiatedByRole: 'admin',
+    createdAt: serverTimestamp()
+  };
+  const acquire = writeBatch(admin);
+  acquire.set(doc(admin, `publication_lifecycle_locks/${actors.owner.uid}`), lock);
+  acquire.set(doc(admin, 'publication_lifecycle_gates/current'), lock);
+  await assertSucceeds(acquire.commit());
+
+  await assertFails(publicQuery(other));
+  await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
+  await assertFails(getDoc(doc(other,
+    `published_quiz_sets/${publicationId}/questions/v0q0`)));
+  await assert.rejects(emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner));
+  await assertFails(setDoc(doc(other, 'publication_lifecycle_gates/current'), {
+    ...lock, operationId: 'forged', createdAt: serverTimestamp()
+  }));
+
+  const release = writeBatch(admin);
+  release.delete(doc(admin, `publication_lifecycle_locks/${actors.owner.uid}`));
+  release.delete(doc(admin, 'publication_lifecycle_gates/current'));
+  await assertSucceeds(release.commit());
+  await assertSucceeds(publicQuery(other));
+
+  await adminWrite('publication_lifecycle_gates/current', {
+    ownerUid: actors.owner.uid,
+    operationId: 'malformed-stale-gate'
+  });
+  await assertFails(publicQuery(other));
+  await assertFails(deleteDoc(doc(admin, 'publication_lifecycle_gates/current')));
+});
+
+rulesTest('legacy owner audit includes missing lifecycleState but public visibility stays closed', async () => {
+  const publicationId = 'legacy-lifecycle-audit';
+  const source = publicRulesSource();
+  delete source.lifecycleState;
+  await adminWrite(`quiz_sets/${publicationId}`, source);
+  await adminWrite(`published_quiz_sets/${publicationId}`,
+    publicRulesProjection(publicationId));
+
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const page = await emulatorStore(owner).auditOwnedPublications(
+    actors.owner.uid, 50, null
+  );
+
+  assert.deepEqual(page.items, [{
+    publicationId, status: 'published', revision: 'rev-1'
+  }]);
+  await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
+  await assert.rejects(emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner));
+});
+
 rulesTest('owner reads only own moderated parent while admin lists the exact bounded moderation status set', async () => {
   await seedPublicRulesSource('owner-moderated');
   await adminWrite('published_quiz_sets/owner-moderated', publicRulesProjection(
@@ -4541,12 +4619,37 @@ rulesTest('publication trash is atomic, restore stays private, and moderated con
     purgeStartedAt: null, contentRevision: serverTimestamp()
   }));
 
-  await ownerStore.moveSetToTrash(publicationId, publicRulesOwner);
+  await ownerStore.moveSetToTrash(publicationId, publicRulesOwner).catch(error => {
+    throw new Error('published trash stage: ' + error.message, { cause: error });
+  });
   assert.equal((await getDoc(doc(ownerDb,
     `published_quiz_sets/${publicationId}`))).data().status, 'withdrawn');
-  await ownerStore.restoreSet(publicationId, publicRulesOwner);
+  await ownerStore.restoreSet(publicationId, publicRulesOwner).catch(error => {
+    throw new Error('withdrawn restore stage: ' + error.message, { cause: error });
+  });
   assert.equal((await getDoc(doc(ownerDb,
     `published_quiz_sets/${publicationId}`))).data().status, 'withdrawn');
+
+  const buildingId = 'lifecycle-building';
+  await seedPublicRulesSource(buildingId);
+  await adminWrite(`published_quiz_sets/${buildingId}`,
+    publicRulesBuilding(buildingId, { buildToken: 'abandoned-build-token' }));
+  await ownerStore.moveSetToTrash(buildingId, publicRulesOwner).catch(error => {
+    throw new Error('building cancellation stage: ' + error.message, { cause: error });
+  });
+  const cancelled = await getDoc(doc(ownerDb, `published_quiz_sets/${buildingId}`));
+  assert.equal(cancelled.data().status, 'cancelled');
+  assert.equal(cancelled.data().buildToken, 'abandoned-build-token');
+  await ownerStore.restoreSet(buildingId, publicRulesOwner).catch(error => {
+    throw new Error('cancelled restore stage: ' + error.message, { cause: error });
+  });
+  const republished = await ownerStore.publishQuizSet(buildingId, publicRulesOwner)
+    .catch(error => {
+      throw new Error('cancelled republish stage: ' + error.message, { cause: error });
+    });
+  assert.equal(republished.status, 'published');
+  assert.equal((await getDoc(doc(ownerDb,
+    `published_quiz_sets/${buildingId}`))).data().status, 'published');
 
   const moderatedId = 'lifecycle-moderated';
   await seedPublicRulesSource(moderatedId);
@@ -4559,8 +4662,12 @@ rulesTest('publication trash is atomic, restore stays private, and moderated con
     moderatedAt: Timestamp.fromMillis(1_000)
   });
 
-  await ownerStore.moveSetToTrash(moderatedId, publicRulesOwner);
-  await ownerStore.restoreSet(moderatedId, publicRulesOwner);
+  await ownerStore.moveSetToTrash(moderatedId, publicRulesOwner).catch(error => {
+    throw new Error('moderated trash stage: ' + error.message, { cause: error });
+  });
+  await ownerStore.restoreSet(moderatedId, publicRulesOwner).catch(error => {
+    throw new Error('moderated restore stage: ' + error.message, { cause: error });
+  });
   assert.equal((await adminRead(`published_quiz_sets/${moderatedId}`)).status, 'moderated');
   await assertFails(updateDoc(doc(ownerDb, `published_quiz_sets/${moderatedId}`), {
     status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
@@ -4569,8 +4676,12 @@ rulesTest('publication trash is atomic, restore stays private, and moderated con
 
 rulesTest('publication suspension and deletion preflight hide copies before allowance removal', async () => {
   const publicationId = 'lifecycle-suspend';
+  const buildingId = 'lifecycle-suspend-building';
   await seedPublicRulesSource(publicationId);
   await seedPublishedRulesProjection(publicationId);
+  await seedPublicRulesSource(buildingId);
+  await adminWrite(`published_quiz_sets/${buildingId}`,
+    publicRulesBuilding(buildingId, { buildToken: 'lifecycle-suspend-build-token' }));
   await adminWrite('teacher_allowances/owner-uid', {
     ...(await adminRead('teacher_allowances/owner-uid')), revision: 1
   });
@@ -4582,6 +4693,7 @@ rulesTest('publication suspension and deletion preflight hide copies before allo
   }, requestAdminIdentity);
 
   assert.equal((await adminRead(`published_quiz_sets/${publicationId}`)).status, 'withdrawn');
+  assert.equal((await adminRead(`published_quiz_sets/${buildingId}`)).status, 'cancelled');
   assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'suspended');
   await assert.rejects(() => emulatorStore(actorFirestore('otherTeacher'))
     .copyPublishedQuizSet(publicationId, 'copy-after-suspend', {

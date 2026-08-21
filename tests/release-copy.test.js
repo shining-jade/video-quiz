@@ -511,3 +511,16 @@ test('public library release guide fixes privacy lifecycle deployment and rollba
   assert.match(guide, /public image[^\n]*orphan audit/i);
   assert.match(guide, /backfill[^\n]*(하지|없)/i);
 });
+
+test('public library release gate documents lifecycle lock indexes legacy audit and durable auditor', () => {
+  const guide = read('docs/PUBLIC-QUIZ-LIBRARY.md');
+  const readme = read('README.md');
+  const handoff = read('HANDOFF.md');
+  for (const phrase of [
+    'publication_lifecycle_locks', 'publication_lifecycle_gates/current',
+    'cancelled', 'firestore.indexes.json', 'audit:public-library',
+    'safeToDeployPublicLibrary', 'lifecycleState 누락'
+  ]) assert.match(guide, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(readme, /audit:public-library/);
+  assert.match(handoff, /safeToDeployPublicLibrary/);
+});

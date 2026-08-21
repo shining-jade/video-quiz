@@ -278,3 +278,13 @@ test('summary is a bounded allowlist item and never returns publication content'
   assert.equal('settings' in summary, false);
   assert.equal(summary.updatedAtMs, 100);
 });
+
+test('cancelled publication parents remain building-shaped hidden tombstones', () => {
+  const flat = Core.flattenProjection(projection(), 'cancelled-build-token');
+  const cancelled = {
+    ...flat.parent,
+    status: 'cancelled'
+  };
+
+  assert.deepEqual(Core.validateParent(cancelled), { ok: true, errors: [] });
+});
