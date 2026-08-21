@@ -13,6 +13,46 @@ test('release docs require Email/Password provider, verification template, reset
   }
 });
 
+test('email-auth release guide fixes the compatibility-to-strict safety order and account boundaries', () => {
+  const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
+  const deploymentSection = emailAuthDocs.slice(
+    emailAuthDocs.indexOf('## 2. 자동 검증과 배포 순서'),
+    emailAuthDocs.indexOf('## 3. 운영 전 브라우저 인수')
+  );
+  const orderedSteps = [
+    'Node와 Firestore Emulator 검증',
+    '호환 head Rules',
+    'migration/lock/apply/verify/unlock gate',
+    '엄격한 Firestore Rules',
+    '정적 앱',
+    '브라우저 인수'
+  ];
+
+  let previousIndex = -1;
+  for (const step of orderedSteps) {
+    const currentIndex = deploymentSection.indexOf(step);
+    assert.ok(currentIndex > previousIndex, `release order must contain ${step} after the previous gate`);
+    previousIndex = currentIndex;
+  }
+  assert.match(emailAuthDocs, /Google[\s\S]{0,120}Anonymous/);
+  assert.match(emailAuthDocs, /`shining-jade\.github\.io`/);
+  assert.match(emailAuthDocs, /Firebase Authentication 사용자[\s\S]{0,120}teacher_allowances[\s\S]{0,120}삭제·재생성·중복 생성하지 않는다/);
+  assert.match(emailAuthDocs, /provider 충돌[\s\S]{0,120}allowance가 중복 생성되지 않/);
+});
+
+test('README routes teacher approval through verified providers and UID allowances, not direct legacy allowlists', () => {
+  const readme = read('README.md');
+  const authenticationSettings = readme.slice(
+    readme.indexOf('### 1) Firestore 보안 규칙'),
+    readme.indexOf('### 3) 기존 데이터 이전')
+  );
+
+  assert.match(authenticationSettings, /검증된 Google 또는 Email\/Password 교사/);
+  assert.match(authenticationSettings, /UID에 묶인 활성 `teacher_allowances`/);
+  assert.match(authenticationSettings, /기존 신청 UI[\s\S]{0,120}승인 UI/);
+  assert.doesNotMatch(authenticationSettings, /teacher_allowlist\/\{[^}]+\}/);
+});
+
 test('email authentication validation core loads before the application script', () => {
   const html = read('index.html');
   const coreIndex = html.indexOf('<script src="teacher-email-auth-core.js"></script>');

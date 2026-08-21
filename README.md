@@ -34,8 +34,8 @@
 
 저장소의 [`firestore.rules`](./firestore.rules)가 운영 규칙의 원본입니다. Firebase 콘솔 → **Firestore Database → 규칙**에 파일 내용을 붙여넣고 **게시**합니다.
 
-- 교사는 검증된 Google 계정과 `teacher_allowlist/{이메일}`의 활성 승인 문서를 모두 통과해야 합니다. 승인 문서는 `enabled: true`, `role: "teacher"` 또는 `role: "admin"`을 가집니다.
-- 승인 목록은 일반 교사와 학생에게 보이지 않습니다. `admin`은 **관리자 통합 조회 → 교사 계정 관리**에서 승인 교사를 추가하고 역할 변경·비활성화를 할 수 있습니다. 현재 로그인한 admin 자신은 비활성화하거나 `teacher`로 낮출 수 없습니다.
+- 교사는 검증된 Google 또는 Email/Password 교사 provider, 정규화 이메일, 현재 UID에 묶인 활성 `teacher_allowances` 승인 문서를 모두 통과해야 합니다. 이메일 인증만으로 교사 권한이 생기지 않습니다.
+- 승인 목록과 `teacher_allowances`는 일반 교사와 학생에게 보이지 않습니다. 사용자는 기존 신청 UI로 한 번 요청하고, `admin`은 **관리자 통합 조회 → 교사 계정 관리**의 관리자 승인 UI로 현재 UID·이메일에 맞는 승인 문서를 생성·변경·비활성화합니다. 현재 로그인한 admin 자신은 비활성화하거나 `teacher`로 낮출 수 없습니다.
 - 승인 교사는 공유 세트를 수업에 사용하거나 사본을 만들 수 있습니다. 소유자가 **공동 편집자**로 추가한 승인 교사만 원본의 내용·이미지를 편집하고 수업을 진행할 수 있습니다. 공동 편집자는 소유권, 공동 편집자 목록, 숨김, 휴지통 상태를 바꿀 수 없으며 `admin`도 콘텐츠 소유권을 자동으로 얻지 않습니다.
 - 학생은 익명 UID로 자기 학생·응답 문서와 세션의 공개 문항만 읽고 씁니다. 원본 세트, 공개 전 정답·해설, 다른 학생 정보와 응답에는 접근할 수 없습니다.
 - `admin`만 전체 세션 조회와 보존 기간 삭제를 할 수 있습니다. 퀴즈 세트를 영구 삭제해도 과거 수업의 세션·스냅샷·학생·응답·점수 기록은 보존됩니다.
@@ -45,16 +45,7 @@
 
 Firebase Console → **Authentication → Sign-in method**에서 **Google**(교사용), **Email/Password**(교사용), **익명(Anonymous)**(학생용)을 사용 설정합니다. Email/Password를 켤 때 Google이나 Anonymous를 끄지 마세요. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
 
-Firestore에 `teacher_allowlist/{정규화된 이메일}` 문서를 만들고 아래처럼 승인합니다. 문서 ID와 로그인 토큰의 이메일이 정확히 일치해야 합니다.
-
-```text
-teacher_allowlist/teacher@school.kr
-  enabled: true
-  role: "teacher"     # 전체 조회 담당자만 "admin"
-  displayName: "홍길동" # 선택
-```
-
-교사용 메뉴에서는 Google 로그인 또는 이메일 가입·로그인·비밀번호 재설정을 선택할 수 있습니다. 미승인·비활성·이메일 미검증 계정은 승인 요청 안내를 봅니다. 같은 승인 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다. Console 설정, 한국어 이메일 템플릿, 인수와 롤백은 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며, 비밀번호와 재설정 링크는 운영 기록에 남기지 않습니다.
+교사용 메뉴에서는 Google 로그인 또는 이메일 가입·로그인·비밀번호 재설정을 선택할 수 있습니다. Google과 Email/Password 모두 검증된 provider여야 하며, 미승인·비활성·이메일 미검증 계정은 신청 안내를 봅니다. 사용자가 신청하면 관리자가 승인 UI에서 현재 UID와 canonical 이메일에 결합된 `teacher_allowances`를 생성합니다. 운영자는 legacy email allowlist를 직접 만들거나 수정하지 않습니다. 같은 이메일의 provider 충돌은 계정을 자동 병합하거나 allowance를 복제하지 않고 기존 로그인 방식을 안내합니다. 같은 승인 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다. Console 설정, 한국어 이메일 템플릿, 인수와 롤백은 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며, 비밀번호와 재설정 링크는 운영 기록에 남기지 않습니다.
 
 ### 3) 기존 데이터 이전
 

@@ -29,13 +29,14 @@ node --check teacher-email-auth-core.js
 git diff --check
 ```
 
-두 테스트 suite가 실패 0인지 확인한다. 그 뒤 기존 데이터 전환 gate를 포함해 다음 순서를 지킨다.
+두 테스트 suite가 실패 0인지 확인한다. 그 뒤 기존 [`TEACHER-ACCESS-CLASS-PLANNING.md`](./TEACHER-ACCESS-CLASS-PLANNING.md)의 데이터 전환·잠금 gate를 포함해 다음 순서를 지킨다.
 
 1. Firebase Auth Email/Password, 승인된 도메인, 한국어 이메일 인증·비밀번호 재설정 템플릿을 준비한다.
 2. Node와 Firestore Emulator 검증을 통과시킨다.
-3. 기존 [`TEACHER-ACCESS-CLASS-PLANNING.md`](./TEACHER-ACCESS-CLASS-PLANNING.md)의 migration/lock gate가 안전한 경우에만 **호환 Firestore Rules**를 먼저 배포한다.
-4. 정적 앱을 그 다음에 배포한다.
-5. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
+3. **호환 head Rules**를 먼저 배포한다. 이 Rules는 migration/lock gate를 진행하는 동안 기존 데이터의 안전한 전환 경로만 열어 둔다.
+4. backup → migration/lock/apply/verify/unlock gate를 정확한 project, token, updateTime generation으로 수행한다. access와 session counter의 apply·verify 보고서가 모두 `safeToDeployStrictRules: true`이고, unlock까지 같은 generation을 재확인하지 못하면 다음 단계로 가지 않는다.
+5. **엄격한 Firestore Rules**를 배포한 뒤에만 **정적 앱**을 배포한다.
+6. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
 
 ## 3. 운영 전 브라우저 인수
 
@@ -47,7 +48,7 @@ git diff --check
 4. 새 이메일 계정으로 로그인해 보호된 교사 홈에 들어간다.
 5. 비밀번호 재설정을 요청하고 새 비밀번호로 다시 로그인한다.
 6. 학생 익명 입장과 기존 Google 교사 로그인이 계속 동작하는지 확인한다.
-7. 같은 이메일의 Google/Email provider 충돌에서 allowance가 중복 생성되지 않고, 기존 로그인 방식으로 안내되는지 확인한다.
+7. 같은 이메일의 Google/Email provider 충돌에서 allowance가 중복 생성되지 않고, 계정을 자동 병합하지 않은 채 기존 로그인 방식으로 안내되는지 확인한다.
 8. 같은 탭에서 앱 및 Firebase 출처 console error가 0인지 확인한다.
 
 이 인수는 실제 이메일 발송·계정·운영 Console 상태가 필요한 pre-deploy gate다. 이 저장소 작업만으로는 실행하거나 통과로 기록하지 않는다.
