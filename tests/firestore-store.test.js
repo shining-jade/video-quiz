@@ -9331,6 +9331,7 @@ test('a verified password session remains eligible for the protected allowance p
 function teacherEmailAuthTestRuntime(overrides = {}) {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const passwordInputs = [{ value: '' }, { value: '' }];
+  let focusedSelector = '';
   const dialog = {
     open: false,
     innerHTML: '',
@@ -9338,10 +9339,13 @@ function teacherEmailAuthTestRuntime(overrides = {}) {
     close() { this.open = false; },
     removeAttribute(name) { if (name === 'open') this.open = false; },
     querySelectorAll(selector) { return selector === 'input[type="password"]' ? passwordInputs : []; },
-    querySelector() { return null; }
+    querySelector(selector) {
+      return { focus() { focusedSelector = selector; } };
+    }
   };
   const context = {
     teacherAuthVersion: 3,
+    teacherAuthDialogRevision: 0,
     teacherAuthDialogState: { mode: 'login', status: 'idle', email: '', message: '', error: '' },
     TeacherEmailAuthCore: require('../teacher-email-auth-core.js'),
     esc(value) {
@@ -9361,11 +9365,11 @@ function teacherEmailAuthTestRuntime(overrides = {}) {
   loadStageFunctions([
     'teacherAuthDialogMarkup', 'renderTeacherAuthDialog', 'teacherEmailAuthFormValue',
     'teacherEmailAuthOperationIsCurrent', 'clearTeacherAuthPasswords',
-    'closeTeacherAuthDialog', 'openTeacherAuthDialog', 'submitTeacherEmailSignup',
+    'invalidateTeacherAuthDialog', 'closeTeacherAuthDialog', 'openTeacherAuthDialog', 'submitTeacherEmailSignup',
     'submitTeacherEmailLogin', 'sendTeacherVerificationEmail',
     'confirmTeacherEmailVerification', 'sendTeacherPasswordReset'
   ], context);
-  return { context, dialog, passwordInputs };
+  return { context, dialog, passwordInputs, focusedSelector: () => focusedSelector };
 }
 
 function authForm(values) {
@@ -9399,14 +9403,47 @@ test('email signup creates the user, updates the profile, sends verification, an
     screenTeacherRequest() { teacherRequestRendered = true; }
   });
 
-  const result = await context.submitTeacherEmailSignup(authForm({
+  const event = authForm({
     displayName: ' 홍교사 ', email: 'Teacher@Example.com', password: '12345678'
-  }));
+  });
+  const result = await context.submitTeacherEmailSignup(event);
 
   assert.deepEqual(calls, ['create', 'profile:홍교사', 'verify']);
   assert.equal(result.status, 'verification-sent');
   assert.equal(teacherRequestRendered, false);
   assert.match(context.teacherAuthDialogState.message, /인증/);
+  assert.equal(event.currentTarget.elements.password.value, '');
+});
+
+test('post-create profile or verification failure binds the new user, uses bounded copy, and clears the password', async t => {
+  for (const failureStage of ['profile', 'verification']) {
+    await t.test(failureStage, async () => {
+      const raw = 'backend internal detail must stay private';
+      const user = {
+        uid: 'new-email-user', email: 'teacher@example.com',
+        async updateProfile() { if (failureStage === 'profile') throw new Error(raw); },
+        async sendEmailVerification() { if (failureStage === 'verification') throw new Error(raw); }
+      };
+      const auth = {
+        currentUser: null,
+        async createUserWithEmailAndPassword() {
+          this.currentUser = user;
+          return { user };
+        }
+      };
+      const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+      const event = authForm({
+        displayName: '홍교사', email: 'teacher@example.com', password: '12345678'
+      });
+
+      const result = await context.submitTeacherEmailSignup(event);
+
+      assert.equal(result.status, 'error');
+      assert.equal(result.message, '인증 처리에 실패했습니다. 다시 시도해 주세요.');
+      assert.doesNotMatch(context.teacherAuthDialogState.error, /backend internal/);
+      assert.equal(event.currentTarget.elements.password.value, '');
+    });
+  }
 });
 
 test('verification confirmation reloads and force-refreshes the token before applying the user', async () => {
@@ -9472,6 +9509,35 @@ test('provider collision never applies a teacher user or probes an allowance', a
   assert.equal(allowanceProbes, 0);
 });
 
+test('a code-less asynchronous login error never exposes its raw message and clears the password', async () => {
+  const raw = 'upstream stack and tenant detail';
+  const auth = {
+    currentUser: null,
+    async signInWithEmailAndPassword() { throw new Error(raw); }
+  };
+  const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+  const event = authForm({ email: 'teacher@example.com', password: '12345678' });
+
+  const result = await context.submitTeacherEmailLogin(event);
+
+  assert.equal(result.status, 'error');
+  assert.equal(result.message, '인증 처리에 실패했습니다. 다시 시도해 주세요.');
+  assert.doesNotMatch(context.teacherAuthDialogState.error, /upstream stack/);
+  assert.equal(event.currentTarget.elements.password.value, '');
+});
+
+test('local email validation keeps its actionable message without exposing async errors', async () => {
+  const auth = { currentUser: null, signInWithEmailAndPassword() { throw new Error('must not call'); } };
+  const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+  const event = authForm({ email: 'teacher@example.com', password: 'short' });
+
+  const result = await context.submitTeacherEmailLogin(event);
+
+  assert.equal(result.status, 'error');
+  assert.match(result.message, /8자 이상/);
+  assert.equal(event.currentTarget.elements.password.value, '');
+});
+
 test('closing the teacher auth dialog clears every password input', () => {
   const { context, dialog, passwordInputs } = teacherEmailAuthTestRuntime();
   dialog.open = true;
@@ -9482,6 +9548,22 @@ test('closing the teacher auth dialog clears every password input', () => {
 
   assert.equal(dialog.open, false);
   assert.deepEqual(passwordInputs.map(input => input.value), ['', '']);
+});
+
+test('mode controls expose selection state and rerender focuses the active mode field', () => {
+  const { context, focusedSelector } = teacherEmailAuthTestRuntime();
+
+  context.openTeacherAuthDialog('signup');
+  const signupMarkup = context.teacherAuthDialogMarkup();
+
+  assert.match(signupMarkup, /aria-pressed="true"[^>]*onclick="openTeacherAuthDialog\('signup'\)"/);
+  assert.equal(focusedSelector(), '#teacher-signup-name');
+
+  context.teacherAuthDialogState = {
+    mode: 'login', status: 'error', email: 'teacher@example.com', message: '', error: '로그인 실패'
+  };
+  context.renderTeacherAuthDialog();
+  assert.equal(focusedSelector(), '#teacher-login-email');
 });
 
 test('verification resend failure is rendered as an accessible error', () => {
@@ -9510,9 +9592,10 @@ test('auth generation change prevents a stale signup continuation from rendering
   };
   const { context, dialog } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
   dialog.innerHTML = 'original dialog';
-  const pending = context.submitTeacherEmailSignup(authForm({
+  const event = authForm({
     displayName: '홍교사', email: 'teacher@example.com', password: '12345678'
-  }));
+  });
+  const pending = context.submitTeacherEmailSignup(event);
   for (let turn = 0; turn < 10 && !finishVerification; turn += 1) await Promise.resolve();
   assert.equal(typeof finishVerification, 'function');
   context.teacherAuthVersion += 1;
@@ -9524,6 +9607,167 @@ test('auth generation change prevents a stale signup continuation from rendering
   assert.equal(result.status, 'stale');
   assert.equal(dialog.innerHTML, 'original dialog');
   assert.notEqual(context.teacherAuthDialogState.status, 'verification-sent');
+  assert.equal(event.currentTarget.elements.password.value, '');
+});
+
+test('closing and reopening in another mode prevents an older signup from replacing or clearing the new form', async () => {
+  let finishVerification;
+  const user = {
+    uid: 'email-teacher', email: 'teacher@example.com',
+    async updateProfile() {},
+    sendEmailVerification() { return new Promise(resolve => { finishVerification = resolve; }); }
+  };
+  const auth = {
+    currentUser: user,
+    async createUserWithEmailAndPassword() { return { user }; }
+  };
+  const { context, dialog, passwordInputs } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+  context.openTeacherAuthDialog('signup');
+  const event = authForm({ displayName: '홍교사', email: 'teacher@example.com', password: 'old-secret' });
+  const pending = context.submitTeacherEmailSignup(event);
+  for (let turn = 0; turn < 10 && !finishVerification; turn += 1) await Promise.resolve();
+  context.closeTeacherAuthDialog();
+  context.openTeacherAuthDialog('login');
+  passwordInputs[0].value = 'new-form-secret';
+  const currentMarkup = dialog.innerHTML;
+  finishVerification();
+
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.innerHTML, currentMarkup);
+  assert.equal(passwordInputs[0].value, 'new-form-secret');
+  assert.equal(event.currentTarget.elements.password.value, '');
+});
+
+test('an older email login cannot apply or close a reopened signup dialog', async () => {
+  let finishLogin;
+  const user = { uid: 'email-teacher', email: 'teacher@example.com' };
+  const auth = {
+    currentUser: null,
+    signInWithEmailAndPassword() { return new Promise(resolve => { finishLogin = () => { this.currentUser = user; resolve({ user }); }; }); }
+  };
+  let applied = 0;
+  const { context, dialog } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    async applyTeacherUser() { applied += 1; return true; }
+  });
+  context.openTeacherAuthDialog('login');
+  const pending = context.submitTeacherEmailLogin(authForm({ email: 'teacher@example.com', password: '12345678' }));
+  context.openTeacherAuthDialog('signup');
+  const currentMarkup = dialog.innerHTML;
+  finishLogin();
+
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(applied, 0);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.innerHTML, currentMarkup);
+});
+
+test('email login keeps the dialog open when applyTeacherUser rejects the continuation', async () => {
+  const user = { uid: 'email-teacher', email: 'teacher@example.com' };
+  const auth = {
+    currentUser: user,
+    async signInWithEmailAndPassword() { return { user }; }
+  };
+  const { context, dialog } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    async applyTeacherUser() { return false; }
+  });
+  context.openTeacherAuthDialog('login');
+
+  const result = await context.submitTeacherEmailLogin(authForm({
+    email: 'teacher@example.com', password: '12345678'
+  }));
+
+  assert.equal(result.status, 'stale');
+  assert.equal(dialog.open, true);
+});
+
+test('an older verification resend cannot overwrite a newly selected login mode', async () => {
+  let finishVerification;
+  const user = {
+    uid: 'email-teacher', email: 'teacher@example.com', isAnonymous: false,
+    sendEmailVerification() { return new Promise(resolve => { finishVerification = resolve; }); }
+  };
+  const auth = { currentUser: user };
+  const { context, dialog } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+  context.openTeacherAuthDialog('signup');
+  const pending = context.sendTeacherVerificationEmail();
+  context.openTeacherAuthDialog('login');
+  const currentMarkup = dialog.innerHTML;
+  finishVerification();
+
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(dialog.innerHTML, currentMarkup);
+});
+
+test('an older Google popup completion cannot close a reopened email dialog', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let finishGoogle;
+  let closes = 0;
+  const context = {
+    teacherAuthDialogRevision: 4,
+    teacherAuthVersion: 8,
+    signInTeacher() { return new Promise(resolve => { finishGoogle = resolve; }); },
+    closeTeacherAuthDialog() { closes += 1; },
+    showTeacherAuthError(error) { throw error; },
+    firebase: { auth() { return { currentUser: { uid: 'google-user' } }; } }
+  };
+  vm.runInNewContext(extractFunction(html, 'teacherEmailAuthOperationIsCurrent'), context);
+  vm.runInNewContext(extractFunction(html, 'signInTeacherFromDialog'), context);
+
+  const pending = context.signInTeacherFromDialog();
+  context.teacherAuthDialogRevision += 1;
+  finishGoogle({ uid: 'google-user' });
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(closes, 0);
+});
+
+test('an older Google popup completion is rejected before manually applying its user', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let finishPopup;
+  let applied = 0;
+  let closes = 0;
+  const user = { uid: 'google-user' };
+  const auth = {
+    currentUser: null,
+    signInWithPopup() {
+      return new Promise(resolve => {
+        finishPopup = () => { this.currentUser = user; resolve({ user }); };
+      });
+    }
+  };
+  function authFactory() { return auth; }
+  authFactory.GoogleAuthProvider = function GoogleAuthProvider() {};
+  const context = {
+    teacherUser: null,
+    teacherAuthDialogRevision: 4,
+    teacherAuthVersion: 8,
+    firebase: { auth: authFactory },
+    async applyTeacherUser() { applied += 1; return true; },
+    closeTeacherAuthDialog() { closes += 1; },
+    showTeacherAuthError(error) { throw error; }
+  };
+  vm.runInNewContext(extractFunction(html, 'teacherEmailAuthOperationIsCurrent'), context);
+  vm.runInNewContext(extractFunction(html, 'signInTeacher'), context);
+  vm.runInNewContext(extractFunction(html, 'signInTeacherFromDialog'), context);
+
+  const pending = context.signInTeacherFromDialog();
+  context.teacherAuthDialogRevision += 1;
+  finishPopup();
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(applied, 0);
+  assert.equal(closes, 0);
 });
 
 test('auth generation 교체는 token 확인을 기다리지 않고 현재 heartbeat timer를 즉시 중단한다', async () => {
@@ -9560,6 +9804,139 @@ test('auth generation 교체는 token 확인을 기다리지 않고 현재 heart
   finishToken({ claims: { firebase: { sign_in_provider: 'google.com' } } });
   await applying;
   assert.equal(stops, 1);
+});
+
+function currentUidGuardContext(auth, overrides = {}) {
+  const renders = [];
+  const context = {
+    teacherUser: null,
+    teacherAllowance: null,
+    teacherState: null,
+    appliedTeacherState: null,
+    clockUserId: '',
+    clockPromise: null,
+    clockPromiseUid: '',
+    teacherAuthVersion: 0,
+    AuthCore: require('../auth-core.js'),
+    firebase: { auth() { return auth; } },
+    renderTeacherAuthArea() { renders.push(context.teacherUser && context.teacherUser.uid || 'signed-out'); },
+    store: {},
+    console,
+    ...overrides
+  };
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'applyTeacherUser'
+  ), context);
+  return { context, renders };
+}
+
+test('applyTeacherUser rejects an old user when current Firebase UID changes during token loading', async () => {
+  let finishToken;
+  let allowanceProbes = 0;
+  const userA = {
+    uid: 'teacher-a', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { finishToken = resolve; }); }
+  };
+  const auth = { currentUser: userA };
+  const { context, renders } = currentUidGuardContext(auth, {
+    store: { async probeTeacherAllowance() { allowanceProbes += 1; return { enabled: true, role: 'teacher' }; } }
+  });
+
+  const pending = context.applyTeacherUser(userA);
+  auth.currentUser = { uid: 'teacher-b' };
+  finishToken({ claims: { firebase: { sign_in_provider: 'password' } } });
+  const result = await pending;
+
+  assert.equal(result, false);
+  assert.equal(context.teacherUser, null);
+  assert.equal(allowanceProbes, 0);
+  assert.doesNotMatch(renders.join(','), /teacher-a/);
+});
+
+test('applyTeacherUser rejects an old user when current Firebase UID changes during allowance loading', async () => {
+  let finishAllowance;
+  const userA = {
+    uid: 'teacher-a', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+    async getIdTokenResult() { return { claims: { firebase: { sign_in_provider: 'password' } } }; }
+  };
+  const auth = { currentUser: userA };
+  const { context, renders } = currentUidGuardContext(auth, {
+    store: { probeTeacherAllowance() { return new Promise(resolve => { finishAllowance = resolve; }); } }
+  });
+
+  const pending = context.applyTeacherUser(userA);
+  for (let turn = 0; turn < 10 && !finishAllowance; turn += 1) await Promise.resolve();
+  auth.currentUser = { uid: 'teacher-b' };
+  finishAllowance({ enabled: true, role: 'teacher' });
+  const result = await pending;
+
+  assert.equal(result, false);
+  assert.equal(context.teacherUser, null);
+  assert.doesNotMatch(renders.join(','), /teacher-a/);
+});
+
+test('applyTeacherUser retracts an old user when current Firebase UID changes during recovery', async () => {
+  let finishRecovery;
+  const userA = {
+    uid: 'teacher-a', email: 'a@school.kr', emailVerified: true, isAnonymous: false,
+    async getIdTokenResult() { return { claims: { firebase: { sign_in_provider: 'password' } } }; }
+  };
+  const auth = { currentUser: userA };
+  const { context, renders } = currentUidGuardContext(auth, {
+    store: { async probeTeacherAllowance() { return { enabled: true, role: 'teacher' }; } },
+    recoverPendingAllocationsForTeacher() {
+      return new Promise(resolve => { finishRecovery = resolve; });
+    }
+  });
+
+  const pending = context.applyTeacherUser(userA);
+  for (let turn = 0; turn < 10 && !finishRecovery; turn += 1) await Promise.resolve();
+  auth.currentUser = { uid: 'teacher-b' };
+  finishRecovery([]);
+  const result = await pending;
+
+  assert.equal(result, false);
+  assert.equal(context.teacherUser, null);
+  assert.equal(context.teacherState.status, 'signed-out');
+  assert.doesNotMatch(renders.join(','), /teacher-a/);
+});
+
+test('pending allocation recovery never renders an owner after Firebase current UID changes', async () => {
+  let finishRecovery;
+  const owner = { status: 'teacher', uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' };
+  const auth = { currentUser: { uid: 'teacher-a' } };
+  const renders = [];
+  const context = pendingAllocationTestContext({
+    teacherUser: { uid: 'teacher-a', email: 'a@school.kr' },
+    teacherState: owner,
+    teacherAuthVersion: 9,
+    pendingAllocationRecoveryTimer: null,
+    AuthCore: require('../auth-core.js'),
+    firebase: { auth() { return auth; } },
+    pendingAllocationsForOwner() {
+      return [{ sessionId: 'session-a', token: 'allocation-token-1234', recoverAfter: 0 }];
+    },
+    store: {
+      recoverPendingSessionAllocation() {
+        return new Promise(resolve => { finishRecovery = resolve; });
+      }
+    },
+    renderTeacherAuthArea() { renders.push(context.teacherUser && context.teacherUser.uid || 'signed-out'); },
+    toast() {},
+    console,
+    Date
+  });
+  vm.runInNewContext(extractFunction(
+    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'recoverPendingAllocationsForTeacher'
+  ), context);
+
+  const pending = context.recoverPendingAllocationsForTeacher(owner);
+  for (let turn = 0; turn < 10 && !finishRecovery; turn += 1) await Promise.resolve();
+  auth.currentUser = { uid: 'teacher-b' };
+  finishRecovery({ complete: true });
+  await pending;
+
+  assert.doesNotMatch(renders.join(','), /teacher-a/);
 });
 
 test('같은 owner의 auth generation 갱신은 heartbeat를 새 generation으로 다시 시작한다', async () => {
@@ -9896,6 +10273,10 @@ test('a late Google token from an older auth observer cannot replace the newer s
       return new Promise(resolve => { tokenResolves.b = resolve; });
     }
   };
+  const auth = {
+    currentUser: null,
+    onAuthStateChanged(listener) { authListener = listener; }
+  };
   const context = {
     teacherUser: null,
     teacherAllowance: null,
@@ -9913,9 +10294,7 @@ test('a late Google token from an older auth observer cannot replace the newer s
     APP() { return { innerHTML: '' }; },
     topbar() { return '<nav></nav>'; },
     firebase: {
-      auth() {
-        return { onAuthStateChanged(listener) { authListener = listener; } };
-      }
+      auth() { return auth; }
     },
     router() {},
     console
@@ -9926,8 +10305,10 @@ test('a late Google token from an older auth observer cannot replace the newer s
   );
 
   context.bootWithAuth();
+  auth.currentUser = userA;
   const observerA = authListener(userA);
   await Promise.resolve();
+  auth.currentUser = userB;
   const observerB = authListener(userB);
   await Promise.resolve();
   tokenResolves.b({ claims: { firebase: { sign_in_provider: 'google.com' } } });
