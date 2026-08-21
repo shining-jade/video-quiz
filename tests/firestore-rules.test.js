@@ -432,6 +432,120 @@ const requestAdminIdentity = {
   uid: 'admin-uid', email: 'admin@school.kr', role: 'admin'
 };
 
+const publicRulesOwner = {
+  ...actors.owner,
+  displayName: '소유 교사',
+  role: 'teacher'
+};
+
+function publicRulesSource(patch = {}) {
+  return {
+    title: '공개 과학 퀴즈',
+    description: '힘과 운동 복습',
+    settings: {
+      revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true
+    },
+    videos: [{
+      videoId: 'dQw4w9WgXcQ',
+      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      startSec: 0,
+      endSec: 120,
+      questions: [{
+        type: 'choice', t: 10, text: '힘의 단위는?', choices: ['N', 'm'], answer: 0,
+        imgUp: true
+      }]
+    }],
+    ownerUid: actors.owner.uid,
+    ownerEmail: actors.owner.email,
+    lifecycleState: 'active',
+    collaboratorCount: 0,
+    imageCount: 0,
+    contentRevision: 'rev-1',
+    ...patch
+  };
+}
+
+function publicRulesProjection(publicationId = 'library-set', patch = {}) {
+  const source = publicRulesSource();
+  return {
+    publicationId,
+    sourceSetId: publicationId,
+    status: 'published',
+    moderationStatus: 'clear',
+    revision: 'rev-1',
+    title: source.title,
+    description: source.description,
+    authorDisplayName: '소유 교사',
+    videos: source.videos,
+    settings: source.settings,
+    videoCount: 1,
+    questionCount: 1,
+    imageCount: 0,
+    publishedAt: Timestamp.fromMillis(900),
+    updatedAt: Timestamp.fromMillis(1_000),
+    ...patch
+  };
+}
+
+function publicRulesBuilding(publicationId = 'library-set', patch = {}) {
+  return {
+    ...publicRulesProjection(publicationId),
+    status: 'building',
+    publishedAt: null,
+    buildToken: 'build-token-1',
+    buildImageCount: 0,
+    ...patch
+  };
+}
+
+function publicCopyStart(publicationId, owner = actors.otherTeacher, patch = {}) {
+  const projection = publicRulesProjection(publicationId);
+  return {
+    title: `${projection.title} (사본)`,
+    description: projection.description,
+    videos: projection.videos,
+    settings: projection.settings,
+    publicationId,
+    sourceTitle: projection.title,
+    sourceAuthorDisplayName: projection.authorDisplayName,
+    visibility: 'private',
+    collaboratorCount: 0,
+    imageCount: 0,
+    sourcePublicationRevision: projection.revision,
+    ownerUid: owner.uid,
+    ownerEmail: owner.email,
+    lifecycleState: 'copying',
+    copyStatus: 'building',
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    contentRevision: serverTimestamp(),
+    ...patch
+  };
+}
+
+async function seedPublicRulesSource(publicationId = 'library-set', patch = {}, images = {}) {
+  await adminWrite(`quiz_sets/${publicationId}`, publicRulesSource(patch));
+  for (const [key, data] of Object.entries(images)) {
+    await adminWrite(`images/${publicationId}/q/${key}`, { data });
+  }
+}
+
+async function seedPublishedRulesProjection(publicationId = 'library-set', patch = {}, images = {}) {
+  const projection = publicRulesProjection(publicationId, {
+    imageCount: Object.keys(images).length,
+    ...patch
+  });
+  await adminWrite(`published_quiz_sets/${publicationId}`, projection);
+  for (const [key, data] of Object.entries(images)) {
+    await adminWrite(`published_quiz_sets/${publicationId}/images/${key}`, {
+      data,
+      revision: projection.revision,
+      buildToken: 'build-token-1'
+    });
+  }
+  return projection;
+}
+
 function classPlanDocuments(planId, patch = {}, writeTime = Timestamp.fromMillis(1_000)) {
   const privatePlan = {
     planId,
@@ -1127,8 +1241,12 @@ rulesTest('teacher-access: completed exact gate permanently disables fallback an
   const legacyUid = 'legacy-only-uid';
   const legacyEmail = 'legacy-only@school.kr';
   await adminWrite(`teacher_allowlist/${legacyEmail}`, { enabled: true, role: 'teacher' });
+  await adminWrite('quiz_sets/legacy-only-set', {
+    ownerUid: legacyUid, ownerEmail: legacyEmail, lifecycleState: 'active',
+    collaboratorCount: 0, imageCount: 0
+  });
   const legacy = googleContext(legacyUid, legacyEmail);
-  await assertSucceeds(getDoc(doc(legacy, 'quiz_sets/set1')));
+  await assertSucceeds(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
   const admin = actorFirestore('admin');
   await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/precomplete@school.kr'), {
     enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
@@ -1140,7 +1258,7 @@ rulesTest('teacher-access: completed exact gate permanently disables fallback an
     completedAt: Timestamp.fromMillis(2), completedByUid: 'admin-uid',
     unlockedAt: Timestamp.fromMillis(3), unlockedByUid: 'admin-uid'
   });
-  await assertFails(getDoc(doc(legacy, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
   await assertFails(updateDoc(doc(admin, 'teacher_allowlist/owner@school.kr'), {
     enabled: false, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
   }));
@@ -1474,6 +1592,11 @@ rulesTest('all legacy parent claims and response replacements are client denied'
 
 rulesTest('승인 교사는 공유 원본과 이미지를 strict counter 프로토콜로 자기 소유 사본을 만든다', async () => {
   const teacher = actorFirestore('otherTeacher');
+  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
   const sourceReference = doc(teacher, 'quiz_sets/set1');
   const before = await assertSucceeds(getDoc(sourceReference));
   const images = await assertSucceeds(getDocs(collection(teacher, 'images/set1/q')));
@@ -3071,19 +3194,25 @@ const readMatrix = [
   {
     name: '세트',
     getPath: 'quiz_sets/set1',
-    list: db => getDocs(query(
-      collection(db, 'quiz_sets'),
-      where('lifecycleState', '==', 'active')
-    )),
-    get: approvedTeachers,
+    list: (db, actorName) => getDocs(actorName === 'admin'
+      ? query(
+          collection(db, 'quiz_sets'),
+          where('lifecycleState', '==', 'active')
+        )
+      : query(
+          collection(db, 'quiz_sets'),
+          where('lifecycleState', '==', 'active'),
+          where('ownerUid', '==', actors[actorName].uid)
+        )),
+    get: ['owner', 'admin'],
     listAllowed: approvedTeachers
   },
   {
     name: '이미지',
     getPath: 'images/set1/q/0',
     list: db => getDocs(collection(db, 'images/set1/q')),
-    get: approvedTeachers,
-    listAllowed: approvedTeachers
+    get: ['owner', 'admin'],
+    listAllowed: ['owner', 'admin']
   },
   {
     name: '코드',
@@ -3841,10 +3970,20 @@ rulesTest('store content-plus-image save follows strict counter protocol', async
   assert.equal(saved.data().imageCount, 1);
 });
 
-rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용하고 missing source는 거부한다', async () => {
+rulesTest('private active original은 소유자·공동편집자만 수업에 사용하고 다른 교사 direct start를 거부한다', async () => {
   await resetFirestore();
   const other = actorFirestore('otherTeacher');
-  await assertSucceeds(setDoc(doc(other, 'sessions/active-source'), {
+  await assertFails(setDoc(doc(other, 'sessions/active-source'), {
+    setId: 'set1', teacherUid: actors.otherTeacher.uid,
+    teacherEmail: actors.otherTeacher.email, status: 'active',
+    registeredStudentCount: 0, studentCountRevision: 0
+  }));
+  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+  await assertSucceeds(setDoc(doc(other, 'sessions/collaborator-source'), {
     setId: 'set1', teacherUid: actors.otherTeacher.uid,
     teacherEmail: actors.otherTeacher.email, status: 'active',
     registeredStudentCount: 0, studentCountRevision: 0
@@ -3859,6 +3998,331 @@ rulesTest('활성 원본은 승인된 다른 교사의 수업 시작을 허용�
     teacherEmail: actors.otherTeacher.email, status: 'active',
     registeredStudentCount: 0, studentCountRevision: 0
   }));
+});
+
+rulesTest('private active original read is exact owner collaborator or admin access', async () => {
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const admin = actorFirestore('admin');
+
+  await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
+  await assertSucceeds(getDoc(doc(admin, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(other, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(other, 'images/set1/q/0')));
+  await assertFails(getDocs(query(
+    collection(other, 'quiz_sets'),
+    where('lifecycleState', '==', 'active')
+  )));
+  await assertSucceeds(getDocs(query(
+    collection(other, 'quiz_sets'),
+    where('lifecycleState', '==', 'active'),
+    where('ownerUid', '==', actors.otherTeacher.uid)
+  )));
+
+  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+  await assertSucceeds(getDoc(doc(other, 'quiz_sets/set1')));
+  await assertSucceeds(getDoc(doc(other, 'images/set1/q/0')));
+});
+
+rulesTest('published projection list requires exact visible status order and bounded limit', async () => {
+  await seedPublicRulesSource('library-set');
+  await seedPublishedRulesProjection('library-set');
+  await adminWrite('published_quiz_sets/library-building', publicRulesBuilding('library-building'));
+  await adminWrite('published_quiz_sets/library-withdrawn', publicRulesProjection(
+    'library-withdrawn', { status: 'withdrawn' }
+  ));
+  await adminWrite('published_quiz_sets/library-moderated', publicRulesProjection(
+    'library-moderated', { status: 'moderated', moderationStatus: 'moderated' }
+  ));
+
+  const exactQuery = db => getDocs(query(
+    collection(db, 'published_quiz_sets'),
+    where('status', '==', 'published'),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(50)
+  ));
+  for (const actorName of approvedTeachers) {
+    await assertSucceeds(exactQuery(actorFirestore(actorName)));
+  }
+  for (const actorName of ['unapproved', 'student', 'anonymous']) {
+    await assertFails(exactQuery(actorFirestore(actorName)));
+  }
+  await assertFails(exactQuery(testEnvironment.unauthenticatedContext().firestore()));
+
+  const other = actorFirestore('otherTeacher');
+  await assertFails(getDocs(collection(other, 'published_quiz_sets')));
+  await assertFails(getDocs(query(
+    collection(other, 'published_quiz_sets'),
+    where('status', '==', 'published'),
+    queryLimit(50)
+  )));
+  await assertFails(getDocs(query(
+    collection(other, 'published_quiz_sets'),
+    where('status', '==', 'published'),
+    orderBy('updatedAt', 'asc'),
+    queryLimit(50)
+  )));
+  await assertFails(getDocs(query(
+    collection(other, 'published_quiz_sets'),
+    where('status', '==', 'published'),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(51)
+  )));
+  await assertFails(getDocs(query(
+    collection(other, 'published_quiz_sets'),
+    where('status', '==', 'building'),
+    orderBy('updatedAt', 'desc'),
+    queryLimit(50)
+  )));
+
+  await assertSucceeds(getDoc(doc(other, 'published_quiz_sets/library-set')));
+  for (const id of ['library-building', 'library-withdrawn', 'library-moderated']) {
+    await assertFails(getDoc(doc(other, `published_quiz_sets/${id}`)));
+  }
+});
+
+rulesTest('published projection owner protocol admits actual building image finalize republish and safety withdrawal shapes', async () => {
+  const firstImages = {
+    v0q0: 'data:image/png;base64,AAAA',
+    v0q0e: 'data:image/png;base64,BBBB'
+  };
+  await seedPublicRulesSource('library-set', { imageCount: 2 }, firstImages);
+  const owner = actorFirestore('owner');
+  const store = emulatorStore(owner, undefined, undefined, () => 1_000);
+
+  const first = await store.publishQuizSet('library-set', publicRulesOwner);
+  assert.equal(first.status, 'published');
+  const firstStored = (await getDoc(doc(owner, 'published_quiz_sets/library-set'))).data();
+  assert.equal(firstStored.ownerUid, undefined);
+  assert.equal(firstStored.buildToken, undefined);
+  const firstPublishedAt = firstStored.publishedAt.toMillis();
+  const other = actorFirestore('otherTeacher');
+  await adminWrite('quiz_sets/library-set/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+  await assertFails(updateDoc(doc(other, 'published_quiz_sets/library-set'), {
+    title: '공동편집자 직접 공개 변경', updatedAt: serverTimestamp()
+  }));
+
+  await adminWrite('quiz_sets/library-set', publicRulesSource({
+    title: '수정된 공개 과학 퀴즈', imageCount: 2, contentRevision: 'rev-2'
+  }));
+  await adminWrite('images/library-set/q/v0q0', { data: 'data:image/png;base64,CHANGED' });
+  await adminWrite('images/library-set/q/v0q0e', undefined);
+  await adminWrite('images/library-set/q/v0q1', { data: 'data:image/png;base64,CCCC' });
+
+  const republished = await store.publishQuizSet('library-set', publicRulesOwner);
+  assert.equal(republished.status, 'published');
+  const republishedStored = (await getDoc(doc(owner, 'published_quiz_sets/library-set'))).data();
+  assert.equal(republishedStored.revision, 'rev-2');
+  assert.equal(republishedStored.publishedAt.toMillis(), firstPublishedAt);
+  assert.equal(republishedStored.imageCount, 2);
+
+  await adminWrite('quiz_sets/library-set', publicRulesSource({
+    title: 'revision 없이 바뀐 비공개 제목', imageCount: -1, contentRevision: 'rev-2'
+  }));
+  const withdrawn = await store.withdrawPublishedQuizSet('library-set', publicRulesOwner);
+  assert.equal(withdrawn.status, 'withdrawn');
+  assert.equal(withdrawn.title, '수정된 공개 과학 퀴즈');
+
+  await assertFails(setDoc(doc(other, 'published_quiz_sets/standalone'),
+    publicRulesProjection('standalone')));
+  await assertFails(updateDoc(doc(actorFirestore('admin'), 'published_quiz_sets/library-set'), {
+    title: '관리자 직접 내용 변경', updatedAt: serverTimestamp()
+  }));
+  await assertFails(updateDoc(doc(owner, 'published_quiz_sets/library-set'), {
+    revision: 'forged-revision', updatedAt: serverTimestamp()
+  }));
+});
+
+rulesTest('published projection public image reads require a visible exact revision binding', async () => {
+  await seedPublicRulesSource('image-public', { imageCount: 1 }, {
+    v0q0: 'data:image/png;base64,AAAA'
+  });
+  await seedPublishedRulesProjection('image-public', {}, {
+    v0q0: 'data:image/png;base64,AAAA'
+  });
+  const other = actorFirestore('otherTeacher');
+  await assertSucceeds(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
+  await assertSucceeds(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
+
+  await adminWrite('published_quiz_sets/image-public/images/v0q0', {
+    data: 'data:image/png;base64,AAAA', revision: 'stale', buildToken: 'build-token-1'
+  });
+  await assertFails(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
+  await assertSucceeds(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
+
+  await adminWrite('published_quiz_sets/image-building', publicRulesBuilding('image-building', {
+    imageCount: 1, buildImageCount: 1
+  }));
+  await adminWrite('published_quiz_sets/image-building/images/v0q0', {
+    data: 'data:image/png;base64,AAAA', revision: 'rev-1', buildToken: 'build-token-1'
+  });
+  await assertFails(getDoc(doc(other, 'published_quiz_sets/image-building/images/v0q0')));
+  await assertFails(setDoc(doc(actorFirestore('owner'),
+    'published_quiz_sets/image-public/images/standalone'), {
+    data: 'data:image/png;base64,AAAA', revision: 'rev-1', buildToken: 'build-token-1'
+  }));
+});
+
+rulesTest('published projection admin moderation and restore require the exact atomic audit side document', async () => {
+  await seedPublicRulesSource('moderation-set');
+  await seedPublishedRulesProjection('moderation-set');
+  const admin = actorFirestore('admin');
+  const owner = actorFirestore('owner');
+
+  await assertFails(updateDoc(doc(admin, 'published_quiz_sets/moderation-set'), {
+    status: 'moderated', moderationStatus: 'moderated', updatedAt: serverTimestamp()
+  }));
+  await assertFails(setDoc(doc(admin, 'published_quiz_audits/moderation-set'), {
+    publicationId: 'moderation-set', revision: 'rev-1', status: 'moderated',
+    moderatedByUid: actors.admin.uid, moderationReason: '독립 감사 위조',
+    moderatedAt: serverTimestamp()
+  }));
+
+  const store = emulatorStore(admin);
+  const moderated = await store.adminModeratePublishedQuiz(
+    'moderation-set', 'rev-1', '저작권 확인 필요', requestAdminIdentity
+  );
+  assert.equal(moderated.status, 'moderated');
+  await assertFails(getDoc(doc(owner, 'published_quiz_audits/moderation-set')));
+  await assertFails(getDocs(collection(owner, 'published_quiz_audits')));
+  await assertSucceeds(getDoc(doc(admin, 'published_quiz_audits/moderation-set')));
+  await assertSucceeds(getDocs(collection(admin, 'published_quiz_audits')));
+  await assertFails(getDoc(doc(actorFirestore('otherTeacher'),
+    'published_quiz_sets/moderation-set')));
+
+  await assertFails(updateDoc(doc(admin, 'published_quiz_sets/moderation-set'), {
+    status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
+  }));
+  const restored = await store.adminRestorePublishedQuiz(
+    'moderation-set', 'rev-1', requestAdminIdentity
+  );
+  assert.equal(restored.status, 'published');
+  assert.equal((await getDoc(doc(admin, 'published_quiz_audits/moderation-set')))
+    .data().status, 'restored');
+
+  const remoderated = await store.adminModeratePublishedQuiz(
+    'moderation-set', 'rev-1', '재검토 필요', requestAdminIdentity
+  );
+  assert.equal(remoderated.status, 'moderated');
+  const rerestored = await store.adminRestorePublishedQuiz(
+    'moderation-set', 'rev-1', requestAdminIdentity
+  );
+  assert.equal(rerestored.status, 'published');
+
+  await assertFails(updateDoc(doc(admin, 'published_quiz_audits/moderation-set'), {
+    restoredByUid: actors.owner.uid,
+    restoredAt: serverTimestamp()
+  }));
+});
+
+rulesTest('published projection copy uses exact provenance count-zero increments and final delete sentinels', async () => {
+  const image = 'data:image/png;base64,AAAA';
+  await seedPublicRulesSource('copy-source', { imageCount: 1 }, { v0q0: image });
+  await seedPublishedRulesProjection('copy-source', {}, { v0q0: image });
+  const other = actorFirestore('otherTeacher');
+  const copyActor = {
+    ...actors.otherTeacher,
+    displayName: '다른 교사',
+    role: 'teacher'
+  };
+  const store = emulatorStore(other);
+
+  const copied = await store.copyPublishedQuizSet('copy-source', 'copy-destination', copyActor);
+  assert.equal(copied.lifecycleState, 'active');
+  const storedCopy = (await getDoc(doc(other, 'quiz_sets/copy-destination'))).data();
+  assert.equal(storedCopy.imageCount, 1);
+  assert.equal(storedCopy.copyStatus, undefined);
+  assert.equal(storedCopy.publicationId, 'copy-source');
+
+  const manualRef = doc(other, 'quiz_sets/manual-copy');
+  await assertSucceeds(setDoc(manualRef, publicCopyStart('copy-source')));
+  await assertFails(updateDoc(manualRef, {
+    imageCount: 1,
+    imageMutation: { key: 'v0q0', action: 'add' },
+    updatedAt: serverTimestamp(),
+    contentRevision: serverTimestamp()
+  }));
+  await assertFails(setDoc(doc(other, 'images/manual-copy/q/v0q0'), { data: image }));
+
+  const wrongTarget = writeBatch(other);
+  wrongTarget.set(manualRef, {
+    imageCount: 1,
+    imageMutation: { key: 'v0q0', action: 'add' },
+    updatedAt: serverTimestamp(),
+    contentRevision: serverTimestamp()
+  }, { merge: true });
+  wrongTarget.set(doc(other, 'images/manual-copy/q/v0q1'), { data: image });
+  await assertFails(wrongTarget.commit());
+
+  const exactIncrement = writeBatch(other);
+  exactIncrement.set(manualRef, {
+    imageCount: 1,
+    imageMutation: { key: 'v0q0', action: 'add' },
+    updatedAt: serverTimestamp(),
+    contentRevision: serverTimestamp()
+  }, { merge: true });
+  exactIncrement.set(doc(other, 'images/manual-copy/q/v0q0'), { data: image });
+  await assertSucceeds(exactIncrement.commit());
+  await assertSucceeds(updateDoc(manualRef, {
+    lifecycleState: 'active',
+    copyStatus: deleteField(),
+    imageMutation: deleteField(),
+    updatedAt: serverTimestamp(),
+    contentRevision: serverTimestamp()
+  }));
+
+  await assertFails(setDoc(doc(other, 'quiz_sets/nonzero-copy'), publicCopyStart(
+    'copy-source', actors.otherTeacher, { imageCount: 1 }
+  )));
+  await assertFails(setDoc(doc(other, 'quiz_sets/forged-copy'), publicCopyStart(
+    'copy-source', actors.otherTeacher, { sourcePublicationRevision: 'forged' }
+  )));
+
+  await adminWrite('published_quiz_sets/copy-source', publicRulesProjection(
+    'copy-source', { imageCount: 1, status: 'withdrawn' }
+  ));
+  await assertFails(setDoc(doc(other, 'quiz_sets/hidden-copy'), publicCopyStart('copy-source')));
+  await adminWrite('published_quiz_sets/copy-source', publicRulesProjection(
+    'copy-source', { imageCount: 1 }
+  ));
+
+  await adminWrite('quiz_sets/copy-source', publicRulesSource({
+    imageCount: 1, lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1)
+  }));
+  await assertFails(setDoc(doc(other, 'quiz_sets/trashed-source-copy'),
+    publicCopyStart('copy-source')));
+  await adminWrite('quiz_sets/copy-source', publicRulesSource({ imageCount: 1 }));
+
+  const ownerAllowance = await adminRead('teacher_allowances/owner-uid');
+  for (const status of ['suspended', 'deletion_pending']) {
+    await adminWrite('teacher_allowances/owner-uid', {
+      ...ownerAllowance,
+      status,
+      enabled: false,
+      administrativeHold: status === 'suspended'
+    });
+    await assertFails(setDoc(doc(other, `quiz_sets/${status}-source-copy`),
+      publicCopyStart('copy-source')));
+  }
+  await adminWrite('teacher_allowances/owner-uid', {
+    ...ownerAllowance,
+    role: 'owner'
+  });
+  await assertFails(setDoc(doc(other, 'quiz_sets/invalid-role-source-copy'),
+    publicCopyStart('copy-source')));
+  await adminWrite('teacher_allowances/owner-uid', ownerAllowance);
+
+  const studentOwner = { uid: actors.student.uid, email: 'student@school.kr' };
+  await assertFails(setDoc(doc(actorFirestore('student'), 'quiz_sets/student-copy'),
+    publicCopyStart('copy-source', studentOwner)));
 });
 
 rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고 자기 admin은 보호한다', async () => {
@@ -3958,7 +4422,8 @@ rulesTest('authoritative verified password teacher and admin keep representative
   await assertSucceeds(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
   await assertSucceeds(getDocs(query(
     collection(passwordTeacher, 'quiz_sets'),
-    where('lifecycleState', '==', 'active')
+    where('lifecycleState', '==', 'active'),
+    where('ownerUid', '==', actors.owner.uid)
   )));
   await assertSucceeds(updateDoc(doc(passwordTeacher, 'quiz_sets/set1'), {
     title: 'password owner update'

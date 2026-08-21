@@ -827,7 +827,8 @@ service cloud.firestore {
     }
 
     function canStartSet(setId) {
-      return isApprovedTeacher() && activeSet(setId);
+      return isApprovedTeacher() && activeSet(setId) &&
+        (ownsSet(setId) || isSetCollaborator(setId));
     }
 
     function canStartSetAfter(setId) {
@@ -892,6 +893,677 @@ service cloud.firestore {
         (!exists(setPath) ||
           getAfter(setPath).data.get('contentRevision', null) !=
             get(setPath).data.get('contentRevision', null));
+    }
+
+    function publicationPath(setId) {
+      return /databases/$(database)/documents/published_quiz_sets/$(setId);
+    }
+
+    function publicationAuditPath(setId) {
+      return /databases/$(database)/documents/published_quiz_audits/$(setId);
+    }
+
+    function publicationSourcePath(setId) {
+      return /databases/$(database)/documents/quiz_sets/$(setId);
+    }
+
+    function publicationImagePath(setId, key) {
+      return /databases/$(database)/documents/published_quiz_sets/$(setId)/images/$(key);
+    }
+
+    function privateImagePath(setId, key) {
+      return /databases/$(database)/documents/images/$(setId)/q/$(key);
+    }
+
+    function publicParentKeys() {
+      return [
+        'publicationId', 'sourceSetId', 'status', 'moderationStatus', 'revision',
+        'title', 'description', 'authorDisplayName', 'videos', 'settings',
+        'videoCount', 'questionCount', 'imageCount', 'publishedAt', 'updatedAt'
+      ];
+    }
+
+    function publicBuildingKeys() {
+      return [
+        'publicationId', 'sourceSetId', 'status', 'moderationStatus', 'revision',
+        'title', 'description', 'authorDisplayName', 'videos', 'settings',
+        'videoCount', 'questionCount', 'imageCount', 'publishedAt', 'updatedAt',
+        'buildToken', 'buildImageCount'
+      ];
+    }
+
+    function validCanonicalPublicationId(value) {
+      return value is string && value.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$');
+    }
+
+    function validPublicParentContent(data, setId) {
+      return validCanonicalPublicationId(setId) &&
+        data.publicationId == setId && data.sourceSetId == setId &&
+        data.status in ['building', 'published', 'withdrawn', 'moderated'] &&
+        data.moderationStatus in ['clear', 'moderated'] &&
+        ((data.status == 'moderated') == (data.moderationStatus == 'moderated')) &&
+        data.revision is string && data.revision == data.revision.trim() &&
+        data.revision.size() >= 1 && data.revision.size() <= 200 &&
+        data.title is string && data.title == data.title.trim() &&
+        data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.description is string && data.description == data.description.trim() &&
+        data.description.size() <= 1000 &&
+        data.authorDisplayName is string &&
+        data.authorDisplayName == data.authorDisplayName.trim() &&
+        data.authorDisplayName.size() >= 1 && data.authorDisplayName.size() <= 80 &&
+        data.videos is list && data.videos.size() >= 1 && data.videos.size() <= 50 &&
+        data.settings is map &&
+        data.videoCount is int && data.videoCount == data.videos.size() &&
+        data.questionCount is int && data.questionCount >= 1 && data.questionCount <= 500 &&
+        data.imageCount is int && data.imageCount >= 0 &&
+        (data.publishedAt == null || data.publishedAt is timestamp) &&
+        data.updatedAt is timestamp &&
+        (data.publishedAt == null || data.updatedAt >= data.publishedAt) &&
+        (data.status == 'building' || data.publishedAt is timestamp);
+    }
+
+    function validPublicParentShape(data, setId) {
+      return data.keys().hasAll(publicParentKeys()) &&
+        data.keys().hasOnly(publicParentKeys()) &&
+        validPublicParentContent(data, setId);
+    }
+
+    function validPublicBuildingShape(data, setId) {
+      return data.keys().hasAll(publicBuildingKeys()) &&
+        data.keys().hasOnly(publicBuildingKeys()) &&
+        data.status == 'building' && data.moderationStatus == 'clear' &&
+        data.buildToken is string && data.buildToken.size() >= 1 &&
+        data.buildToken.size() <= 200 &&
+        data.buildImageCount is int && data.buildImageCount >= 0 &&
+        validPublicParentContent(data, setId);
+    }
+
+    function sourceRevision(data) {
+      let revision = data.get('contentRevision', null);
+      return revision is string ? revision.trim() :
+        revision is int && revision >= 0 ? string(revision) :
+        revision is timestamp ? string(revision.seconds()) + ':' + string(revision.nanos()) : '';
+    }
+
+    function validSourceOwnerAllowance(source) {
+      let path = /databases/$(database)/documents/teacher_allowances/$(source.ownerUid);
+      let allowance = get(path).data;
+      return exists(path) &&
+        [allowance.uid, allowance.emailCanonical, allowance.status, allowance.enabled] ==
+          [source.ownerUid, source.ownerEmail, 'active', true] &&
+        allowance.role in ['teacher', 'admin'];
+    }
+
+    function validActivePublicationSourceIdentity(setId) {
+      let path = publicationSourcePath(setId);
+      let source = get(path).data;
+      return exists(path) && source.ownerUid is string && source.ownerEmail is string &&
+        source.ownerUid.size() >= 1 && canonicalAllowanceId(source.ownerEmail) &&
+        source.get('lifecycleState', 'active') == 'active' &&
+        source.get('trashedAt', null) == null && source.get('purgeStartedAt', null) == null &&
+        sourceRevision(source).size() >= 1 && validSourceOwnerAllowance(source);
+    }
+
+    function validActivePublicationSource(setId) {
+      let source = get(publicationSourcePath(setId)).data;
+      return validActivePublicationSourceIdentity(setId) && validAuthoritativeCounters(source);
+    }
+
+    function requesterOwnsPublicationSource(setId) {
+      let source = get(publicationSourcePath(setId)).data;
+      return isApprovedTeacher() && validActivePublicationSourceIdentity(setId) &&
+        source.ownerUid == request.auth.uid && source.ownerEmail == request.auth.token.email;
+    }
+
+    function publicMatchesActiveSource(data, setId) {
+      let source = get(publicationSourcePath(setId)).data;
+      return validActivePublicationSource(setId) &&
+        data.revision == sourceRevision(source) &&
+        source.title is string && data.title == source.title.trim() &&
+        source.get('description', '') is string &&
+        data.description == source.get('description', '').trim() &&
+        source.videos is list && data.videos == source.videos &&
+        source.settings is map && data.settings == source.settings &&
+        data.videoCount == source.videos.size() && data.imageCount == source.imageCount;
+    }
+
+    function ownerAuthorMatchesAllowance(data, setId) {
+      let source = get(publicationSourcePath(setId)).data;
+      let allowance = get(
+        /databases/$(database)/documents/teacher_allowances/$(source.ownerUid)
+      ).data;
+      return allowance.get('displayName', '') is string &&
+        data.authorDisplayName == allowance.get('displayName', '').trim();
+    }
+
+    function validOwnerProjection(data, setId) {
+      let sourcePath = publicationSourcePath(setId);
+      let source = get(sourcePath).data;
+      let allowancePath = /databases/$(database)/documents/teacher_allowances/$(source.ownerUid);
+      let allowance = get(allowancePath).data;
+      return isApprovedTeacher() && exists(sourcePath) && exists(allowancePath) &&
+        source.ownerUid == request.auth.uid && source.ownerEmail == request.auth.token.email &&
+        source.get('lifecycleState', 'active') == 'active' &&
+        source.get('trashedAt', null) == null && source.get('purgeStartedAt', null) == null &&
+        [allowance.uid, allowance.emailCanonical, allowance.status, allowance.enabled] ==
+          [source.ownerUid, source.ownerEmail, 'active', true] &&
+        allowance.role in ['teacher', 'admin'] && validAuthoritativeCounters(source) &&
+        data.revision == sourceRevision(source) &&
+        source.title is string && data.title == source.title.trim() &&
+        source.get('description', '') is string &&
+        data.description == source.get('description', '').trim() &&
+        source.videos is list && data.videos == source.videos &&
+        source.settings is map && data.settings == source.settings &&
+        data.videoCount == source.videos.size() && data.imageCount == source.imageCount &&
+        allowance.get('displayName', '') is string &&
+        data.authorDisplayName == allowance.get('displayName', '').trim();
+    }
+
+    function publicContentUnchanged(before, after) {
+      return after.diff(before).affectedKeys().hasOnly([
+        'status', 'moderationStatus', 'publishedAt', 'updatedAt',
+        'buildToken', 'buildImageCount'
+      ]);
+    }
+
+    function validBuildingCreate(setId) {
+      let after = request.resource.data;
+      return validPublicBuildingShape(after, setId) && validOwnerProjection(after, setId) &&
+        after.publishedAt == null && after.updatedAt == request.time &&
+        after.buildImageCount == 0;
+    }
+
+    function validBuildingReplace(setId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.status in ['published', 'withdrawn'] &&
+        before.moderationStatus == 'clear' &&
+        validPublicBuildingShape(after, setId) && validOwnerProjection(after, setId) &&
+        after.publishedAt == before.publishedAt && after.publishedAt is timestamp &&
+        after.updatedAt == request.time && after.updatedAt >= before.updatedAt &&
+        after.buildImageCount == before.imageCount;
+    }
+
+    function validBuildingCountUpdate(setId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.status == 'building' && before.moderationStatus == 'clear' &&
+        validPublicBuildingShape(after, setId) && validOwnerProjection(after, setId) &&
+        after.diff(before).affectedKeys().hasOnly(['buildImageCount']) &&
+        (after.buildImageCount == before.buildImageCount + 1 ||
+          (before.buildImageCount > 0 &&
+            after.buildImageCount == before.buildImageCount - 1));
+    }
+
+    function validPublicationFinalization(setId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.status == 'building' && before.moderationStatus == 'clear' &&
+        before.buildToken is string && before.buildImageCount is int &&
+        validPublicParentShape(after, setId) && validOwnerProjection(after, setId) &&
+        publicContentUnchanged(before, after) &&
+        after.status == 'published' && after.moderationStatus == 'clear' &&
+        !('buildToken' in after) && !('buildImageCount' in after) &&
+        before.buildImageCount == after.imageCount &&
+        ((before.publishedAt == null && after.publishedAt == request.time) ||
+          (before.publishedAt is timestamp && after.publishedAt == before.publishedAt)) &&
+        after.updatedAt == request.time && after.updatedAt >= before.updatedAt &&
+        after.updatedAt >= after.publishedAt;
+    }
+
+    function validOwnerWithdrawal(setId) {
+      let source = get(publicationSourcePath(setId)).data;
+      let before = resource.data;
+      let after = request.resource.data;
+      return requesterOwnsPublicationSource(setId) &&
+        validPublicParentShape(after, setId) &&
+        before.status == 'published' && before.moderationStatus == 'clear' &&
+        after.status == 'withdrawn' && after.moderationStatus == 'clear' &&
+        sourceRevision(source) == before.revision &&
+        after.diff(before).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+        after.updatedAt == request.time && after.updatedAt >= before.updatedAt;
+    }
+
+    function validModeratedAudit(data, setId, revision) {
+      let keys = [
+        'publicationId', 'revision', 'status', 'moderatedByUid',
+        'moderationReason', 'moderatedAt'
+      ];
+      return data.keys().hasAll(keys) && data.keys().hasOnly(keys) &&
+        data.publicationId == setId && data.revision == revision &&
+        data.status == 'moderated' && data.moderatedByUid == request.auth.uid &&
+        data.moderationReason is string &&
+        data.moderationReason == data.moderationReason.trim() &&
+        data.moderationReason.size() >= 1 && data.moderationReason.size() <= 200 &&
+        data.moderatedAt == request.time;
+    }
+
+    function validRestoredAudit(before, after, setId, revision) {
+      let keys = [
+        'publicationId', 'revision', 'status', 'moderatedByUid',
+        'moderationReason', 'moderatedAt', 'restoredByUid', 'restoredAt'
+      ];
+      return validModeratedStoredAudit(before, setId, revision) &&
+        after.keys().hasAll(keys) && after.keys().hasOnly(keys) &&
+        after.publicationId == before.publicationId && after.revision == before.revision &&
+        after.status == 'restored' &&
+        after.moderatedByUid == before.moderatedByUid &&
+        after.moderationReason == before.moderationReason &&
+        after.moderatedAt == before.moderatedAt &&
+        after.restoredByUid == request.auth.uid && after.restoredAt == request.time &&
+        after.restoredAt >= before.moderatedAt;
+    }
+
+    function validModeratedStoredAudit(data, setId, revision) {
+      let keys = [
+        'publicationId', 'revision', 'status', 'moderatedByUid',
+        'moderationReason', 'moderatedAt'
+      ];
+      return data.keys().hasAll(keys) && data.keys().hasOnly(keys) &&
+        data.publicationId == setId && data.revision == revision &&
+        data.status == 'moderated' && data.moderatedByUid is string &&
+        data.moderatedByUid.size() >= 1 && data.moderationReason is string &&
+        data.moderationReason == data.moderationReason.trim() &&
+        data.moderationReason.size() >= 1 && data.moderationReason.size() <= 200 &&
+        data.moderatedAt is timestamp;
+    }
+
+    function validModerationParent(setId) {
+      let parentPath = publicationPath(setId);
+      let auditPath = publicationAuditPath(setId);
+      let before = get(parentPath).data;
+      let after = getAfter(parentPath).data;
+      let auditBefore = exists(auditPath) ? get(auditPath).data : {};
+      let audit = getAfter(auditPath).data;
+      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+        existsAfter(auditPath) &&
+        (!exists(auditPath)
+          ? true
+          : auditBefore.status == 'restored' &&
+            audit.diff(auditBefore).affectedKeys().hasAll(['status', 'moderatedAt']) &&
+            audit.diff(auditBefore).affectedKeys().hasOnly([
+              'status', 'moderatedByUid', 'moderationReason', 'moderatedAt',
+              'restoredByUid', 'restoredAt'
+            ])) &&
+        validPublicParentShape(after, setId) &&
+        before.status == 'published' &&
+        before.moderationStatus == 'clear' && after.status == 'moderated' &&
+        after.moderationStatus == 'moderated' && after.revision == before.revision &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'moderationStatus', 'updatedAt'
+        ]) && after.updatedAt == request.time && after.updatedAt >= before.updatedAt &&
+        audit.publicationId == setId && audit.revision == before.revision &&
+        audit.status == 'moderated' && audit.moderatedByUid == request.auth.uid &&
+        audit.moderatedAt == request.time;
+    }
+
+    function validModerationAuditPair(setId) {
+      let parentPath = publicationPath(setId);
+      let before = get(parentPath).data;
+      let after = getAfter(parentPath).data;
+      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+        before.status == 'published' && before.moderationStatus == 'clear' &&
+        after.status == 'moderated' && after.moderationStatus == 'moderated' &&
+        after.revision == before.revision &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'moderationStatus', 'updatedAt'
+        ]) && after.updatedAt == request.time &&
+        validModeratedAudit(request.resource.data, setId, before.revision);
+    }
+
+    function validRestoreParent(setId) {
+      let parentPath = publicationPath(setId);
+      let auditPath = publicationAuditPath(setId);
+      let before = get(parentPath).data;
+      let after = getAfter(parentPath).data;
+      let auditBefore = get(auditPath).data;
+      let auditAfter = getAfter(auditPath).data;
+      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+        exists(auditPath) && existsAfter(auditPath) &&
+        validPublicParentShape(after, setId) &&
+        before.status == 'moderated' && before.moderationStatus == 'moderated' &&
+        after.status == 'published' && after.moderationStatus == 'clear' &&
+        after.revision == before.revision && publicMatchesActiveSource(after, setId) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'moderationStatus', 'updatedAt'
+        ]) && after.updatedAt == request.time && after.updatedAt >= before.updatedAt &&
+        auditBefore.status == 'moderated' && auditBefore.revision == before.revision &&
+        auditAfter.status == 'restored' && auditAfter.revision == before.revision &&
+        auditAfter.restoredByUid == request.auth.uid &&
+        auditAfter.restoredAt == request.time &&
+        auditAfter.diff(auditBefore).affectedKeys().hasOnly([
+          'status', 'restoredByUid', 'restoredAt'
+        ]);
+    }
+
+    function validRestoreAuditPair(setId) {
+      let parentPath = publicationPath(setId);
+      let before = get(parentPath).data;
+      let after = getAfter(parentPath).data;
+      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+        before.status == 'moderated' && before.moderationStatus == 'moderated' &&
+        after.status == 'published' && after.moderationStatus == 'clear' &&
+        after.revision == before.revision &&
+        after.diff(before).affectedKeys().hasOnly([
+          'status', 'moderationStatus', 'updatedAt'
+        ]) && after.updatedAt == request.time &&
+        validRestoredAudit(resource.data, request.resource.data, setId, before.revision);
+    }
+
+    function validPublicImageData(data, revision, buildToken) {
+      let keys = ['data', 'revision', 'buildToken'];
+      return data.keys().hasAll(keys) && data.keys().hasOnly(keys) &&
+        data.data is string && data.data.size() >= 1 && data.data.size() <= 380100 &&
+        (data.data.matches('^data:image/.*$') || data.data.matches('^https://.*$')) &&
+        data.revision == revision && data.buildToken == buildToken &&
+        data.buildToken is string && data.buildToken.size() >= 1 &&
+        data.buildToken.size() <= 200;
+    }
+
+    function validPublicImageKey(key) {
+      return key.matches('^v(0|[1-9][0-9]*)q(0|[1-9][0-9]*)(e?)$');
+    }
+
+    function validPublicImageCreate(setId, key) {
+      let parentBefore = get(publicationPath(setId)).data;
+      let parentAfter = getAfter(publicationPath(setId)).data;
+      let privatePath = privateImagePath(setId, key);
+      return validPublicImageKey(key) && validOwnerProjection(parentAfter, setId) &&
+        parentBefore.status == 'building' && parentBefore.moderationStatus == 'clear' &&
+        validPublicBuildingShape(parentAfter, setId) &&
+        parentAfter.diff(parentBefore).affectedKeys().hasOnly(['buildImageCount']) &&
+        parentAfter.buildImageCount == parentBefore.buildImageCount + 1 &&
+        validPublicImageData(request.resource.data, parentAfter.revision, parentAfter.buildToken) &&
+        exists(privatePath) && request.resource.data.data == get(privatePath).data.data;
+    }
+
+    function validPublicImageReplace(setId, key) {
+      let parentBefore = get(publicationPath(setId)).data;
+      let parentAfter = getAfter(publicationPath(setId)).data;
+      let privatePath = privateImagePath(setId, key);
+      return validPublicImageKey(key) && validOwnerProjection(parentAfter, setId) &&
+        parentBefore.status == 'building' && validPublicBuildingShape(parentAfter, setId) &&
+        parentAfter == parentBefore &&
+        validPublicImageData(request.resource.data, parentAfter.revision, parentAfter.buildToken) &&
+        exists(privatePath) && request.resource.data.data == get(privatePath).data.data;
+    }
+
+    function validPublicImageDelete(setId, key) {
+      let parentBefore = get(publicationPath(setId)).data;
+      let parentAfter = getAfter(publicationPath(setId)).data;
+      return validPublicImageKey(key) && validOwnerProjection(parentAfter, setId) &&
+        parentBefore.status == 'building' && parentBefore.moderationStatus == 'clear' &&
+        validPublicBuildingShape(parentAfter, setId) &&
+        parentAfter.diff(parentBefore).affectedKeys().hasOnly(['buildImageCount']) &&
+        parentBefore.buildImageCount > 0 &&
+        parentAfter.buildImageCount == parentBefore.buildImageCount - 1 &&
+        !exists(privateImagePath(setId, key));
+    }
+
+    function visiblePublicImage(setId, data) {
+      let parent = get(publicationPath(setId)).data;
+      return isApprovedTeacher() && validPublicParentShape(parent, setId) &&
+        parent.status == 'published' &&
+        validPublicImageData(data, parent.revision, data.buildToken);
+    }
+
+    function ownerMayReadHiddenPublication(setId) {
+      let path = publicationPath(setId);
+      return requesterOwnsPublicationSource(setId) &&
+        (!exists(path) || get(path).data.get('status', '') in ['building', 'withdrawn']);
+    }
+
+    function validPublicationGet(setId) {
+      let path = publicationPath(setId);
+      return !exists(path)
+        ? requesterOwnsPublicationSource(setId)
+        : resource.data.get('status', '') == 'published'
+          ? isApprovedTeacher() && validPublicParentShape(resource.data, setId)
+          : isAdmin()
+            ? (resource.data.get('status', '') == 'building'
+              ? validPublicBuildingShape(resource.data, setId)
+              : validPublicParentShape(resource.data, setId))
+            : ownerMayReadHiddenPublication(setId) &&
+              (resource.data.get('status', '') == 'building'
+                ? validPublicBuildingShape(resource.data, setId)
+                : validPublicParentShape(resource.data, setId));
+    }
+
+    function validPublicImageGet(setId, data) {
+      let parent = get(publicationPath(setId)).data;
+      return parent.get('status', '') == 'published'
+        ? visiblePublicImage(setId, data)
+        : ownerMayReadHiddenPublication(setId);
+    }
+
+    function validPublicImageList(setId) {
+      let path = publicationPath(setId);
+      return !exists(path)
+        ? requesterOwnsPublicationSource(setId)
+        : get(path).data.get('status', '') == 'published'
+          ? isApprovedTeacher()
+          : ownerMayReadHiddenPublication(setId);
+    }
+
+    function publicCopyBaseKeys() {
+      return [
+        'title', 'description', 'videos', 'settings', 'publicationId', 'sourceTitle',
+        'sourceAuthorDisplayName', 'visibility', 'collaboratorCount', 'imageCount',
+        'sourcePublicationRevision', 'ownerUid', 'ownerEmail', 'lifecycleState',
+        'copyStatus', 'createdAt', 'updatedAt', 'contentRevision'
+      ];
+    }
+
+    function activePublicCopyKeys() {
+      return [
+        'title', 'description', 'videos', 'settings', 'publicationId', 'sourceTitle',
+        'sourceAuthorDisplayName', 'visibility', 'collaboratorCount', 'imageCount',
+        'sourcePublicationRevision', 'ownerUid', 'ownerEmail', 'lifecycleState',
+        'createdAt', 'updatedAt', 'contentRevision'
+      ];
+    }
+
+    function copyingPublicCopyKeys() {
+      return [
+        'title', 'description', 'videos', 'settings', 'publicationId', 'sourceTitle',
+        'sourceAuthorDisplayName', 'visibility', 'collaboratorCount', 'imageCount',
+        'sourcePublicationRevision', 'ownerUid', 'ownerEmail', 'lifecycleState',
+        'copyStatus', 'createdAt', 'updatedAt', 'contentRevision', 'imageMutation'
+      ];
+    }
+
+    function publicCopyTitle(publicTitle) {
+      let title = publicTitle + ' (사본)';
+      return title.size() <= 200 ? title : title[0:200];
+    }
+
+    function validPublishedCopySource(publicationId) {
+      let path = publicationPath(publicationId);
+      let publication = get(path).data;
+      return exists(path) && validPublicParentShape(publication, publicationId) &&
+        publication.status == 'published' && publication.moderationStatus == 'clear' &&
+        publicMatchesActiveSource(publication, publicationId);
+    }
+
+    function validPublishedCopySourceStillActive(data) {
+      let path = publicationPath(data.publicationId);
+      let publication = get(path).data;
+      return exists(path) && publication.publicationId == data.publicationId &&
+        publication.sourceSetId == data.publicationId &&
+        publication.status == 'published' && publication.moderationStatus == 'clear' &&
+        publication.revision == data.sourcePublicationRevision &&
+        publicMatchesActiveSource(publication, data.publicationId);
+    }
+
+    function validPublicCopyProvenance(data) {
+      let publication = get(publicationPath(data.publicationId)).data;
+      return validPublishedCopySource(data.publicationId) &&
+        data.sourcePublicationRevision == publication.revision &&
+        data.title == publicCopyTitle(publication.title) &&
+        data.description == publication.description && data.videos == publication.videos &&
+        data.settings == publication.settings && data.sourceTitle == publication.title &&
+        data.sourceAuthorDisplayName == publication.authorDisplayName &&
+        data.visibility == 'private' && data.collaboratorCount == 0;
+    }
+
+    function validPrivateCopyStart(setId) {
+      let after = request.resource.data;
+      return isApprovedTeacher() && after.keys().hasAll(publicCopyBaseKeys()) &&
+        after.keys().hasOnly(publicCopyBaseKeys()) && validCanonicalPublicationId(setId) &&
+        validCanonicalPublicationId(after.publicationId) && setId != after.publicationId &&
+        after.ownerUid == request.auth.uid && after.ownerEmail == request.auth.token.email &&
+        after.lifecycleState == 'copying' && after.copyStatus == 'building' &&
+        after.imageCount == 0 && !('imageMutation' in after) &&
+        after.createdAt == request.time && after.updatedAt == request.time &&
+        after.contentRevision == request.time && validPublicCopyProvenance(after);
+    }
+
+    function validCopyingDestinationShape(data) {
+      let required = publicCopyBaseKeys();
+      return data.keys().hasAll(required) &&
+        data.keys().hasOnly(copyingPublicCopyKeys()) &&
+        data.ownerUid == request.auth.uid && data.ownerEmail == request.auth.token.email &&
+        data.lifecycleState == 'copying' && data.copyStatus == 'building' &&
+        data.imageCount is int && data.imageCount >= 0 && data.createdAt is timestamp &&
+        data.updatedAt is timestamp && data.contentRevision is timestamp;
+    }
+
+    function validCopyImageIncrement(setId) {
+      let parentPath = publicationSourcePath(setId);
+      let before = get(parentPath).data;
+      let after = getAfter(parentPath).data;
+      let mutation = after.get('imageMutation', {});
+      let childPath = privateImagePath(setId, mutation.key);
+      let publication = get(publicationPath(after.publicationId)).data;
+      return isApprovedTeacher() && before.lifecycleState == 'copying' &&
+        before.copyStatus == 'building' && before.ownerUid == request.auth.uid &&
+        before.ownerEmail == request.auth.token.email &&
+        validCopyingDestinationShape(after) && validPublishedCopySourceStillActive(after) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'imageCount', 'imageMutation', 'updatedAt', 'contentRevision'
+        ]) && mutation.keys().hasAll(['key', 'action']) &&
+        mutation.keys().hasOnly(['key', 'action']) && validPublicImageKey(mutation.key) &&
+        mutation.action == 'add' && !exists(childPath) && existsAfter(childPath) &&
+        after.imageCount == before.imageCount + 1 &&
+        after.imageCount <= publication.imageCount &&
+        after.updatedAt == request.time && after.contentRevision == request.time;
+    }
+
+    function validCopyImageCreate(setId, key) {
+      let parentPath = publicationSourcePath(setId);
+      let before = get(parentPath).data;
+      let after = getAfter(parentPath).data;
+      let mutation = after.get('imageMutation', {});
+      let publicImagePath = publicationImagePath(after.publicationId, key);
+      let publicImage = get(publicImagePath).data;
+      let publication = get(publicationPath(after.publicationId)).data;
+      return exists(parentPath) && existsAfter(parentPath) &&
+        before.lifecycleState == 'copying' && after.lifecycleState == 'copying' &&
+        before.ownerUid == request.auth.uid && after.ownerUid == request.auth.uid &&
+        mutation.keys().hasAll(['key', 'action']) &&
+        mutation.keys().hasOnly(['key', 'action']) && mutation.key == key &&
+        mutation.action == 'add' && validPublicImageKey(key) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'imageCount', 'imageMutation', 'updatedAt', 'contentRevision'
+        ]) && after.imageCount == before.imageCount + 1 &&
+        request.resource.data.keys().hasAll(['data']) &&
+        request.resource.data.keys().hasOnly(['data']) &&
+        request.resource.data.data is string && exists(publicImagePath) &&
+        publication.status == 'published' && publication.moderationStatus == 'clear' &&
+        publicImage.revision == publication.revision &&
+        publicImage.data == request.resource.data.data;
+    }
+
+    function validPrivateCopyFinalize(setId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let publication = get(publicationPath(before.publicationId)).data;
+      return isApprovedTeacher() && before.lifecycleState == 'copying' &&
+        before.copyStatus == 'building' && before.ownerUid == request.auth.uid &&
+        before.ownerEmail == request.auth.token.email &&
+        after.keys().hasAll(activePublicCopyKeys()) &&
+        after.keys().hasOnly(activePublicCopyKeys()) &&
+        after.ownerUid == request.auth.uid && after.ownerEmail == request.auth.token.email &&
+        after.lifecycleState == 'active' && !('copyStatus' in after) &&
+        !('imageMutation' in after) && validPublishedCopySourceStillActive(after) &&
+        after.diff(before).affectedKeys().hasOnly([
+          'lifecycleState', 'copyStatus', 'imageMutation', 'updatedAt', 'contentRevision'
+        ]) && after.imageCount == publication.imageCount &&
+        after.updatedAt == request.time && after.contentRevision == request.time;
+    }
+
+    function canReadPrivateSet(setId) {
+      let path = publicationSourcePath(setId);
+      let source = get(path).data;
+      return !exists(path)
+        ? false
+        : !isApprovedTeacher()
+          ? false
+          : source.ownerUid == request.auth.uid
+            ? true
+            : isAdmin()
+              ? true
+              : source.get('lifecycleState', 'active') == 'active' &&
+                exists(collaboratorPath(setId)) &&
+                get(collaboratorPath(setId)).data.get('email', '') ==
+                  request.auth.token.email;
+    }
+
+    function validEditablePrivateSetUpdate(setId) {
+      return (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'lifecycleState',
+          'imageCount', 'imageMutation', 'publicationId', 'sourcePublicationRevision',
+          'sourceTitle', 'sourceAuthorDisplayName', 'visibility', 'copyStatus'
+        ])) && canEditSet(setId) && activeSet(setId) &&
+        request.resource.data.lifecycleState in ['active', 'trashed', 'purging'] &&
+        request.resource.data.ownerUid == resource.data.ownerUid &&
+        request.resource.data.ownerEmail == resource.data.ownerEmail &&
+        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['archived']) ||
+          ownsSet(setId)) && validCollaboratorCount(setId);
+    }
+
+    function validPrivateSetUpdate(setId) {
+      return resource.data.get('lifecycleState', '') == 'copying'
+        ? (request.resource.data.get('lifecycleState', '') == 'copying'
+          ? validCopyImageIncrement(setId)
+          : validPrivateCopyFinalize(setId))
+        : validEditablePrivateSetUpdate(setId) || validSetLifecycleTransition(setId);
+    }
+
+    function validPrivateImageCreate(setId, key) {
+      let parent = getAfter(publicationSourcePath(setId)).data;
+      return parent.get('lifecycleState', '') == 'copying'
+        ? validCopyImageCreate(setId, key)
+        : counterMigrationUnlocked() && validActiveImageCreate(setId, key);
+    }
+
+    function validPublicParentUpdate(setId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.status == 'building'
+        ? (after.status == 'building'
+          ? validBuildingCountUpdate(setId)
+          : validPublicationFinalization(setId))
+        : before.status == 'published'
+          ? (after.status == 'building'
+            ? validBuildingReplace(setId)
+            : after.status == 'withdrawn'
+              ? validOwnerWithdrawal(setId)
+              : validModerationParent(setId))
+          : before.status == 'withdrawn'
+            ? validBuildingReplace(setId)
+            : before.status == 'moderated'
+              ? validRestoreParent(setId)
+              : false;
+    }
+
+    function validPublicationAuditWrite(setId) {
+      let parentBefore = get(publicationPath(setId)).data;
+      return parentBefore.status == 'published'
+        ? validModerationAuditPair(setId)
+        : parentBefore.status == 'moderated'
+          ? validRestoreAuditPair(setId)
+          : false;
     }
 
     function ownsSession(sessionId) {
@@ -1822,19 +2494,57 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    function validPublishedListQuery() {
+      return request.query.limit != null && request.query.limit >= 1 &&
+        request.query.limit <= 50 &&
+        request.query.orderBy == {
+          'updatedAt': 'DESC', '__name__': 'DESC'
+        };
+    }
+
+    match /published_quiz_sets/{setId} {
+      allow get: if validPublicationGet(setId);
+      allow list: if isApprovedTeacher() && validPublishedListQuery() &&
+        resource.data.status == 'published';
+      allow create: if validBuildingCreate(setId);
+      allow update: if validPublicParentUpdate(setId);
+      allow delete: if false;
+      allow read, write: if false;
+
+      match /images/{key} {
+        allow get: if validPublicImageGet(setId, resource.data);
+        allow list: if validPublicImageList(setId);
+        allow create: if validPublicImageCreate(setId, key);
+        allow update: if validPublicImageReplace(setId, key);
+        allow delete: if validPublicImageDelete(setId, key);
+        allow read, write: if false;
+      }
+    }
+
+    match /published_quiz_audits/{setId} {
+      allow get, list: if isAdmin();
+      allow create, update: if validPublicationAuditWrite(setId);
+      allow delete: if false;
+      allow read, write: if false;
+    }
+
     match /quiz_sets/{setId} {
-      allow get: if isApprovedTeacher() &&
-        (!exists(/databases/$(database)/documents/quiz_sets/$(setId)) ||
-          activeSet(setId) || ownsSet(setId) || isAdmin() ||
-          setId.matches('^__teacher_allowance_probe__.*$'));
-      allow list: if (isApprovedTeacher() &&
+      allow get: if !exists(publicationSourcePath(setId))
+        ? isApprovedTeacher()
+        : canReadPrivateSet(setId);
+      allow list: if (isAdmin() &&
           resource.data.keys().hasAll(['lifecycleState']) &&
           (resource.data.lifecycleState == 'active' ||
-            (resource.data.lifecycleState in ['trashed', 'purging'] &&
-              (resource.data.ownerUid == request.auth.uid || isAdmin())))) ||
-        (isStoppedTeacherForSafeEnd() && resource.data.ownerUid == request.auth.uid &&
+            resource.data.lifecycleState in ['trashed', 'purging'])) ||
+        (isApprovedTeacher() &&
+          resource.data.keys().hasAll(['lifecycleState', 'ownerUid']) &&
+          resource.data.ownerUid == request.auth.uid &&
+          resource.data.lifecycleState in ['active', 'trashed', 'purging']) ||
+        (isStoppedTeacherForSafeEnd() &&
+          resource.data.keys().hasAll(['ownerUid']) &&
+          resource.data.ownerUid == request.auth.uid &&
           request.query.limit != null && request.query.limit <= 101);
-      allow create: if isApprovedTeacher() &&
+      allow create: if validPrivateCopyStart(setId) || (isApprovedTeacher() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.ownerEmail == request.auth.token.email &&
         request.resource.data.lifecycleState == 'active' &&
@@ -1844,16 +2554,12 @@ service cloud.firestore {
         !('collaboratorMutation' in request.resource.data) &&
         !('imageMutation' in request.resource.data) &&
         !('trashedAt' in request.resource.data) &&
-        !('purgeStartedAt' in request.resource.data);
-      allow update: if ((!request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'lifecycleState',
-          'imageCount', 'imageMutation'
-        ])) && canEditSet(setId) && activeSet(setId) &&
-        request.resource.data.lifecycleState in ['active', 'trashed', 'purging'] &&
-        request.resource.data.ownerUid == resource.data.ownerUid &&
-        request.resource.data.ownerEmail == resource.data.ownerEmail &&
-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['archived']) || ownsSet(setId)) &&
-        validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
+        !('purgeStartedAt' in request.resource.data) &&
+        !request.resource.data.keys().hasAny([
+          'publicationId', 'sourcePublicationRevision', 'sourceTitle',
+          'sourceAuthorDisplayName', 'visibility', 'copyStatus'
+        ]));
+      allow update: if validPrivateSetUpdate(setId);
       allow delete: if canPurgeSet(setId) &&
         counterMigrationUnlocked() &&
         validAuthoritativeCounters(resource.data) &&
@@ -1878,8 +2584,8 @@ service cloud.firestore {
     }
 
     match /images/{setId}/q/{questionIndex} {
-      allow get, list: if (isApprovedTeacher() && activeSet(setId)) || canPurgeSet(setId);
-      allow create: if counterMigrationUnlocked() && validActiveImageCreate(setId, questionIndex);
+      allow get, list: if canReadPrivateSet(setId) || canPurgeSet(setId);
+      allow create: if validPrivateImageCreate(setId, questionIndex);
       allow update: if counterMigrationUnlocked() && validActiveImageUpdate(setId, questionIndex);
       allow delete: if counterMigrationUnlocked() &&
         (validActiveImageDelete(setId, questionIndex) || validPurgeImageDelete(setId, questionIndex));
