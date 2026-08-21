@@ -6,6 +6,7 @@
     "migrate:legacy": "node scripts/migrate-legacy-ownership.js",
     "migrate:lifecycle": "node scripts/migrate-lifecycle-state.js",
     "migrate:counters": "node scripts/migrate-set-counters.js",
+    "migrate:collaborator-shares": "node scripts/migrate-collaborator-shares.js",
     "gate:counters": "node scripts/manage-counter-gate.js",
     "migrate:teacher-access": "node scripts/migrate-teacher-access-status.js",
     "migrate:session-counters": "node scripts/migrate-session-counters.js"

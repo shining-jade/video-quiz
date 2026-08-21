@@ -2463,6 +2463,52 @@ test('공동편집 세트 discovery는 자기 전용 exact index 결과만 direc
   assert.equal(fake.calls().some(call => call.operation === 'collectionGroup'), false);
 });
 
+test('공유 목록은 stale permission-denied parent만 건너뛰고 실제 읽기 장애는 전파한다', async () => {
+  const actor = { uid: 'teacher', email: 'teacher@school.kr', role: 'teacher' };
+  const permissionDenied = Object.assign(new Error('stale trashed parent'), {
+    code: 'permission-denied'
+  });
+  const unavailable = Object.assign(new Error('network unavailable'), { code: 'unavailable' });
+  const makeDb = hiddenFailure => ({
+    collection(path) {
+      assert.equal(path, 'quiz_set_shares/teacher@school.kr/sets');
+      return {
+        limit(value) {
+          assert.equal(value, 50);
+          return this;
+        },
+        async get(options) {
+          assert.deepEqual(options, { source: 'server' });
+          return {
+            docs: ['active', 'hidden'].map(id => ({
+              id,
+              data() { return { email: actor.email, setId: id }; }
+            }))
+          };
+        }
+      };
+    },
+    doc(path) {
+      return { async get(options) {
+        assert.deepEqual(options, { source: 'server' });
+        const id = path.split('/').at(-1);
+        if (id === 'hidden') throw hiddenFailure;
+        return {
+          exists: true,
+          id,
+          data() { return { ownerUid: 'owner', lifecycleState: 'active', title: '공유' }; }
+        };
+      } };
+    }
+  });
+
+  const store = loadStoreModule().createFirestoreStore(makeDb(permissionDenied), {}, () => 0);
+  assert.deepEqual((await store.listSharedQuizSets(actor)).map(set => set.id), ['active']);
+
+  const offlineStore = loadStoreModule().createFirestoreStore(makeDb(unavailable), {}, () => 0);
+  await assert.rejects(offlineStore.listSharedQuizSets(actor), unavailable);
+});
+
 test('사본은 공동 편집·휴지통 상태를 물려받지 않고 활성 빈 상태로 시작한다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/source': {

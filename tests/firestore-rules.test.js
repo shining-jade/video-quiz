@@ -4146,6 +4146,119 @@ rulesTest('FixRound2 private read and shared discovery use exact quiz_sets paths
   assert.deepEqual(discovered.map(set => set.id), ['set1']);
 });
 
+rulesTest('FixRound3 shared discovery skips one trashed stale parent without hiding active shares', async () => {
+  const other = actorFirestore('otherTeacher');
+  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('quiz_set_shares/other@school.kr/sets/set1', {
+    email: actors.otherTeacher.email,
+    setId: 'set1'
+  });
+  await adminWrite('quiz_sets/trashed-shared', {
+    ownerUid: actors.owner.uid,
+    ownerEmail: actors.owner.email,
+    trashedAt: Timestamp.fromMillis(2),
+    purgeStartedAt: null,
+    lifecycleState: 'trashed',
+    collaboratorCount: 1,
+    imageCount: 0,
+    title: '휴지통 공유 세트'
+  });
+  await adminWrite('quiz_sets/trashed-shared/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('quiz_set_shares/other@school.kr/sets/trashed-shared', {
+    email: actors.otherTeacher.email,
+    setId: 'trashed-shared'
+  });
+
+  await assertFails(getDoc(doc(other, 'quiz_sets/trashed-shared')));
+  const discovered = await emulatorStore(other).listSharedQuizSets({
+    ...actors.otherTeacher,
+    role: 'teacher'
+  });
+  assert.deepEqual(discovered.map(set => set.id), ['set1']);
+});
+
+rulesTest('FixRound3 Admin-backfilled legacy indexes restore discovery, remove, and purge protocols', async () => {
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const otherStore = emulatorStore(actorFirestore('otherTeacher'));
+  const otherActor = { ...actors.otherTeacher, role: 'teacher' };
+
+  await adminWrite('quiz_sets/legacy-shared', {
+    ownerUid: actors.owner.uid,
+    ownerEmail: actors.owner.email,
+    trashedAt: null,
+    purgeStartedAt: null,
+    lifecycleState: 'active',
+    collaboratorCount: 1,
+    imageCount: 0,
+    title: '기존 공유 세트'
+  });
+  await adminWrite('quiz_sets/legacy-shared/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+
+  assert.equal((await otherStore.listSharedQuizSets(otherActor))
+    .some(set => set.id === 'legacy-shared'), false);
+  await assert.rejects(ownerStore.removeCollaborator(
+    'legacy-shared', actors.otherTeacher.email, actors.owner
+  ), error => String(error && error.code || '').includes('permission-denied'));
+
+  // This exact document is the trusted Admin migration's only backfill shape.
+  await adminWrite('quiz_set_shares/other@school.kr/sets/legacy-shared', {
+    email: actors.otherTeacher.email,
+    setId: 'legacy-shared'
+  });
+  assert.equal((await otherStore.listSharedQuizSets(otherActor))
+    .some(set => set.id === 'legacy-shared'), true);
+  assert.equal(await ownerStore.removeCollaborator(
+    'legacy-shared', actors.otherTeacher.email, actors.owner
+  ), true);
+
+  const expiredAt = Timestamp.fromMillis(Date.now() - 31 * 86400000);
+  await adminWrite('quiz_sets/legacy-purge', {
+    ownerUid: actors.owner.uid,
+    ownerEmail: actors.owner.email,
+    lifecycleState: 'trashed',
+    trashedAt: expiredAt,
+    purgeStartedAt: null,
+    collaboratorCount: 1,
+    imageCount: 0,
+    contentRevision: Timestamp.fromMillis(1)
+  });
+  await adminWrite('quiz_sets/legacy-purge/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1)
+  });
+  await ownerStore.beginSetPurge('legacy-purge', 'immediate', actors.owner);
+  await assert.rejects(ownerStore.continueSetPurge('legacy-purge'), error =>
+    String(error && error.code || '').includes('permission-denied')
+  );
+  await adminWrite('quiz_set_shares/other@school.kr/sets/legacy-purge', {
+    email: actors.otherTeacher.email,
+    setId: 'legacy-purge'
+  });
+  assert.deepEqual(await ownerStore.continueSetPurge('legacy-purge'), {
+    done: false,
+    deleted: 1,
+    parentDeleted: false
+  });
+  assert.deepEqual(await ownerStore.continueSetPurge('legacy-purge'), {
+    done: true,
+    deleted: 0,
+    parentDeleted: true
+  });
+});
+
 rulesTest('FixRound1 private nested reviewer PII exploit cannot cross the flat public projection boundary', async () => {
   const publicationId = 'pii-boundary';
   await seedPublicRulesSource(publicationId);

@@ -1854,7 +1854,15 @@
           /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(document.id)
           ? document.id : '';
       }).filter(Boolean))];
-      const sets = await Promise.all(setIds.map(getQuizSet));
+      const sets = await Promise.all(setIds.map(async setId => {
+        try {
+          const parent = await db.doc('quiz_sets/' + setId).get({ source: 'server' });
+          return quizSetValue(parent);
+        } catch (error) {
+          if (permissionDenied(error)) return null;
+          throw error;
+        }
+      }));
       return sets.filter(set => set && set.ownerUid !== current.uid && activeSet(set));
     }
 
