@@ -11,23 +11,9 @@
 - 겹침 경고는 수업 준비를 돕는 권고이며 수업 시작을 막지 않습니다. 어떤 동시 인원 숫자도 Firebase 무료 할당량을 보장하지 않습니다.
 - 교사 계정 purge는 자동 작업이 아닙니다. 30일, 소유 세트 0건, 진행 세션 0건과 실제 class plan 상태를 다시 확인한 관리자가 별도 CLI로 명시 실행합니다.
 
-## 필수 배포 순서
+## 통합 릴리스에서의 위치
 
-순서를 바꾸거나 안전하지 않은 보고서를 건너뛰지 않습니다.
-
-1. Firestore와 Firebase Auth 대상 프로젝트를 확인하고 Firestore export/백업 및 현재 Rules 원문을 보존합니다.
-2. `pnpm test`와 `pnpm test:rules`를 실행해 Node 전체와 Firestore/Admin Emulator 전체가 통과하는지 확인합니다.
-3. **호환 head Firestore Rules를 먼저 배포**합니다. 이 Rules는 legacy 세션의 안전 종료는 허용하지만 counter 없는 신규 join은 이미 거부하고, 두 migration lock이 활성화되면 allowance 관리와 모든 신규 join을 닫습니다. 이 단계를 건너뛰면 join 없는 구간을 증명할 수 없습니다.
-4. 교사 승인 migration을 production dry-run하고 durable 보고서를 검토합니다.
-5. 예측 불가능한 access lock token을 정한 뒤 새 출력 경로로 교사 승인 migration apply를 실행합니다. post-audit mismatch가 0이고 `safeToDeployStrictRules: true`인지 확인하되 lock은 해제하지 않습니다.
-6. 세션 counter maintenance dry-run으로 모든 `allocating|active|live` 세션과 실제 `students` 하위 문서를 스캔합니다.
-7. 별도의 예측 불가능한 counter lock token으로 세션 counter apply를 실행합니다. CLI는 `migration_gates/session_counter_migration`을 먼저 잠그고 정확한 updateTime generation에 scan/recount/post-audit를 묶은 뒤에만 completion gate를 기록합니다.
-8. 두 보고서의 lock token/generation, session `gate.updateTimeGeneration`, `preflightNonEndedLegacyCount: 0`, `safeToDeployStrictRules: true`를 확인합니다.
-9. strict Firestore Rules와 정적 앱을 배포합니다.
-10. 배포 직후 두 `--verify-lock`을 실행해 apply 보고서와 **같은 token과 모든 generation**임을 다시 확인합니다. access는 operational lock generation과 완료 `migrationGeneration`, session은 operational lock generation과 별도 completion gate generation이 모두 같아야 합니다. 하나라도 바뀌었으면 사후 audit 뒤 race가 있었으므로 안전을 주장하지 말고 중단합니다.
-11. 검증된 access lock과 session lock을 각각 apply 보고서의 정확한 token/generation으로 명시 해제합니다. 두 completion 상태는 삭제하지 않습니다. access unlock은 운영 잠금만 풀며 legacy fallback을 다시 열지 않습니다.
-12. 관리자 1명, 일반 교사 2명, 겹치는 수업 2개와 학생 세션 2개로 실제 브라우저 smoke를 수행합니다.
-13. rollback commit, 배포 전 Rules, 백업 위치와 모든 migration·verify·unlock 보고서를 같은 운영 기록에 보존합니다.
+전체 production 순서는 오직 [`RELEASE-RUNBOOK.md`](./RELEASE-RUNBOOK.md)의 R0~R15가 authoritative합니다. 이 문서는 R5 teacher access lock/apply, R6 session join lock/recount/completion gate, R12 같은-generation verify, R13 exact unlock의 CLI 계약만 설명합니다. 호환 head/staged Rules를 별도로 선배포하거나 앱을 먼저 push하는 이전 순서는 폐기했습니다. R1의 externally enforced exact write-quiescence를 유지하고, 통합 런북의 유일한 R10 strict Rules → R11 static app 순서를 따릅니다.
 
 활성 legacy 세션, 누락 counter, 학생 문서 UID 불일치, 잘못된 allowance UID/email/role/status/Timestamp, Auth 조회 실패, 부분 스캔, gate generation 변경 또는 `safeToDeployStrictRules !== true`가 하나라도 있으면 즉시 중단합니다.
 
@@ -109,16 +95,9 @@ Apply 내부 순서는 고정되어 있습니다.
 
 이미 exact gate가 존재하면 clean 상태에서만 멱등 성공합니다. 다른 project/environment의 gate, invalid gate, gate 이후 발견된 counter 문제는 덮어쓰지 않고 중단합니다.
 
-## 4. strict Rules·정적 앱과 같은-generation 해제
+## 4. post-deploy 같은-generation verify와 exact 해제
 
-두 apply 보고서가 모두 안전할 때만 아래 운영 단계를 수행합니다. 명령 실행 전 Firebase CLI의 현재 프로젝트와 로그인 계정을 별도 확인합니다.
-
-```powershell
-firebase deploy --only firestore:rules --project video-quiz-65798
-git push origin main
-```
-
-배포 뒤 apply 보고서의 값을 그대로 사용해 lock을 다시 검증합니다.
+Rules/static app 배포 순서는 이 문서가 정의하지 않습니다. 통합 런북 R10 strict Rules와 R11 static app을 완료한 뒤에도 write-quiescence와 두 operational lock을 유지하고, apply 보고서의 값을 그대로 사용해 R12에서 lock을 다시 검증합니다.
 
 ```powershell
 pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --verify-lock --lock-token <ACCESS_LOCK_TOKEN> --expected-generation <ACCESS_LOCK_GENERATION> --expected-migration-generation <ACCESS_MIGRATION_GENERATION> --output teacher-access-release-verify.json
@@ -136,7 +115,7 @@ pnpm migrate:teacher-access -- --project video-quiz-65798 --target-mode producti
 pnpm migrate:session-counters -- --project video-quiz-65798 --target-mode production --admin-uid <ADMIN_UID> --unlock --confirm-project video-quiz-65798 --lock-token <COUNTER_LOCK_TOKEN> --expected-generation <COUNTER_LOCK_GENERATION> --output session-counter-unlock.json
 ```
 
-호환 head Rules가 counter migration보다 먼저 배포되므로 counter 없는 legacy session에는 어느 시점에도 신규 학생이 들어갈 수 없습니다. session lock은 이미 counter가 있는 세션의 join까지 유지보수 동안 닫아 scan/apply/post-audit 사이의 틈을 제거합니다.
+R1의 externally enforced write-quiescence와 R6 session lock을 함께 유지하므로 counter 없는 legacy session과 이미 counter가 있는 session 모두 scan/apply/post-audit 사이에 신규 join을 만들 수 없습니다.
 
 종료되지 않은 세션의 학생 문서는 admin도 단독 삭제할 수 없습니다. 별도 counted decrement protocol을 도입하기 전까지 학생 삭제는 counter migration lock이 해제된 `ended|aborted` 세션 cleanup에서만 admin 또는 세션 소유자에게 허용됩니다. Lock 중에는 종료된 세션 cleanup도 중단해 verify scan과 삭제가 교차하지 않게 합니다.
 
@@ -164,5 +143,5 @@ Access unlock 뒤에도 `migration_gates/teacher_access_status`의 completion fi
 - migration 도중 실패: strict Rules와 앱을 배포하지 말고 `.reserved` 또는 최종 JSON의 누적 결과를 보존합니다. 원인을 해결한 뒤 새 파일명으로 멱등 재시도합니다.
 - access apply 뒤 문제: allowance를 임의 삭제하지 말고 기존 Rules/앱을 유지한 채 audit mismatch를 해결합니다.
 - session gate 생성 뒤 보고서 실패: gate를 임의 삭제하거나 덮어쓰지 않습니다. 같은 프로젝트에서 migration을 새 출력 경로로 다시 실행해 exact gate generation과 전수 audit를 복구합니다.
-- Rules 배포 뒤 문제: 저장해 둔 직전 Rules 릴리스를 복원하고 앱 rollback commit으로 되돌립니다. migration 보고서는 삭제하지 않습니다.
+- Rules/static app 뒤 문제: 통합 런북의 rollback대로 write-quiescence를 유지하고 저장해 둔 직전 호환 Rules를 먼저 복원한 뒤 앱 rollback commit을 복원합니다. migration 보고서는 삭제하지 않습니다.
 - 계정 purge 실패: `deletion_pending`을 유지하고 소유 세트·진행 세션·class plan과 Firebase Auth 상태를 재감사합니다.

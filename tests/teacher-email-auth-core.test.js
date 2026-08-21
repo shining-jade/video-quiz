@@ -21,6 +21,19 @@ test('verification profile retry accepts only a bounded display name', () => {
   assert.equal(Core.normalizeDisplayName(' 홍교사 '), '홍교사');
   assert.throws(() => Core.normalizeDisplayName(''));
   assert.throws(() => Core.normalizeDisplayName('x'.repeat(81)));
+  assert.throws(() => Core.normalizeDisplayName('teacher@example.com'), /표시 이름|이메일/);
+  assert.throws(() => Core.normalizeDisplayName('AbCDefghijklmnopqrst1234'), /표시 이름|UID/);
+  assert.throws(() => Core.normalizeDisplayName('short-owner-uid', {
+    emailCanonical: 'teacher@example.com', uid: 'short-owner-uid'
+  }), /표시 이름|UID/);
+});
+
+test('signup rejects an email-shaped or exact owner-email public display name', () => {
+  for (const displayName of ['other@example.com', ' Teacher@Example.COM ']) {
+    assert.throws(() => Core.normalizeSignup({
+      displayName, email: 'teacher@example.com', password: '12345678'
+    }), /표시 이름|이메일/);
+  }
 });
 
 test('password reset treats only success and missing-account as the exact neutral success', () => {

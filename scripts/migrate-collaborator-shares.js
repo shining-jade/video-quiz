@@ -79,6 +79,21 @@ function productionDependencies() {
   };
 }
 
+function nonPiiSummary(report) {
+  const value = report || {};
+  const count = key => Number.isSafeInteger(value[key]) && value[key] >= 0 ? value[key] : 0;
+  return [
+    'collaborator-share-migration',
+    'status=' + String(value.status || 'unknown'),
+    'safeToUseShareIndex=' + String(value.safeToUseShareIndex === true),
+    'plannedUpserts=' + count('plannedUpsertCount'),
+    'plannedDeletes=' + count('plannedDeleteCount'),
+    'appliedUpserts=' + count('appliedUpsertCount'),
+    'appliedDeletes=' + count('appliedDeleteCount'),
+    'concurrentlySkipped=' + count('concurrentlySkippedCount')
+  ].join(' ');
+}
+
 async function main(argv = process.argv.slice(2), dependencies = productionDependencies()) {
   const options = parseArgs(argv);
   const target = validateTarget(options, dependencies.environment || process.env);
@@ -115,7 +130,7 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
     });
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     try {
-      dependencies.writeLine(JSON.stringify(report, null, 2));
+      dependencies.writeLine(nonPiiSummary(report));
     } catch (_) {
       // The committed durable report is authoritative.
     }
@@ -164,4 +179,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, parseArgs, productionDependencies, validateTarget };
+module.exports = { main, nonPiiSummary, parseArgs, productionDependencies, validateTarget };

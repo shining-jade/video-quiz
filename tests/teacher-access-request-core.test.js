@@ -62,6 +62,17 @@ test('verified password user builds the same bounded approval request', () => {
   assert.equal(request.status, 'pending');
 });
 
+test('new approval requests reject public author labels that expose email or UID identity', () => {
+  for (const displayName of [
+    'teacher@school.kr', 'other@example.com', user.uid, 'AbCDefghijklmnopqrst1234'
+  ]) {
+    assert.throws(() => core.buildRequest({ ...user, displayName }, {
+      organization: '', note: ''
+    }, 1000), /displayName|표시 이름|이메일|UID/);
+  }
+  assert.equal(core.buildRequest({ ...user, displayName: '김 교사' }, {}, 1000).displayName, '김 교사');
+});
+
 test('buildRequest derives identity and ignores caller privileged fields', () => {
   const input = {
     uid: 'attacker', email: 'attacker@example.com', displayName: '공격자',

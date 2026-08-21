@@ -19,7 +19,7 @@
 
 Firebase Authentication이 비밀번호와 재설정 토큰을 처리한다. 관리자, Firestore 문서, 로그와 인수인계에는 비밀번호 원문·해시·재설정 링크를 저장하거나 복사하지 않는다. 재설정 요청 화면은 계정 존재 여부와 관계없이 같은 안내(“입력한 이메일을 확인해 주세요”)를 보여야 한다.
 
-## 2. 자동 검증과 배포 순서
+## 2. 자동 검증과 통합 릴리스
 
 Console을 바꾸거나 배포하기 전에 저장소 루트에서 다음을 모두 통과시킨다.
 
@@ -30,17 +30,9 @@ node --check teacher-email-auth-core.js
 git diff --check
 ```
 
-두 테스트 suite가 실패 0인지 확인한다. 그 뒤 기존 [`TEACHER-ACCESS-CLASS-PLANNING.md`](./TEACHER-ACCESS-CLASS-PLANNING.md)의 데이터 전환·잠금 gate를 포함해 다음 순서를 지킨다.
+두 테스트 suite가 실패 0인지 확인한다. lifecycle, share index, set counter, access, session, public audit, index, Rules, static app, provider gate의 전체 순서는 오직 [`RELEASE-RUNBOOK.md`](./RELEASE-RUNBOOK.md)의 R0~R15를 따른다. 이 문서에서 별도 축약 순서를 만들지 않는다. 특히 externally enforced exact write-quiescence를 R1부터 유지하고, R10 strict Rules를 확인한 뒤 R11 static app을 배포하며, 같은-generation verify와 exact unlock 뒤에만 Email/Password 공급자를 활성화한다.
 
-1. **Firebase Password Policy** 최소 길이 8·Enforcement `Require`, 승인된 도메인, 한국어 이메일 인증·비밀번호 재설정 템플릿을 준비하고 확인한다. 이때 Email/Password 공급자는 아직 비활성 상태로 둔다.
-2. Node와 Firestore Emulator 검증을 통과시킨다.
-3. **호환 head Rules**를 먼저 배포한다. 이 Rules는 migration/lock gate를 진행하는 동안 기존 Google 계정의 안전한 전환 경로만 열어 두며, password provider는 UID allowance 없이 legacy email fallback을 사용할 수 없어야 한다.
-4. backup 뒤 access exact lock/apply와 session join lock/recount/gate를 수행한다. 두 **lock/apply 보고서와 safe gate**가 정확한 project, token, updateTime generation 및 `safeToDeployStrictRules: true`를 기록해야 한다.
-5. 두 잠금을 유지한 채 password provider에 authoritative `teacher_allowances/{uid}` binding만 허용하는 **엄격한 Firestore Rules**와 **정적 앱**을 순서대로 배포한다. strict/static 배포 중에는 unlock하거나 legacy fallback을 다시 열지 않는다.
-6. 잠금을 유지한 채 **동일 token/updateTime generation post-deploy verify**를 수행한다. access와 session counter의 verify 보고서가 배포 전 apply와 같은 token·generation, complete 상태, 안전 판정을 다시 확인하지 못하면 rollback 또는 원인 조사를 하고 unlock하지 않는다.
-7. 두 verify가 안전할 때만 동일 token·generation으로 **exact unlock**을 수행한다.
-8. strict UID Rules 배포·검증·exact unlock이 모두 끝난 뒤에만 **Email/Password 공급자 활성화**를 수행한다. 기존 Google·Anonymous는 유지하며, 위 증거 중 하나라도 없으면 활성화하지 않는다.
-9. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
+같은 canonical email의 provider가 이미 존재하거나 legacy mirror UID가 신청 UID와 다르면 승인 transaction은 mirror를 덮어쓰지 않는다. 자동 계정 병합이나 두 번째 allowance 생성 대신 기존 로그인 방법을 안내하고 Auth provider identity를 조사한 뒤, 통합 런북의 access exact migration/audit로 single UID를 확정한다.
 
 ## 3. 운영 전 브라우저 인수
 
@@ -59,7 +51,7 @@ git diff --check
 
 ## 4. 실패 시 롤백과 개인정보 확인
 
-브라우저 인수가 실패하면 이메일·비밀번호 교사 기능을 운영 전환으로 확정하지 않는다. 이미 배포했다면 먼저 정적 앱을 직전 Git 커밋으로 되돌리고, Firebase Console → Firestore Database → Rules → 릴리스 기록에서 직전 Rules를 복원한다. Rules는 호환성·데이터 전환 gate를 무시하고 순서를 바꿔 되돌리지 않는다.
+브라우저 인수가 실패하면 이메일·비밀번호 교사 기능을 운영 전환으로 확정하지 않는다. [`RELEASE-RUNBOOK.md`](./RELEASE-RUNBOOK.md)의 rollback을 따라 write-quiescence를 유지하고 직전 호환 Rules를 먼저 복원한 뒤 직전 정적 앱 커밋을 복원한다.
 
 **롤백** 중에도 Firebase Authentication 사용자, `teacher_allowances`와 기존 승인/수업 데이터는 삭제·재생성·중복 생성하지 않는다. 문제 원인을 기록하고, 교사 권한은 인증 상태와 단일 allowance binding을 다시 확인한 뒤 후속 변경 창에서 처리한다.
 

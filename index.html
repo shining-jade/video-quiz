@@ -777,6 +777,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="editor-draft.js"></script>
 <script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
+<script src="public-author-label-core.js"></script>
 <script src="public-quiz-library-core.js"></script>
 <script src="firestore-store.js"></script>
 <script src="choice-order-core.js"></script>
@@ -1954,7 +1955,8 @@ async function sendTeacherVerificationEmail() {
     if (!profileComplete) {
       try {
         displayName = TeacherEmailAuthCore.normalizeDisplayName(
-          teacherEmailAuthFormValue(event && event.currentTarget, 'displayName') || displayName
+          teacherEmailAuthFormValue(event && event.currentTarget, 'displayName') || displayName,
+          { emailCanonical: user.email, uid: user.uid }
         );
       } catch (validationError) {
         if (!teacherVerificationStateIsCurrent(verificationState)) return { status: 'stale' };
@@ -3539,11 +3541,16 @@ function publishQuizSetFromList(setId) {
   }
   const imageCount = Number.isSafeInteger(current.imageCount) ? current.imageCount : 0;
   const actor = publicLibraryActor();
-  if (!actor.displayName) {
-    alert('교사 표시 이름을 설정한 뒤 공개 자료실에 게시해 주세요.');
+  const authorValidation = PublicAuthorLabelCore.validate(actor.displayName, {
+    emailCanonical: actor.email,
+    uid: actor.uid
+  });
+  if (!authorValidation.ok) {
+    alert('이메일 또는 UID가 아닌 공개용 교사 표시 이름을 설정한 뒤 게시해 주세요.');
     return Promise.resolve(false);
   }
-  const authorDisplayName = actor.displayName;
+  actor.displayName = authorValidation.value;
+  const authorDisplayName = authorValidation.value;
   const notice = '다음 정보를 공개 자료실에 게시할까요?\n\n' +
     '제목: ' + current.title + '\n' +
     '설명: ' + (current.description || '설명 없음') + '\n' +
@@ -3624,9 +3631,10 @@ function publicLibrarySafeSummary(value) {
   const publicationId = typeof raw.publicationId === 'string' ? raw.publicationId.trim() : '';
   const title = typeof raw.title === 'string' ? raw.title.slice(0, 200) : '';
   const description = typeof raw.description === 'string' ? raw.description.slice(0, 1000) : '';
-  const authorDisplayName = typeof raw.authorDisplayName === 'string'
-    ? raw.authorDisplayName.slice(0, 120) : '';
+  const author = PublicAuthorLabelCore.validate(raw.authorDisplayName);
+  const authorDisplayName = author.value;
   if (!publicationId || !title || !authorDisplayName || publicationId.includes('/') ||
+      !author.ok ||
       !Number.isSafeInteger(raw.videoCount) || raw.videoCount < 0 ||
       !Number.isSafeInteger(raw.questionCount) || raw.questionCount < 0) return null;
   return {

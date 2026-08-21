@@ -202,6 +202,46 @@ test('share migration CLI reserves a fail-closed durable report before Admin ini
   assert.deepEqual(report, expected);
 });
 
+test('share migration CLI prints only a non-PII summary while the restricted durable report retains details', async () => {
+  assert.ifError(cliLoadError);
+  const email = 'private-teacher@school.kr';
+  const setId = 'private-set-id';
+  const detailedReport = {
+    tool: 'collaborator-share-migration', schemaVersion: 1,
+    projectId: 'demo-video-quiz', targetMode: 'emulator', mode: 'dry-run',
+    operation: 'collaborator-share-backfill', status: 'complete',
+    plannedUpsertCount: 1, plannedDeleteCount: 0,
+    appliedUpsertCount: 0, appliedDeleteCount: 0,
+    concurrentlySkipped: [{ email, setId, reason: 'missing-parent' }],
+    concurrentlySkippedCount: 1,
+    audit: { findingDetails: [{ type: 'missing-index', email, setId }] },
+    safeToUseShareIndex: false
+  };
+  let durable = '';
+  const stdout = [];
+
+  await cli.main([
+    '--project', 'demo-video-quiz', '--target-mode', 'emulator',
+    '--output', 'restricted-report.json'
+  ], {
+    environment: { FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080' },
+    reserveReport() { return { async commit(text) { durable = text; } }; },
+    async initialize() { return { db: {}, async close() {} }; },
+    async runCollaboratorShareMigration() { return detailedReport; },
+    writeLine(line) { stdout.push(line); }
+  });
+
+  assert.match(durable, new RegExp(email));
+  assert.match(durable, new RegExp(setId));
+  assert.equal(stdout.length, 1);
+  assert.match(stdout[0], /status=complete/);
+  assert.match(stdout[0], /safeToUseShareIndex=false/);
+  assert.match(stdout[0], /plannedUpserts=1/);
+  assert.doesNotMatch(stdout[0], new RegExp(email));
+  assert.doesNotMatch(stdout[0], new RegExp(setId));
+  assert.doesNotMatch(stdout[0], /findingDetails|concurrentlySkipped\s*:/);
+});
+
 test('share migration transaction reread handles concurrent child removal and exact add safely', async () => {
   assert.ifError(loadError);
   const removed = fakeAdminDb({

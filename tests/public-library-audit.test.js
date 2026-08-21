@@ -71,13 +71,28 @@ function validFixture() {
     'quiz_sets/set-1': source,
     'teacher_allowances/owner': {
       uid: 'owner', emailCanonical: 'owner@school.kr', status: 'active',
-      enabled: true, role: 'teacher'
+      enabled: true, role: 'teacher', displayName: '홍교사'
     },
     'published_quiz_sets/set-1': flat.parent,
     'published_quiz_sets/set-1/videos/v0': flat.videos.v0,
     'published_quiz_sets/set-1/questions/v0q0': flat.questions.v0q0
   };
 }
+
+test('production audit detects unsafe author-label values and allowance parity drift', async () => {
+  const { auditPublicLibrary } = require('../public-library-audit.js');
+  const unsafe = validFixture();
+  unsafe['published_quiz_sets/set-1'].authorDisplayName = 'owner@school.kr';
+  const unsafeReport = await auditPublicLibrary({ db: fakeDb(unsafe), maxDocuments: 100 });
+  assert.equal(unsafeReport.safeToDeployPublicLibrary, false);
+  assert.ok(unsafeReport.findings.some(item => item.code === 'PUBLIC_AUTHOR_LABEL_UNSAFE'));
+
+  const mismatch = validFixture();
+  mismatch['teacher_allowances/owner'].displayName = '다른 교사';
+  const mismatchReport = await auditPublicLibrary({ db: fakeDb(mismatch), maxDocuments: 100 });
+  assert.equal(mismatchReport.safeToDeployPublicLibrary, false);
+  assert.ok(mismatchReport.findings.some(item => item.code === 'PUBLIC_AUTHOR_LABEL_PARITY'));
+});
 
 test('public-library auditor exports bounded read-only target and report contracts', () => {
   const audit = require('../public-library-audit.js');

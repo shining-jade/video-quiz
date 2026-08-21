@@ -1,6 +1,7 @@
 'use strict';
 
 const PublicQuizLibraryCore = require('./public-quiz-library-core.js');
+const PublicAuthorLabelCore = require('./public-author-label-core.js');
 
 const PARENT_KEYS = new Set(PublicQuizLibraryCore.PUBLIC_PARENT_KEYS.concat([
   'buildToken', 'buildVideoCount', 'buildQuestionCount', 'buildImageCount', 'buildMutation'
@@ -350,6 +351,10 @@ async function auditPublicLibrary(options) {
     if (!validation.ok || value.publicationId !== document.id || value.sourceSetId !== document.id) {
       finding('PARENT_MALFORMED', path, validation.errors.join(' '));
     }
+    if (!PublicAuthorLabelCore.validate(value.authorDisplayName).ok) {
+      finding('PUBLIC_AUTHOR_LABEL_UNSAFE', path,
+        'Public author label is blank, email-shaped, or UID-like.');
+    }
     if (['building', 'cancelled'].includes(value.status)) {
       if (typeof value.buildToken !== 'string' || !value.buildToken ||
           !['buildVideoCount', 'buildQuestionCount', 'buildImageCount'].every(key =>
@@ -370,10 +375,28 @@ async function auditPublicLibrary(options) {
         continue;
       }
       const allowance = await allowanceFor(source.ownerUid || '');
+      const publicAuthor = PublicAuthorLabelCore.validate(value.authorDisplayName, {
+        emailCanonical: source.ownerEmail,
+        uid: source.ownerUid
+      });
+      if (!publicAuthor.ok) {
+        finding('PUBLIC_AUTHOR_LABEL_UNSAFE', path,
+          'Public author label exposes the bound owner identity.');
+      }
       if (!allowance || allowance.uid !== source.ownerUid ||
           allowance.emailCanonical !== source.ownerEmail || allowance.status !== 'active' ||
           allowance.enabled !== true || !['teacher', 'admin'].includes(allowance.role)) {
         finding('VISIBLE_ALLOWANCE_INACTIVE', path, 'source owner allowance is not exact active.');
+      }
+      if (allowance) {
+        const allowanceAuthor = PublicAuthorLabelCore.validate(allowance.displayName, {
+          emailCanonical: source.ownerEmail,
+          uid: source.ownerUid
+        });
+        if (!allowanceAuthor.ok || publicAuthor.value !== allowanceAuthor.value) {
+          finding('PUBLIC_AUTHOR_LABEL_PARITY', path,
+            'Public author label does not match the public-safe authoritative allowance label.');
+        }
       }
       if (lockMap.has(source.ownerUid)) {
         finding('VISIBLE_OWNER_LOCKED', path, 'source owner lifecycle lock exists.');

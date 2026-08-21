@@ -1,8 +1,10 @@
 (function (root, factory) {
-  const api = factory();
+  const publicAuthorLabel = typeof module === 'object' && module.exports
+    ? require('./public-author-label-core.js') : root && root.PublicAuthorLabelCore;
+  const api = factory(publicAuthorLabel);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.TeacherEmailAuthCore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (publicAuthorLabel) {
   const RESET_SENT_MESSAGE = '입력한 이메일을 확인해 주세요.';
 
   function canonicalEmail(value) {
@@ -21,18 +23,23 @@
     }
   }
 
-  function normalizeDisplayName(value) {
-    const displayName = String(value || '').trim();
-    if (!displayName || displayName.length > 80) {
-      throw new Error('이름은 1~80자여야 합니다.');
+  function authorLabelCore() {
+    const value = publicAuthorLabel ||
+      (typeof globalThis !== 'undefined' && globalThis.PublicAuthorLabelCore);
+    if (!value || typeof value.requireSafe !== 'function') {
+      throw new Error('공개 표시 이름 검증기가 준비되지 않았습니다.');
     }
-    return displayName;
+    return value;
+  }
+
+  function normalizeDisplayName(value, identity) {
+    return authorLabelCore().requireSafe(value, identity);
   }
 
   function normalizeSignup(input) {
     const values = input || {};
-    const displayName = normalizeDisplayName(values.displayName);
     const email = canonicalEmail(values.email);
+    const displayName = normalizeDisplayName(values.displayName, { emailCanonical: email });
     const password = String(values.password || '');
 
     validateEmail(email);

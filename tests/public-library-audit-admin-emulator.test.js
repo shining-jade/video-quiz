@@ -46,7 +46,7 @@ emulatorTest('Admin auditor scans a bounded real Emulator graph without writes',
       db.doc('quiz_sets/set-1').set(source),
       db.doc('teacher_allowances/owner').set({
         uid: 'owner', emailCanonical: 'owner@school.kr', status: 'active',
-        enabled: true, role: 'teacher'
+        enabled: true, role: 'teacher', displayName: '홍교사'
       }),
       db.doc('published_quiz_sets/set-1').set(flat.parent),
       db.doc('published_quiz_sets/set-1/videos/v0').set(flat.videos.v0),

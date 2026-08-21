@@ -15,35 +15,29 @@ test('release docs require Email/Password provider, verification template, reset
 
 test('email-auth release gate requires Password Policy minimum 8 and Require before provider activation', () => {
   const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
-  const policyIndex = emailAuthDocs.indexOf('Firebase Password Policy');
-  const minimumIndex = emailAuthDocs.indexOf('최소 길이 8');
-  const requireIndex = emailAuthDocs.indexOf('Enforcement \`Require\`');
-  const providerIndex = emailAuthDocs.indexOf('Email/Password 공급자 활성화');
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const policyIndex = runbook.indexOf('Password Policy 최소 길이 8');
+  const requireIndex = runbook.indexOf('Enforcement `Require`', policyIndex);
+  const providerIndex = runbook.indexOf('### R14 — Email/Password provider gate');
 
   assert.ok(policyIndex >= 0, 'Password Policy operator gate must be documented');
-  assert.ok(minimumIndex > policyIndex, 'minimum length 8 must be part of the policy gate');
-  assert.ok(requireIndex > minimumIndex, 'Require enforcement must be part of the policy gate');
+  assert.ok(requireIndex > policyIndex, 'Require enforcement must be part of the policy gate');
   assert.ok(providerIndex > requireIndex, 'provider activation must happen after the policy gate');
   assert.match(emailAuthDocs, /최소 길이 8[^\n]*Enforcement \`Require\`[^\n]*(확인|검증)[^\n]*(실패|아니면)[^\n]*(중단|활성화하지)/);
 });
 
-test('email-auth release guide keeps the deployment lock through strict/static verify and exact unlock', () => {
+test('one authoritative runbook composes every gate under quiescence and Rules-before-static order', () => {
   const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
-  const deploymentSection = emailAuthDocs.slice(
-    emailAuthDocs.indexOf('## 2. 자동 검증과 배포 순서'),
-    emailAuthDocs.indexOf('## 3. 운영 전 브라우저 인수')
-  );
+  const deploymentSection = read('docs/RELEASE-RUNBOOK.md');
   const orderedSteps = [
-    'Firebase Password Policy',
-    'Node와 Firestore Emulator 검증',
-    '호환 head Rules',
-    'lock/apply 보고서와 safe gate',
-    '엄격한 Firestore Rules',
-    '정적 앱',
-    '동일 token/updateTime generation post-deploy verify',
-    'exact unlock',
-    'Email/Password 공급자 활성화',
-    '브라우저 인수'
+    '### R0 —', '### R1 — exact write-quiescence', '### R2 — lifecycle',
+    '### R3 — collaborator share', '### R4 — set counter',
+    '### R5 — teacher access', '### R6 — session join',
+    '### R7 — public privacy', '### R8 — composite index',
+    '### R9 — release manifest', '### R10 — strict Firestore Rules',
+    '### R11 — static app', '### R12 — 같은 generation post-deploy verify',
+    '### R13 — exact unlock', '### R14 — Email/Password provider',
+    '### R15 — controlled smoke'
   ];
 
   let previousIndex = -1;
@@ -52,6 +46,14 @@ test('email-auth release guide keeps the deployment lock through strict/static v
     assert.ok(currentIndex > previousIndex, `release order must contain ${step} after the previous gate`);
     previousIndex = currentIndex;
   }
+  assert.match(deploymentSection, /정적 앱 배포나 화면 배너를 quiescence로 간주하지 않는다/);
+  assert.match(deploymentSection, /유일한 rollout 순서[\s\S]{0,80}Rules before static app/);
+  assert.match(deploymentSection, /롤백도 Rules before static app/);
+  for (const satellite of [
+    'docs/EMAIL-TEACHER-AUTH.md', 'docs/PUBLIC-QUIZ-LIBRARY.md',
+    'docs/COUNTER-MIGRATION.md', 'docs/COLLABORATOR-SHARE-MIGRATION.md',
+    'docs/TEACHER-ACCESS-CLASS-PLANNING.md'
+  ]) assert.match(read(satellite), /RELEASE-RUNBOOK\.md/);
   assert.match(emailAuthDocs, /Google[\s\S]{0,120}Anonymous/);
   assert.match(emailAuthDocs, /`shining-jade\.github\.io`/);
   assert.match(emailAuthDocs, /Firebase Authentication 사용자[\s\S]{0,120}teacher_allowances[\s\S]{0,120}삭제·재생성·중복 생성하지 않는다/);
@@ -60,18 +62,14 @@ test('email-auth release guide keeps the deployment lock through strict/static v
 
 test('HANDOFF preserves the full authoritative email-auth release sequence without an unsafe shortcut', () => {
   const handoff = read('HANDOFF.md');
-  const emailAuthBlock = handoff.slice(0, handoff.indexOf('> 2026-08-20'));
+  const emailAuthBlock = handoff.slice(0, handoff.indexOf('> OX'));
   const ordered = [
-    'Firebase Password Policy 최소 길이 8·Enforcement \`Require\`',
-    'Node/Emulator 검증',
-    '호환 head Rules',
-    'access exact lock/apply',
-    'session join lock/recount/gate',
-    'strict UID Rules·static app',
-    '같은 generation post-deploy verify',
-    'exact unlock',
-    'Email/Password 공급자 활성화',
-    '브라우저 인수'
+    'R1 externally enforced exact write-quiescence', 'R2 lifecycle', 'R3 share',
+    'R4 set counter lock/apply', 'R5 access lock/apply',
+    'R6 session lock/recount/gate', 'R7 public privacy/author-value audit',
+    'R8 index build', 'R10 strict Rules', 'R11 static app',
+    'R12 같은-generation verify', 'R13 exact unlock',
+    'R14 Email/Password provider', 'R15 controlled smoke'
   ];
   let cursor = -1;
   for (const marker of ordered) {
@@ -79,8 +77,9 @@ test('HANDOFF preserves the full authoritative email-auth release sequence witho
     assert.ok(next > cursor, `HANDOFF email-auth order missing or unsafe: ${marker}`);
     cursor = next;
   }
-  assert.match(emailAuthBlock, /safeToDeployStrictRules: true/);
-  assert.match(emailAuthBlock, /Google·Anonymous 유지/);
+  assert.match(emailAuthBlock, /docs\/RELEASE-RUNBOOK\.md/);
+  assert.match(emailAuthBlock, /다른 UID의 canonical email mirror/);
+  assert.match(emailAuthBlock, /unsafe author label\/parity/);
 });
 
 test('README routes teacher approval through verified providers and UID allowances, not direct legacy allowlists', () => {
@@ -409,17 +408,15 @@ test('교사 인증은 Google과 이메일 흐름을 한 접근 가능한 dialog
   assert.match(html, /function sendTeacherPasswordReset\(event\)/);
 });
 
-test('counter migration 운영 문서는 staged lock migration strict unlock 순서를 고정한다', () => {
+test('counter migration guide defers rollout and fixes R4 lock/apply R12 verify R13 unlock', () => {
   const guide = read('docs/COUNTER-MIGRATION.md');
   const stagedConfig = JSON.parse(read('firebase.counter-migration.json'));
   assert.equal(stagedConfig.firestore.rules, 'firestore.rules');
 
   const ordered = [
-    '1. staged gate Rules 배포',
-    '2. migration_gates/set_counters 잠금',
-    '3. counter migration 및 audit',
-    '4. strict counter Rules 재배포',
-    '5. 동일 lockId로 잠금 해제'
+    '## R4 — lock, apply, audit',
+    '## R12 — post-deploy verify',
+    '## R13 — exact unlock'
   ];
   let cursor = -1;
   for (const marker of ordered) {
@@ -427,24 +424,22 @@ test('counter migration 운영 문서는 staged lock migration strict unlock 순
     assert.ok(next > cursor, `missing or out-of-order: ${marker}`);
     cursor = next;
   }
-  assert.match(guide, /--config firebase\.counter-migration\.json --project video-quiz-65798/);
+  assert.match(guide, /RELEASE-RUNBOOK\.md/);
+  assert.match(guide, /write-quiescence/);
   assert.match(guide, /--target-mode production[\s\S]*--confirm-project video-quiz-65798[\s\S]*--gate-id <LOCK_ID>/);
   assert.match(guide, /safeToDeployStrictRules[^\n]*true/);
-  assert.match(guide, /운영 환경에서는 실행하지 않았습니다/);
-  assert.match(guide, /staged[^\n]*배포[^\n]*직후[^\n]*즉시[^\n]*잠금/);
-  assert.match(guide, /gate가 없거나 잠겨 있으면[^\n]*collaborator\/image[^\n]*parent[^\n]*(거부|차단)/);
+  assert.match(guide, /production migration이나 deploy를 실행하지 않았다/);
+  assert.match(guide, /strict Rules가 먼저, static app이 다음/);
+  assert.match(guide, /--action unlock[\s\S]*--gate-generation <UPDATE_TIME_GENERATION>/);
 });
 
-test('teacher access release guide fixes compatibility-head migration verify unlock order with no join gap', () => {
+test('teacher access guide only owns access/session CLI verify and unlock contracts', () => {
   const guide = read('docs/TEACHER-ACCESS-CLASS-PLANNING.md');
   const rules = read('firestore.rules');
   const ordered = [
-    '호환 head Firestore Rules를 먼저 배포',
-    '교사 승인 migration apply',
-    '세션 counter apply',
-    'strict Firestore Rules와 정적 앱을 배포',
-    '두 `--verify-lock`',
-    '명시 해제'
+    '## 2. 교사 승인 상태 migration',
+    '## 3. 세션 counter maintenance와 completion gate',
+    '## 4. post-deploy 같은-generation verify와 exact 해제'
   ];
   let cursor = -1;
   for (const marker of ordered) {
@@ -452,13 +447,16 @@ test('teacher access release guide fixes compatibility-head migration verify unl
     assert.ok(next > cursor, `missing or out-of-order: ${marker}`);
     cursor = next;
   }
+  assert.match(guide, /RELEASE-RUNBOOK\.md/);
+  assert.match(guide, /R10 strict Rules → R11 static app/);
+  assert.match(guide, /externally enforced write-quiescence[\s\S]*session lock/);
   assert.match(guide, /--apply.*--lock-token <ACCESS_LOCK_TOKEN>/);
   assert.match(guide, /--apply.*--lock-token <COUNTER_LOCK_TOKEN>/);
   assert.match(guide, /--verify-lock.*--expected-generation <ACCESS_LOCK_GENERATION>/);
   assert.match(guide, /--verify-lock.*--expected-migration-generation <ACCESS_MIGRATION_GENERATION>/);
   assert.match(guide, /--verify-lock.*--expected-gate-generation <SESSION_GATE_GENERATION>/);
   assert.match(guide, /--unlock.*--expected-generation <COUNTER_LOCK_GENERATION>/);
-  assert.match(guide, /access unlock[^\n]*legacy fallback[^\n]*(다시 열지|다시 열리지)/i);
+  assert.match(guide, /access unlock[^\n]*legacy fallback[^\n]*(허용되지|되살리지)/i);
   assert.match(guide, /status: "complete"[^\n]*strictReady: true[^\n]*migrationGeneration/);
   assert.match(rules, /allow create: if sessionCounterMigrationUnlocked\(\)[\s\S]{0,100}?anonymousStudent\(\)/);
 });
@@ -474,7 +472,8 @@ test('공동 편집과 휴지통 공개 문구는 무료 정리의 한계와 보
   assert.match(readme, /과거 수업 기록은 보존/);
   assert.doesNotMatch(readme, /세트 \*\*삭제\*\*는 일부러 막아 두었습니다/);
   assert.match(handoff, /교사 계정 관리/);
-  assert.match(handoff, /staged gate Rules 배포/);
+  assert.match(handoff, /RELEASE-RUNBOOK\.md/);
+  assert.match(handoff, /R10 strict Rules → R11 static app/);
   assert.match(handoff, /safeToDeployStrictRules/);
 });
 
@@ -491,10 +490,12 @@ test('public library release guide fixes privacy lifecycle deployment and rollba
     assert.match(combined, new RegExp(marker));
   }
   const ordered = [
-    'production dry-run',
-    'Rules를 먼저 배포',
-    '정적 앱을 배포',
-    'privacy smoke'
+    'R7 durable audit',
+    'R8 composite index build 완료',
+    'R10 strict Rules',
+    'R11 static app',
+    'R12 같은-generation public 재감사',
+    'R15 privacy smoke'
   ];
   let cursor = -1;
   for (const marker of ordered) {
@@ -514,13 +515,17 @@ test('public library release guide fixes privacy lifecycle deployment and rollba
 
 test('public library release gate documents lifecycle lock indexes legacy audit and durable auditor', () => {
   const guide = read('docs/PUBLIC-QUIZ-LIBRARY.md');
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
   const readme = read('README.md');
   const handoff = read('HANDOFF.md');
   for (const phrase of [
     'publication_lifecycle_locks', 'publication_lifecycle_gates/current',
-    'cancelled', 'firestore.indexes.json', 'audit:public-library',
+    'cancelled', 'audit:public-library',
     'safeToDeployPublicLibrary', 'lifecycleState 누락'
   ]) assert.match(guide, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(runbook, /firestore\.indexes\.json/);
+  assert.match(guide, /PUBLIC_AUTHOR_LABEL_UNSAFE/);
+  assert.match(guide, /PUBLIC_AUTHOR_LABEL_PARITY/);
   assert.match(readme, /audit:public-library/);
   assert.match(handoff, /safeToDeployPublicLibrary/);
 });

@@ -4073,6 +4073,64 @@ rulesTest('private active original은 소유자·공동편집자만 수업에 �
   }));
 });
 
+rulesTest('teacher-access: two pending UIDs sharing one email preserve the first canonical mirror UID', async () => {
+  const sharedEmail = 'shared-approval@school.kr';
+  for (const [uid, displayName] of [['pending-shared-a', '첫 교사'], ['pending-shared-b', '둘째 교사']]) {
+    await adminWrite(`teacher_access_requests/${uid}`, {
+      uid, emailCanonical: sharedEmail, displayName,
+      organization: '', note: '', status: 'pending', revision: 1,
+      createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
+    });
+  }
+  const store = emulatorStore(actorFirestore('admin'));
+
+  await store.decideTeacherRequest(
+    'pending-shared-a', 1, { status: 'approved' }, requestAdminIdentity
+  );
+  await assert.rejects(() => store.decideTeacherRequest(
+    'pending-shared-b', 1, { status: 'approved' }, requestAdminIdentity
+  ));
+  await store.decideTeacherRequest(
+    'pending-shared-b', 1,
+    { status: 'rejected', reason: '동일 이메일의 기존 UID 승인' }, requestAdminIdentity
+  );
+
+  assert.equal((await adminRead(`teacher_allowlist/${sharedEmail}`)).uid, 'pending-shared-a');
+  assert.equal((await adminRead('teacher_access_requests/pending-shared-b')).status, 'rejected');
+  assert.equal(await adminRead('teacher_allowances/pending-shared-b'), undefined);
+});
+
+rulesTest('teacher-access: approval after-state cannot assign the canonical mirror to another UID', async () => {
+  const uid = 'pending-after-state';
+  const email = 'after-state@school.kr';
+  await adminWrite(`teacher_access_requests/${uid}`, {
+    uid, emailCanonical: email, displayName: '안전 교사',
+    organization: '', note: '', status: 'pending', revision: 1,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
+  });
+  const admin = actorFirestore('admin');
+  const batch = writeBatch(admin);
+  batch.update(doc(admin, `teacher_access_requests/${uid}`), {
+    status: 'approved', revision: 2, decidedAt: serverTimestamp(),
+    decidedByUid: 'admin-uid', decisionReason: '', updatedAt: serverTimestamp()
+  });
+  batch.set(doc(admin, `teacher_allowances/${uid}`), {
+    uid, emailCanonical: email, displayName: '안전 교사', status: 'active',
+    enabled: true, role: 'teacher', administrativeHold: false,
+    approvedAt: serverTimestamp(), approvedByUid: 'admin-uid',
+    updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  });
+  batch.set(doc(admin, `teacher_allowlist/${email}`), {
+    uid: 'different-uid', enabled: true, role: 'teacher',
+    updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  });
+
+  await assertFails(batch.commit());
+  assert.equal((await adminRead(`teacher_access_requests/${uid}`)).status, 'pending');
+  assert.equal(await adminRead(`teacher_allowances/${uid}`), undefined);
+  assert.equal(await adminRead(`teacher_allowlist/${email}`), undefined);
+});
+
 rulesTest('FixRound2 private read and shared discovery use exact quiz_sets paths without collection-group leakage', async () => {
   const owner = actorFirestore('owner');
   const other = actorFirestore('otherTeacher');
@@ -4411,6 +4469,41 @@ rulesTest('published projection list requires exact visible status order and bou
   for (const id of ['library-building', 'library-withdrawn', 'library-moderated']) {
     await assertFails(getDoc(doc(other, `published_quiz_sets/${id}`)));
   }
+});
+
+rulesTest('published projection rejects and hides email-shaped or UID-like author labels at the Rules boundary', async () => {
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+
+  for (const [index, authorDisplayName] of [
+    'owner@school.kr', 'AbCDefghijklmnopqrst1234', actors.owner.uid
+  ].entries()) {
+    const publicationId = `unsafe-author-${index}`;
+    await seedPublicRulesSource(publicationId);
+    const allowance = await adminRead('teacher_allowances/owner-uid');
+    await adminWrite('teacher_allowances/owner-uid', {
+      ...allowance, displayName: authorDisplayName
+    });
+    await assertFails(setDoc(doc(owner, `published_quiz_sets/${publicationId}`), {
+      ...publicRulesBuilding(publicationId, { authorDisplayName }),
+      updatedAt: serverTimestamp()
+    }));
+    const unsafeProjection = publicRulesProjection(publicationId, {
+      authorDisplayName: '마이그레이션 전 표시명'
+    });
+    unsafeProjection.authorDisplayName = authorDisplayName;
+    await adminWrite(`published_quiz_sets/${publicationId}`, unsafeProjection);
+    await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
+  }
+
+  const safeId = 'safe-korean-author';
+  await seedPublicRulesSource(safeId);
+  const allowance = await adminRead('teacher_allowances/owner-uid');
+  await adminWrite('teacher_allowances/owner-uid', { ...allowance, displayName: '홍 교사' });
+  await assertSucceeds(setDoc(doc(owner, `published_quiz_sets/${safeId}`), {
+    ...publicRulesBuilding(safeId, { authorDisplayName: '홍 교사' }),
+    updatedAt: serverTimestamp()
+  }));
 });
 
 rulesTest('FixRound2 publication lifecycle gate deterministically closes list get children and races', async () => {

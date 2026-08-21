@@ -1,5 +1,8 @@
 # 이메일 로그인과 공개 퀴즈 자료실 설계
 
+> 운영 주의(2026-08-22): 이 문서는 역사적 설계/구현 기록이다. 아래의 개별 rollout·deploy 순서는 폐기되었고, production 전체 순서는 오직 [`docs/RELEASE-RUNBOOK.md`](../../RELEASE-RUNBOOK.md)의 R0~R15를 따른다.
+
+
 ## 목표
 
 기존 Google 교사 로그인을 유지하면서 Firebase Authentication의 이메일·비밀번호 가입과 비밀번호 재설정을 추가한다. 두 로그인 방식 모두 이메일 신뢰성과 관리자 승인을 통과한 뒤에만 교사 기능을 사용할 수 있다.

@@ -1,10 +1,12 @@
 (function (root, factory) {
   const playlist = typeof module === 'object' && module.exports
     ? require('./playlist-core.js') : root && root.PlaylistCore;
-  const api = factory(playlist);
+  const publicAuthorLabel = typeof module === 'object' && module.exports
+    ? require('./public-author-label-core.js') : root && root.PublicAuthorLabelCore;
+  const api = factory(playlist, publicAuthorLabel);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else if (root) root.PublicQuizLibraryCore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (playlist) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (playlist, publicAuthorLabel) {
   const PUBLIC_KEYS = Object.freeze([
     'publicationId', 'sourceSetId', 'status', 'moderationStatus', 'revision',
     'title', 'description', 'authorDisplayName', 'videos', 'settings',
@@ -84,6 +86,21 @@
       throw new Error(name + ' has an invalid length.');
     }
     return cleaned;
+  }
+
+  function authorLabelCore() {
+    const value = publicAuthorLabel ||
+      (typeof globalThis !== 'undefined' && globalThis.PublicAuthorLabelCore);
+    if (!value || typeof value.validate !== 'function') {
+      throw new Error('PublicAuthorLabelCore is required.');
+    }
+    return value;
+  }
+
+  function validateAuthorLabel(value, errors, identity) {
+    const result = authorLabelCore().validate(value, identity);
+    if (!result.ok) errors.push('authorDisplayName is not public-safe.');
+    return result;
   }
 
   function canonicalHttps(value) {
@@ -193,7 +210,10 @@
       title: cleanText(set.title, 'title', 1, MAX_TITLE),
       description: set.description === undefined || set.description === null
         ? '' : cleanText(set.description, 'description', 0, MAX_DESCRIPTION),
-      authorDisplayName: cleanText(context.authorDisplayName, 'authorDisplayName', 1, MAX_AUTHOR),
+      authorDisplayName: authorLabelCore().requireSafe(context.authorDisplayName, {
+        emailCanonical: context.ownerEmailCanonical || set.ownerEmail,
+        uid: context.ownerUid || set.ownerUid
+      }),
       videos,
       settings: projectionSettings(set.settings),
       videoCount: videos.length,
@@ -349,7 +369,7 @@
     return errors;
   }
 
-  function validateProjection(value) {
+  function validateProjection(value, identity) {
     const errors = [];
     if (!validateUnknownKeys(value, PUBLIC_KEYS, 'projection', errors)) return { ok: false, errors };
     ['publicationId', 'sourceSetId'].forEach(key => {
@@ -362,6 +382,7 @@
     validateString(value.title, 'title', 1, MAX_TITLE, errors);
     validateString(value.description, 'description', 0, MAX_DESCRIPTION, errors);
     validateString(value.authorDisplayName, 'authorDisplayName', 1, MAX_AUTHOR, errors);
+    validateAuthorLabel(value.authorDisplayName, errors, identity);
     if (!Array.isArray(value.videos) || value.videos.length < 1 || value.videos.length > MAX_VIDEOS) {
       errors.push('videos must contain 1 to ' + MAX_VIDEOS + ' entries.');
     } else {
@@ -401,7 +422,7 @@
     };
   }
 
-  function validateParent(value) {
+  function validateParent(value, identity) {
     const errors = [];
     if (!validateUnknownKeys(value, PUBLIC_PARENT_KEYS, 'parent', errors)) {
       return { ok: false, errors };
@@ -418,6 +439,7 @@
     validateString(value.title, 'title', 1, MAX_TITLE, errors);
     validateString(value.description, 'description', 0, MAX_DESCRIPTION, errors);
     validateString(value.authorDisplayName, 'authorDisplayName', 1, MAX_AUTHOR, errors);
+    validateAuthorLabel(value.authorDisplayName, errors, identity);
     errors.push(...validateSettings(parentSettings(value), 'settings'));
     validateNumber(value.videoCount, 'videoCount', 1, MAX_VIDEOS, errors);
     validateNumber(value.questionCount, 'questionCount', 1, MAX_QUESTIONS, errors);
@@ -636,6 +658,7 @@
     PUBLIC_KEYS,
     PUBLIC_PARENT_KEYS,
     PUBLIC_CHILD_SCHEMA_VERSION,
+    validateAuthorLabel: (value, identity) => authorLabelCore().validate(value, identity),
     buildProjection,
     validateProjection,
     validateParent,

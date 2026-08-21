@@ -14,16 +14,21 @@
   const publicQuizLibrary = typeof module === 'object' && module.exports
     ? require('./public-quiz-library-core.js')
     : root.PublicQuizLibraryCore;
+  const publicAuthorLabel = typeof module === 'object' && module.exports
+    ? require('./public-author-label-core.js')
+    : root.PublicAuthorLabelCore;
   const firestoreTimestamp = typeof module === 'object' && module.exports
     ? require('firebase/firestore').Timestamp
     : root.firebase && root.firebase.firestore && root.firebase.firestore.Timestamp;
   const api = factory(
-    core, collaboration, teacherAccess, classPlanning, publicQuizLibrary, firestoreTimestamp
+    core, collaboration, teacherAccess, classPlanning, publicQuizLibrary, publicAuthorLabel,
+    firestoreTimestamp
   );
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (
-  core, collaboration, teacherAccess, classPlanning, publicQuizLibrary, FirestoreTimestamp
+  core, collaboration, teacherAccess, classPlanning, publicQuizLibrary, publicAuthorLabel,
+  FirestoreTimestamp
 ) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
@@ -446,7 +451,9 @@
         'uid', 'emailCanonical', 'displayName', 'organization', 'note',
         'status', 'revision', 'createdAtMs', 'updatedAtMs'
       ];
-      const validation = teacherAccessCore().validateRequest(value);
+      const access = teacherAccessCore();
+      const validation = typeof access.validateNewRequest === 'function'
+        ? access.validateNewRequest(value) : access.validateRequest(value);
       if (!ownKeysOnly(value, allowed) || !validation.ok || value.status !== 'pending' ||
           value.revision !== 1 || value.emailCanonical !== canonicalTeacherEmail(value.emailCanonical)) {
         throw new Error('invalid 교사 신청: 허용되지 않은 필드 또는 신원 값입니다.');
@@ -487,6 +494,15 @@
       }
       if (typeof value.isCurrent === 'function' && value.isCurrent() !== true) {
         throw new Error('화면 또는 로그인 상태가 변경되어 lifecycle 작업을 다시 시도해 주세요.');
+      }
+      return value;
+    }
+
+    function publicAuthorLabelCore() {
+      const value = publicAuthorLabel ||
+        (typeof globalThis !== 'undefined' && globalThis.PublicAuthorLabelCore);
+      if (!value || typeof value.requireSafe !== 'function') {
+        throw new Error('PublicAuthorLabelCore가 준비되지 않았습니다.');
       }
       return value;
     }
@@ -641,7 +657,8 @@
           }
           throw new Error('기존 teacher allowance 승인 문서가 이미 존재합니다.');
         }
-        if (legacySnapshot.exists && legacy.role !== 'teacher') {
+        if (normalized.status === 'approved' && legacySnapshot.exists &&
+            (legacy.role !== 'teacher' || legacy.uid !== exactUid)) {
           throw new Error('기존 legacy allowance identity가 신청 신원과 일치하지 않습니다.');
         }
         transaction.update(requestRef, {
@@ -653,6 +670,10 @@
           updatedAt: fieldValue.serverTimestamp()
         });
         if (normalized.status === 'approved') {
+          publicAuthorLabelCore().requireSafe(request.displayName, {
+            emailCanonical: request.emailCanonical,
+            uid: exactUid
+          });
           const timestamp = fieldValue.serverTimestamp();
           transaction.set(allowanceRef, {
             uid: exactUid,
@@ -2968,6 +2989,28 @@
       return value;
     }
 
+    function requirePublicAuthorAllowance(source, allowanceSnapshot, actor) {
+      const value = requireActiveSourceOwner(source, allowanceSnapshot, actor);
+      const ownerEmail = canonicalTeacherEmail(value.ownerEmail);
+      const allowance = activeAllowanceIdentity(
+        allowanceSnapshot, value.ownerUid, ownerEmail, ['teacher', 'admin']
+      );
+      const authorDisplayName = publicAuthorLabelCore().requireSafe(allowance.displayName, {
+        emailCanonical: ownerEmail,
+        uid: value.ownerUid
+      });
+      if (actor) {
+        const actorLabel = publicAuthorLabelCore().requireSafe(actor.displayName, {
+          emailCanonical: actor.email,
+          uid: actor.uid
+        });
+        if (actorLabel !== authorDisplayName) {
+          throw new Error('게시 제작자 표시명은 authoritative allowance와 일치해야 합니다.');
+        }
+      }
+      return { source: value, authorDisplayName };
+    }
+
     async function requireAuthoritativePublicationAdmin(transaction, actor) {
       const current = assertAdminIdentity(actor);
       const snapshot = await transaction.get(db.doc('teacher_allowances/' + current.uid));
@@ -3078,6 +3121,8 @@
       return publicLibraryCore().buildProjection(source, {
         setId: publicationId,
         authorDisplayName,
+        ownerEmailCanonical: canonicalTeacherEmail(source && source.ownerEmail),
+        ownerUid: source && source.ownerUid,
         revision,
         nowMs: publicServerNowMs()
       });
@@ -3086,7 +3131,7 @@
     function requireMatchingPublicationSource(
       source, allowanceSnapshot, actor, initialProjection
     ) {
-      requireActiveSourceOwner(source, allowanceSnapshot, actor);
+      const author = requirePublicAuthorAllowance(source, allowanceSnapshot, actor);
       if (requireContentRevision(source) !== initialProjection.revision) {
         throw new Error('원본 content revision이 게시 준비 중 변경되었습니다.');
       }
@@ -3094,7 +3139,7 @@
         source,
         initialProjection.publicationId,
         initialProjection.revision,
-        initialProjection.authorDisplayName
+        author.authorDisplayName
       );
       const matches = Array.isArray(initialProjection.videos)
         ? samePublicProjectionContent(rebuilt, initialProjection)
@@ -3132,7 +3177,7 @@
         db.collection('images/' + publicationId + '/q').get({ source: 'server' }),
         publicRef.get({ source: 'server' })
       ]);
-      requireActiveSourceOwner(source, allowanceSnapshot, currentActor);
+      const author = requirePublicAuthorAllowance(source, allowanceSnapshot, currentActor);
       assertNoPublicationLifecycleLock(lockSnapshot);
       const revision = requireContentRevision(source);
       const privateImages = privatePublicationImages(imageSnapshot);
@@ -3140,7 +3185,7 @@
         throw new Error('원본 imageCount와 공개할 이미지 수가 일치하지 않습니다.');
       }
       const desiredBuilding = rebuiltSourceProjection(
-        source, publicationId, revision, String(currentActor.displayName || '').trim()
+        source, publicationId, revision, author.authorDisplayName
       );
       const existingRaw = existingSnapshot.exists ? existingSnapshot.data() || {} : null;
       const existingParent = existingRaw

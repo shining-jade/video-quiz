@@ -87,6 +87,13 @@ service cloud.firestore {
       return email.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+$');
     }
 
+    function validPublicAuthorLabel(label, email, uid) {
+      return label is string && label == label.trim() &&
+        label.size() >= 1 && label.size() <= 80 &&
+        !label.matches('^([^ @]+@[^ @]+|[A-Za-z0-9_-]{20,128})$') &&
+        !(label in [email, uid]);
+    }
+
     function validAllowanceDocument(email) {
       return request.resource.data.keys().hasOnly([
           'enabled', 'role', 'updatedAt', 'updatedByUid'
@@ -133,6 +140,7 @@ service cloud.firestore {
         ]) &&
         validTeacherRequestProfile(data, uid) &&
         data.emailCanonical == request.auth.token.email &&
+        validPublicAuthorLabel(data.displayName, data.emailCanonical, uid) &&
         data.status == 'pending' && data.revision == 1 &&
         data.createdAt == request.time && data.updatedAt == request.time;
     }
@@ -183,6 +191,7 @@ service cloud.firestore {
         ]) &&
         data.uid == uid && data.emailCanonical == requestData.emailCanonical &&
         data.displayName == requestData.displayName && data.status == 'active' &&
+        validPublicAuthorLabel(data.displayName, data.emailCanonical, uid) &&
         data.enabled == true && data.role == 'teacher' &&
         data.administrativeHold == false &&
         data.approvedAt == request.time && data.approvedByUid == request.auth.uid &&
@@ -191,9 +200,9 @@ service cloud.firestore {
         requestData.decidedByUid == request.auth.uid;
     }
 
-    function validApprovedLegacyAllowance(data) {
+    function validApprovedLegacyAllowance(uid, data) {
       return data.keys().hasOnly(['uid', 'enabled', 'role', 'updatedAt', 'updatedByUid']) &&
-        data.uid is string && data.enabled == true && data.role == 'teacher' &&
+        data.uid == uid && data.enabled == true && data.role == 'teacher' &&
         data.updatedAt == request.time && data.updatedByUid == request.auth.uid;
     }
 
@@ -222,9 +231,10 @@ service cloud.firestore {
           'status', 'revision', 'updatedAt', 'decidedAt', 'decidedByUid', 'decisionReason'
         ]) &&
         (after.status == 'rejected' ||
-          (existsAfter(allowanceTarget) && existsAfter(legacyTarget) &&
+          ((!exists(legacyTarget) || get(legacyTarget).data.get('uid', '') == uid) &&
+            existsAfter(allowanceTarget) && existsAfter(legacyTarget) &&
             validApprovedTeacherAllowance(uid, getAfter(allowanceTarget).data, after) &&
-            validApprovedLegacyAllowance(getAfter(legacyTarget).data)));
+            validApprovedLegacyAllowance(uid, getAfter(legacyTarget).data)));
     }
 
     function validStoredTeacherAllowance(uid, data) {
@@ -486,8 +496,10 @@ service cloud.firestore {
 
     function validAuthoritativeLegacyMirror(email) {
       let uid = request.resource.data.get('uid', '');
+      let mirrorPath = /databases/$(database)/documents/teacher_allowlist/$(email);
       let allowancePath = /databases/$(database)/documents/teacher_allowances/$(uid);
       return signedIn() && teacherAccessMigrationUnlocked() && uid is string && uid.size() > 0 &&
+        (!exists(mirrorPath) || get(mirrorPath).data.get('uid', '') in ['', uid]) &&
         request.resource.data.keys().hasOnly([
           'uid', 'enabled', 'role', 'updatedAt', 'updatedByUid'
         ]) && request.resource.data.updatedAt == request.time &&
@@ -1017,9 +1029,7 @@ service cloud.firestore {
         data.title.size() >= 1 && data.title.size() <= 200 &&
         data.description is string && data.description == data.description.trim() &&
         data.description.size() <= 1000 &&
-        data.authorDisplayName is string &&
-        data.authorDisplayName == data.authorDisplayName.trim() &&
-        data.authorDisplayName.size() >= 1 && data.authorDisplayName.size() <= 80 &&
+        validPublicAuthorLabel(data.authorDisplayName, '', '') &&
         data.revealMode in ['instant', 'timer', 'manual', 'never'] &&
         data.limitSec is int && data.limitSec >= 0 && data.limitSec <= 600 &&
         data.revealDelaySec is int && data.revealDelaySec >= 0 &&
@@ -1141,7 +1151,12 @@ service cloud.firestore {
 
     function publicMatchesActiveSourceAfter(data, setId) {
       let source = getAfter(publicationSourcePath(setId)).data;
+      let allowance = getAfter(
+        /databases/$(database)/documents/teacher_allowances/$(source.ownerUid)
+      ).data;
       return validActivePublicationSourceAfter(setId) &&
+        validPublicAuthorLabel(data.authorDisplayName, source.ownerEmail, source.ownerUid) &&
+        data.authorDisplayName == allowance.get('displayName', '') &&
         data.revision == sourceRevision(source) &&
         source.title is string && data.title == source.title.trim() &&
         source.get('description', '') is string &&
@@ -1159,8 +1174,8 @@ service cloud.firestore {
       let allowance = get(
         /databases/$(database)/documents/teacher_allowances/$(source.ownerUid)
       ).data;
-      return allowance.get('displayName', '') is string &&
-        data.authorDisplayName == allowance.get('displayName', '').trim();
+      return !(data.authorDisplayName in [source.ownerEmail, source.ownerUid]) &&
+        data.authorDisplayName == allowance.get('displayName', '');
     }
 
     function validOwnerProjectionAfter(data, setId) {
@@ -1186,8 +1201,8 @@ service cloud.firestore {
         data.revealDelaySec == source.get('settings', {}).get('revealDelaySec', 5) &&
         data.autoPause == source.get('settings', {}).get('autoPause', true) &&
         data.imageCount == source.imageCount &&
-        allowance.get('displayName', '') is string &&
-        data.authorDisplayName == allowance.get('displayName', '').trim();
+        !(data.authorDisplayName in [source.ownerEmail, source.ownerUid]) &&
+        data.authorDisplayName == allowance.get('displayName', '');
     }
 
     function validOwnerPublicationLifecycleAfter(data, setId) {
@@ -1801,6 +1816,7 @@ service cloud.firestore {
               : validPublicParentShape(resource.data, setId))
           : resource.data.get('status', '') == 'published'
             ? validPublicParentShape(resource.data, setId) &&
+              ownerAuthorMatchesAllowance(resource.data, setId) &&
               ((isApprovedTeacher() && visiblePublicationSourceIsActive(setId)) ||
                 lifecycleOwnerMayAuditPublication(setId))
             : (ownerMayReadPublicationStatus(setId) ||

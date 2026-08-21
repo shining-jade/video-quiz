@@ -64,6 +64,25 @@ test('projection contains bounded public content and strips every private identi
   assert.equal('updatedAt' in summary, false);
 });
 
+test('projection and stored-parent validation reject identity-shaped author labels', () => {
+  for (const authorDisplayName of [
+    'teacher@example.com', 'AbCDefghijklmnopqrst1234', 'teacher-uid'
+  ]) {
+    assert.throws(() => Core.buildProjection(privateSet, {
+      setId: 'set-1', authorDisplayName, revision: '10:20', nowMs: 100,
+      ownerEmailCanonical: 'teacher@example.com', ownerUid: 'teacher-uid'
+    }), /author|표시 이름|email|UID/i);
+    const parent = Core.flattenProjection(projection(), 'build-token-1').parent;
+    assert.equal(Core.validateParent({ ...parent, authorDisplayName }, {
+      emailCanonical: 'teacher@example.com', uid: 'teacher-uid'
+    }).ok, false);
+  }
+  assert.equal(Core.buildProjection(privateSet, {
+    setId: 'set-1', authorDisplayName: '홍교사', revision: '10:20', nowMs: 100,
+    ownerEmailCanonical: 'teacher@example.com', ownerUid: 'teacher-uid'
+  }).authorDisplayName, '홍교사');
+});
+
 test('flat storage splits exact video and question children and reassembles only a complete revision', () => {
   const value = projection();
   const flat = Core.flattenProjection(value, 'build-token-1');

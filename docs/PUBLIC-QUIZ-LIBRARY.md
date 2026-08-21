@@ -11,7 +11,7 @@
 - `published_quiz_sets/{publicationId}/images/{imageKey}`는 `data`, `revision`, `schemaVersion`, `buildToken`만 가진다.
 - `published_quiz_audits/{publicationId}`는 관리자 moderation 감사 기록이며 일반 교사에게 공개하지 않는다.
 
-공개 projection에는 소유자의 **이메일과 UID 비공개** 원칙을 적용한다. 표시 이름만 허용하며 원본 경로의 개인정보, 공동 편집자, 학생 응답, 정답 검토 메타데이터는 복제하지 않는다.
+공개 projection에는 소유자의 **이메일과 UID 비공개** 원칙을 적용한다. 표시 이름만 허용하며 원본 경로의 개인정보, 공동 편집자, 학생 응답, 정답 검토 메타데이터는 복제하지 않는다. `authorDisplayName`은 trim 뒤 1~80자여야 하고 blank, 이메일 모양, 정규화 owner email, owner UID와 동일한 값, Firebase UID 모양을 거부한다. authoritative allowance의 공개용 표시 이름과 정확히 같아야 한다. 기존의 안전한 한국어 이름은 migration 없이 유지하지만 unsafe legacy 값은 production auditor의 `PUBLIC_AUTHOR_LABEL_UNSAFE` 또는 `PUBLIC_AUTHOR_LABEL_PARITY` finding을 명시적으로 교정한 뒤 다시 감사한다.
 
 모든 public child의 현재 `schemaVersion`은 `1`이다. Rules가 허용하는 child collection query는 부모와 같은 `revision` 및 `schemaVersion == 1`을 둘 다 equality 조건으로 사용해야 한다. create/get은 전체 필드 allowlist와 값 형식을 검증한다. marker가 없거나 다른 legacy child는 이 query 결과에서 숨겨지며, 배포 전 auditor가 누락·형식 불일치·unknown field를 발견하면 배포를 중단한다. 이 marker를 검증 없이 backfill하지 않는다.
 
@@ -39,7 +39,7 @@
 
 purge 전후에 `published_quiz_sets/{id}/images`를 server source로 bounded 조회한다. public parent가 `published`이면 삭제를 중단한다. public image **orphan audit**에서 하나라도 남으면 private parent 삭제를 금지한다. 운영 점검에서도 부모 없는 공개 이미지, 부모 revision과 다른 이미지, `published` 부모의 source revision 불일치를 모두 0으로 확인한다. 자동 공개 backfill이나 child 추정 복구는 없다.
 
-## 배포 전 체크와 순서
+## 배포 전 체크와 통합 릴리스
 
 운영 데이터나 실제 계정을 변경하기 전에 로컬 Node와 demo Firestore Emulator에서 다음을 모두 통과시킨다.
 
@@ -58,11 +58,7 @@ pnpm audit:public-library -- --project <exact-project-id> --target-mode producti
 
 보고서가 `complete: true`, `safeToDeployPublicLibrary: true`, `findings: []`가 아니면 배포를 중단한다. auditor는 `quiz_sets`와 `publication_lifecycle_locks` 전체를 bounded scan하므로 공개 부모가 없는 legacy lifecycle 누락과 orphan/malformed/stale lock도 실패다. active/orphan/malformed/stale gate, child `schemaVersion` 누락·불일치, PII 필드, orphan child/audit, source revision·allowance 불일치도 모두 실패다. `maxDocuments`는 gate와 direct binding get 및 collection query 반환 문서를 포함한 전체 read 예산이다. 완전성을 확인하기 위한 `remaining + 1` probe는 예산 밖으로 실행하지 않고, 정확한 경계에 닿으면 `complete: false`로 실패 폐쇄한다. auditor에는 apply 모드가 없다.
 
-1. 백업과 기존 migration gate를 확인하고 `audit:public-library` production dry-run을 새 durable 출력에 실행한다. legacy `lifecycleState` 누락을 포함해 `safeToDeployPublicLibrary`가 false면 자동 수정하지 말고 중단한다.
-2. `firebase.json`이 가리키는 `firestore.indexes.json`의 `published_quiz_sets(status ASC, updatedAt DESC, __name__ DESC)` composite index를 먼저 배포하고 build 완료를 확인한다. index가 building/error이면 Rules나 앱 배포를 시작하지 않는다.
-3. 테스트된 `firestore.rules`의 해시와 직전 Rules 릴리스를 기록한 뒤 **Rules를 먼저 배포**한다. Emulator 결과 또는 dry-run 감사가 불완전하면 중단한다.
-4. 새 Rules가 적용된 것을 재확인한 뒤에만 **정적 앱을 배포**한다. 앱을 먼저 배포하면 lifecycle paired write가 거부되거나 이전 앱이 공개 상태를 남길 수 있다.
-5. 아래 actor matrix로 **privacy smoke**를 완료하고 콘솔에서 앱/Firebase origin 오류가 0인지 확인한다.
+전체 production 순서는 오직 [`RELEASE-RUNBOOK.md`](./RELEASE-RUNBOOK.md)의 R0~R15를 따른다. public 단계는 write-quiescence 중 R7 durable audit → R8 composite index build 완료 → R10 strict Rules → R11 static app → R12 같은-generation public 재감사 → R15 privacy smoke다. `complete: true`, `safeToDeployPublicLibrary: true`, `findings: []`가 아니거나 author value/parity finding이 하나라도 있으면 Rules/static app 배포를 중단한다.
 
 ## privacy smoke actor matrix
 
@@ -81,6 +77,6 @@ owner A가 질문·해설 이미지를 포함한 세트를 게시하고 teacher 
 
 ## 롤백
 
-privacy smoke 또는 수명주기 점검이 실패하면 신규 게시·계정 중지·탈퇴 처리를 중단한다. 데이터나 기존 독립 사본을 되돌리지 않는다. 먼저 정적 앱을 직전 검증 버전으로 롤백하고, 그 앱과 호환되는 직전 Rules 릴리스를 복원한다. 이미 `withdrawn`인 publication은 다시 공개하지 않는다. moderated 항목은 관리자 감사 없이 복구하지 않는다. 실패 batch의 allowance가 active인지, 공개 visible count가 0인지 다시 감사한 후 원인을 수정해 전체 순서를 처음부터 반복한다. `publication_lifecycle_gates/current`가 남으면 공개가 차단된 것이 정상이다. blind delete하지 말고 exact operation 재시도 또는 Admin 조사 뒤 paired lock과 함께 해제한다.
+privacy smoke 또는 수명주기 점검이 실패하면 신규 게시·계정 중지·탈퇴 처리를 중단한다. 데이터나 기존 독립 사본을 되돌리지 않는다. 통합 런북의 rollback대로 write-quiescence를 유지하고 직전 호환 Rules를 먼저 복원한 뒤 직전 정적 앱을 복원한다. 이미 `withdrawn`인 publication은 다시 공개하지 않는다. moderated 항목은 관리자 감사 없이 복구하지 않는다. 실패 batch의 allowance가 active인지, 공개 visible count가 0인지 다시 감사한 후 원인을 수정해 전체 순서를 처음부터 반복한다. `publication_lifecycle_gates/current`가 남으면 공개가 차단된 것이 정상이다. blind delete하지 말고 exact operation 재시도 또는 Admin 조사 뒤 paired lock과 함께 해제한다.
 
 이 구현 작업에서는 production migration, deploy, push, 실제 계정 생성, 메일 발송, 실제 브라우저 인수를 실행하지 않았다.

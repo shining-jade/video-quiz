@@ -7,7 +7,8 @@ document.
 
 Do not grant a client repair permission. Current client add/remove/purge operations keep the parent,
 collaborator, and index atomic; the migration uses Admin transactions only. No production migration
-was run while implementing this tool.
+was run while implementing this tool. The only authoritative release order is R0 through R15 in
+[`RELEASE-RUNBOOK.md`](./RELEASE-RUNBOOK.md); this document only defines the R3 CLI contract.
 
 ## Safety boundary
 
@@ -24,11 +25,12 @@ was run while implementing this tool.
 - A final authoritative rescan sets `safeToUseShareIndex`. Orphan or malformed collaborators remain
   findings for manual remediation and keep that value false.
 - The output uses the existing exclusive reserved-report writer. It never overwrites an existing
-  report and preserves a fail-closed `.reserved` artifact if publication cannot complete.
+  report and preserves a fail-closed `.reserved` artifact if publication cannot complete. Detailed
+  email/set findings remain only in the restricted durable report; stdout contains non-PII status and
+  counts.
 
-Serialize trusted Admin repair jobs. Normal strict client mutations may continue because they already
-maintain the three-document invariant atomically; another Admin process must not bypass that invariant
-while this audit is running.
+Maintain the R1 externally enforced exact write-quiescence and serialize the trusted Admin repair.
+Do not use a report as release evidence if normal clients or another Admin writer ran during the scan.
 
 ## Production dry-run
 

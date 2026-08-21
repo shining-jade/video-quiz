@@ -1,5 +1,8 @@
 # 교사 권한 신청·수업계획·현황판 설계
 
+> 운영 주의(2026-08-22): 이 문서는 역사적 설계/구현 기록이다. 아래의 개별 rollout·deploy 순서는 폐기되었고, production 전체 순서는 오직 [`docs/RELEASE-RUNBOOK.md`](../../RELEASE-RUNBOOK.md)의 R0~R15를 따른다.
+
+
 작성일: 2026-08-20
 
 ## 1. 목표

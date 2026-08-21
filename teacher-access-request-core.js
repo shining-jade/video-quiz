@@ -1,8 +1,10 @@
 (function (root, factory) {
-  const api = factory();
+  const publicAuthorLabel = typeof module === 'object' && module.exports
+    ? require('./public-author-label-core.js') : root && root.PublicAuthorLabelCore;
+  const api = factory(publicAuthorLabel);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else if (root) root.TeacherAccessRequestCore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (publicAuthorLabel) {
   const STATUSES = new Set(['pending', 'approved', 'rejected', 'cancelled']);
   const DECISIONS = new Set(['approved', 'rejected']);
   const ALLOWANCE_STATUSES = new Set(['active', 'suspended', 'deletion_pending']);
@@ -30,6 +32,22 @@
       );
   }
 
+  function authorLabelCore() {
+    const value = publicAuthorLabel ||
+      (typeof globalThis !== 'undefined' && globalThis.PublicAuthorLabelCore);
+    if (!value || typeof value.validate !== 'function') {
+      fail('공개 표시 이름 검증기가 준비되지 않았습니다.');
+    }
+    return value;
+  }
+
+  function validatePublicIdentity(value) {
+    return authorLabelCore().validate(value && value.displayName, {
+      emailCanonical: value && value.emailCanonical,
+      uid: value && value.uid
+    });
+  }
+
   function validateProfile(displayName, organization, note) {
     if (displayName.length < 1 || displayName.length > 80) fail('displayName 이름은 1~80자여야 합니다.');
     if (organization.length > 120) fail('organization 조직은 120자 이하여야 합니다.');
@@ -46,6 +64,7 @@
     if (!nonEmptyString(uid)) fail('uid가 필요합니다.');
     if (!emailCanonical || !emailCanonical.includes('@')) fail('유효한 이메일이 필요합니다.');
     validateProfile(displayName, organization, note);
+    authorLabelCore().requireSafe(displayName, { emailCanonical, uid });
     if (!Number.isFinite(nowMs)) fail('createdAtMs 시각이 필요합니다.');
     return {
       uid,
@@ -82,6 +101,14 @@
     if (value.decidedByUid !== undefined && !nonEmptyString(value.decidedByUid)) errors.push('decidedByUid');
     if (value.decisionReason !== undefined && text(value.decisionReason).length > 200) errors.push('decisionReason');
     return { ok: errors.length === 0, errors };
+  }
+
+  function validateNewRequest(request) {
+    const result = validateRequest(request);
+    const identity = validatePublicIdentity(request);
+    return result.ok && identity.ok
+      ? result
+      : { ok: false, errors: result.errors.concat(identity.ok ? [] : ['displayName']) };
   }
 
   function canCancel(request, uid) {
@@ -128,5 +155,8 @@
     return allowance.enabled === true ? 'active' : 'unapproved';
   }
 
-  return { isVerifiedTeacherUser, buildRequest, validateRequest, canCancel, nextDecision, teacherStatus };
+  return {
+    isVerifiedTeacherUser, buildRequest, validateRequest, validateNewRequest,
+    validatePublicIdentity, canCancel, nextDecision, teacherStatus
+  };
 });

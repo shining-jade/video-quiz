@@ -1,5 +1,8 @@
 # 공동 편집자·휴지통·교사 승인 관리 구현 계획
 
+> 운영 주의(2026-08-22): 이 문서는 역사적 설계/구현 기록이다. 아래의 개별 rollout·deploy 순서는 폐기되었고, production 전체 순서는 오직 [`docs/RELEASE-RUNBOOK.md`](../../RELEASE-RUNBOOK.md)의 R0~R15를 따른다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 승인 교사 공동 편집, 관리자 교사 승인 관리, 소유자 휴지통과 무료 우선 30일 영구 정리를 기존 영상 퀴즈에 안전하게 추가한다.

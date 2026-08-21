@@ -544,6 +544,9 @@ function extractFunction(source, name) {
 
 function loadStageFunctions(names, context) {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  if (!Object.hasOwn(context, 'PublicAuthorLabelCore')) {
+    context.PublicAuthorLabelCore = require('../public-author-label-core.js');
+  }
   names.forEach(name => vm.runInNewContext(extractFunction(html, name), context));
   return context;
 }
@@ -1941,6 +1944,7 @@ test('admin approval atomically updates the teacher request and both authoritati
   });
   const legacy = fake.value('teacher_allowlist/teacher@school.kr');
   assert.equal(legacy.enabled, true);
+  assert.equal(legacy.uid, 'teacher-a');
   assert.equal(legacy.role, 'teacher');
   assert.equal(legacy.updatedByUid, 'admin-uid');
   assert.equal(legacy.updatedAt.toMillis(), 50_000);
@@ -2432,6 +2436,73 @@ test('세트 목록은 활성 query와 소유자 휴지통 query를 분리한다
     .map(set => set.id), ['trash']);
   assert.deepEqual((await store.listTrash({ role: 'admin' }))
     .map(set => set.id).sort(), ['other-trash', 'trash']);
+});
+
+test('two pending UIDs sharing one canonical email cannot replace the first approved mirror identity', async () => {
+  const sharedEmail = 'shared@school.kr';
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/teacher-a': pendingTeacherRequest({
+      uid: 'teacher-a', emailCanonical: sharedEmail, displayName: '첫 교사'
+    }),
+    'teacher_access_requests/teacher-b': pendingTeacherRequest({
+      uid: 'teacher-b', emailCanonical: sharedEmail, displayName: '둘째 교사'
+    }),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+  const store = createStore(fake);
+
+  await store.decideTeacherRequest(
+    'teacher-a', 3, { status: 'approved' }, teacherRequestAdmin
+  );
+  await assert.rejects(() => store.decideTeacherRequest(
+    'teacher-b', 3, { status: 'approved' }, teacherRequestAdmin
+  ), /UID|identity|신원|이미/);
+  await store.decideTeacherRequest(
+    'teacher-b', 3, { status: 'rejected', reason: '동일 이메일의 기존 UID 승인' }, teacherRequestAdmin
+  );
+
+  assert.equal(fake.value(`teacher_allowlist/${sharedEmail}`).uid, 'teacher-a');
+  assert.equal(fake.value('teacher_allowances/teacher-a').uid, 'teacher-a');
+  assert.equal(fake.value('teacher_allowances/teacher-b'), undefined);
+  assert.equal(fake.value('teacher_access_requests/teacher-b').status, 'rejected');
+});
+
+test('approval preserves an existing canonical mirror only when it already names the exact same UID', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+    'teacher_allowlist/teacher@school.kr': {
+      uid: 'teacher-a', enabled: true, role: 'teacher',
+      updatedAt: { toMillis: () => 1 }, updatedByUid: 'previous-admin'
+    },
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+
+  await createStore(fake).decideTeacherRequest(
+    'teacher-a', 3, { status: 'approved' }, teacherRequestAdmin
+  );
+
+  assert.equal(fake.value('teacher_allowances/teacher-a').uid, 'teacher-a');
+  assert.equal(fake.value('teacher_allowlist/teacher@school.kr').uid, 'teacher-a');
+});
+
+test('approval refuses an existing canonical mirror assigned to a different UID without partial writes', async () => {
+  const mirror = {
+    uid: 'other-uid', enabled: true, role: 'teacher',
+    updatedAt: { toMillis: () => 1 }, updatedByUid: 'previous-admin'
+  };
+  const fake = makeFirestoreFake({
+    'teacher_access_requests/teacher-a': pendingTeacherRequest(),
+    'teacher_allowlist/teacher@school.kr': mirror,
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' }
+  });
+
+  await assert.rejects(() => createStore(fake).decideTeacherRequest(
+    'teacher-a', 3, { status: 'approved' }, teacherRequestAdmin
+  ), /UID|identity|신원/);
+
+  assert.deepEqual(fake.value('teacher_allowlist/teacher@school.kr'), mirror);
+  assert.equal(fake.value('teacher_allowances/teacher-a'), undefined);
+  assert.equal(fake.value('teacher_access_requests/teacher-a').status, 'pending');
 });
 
 test('공동편집 세트 discovery는 자기 전용 exact index 결과만 direct get한다', async () => {
@@ -4412,6 +4483,24 @@ test('owner publication mutation errors clear busy and fail closed as unknown', 
       assert.equal(set.publicationStatus, 'unknown');
     });
   }
+});
+
+test('public library UI drops identity-shaped author labels before rendering', () => {
+  const context = { PublicAuthorLabelCore: require('../public-author-label-core.js') };
+  loadStageFunctions(['publicLibrarySafeSummary'], context);
+  const base = {
+    publicationId: 'pub-1', title: '공개 퀴즈', description: '',
+    videoCount: 1, questionCount: 1, updatedAtMs: 1
+  };
+  assert.equal(context.publicLibrarySafeSummary({
+    ...base, authorDisplayName: 'owner@school.kr'
+  }), null);
+  assert.equal(context.publicLibrarySafeSummary({
+    ...base, authorDisplayName: 'AbCDefghijklmnopqrst1234'
+  }), null);
+  assert.equal(context.publicLibrarySafeSummary({
+    ...base, authorDisplayName: '홍교사'
+  }).authorDisplayName, '홍교사');
 });
 
 test('public library renders summary only and copy routes to the new private set', async () => {
@@ -15104,7 +15193,7 @@ function publicLibraryActor(uid = 'owner', email = 'owner@school.kr', overrides 
 function publicLibraryAllowance(uid = 'owner', email = 'owner@school.kr', overrides = {}) {
   return {
     uid, emailCanonical: email, role: 'teacher', status: 'active', enabled: true,
-    revision: 1, ...overrides
+    displayName: uid === 'owner' ? '홍교사' : '김교사', revision: 1, ...overrides
   };
 }
 
@@ -15178,6 +15267,36 @@ function publicLibraryStoredDocuments(id = 'set-1', options = {}, buildToken = '
 
 const PUBLIC_LIBRARY_IMAGE_A = 'data:image/png;base64,AAAA';
 const PUBLIC_LIBRARY_IMAGE_B = 'data:image/png;base64,BBBB';
+
+test('publish rejects unsafe or allowance-mismatched public author labels before creating a projection', async t => {
+  for (const entry of [
+    {
+      name: 'email-shaped allowance label',
+      allowanceName: 'owner@school.kr', actorName: 'owner@school.kr'
+    },
+    {
+      name: 'UID-like allowance label',
+      allowanceName: 'AbCDefghijklmnopqrst1234', actorName: 'AbCDefghijklmnopqrst1234'
+    },
+    {
+      name: 'actor and allowance display-name mismatch',
+      allowanceName: '홍교사', actorName: '다른교사'
+    }
+  ]) {
+    await t.test(entry.name, async () => {
+      const fake = makeFirestoreFake({
+        'quiz_sets/set-1': publicLibrarySource(),
+        'teacher_allowances/owner': publicLibraryAllowance('owner', 'owner@school.kr', {
+          displayName: entry.allowanceName
+        })
+      });
+      await assert.rejects(() => createStore(fake).publishQuizSet('set-1',
+        publicLibraryActor('owner', 'owner@school.kr', { displayName: entry.actorName })
+      ), /표시 이름|author|displayName|allowance/i);
+      assert.equal(fake.value('published_quiz_sets/set-1'), undefined);
+    });
+  }
+});
 
 test('publish keeps a building projection hidden until bound images and the source reread finalize', async () => {
   const source = publicLibrarySource({ imageCount: 2 });

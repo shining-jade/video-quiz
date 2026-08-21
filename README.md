@@ -43,15 +43,15 @@
 
 ### 2) Google·이메일 교사 로그인과 학생 익명 로그인 설정
 
-공개 퀴즈 자료실은 기존 세트를 자동 공개하지 않는 private by default 기능입니다. 소유자가 게시한 비식별 projection만 승인 교사에게 보이며, 다른 교사는 원본 권한이 아닌 독립 사본을 만듭니다. public child 목록은 exact `revision + schemaVersion == 1` query만 사용하고 legacy marker는 검증 없이 backfill하지 않습니다. 휴지통·중지·탈퇴·purge 전 공개 사본 철회, 전역 lifecycle gate, index 선배포, Rules-before-app 배포, privacy smoke와 롤백의 authoritative 절차는 [`docs/PUBLIC-QUIZ-LIBRARY.md`](./docs/PUBLIC-QUIZ-LIBRARY.md)를 따르세요. 운영 배포 전에는 새 출력 경로를 지정한 `pnpm audit:public-library -- --project <exact-project-id> --target-mode production --max-documents <bounded-count> --output <new-report>.json` read-only 감사가 gate/direct get까지 포함한 전체 예산 안에서 완전하고 안전해야 합니다.
+공개 퀴즈 자료실은 기존 세트를 자동 공개하지 않는 private by default 기능입니다. 소유자가 게시한 비식별 projection만 승인 교사에게 보이며, 다른 교사는 원본 권한이 아닌 독립 사본을 만듭니다. public child 목록은 exact `revision + schemaVersion == 1` query만 사용하고 legacy marker는 검증 없이 backfill하지 않습니다. 데이터 계약은 [`docs/PUBLIC-QUIZ-LIBRARY.md`](./docs/PUBLIC-QUIZ-LIBRARY.md), 전체 운영 릴리스 순서는 오직 [`docs/RELEASE-RUNBOOK.md`](./docs/RELEASE-RUNBOOK.md)를 따르세요. 운영 배포 전에는 새 출력 경로를 지정한 `pnpm audit:public-library -- --project <exact-project-id> --target-mode production --max-documents <bounded-count> --output <new-report>.json` read-only 감사가 gate/direct get까지 포함한 전체 예산 안에서 완전하고 안전해야 합니다.
 
-Firebase Console에서는 기존 **Google**(교사용)과 **익명(Anonymous)**(학생용)을 유지합니다. **Email/Password**(교사용)는 Firebase Password Policy 최소 길이 8·Enforcement `Require`를 확인하고, 호환 Rules → migration lock/apply → strict UID Rules·정적 앱 → 같은 generation verify → exact unlock을 모두 마친 뒤에만 활성화합니다. 이 순서는 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며 Google이나 Anonymous를 끄지 않습니다. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
+Firebase Console에서는 기존 **Google**(교사용)과 **익명(Anonymous)**(학생용)을 유지합니다. **Email/Password**(교사용)는 Firebase Password Policy 최소 길이 8·Enforcement `Require`와 통합 런북의 migration/audit, R10 strict Rules → R11 static app, same-generation verify, exact unlock을 모두 마친 R14에서만 활성화합니다. Google이나 Anonymous를 끄지 않습니다. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
 
 교사용 메뉴에서는 Google 로그인 또는 이메일 가입·로그인·비밀번호 재설정을 선택할 수 있습니다. Google과 Email/Password 모두 검증된 provider여야 하며, 미승인·비활성·이메일 미검증 계정은 신청 안내를 봅니다. 사용자가 신청하면 관리자가 승인 UI에서 현재 UID와 canonical 이메일에 결합된 `teacher_allowances`를 생성합니다. 운영자는 legacy email allowlist를 직접 만들거나 수정하지 않습니다. 같은 이메일의 provider 충돌은 계정을 자동 병합하거나 allowance를 복제하지 않고 기존 로그인 방식을 안내합니다. 같은 승인 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다. Console 설정, 한국어 이메일 템플릿, 인수와 롤백은 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며, 비밀번호와 재설정 링크는 운영 기록에 남기지 않습니다.
 
 ### 3) 기존 데이터 이전
 
-교사 개인 계정 승인과 수업계획 현황판을 배포할 때는 기존 email allowlist를 UID 기반 `teacher_allowances`로 이관하고, 종료되지 않은 세션의 학생 counter를 전수 감사한 뒤 completion gate를 기록해야 합니다. 정확한 backup → Emulator → **호환 head Rules 선배포** → access lock/apply → session join lock/recount/gate → strict Rules·static app → 같은 generation 재검증 → exact unlock → 두 교사·두 수업 browser smoke 순서는 [`docs/TEACHER-ACCESS-CLASS-PLANNING.md`](./docs/TEACHER-ACCESS-CLASS-PLANNING.md)를 따릅니다. 두 apply 보고서가 모두 `safeToDeployStrictRules: true`가 아니거나 lock generation이 배포 뒤 달라졌으면 중단합니다.
+교사 개인 계정 승인과 수업계획 현황판을 배포할 때는 기존 email allowlist를 UID 기반 `teacher_allowances`로 이관하고, 종료되지 않은 세션의 학생 counter를 전수 감사한 뒤 completion gate를 기록해야 합니다. CLI 세부 계약은 [`docs/TEACHER-ACCESS-CLASS-PLANNING.md`](./docs/TEACHER-ACCESS-CLASS-PLANNING.md), 정확한 전체 순서는 통합 런북 R0~R15를 따릅니다. 두 apply 보고서가 모두 `safeToDeployStrictRules: true`가 아니거나 lock generation이 배포 뒤 달라졌으면 중단합니다.
 
 엄격한 규칙을 게시하기 전에 기존 `ownerUid` 없는 데이터와 응답의 레거시 정오 필드를 신뢰할 수 있는 Admin SDK 명령으로 이전합니다. 브라우저에서는 이전하지 않습니다. 먼저 대상 Google 계정의 Firebase Authentication UID를 확인하고 관리자 자격 증명이 설정된 로컬 터미널에서 dry-run을 실행합니다.
 
@@ -73,17 +73,7 @@ pnpm migrate:legacy -- --project video-quiz-65798 --owner-uid <교사_UID> --app
 
 이전 보고서의 배포 게이트와 `pnpm test`, `pnpm test:rules`가 모두 통과한 뒤 `firestore.rules`를 게시합니다. 게시 직전 규칙 원문과 Firebase Console의 직전 릴리스 시각을 기록합니다. 문제가 생기면 데이터를 되돌리거나 재이전하지 말고, Firebase Console → Firestore Database → 규칙 → 릴리스 기록에서 직전 규칙을 복원해 게시한 뒤 원인을 조사합니다.
 
-공동 편집자·휴지통 최초 운영 전환은 다음 순서를 바꾸면 안 됩니다.
-
-1. lifecycle 이관·감사(dry-run → apply → `safeToDeployStrictRules: true`)
-2. 병합 및 앱 push
-3. 현재 Rules에서 두 admin 로그인 확인
-4. staged Rules 배포
-5. trusted CLI로 counter gate 잠금
-6. counter 이관·감사(`safeToDeployStrictRules: true`)
-7. strict Rules 배포
-8. 동일 `lockId`와 `updateTimeGeneration`으로 잠금 해제
-9. production smoke
+공동 편집자·휴지통을 포함한 전체 전환은 [`docs/RELEASE-RUNBOOK.md`](./docs/RELEASE-RUNBOOK.md)의 externally enforced exact write-quiescence와 R0~R15를 그대로 사용합니다. 기능별 별도 staged/app-push 순서를 만들지 않습니다.
 
 Lifecycle CLI도 대상을 명시하고 Emulator 환경 변수가 없는 터미널에서 실행합니다. 출력 파일은 기존 파일을 덮어쓰지 않습니다.
 

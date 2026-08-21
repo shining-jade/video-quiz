@@ -1,5 +1,8 @@
 # Teacher Access, Class Planning, and Dashboard Implementation Plan
 
+> 운영 주의(2026-08-22): 이 문서는 역사적 설계/구현 기록이다. 아래의 개별 rollout·deploy 순서는 폐기되었고, production 전체 순서는 오직 [`docs/RELEASE-RUNBOOK.md`](../../RELEASE-RUNBOOK.md)의 R0~R15를 따른다.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 교사가 자기 Google 계정으로 권한을 신청하고 관리자가 승인하며, 승인 교사가 수업 사용계획을 등록하고 메인 현황판에서 겹침·예상/실제 참여 규모를 확인하도록 한다.
