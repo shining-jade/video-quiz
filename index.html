@@ -79,7 +79,7 @@ a { color: var(--accent); }
    폼
    ══════════════════════════════════════════════════════════ */
 label.f { display: block; font-size: 13px; font-weight: 600; color: var(--ink-2); margin-bottom: 5px; }
-input[type=text], input[type=number], input[type=password], input[type=date], select, textarea {
+input[type=text], input[type=email], input[type=number], input[type=password], input[type=date], select, textarea {
   width: 100%; padding: 10px 12px; font: inherit; font-size: 15px;
   border: 1px solid var(--line-2); border-radius: 9px;
   background: #fff; color: var(--ink); outline: none;
@@ -729,12 +729,23 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 .image-lightbox-close { position: absolute; top: 8px; right: 8px; min-width: 44px; min-height: 44px; border: 0; border-radius: 999px; background: rgba(0,0,0,.72); color: #fff; font-size: 24px; cursor: pointer; }
 .image-lightbox-caption { color: #fff; font-size: 14px; text-align: center; }
 @media (max-width: 600px) { .image-lightbox { padding: 10px; } .image-lightbox img { max-width: 98vw; max-height: calc(96vh - 58px); } }
+.teacher-auth-dialog { width: min(92vw, 480px); max-height: 90vh; padding: 0; border: 0; border-radius: 14px; color: var(--ink); box-shadow: 0 22px 70px rgba(10,15,30,.3); }
+.teacher-auth-dialog::backdrop { background: rgba(10,15,30,.52); }
+.teacher-auth-panel { padding: 22px; }
+.teacher-auth-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.teacher-auth-head h2 { flex: 1; font-size: 20px; }
+.teacher-auth-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin: 12px 0 16px; }
+.teacher-auth-tabs .btn { padding-left: 8px; padding-right: 8px; }
+.teacher-auth-divider { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--ink-3); font-size: 12px; }
+.teacher-auth-divider::before, .teacher-auth-divider::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
+@media (max-width: 430px) { .teacher-auth-tabs { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 
 <div id="app"></div>
 <div id="toast"></div>
+<dialog id="teacher-auth-dialog" class="teacher-auth-dialog" aria-labelledby="teacher-auth-title" onclose="clearTeacherAuthPasswords()"></dialog>
 <div id="image-lightbox" class="image-lightbox" role="dialog" aria-modal="true" aria-label="이미지 크게 보기" hidden onclick="if(event.target===this) closeImageLightbox()">
   <div class="image-lightbox-panel">
     <button id="image-lightbox-close" class="image-lightbox-close" type="button" aria-label="확대 이미지 닫기" onclick="closeImageLightbox()">×</button>
@@ -1419,6 +1430,7 @@ let teacherRequestScreen = null;
 let teacherRequestReroute = null;
 let adminTeacherRequestScreen = null;
 let teacherDashboard = null;
+let teacherAuthDialogState = { mode: 'login', status: 'idle', email: '', message: '', error: '' };
 let classPlanningThresholds = ClassPlanningCore.normalizeThresholds();
 let teacherDeletionScreen = null;
 
@@ -1543,9 +1555,9 @@ function startTrashMaintenance(authGeneration) {
 
 function teacherAuthMarkup() {
   if (!teacherUser) {
-    return '<button class="btn ghost sm" onclick="signInTeacher().catch(showTeacherAuthError)">교사 Google 로그인</button>';
+    return '<button class="btn ghost sm" onclick="openTeacherAuthDialog(\'login\')">교사 계정 로그인</button>';
   }
-  const identity = teacherUser.displayName || teacherState.email || 'Google 계정';
+  const identity = teacherUser.displayName || teacherState.email || '교사 계정';
   const pending = AuthCore.isTeacher(teacherState)
     ? pendingAllocationsForOwner(teacherState) : [];
   const recovery = pending.length
@@ -1562,6 +1574,251 @@ function teacherAuthMarkup() {
 function renderTeacherAuthArea() {
   const area = document.getElementById('teacher-auth-area');
   if (area) area.innerHTML = teacherAuthMarkup();
+}
+
+function teacherAuthDialogMarkup() {
+  const state = teacherAuthDialogState || { mode: 'login', status: 'idle' };
+  const mode = ['login', 'signup', 'reset'].includes(state.mode) ? state.mode : 'login';
+  const email = esc(state.email || '');
+  const feedback = state.error
+    ? '<div class="notice" role="alert">' + esc(state.error) + '</div>'
+    : state.message
+      ? '<div class="notice info" role="status">' + esc(state.message) + '</div>'
+      : '';
+  let form = '';
+  if (state.status === 'verification-sent') {
+    form = (state.error ? feedback : '<div class="notice info" role="status">' +
+      esc(state.message || '인증 메일을 보냈습니다. 이메일 인증을 완료해 주세요.') + '</div>') +
+      '<p class="sub"><strong>' + email + '</strong>의 받은편지함과 스팸함을 확인해 주세요.</p>' +
+      '<div class="row"><button class="btn" type="button" onclick="sendTeacherVerificationEmail()">인증 메일 다시 보내기</button>' +
+      '<button class="btn primary" type="button" onclick="confirmTeacherEmailVerification()">인증 완료 확인</button></div>';
+  } else if (mode === 'signup') {
+    form = feedback + '<form onsubmit="submitTeacherEmailSignup(event)">' +
+      '<div class="field"><label class="f" for="teacher-signup-name">이름</label><input id="teacher-signup-name" name="displayName" type="text" maxlength="80" autocomplete="name" required></div>' +
+      '<div class="field"><label class="f" for="teacher-signup-email">이메일</label><input id="teacher-signup-email" name="email" type="email" value="' + email + '" autocomplete="email" required></div>' +
+      '<div class="field"><label class="f" for="teacher-signup-password">비밀번호</label><input id="teacher-signup-password" name="password" type="password" minlength="8" autocomplete="new-password" required><div class="hint">8자 이상 입력해 주세요. 비밀번호는 저장하지 않습니다.</div></div>' +
+      '<button class="btn primary block" type="submit">이메일로 가입</button></form>';
+  } else if (mode === 'reset') {
+    form = feedback + '<form onsubmit="sendTeacherPasswordReset(event)">' +
+      '<div class="field"><label class="f" for="teacher-reset-email">이메일</label><input id="teacher-reset-email" name="email" type="email" value="' + email + '" autocomplete="email" required></div>' +
+      '<button class="btn primary block" type="submit">비밀번호 재설정 메일 보내기</button></form>';
+  } else {
+    form = feedback + '<form onsubmit="submitTeacherEmailLogin(event)">' +
+      '<div class="field"><label class="f" for="teacher-login-email">이메일</label><input id="teacher-login-email" name="email" type="email" value="' + email + '" autocomplete="email" required></div>' +
+      '<div class="field"><label class="f" for="teacher-login-password">비밀번호</label><input id="teacher-login-password" name="password" type="password" minlength="8" autocomplete="current-password" required></div>' +
+      '<button class="btn primary block" type="submit">이메일로 로그인</button></form>';
+  }
+  const tabs = state.status === 'verification-sent' ? '' :
+    '<div class="teacher-auth-tabs" aria-label="이메일 인증 방식">' +
+    '<button class="btn' + (mode === 'login' ? ' primary' : '') + '" type="button" onclick="openTeacherAuthDialog(\'login\')">로그인</button>' +
+    '<button class="btn' + (mode === 'signup' ? ' primary' : '') + '" type="button" onclick="openTeacherAuthDialog(\'signup\')">가입</button>' +
+    '<button class="btn' + (mode === 'reset' ? ' primary' : '') + '" type="button" onclick="openTeacherAuthDialog(\'reset\')">비밀번호 재설정</button></div>';
+  return '<div class="teacher-auth-panel"><div class="teacher-auth-head"><h2 id="teacher-auth-title">교사 계정 인증</h2>' +
+    '<button class="btn ghost sm" type="button" aria-label="교사 인증 닫기" onclick="closeTeacherAuthDialog()">닫기</button></div>' +
+    '<button class="btn block" type="button" onclick="signInTeacher().then(closeTeacherAuthDialog).catch(showTeacherAuthError)">Google로 로그인</button>' +
+    '<div class="teacher-auth-divider">또는 이메일 사용</div>' + tabs + form + '</div>';
+}
+
+function renderTeacherAuthDialog() {
+  const dialog = document.getElementById('teacher-auth-dialog');
+  if (!dialog) return false;
+  dialog.innerHTML = teacherAuthDialogMarkup();
+  return true;
+}
+
+function teacherEmailAuthFormValue(form, name) {
+  const control = form && form.elements && form.elements[name];
+  return control ? control.value : '';
+}
+
+function teacherEmailAuthOperationIsCurrent(authGeneration, uid) {
+  const current = firebase.auth().currentUser;
+  return teacherAuthVersion === authGeneration && !!current && String(current.uid || '') === String(uid || '');
+}
+
+function clearTeacherAuthPasswords() {
+  const dialog = document.getElementById('teacher-auth-dialog');
+  if (!dialog || typeof dialog.querySelectorAll !== 'function') return;
+  dialog.querySelectorAll('input[type="password"]').forEach(input => { input.value = ''; });
+}
+
+function closeTeacherAuthDialog() {
+  clearTeacherAuthPasswords();
+  const dialog = document.getElementById('teacher-auth-dialog');
+  if (!dialog) return;
+  if (dialog.open && typeof dialog.close === 'function') dialog.close();
+  else if (typeof dialog.removeAttribute === 'function') dialog.removeAttribute('open');
+}
+
+function openTeacherAuthDialog(mode) {
+  const nextMode = ['login', 'signup', 'reset'].includes(mode) ? mode : 'login';
+  clearTeacherAuthPasswords();
+  teacherAuthDialogState = { mode: nextMode, status: 'idle', email: '', message: '', error: '' };
+  if (!renderTeacherAuthDialog()) return false;
+  const dialog = document.getElementById('teacher-auth-dialog');
+  if (!dialog.open) {
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  }
+  const first = typeof dialog.querySelector === 'function' ? dialog.querySelector('input, button') : null;
+  if (first && typeof first.focus === 'function') first.focus();
+  return true;
+}
+
+async function submitTeacherEmailSignup(event) {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  const startedGeneration = teacherAuthVersion;
+  const startedUser = firebase.auth().currentUser;
+  const startedUid = startedUser && startedUser.uid || '';
+  try {
+    const values = TeacherEmailAuthCore.normalizeSignup({
+      displayName: teacherEmailAuthFormValue(event && event.currentTarget, 'displayName'),
+      email: teacherEmailAuthFormValue(event && event.currentTarget, 'email'),
+      password: teacherEmailAuthFormValue(event && event.currentTarget, 'password')
+    });
+    const auth = firebase.auth();
+    const credential = await auth.createUserWithEmailAndPassword(values.email, values.password);
+    const user = credential && credential.user;
+    const authGeneration = teacherAuthVersion;
+    const uid = user && user.uid;
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    await user.updateProfile({ displayName: values.displayName });
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    await user.sendEmailVerification();
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    clearTeacherAuthPasswords();
+    teacherAuthDialogState = {
+      mode: 'signup', status: 'verification-sent', email: values.email,
+      message: '인증 메일을 보냈습니다. 이메일 인증을 완료한 뒤 확인해 주세요.', error: ''
+    };
+    renderTeacherAuthDialog();
+    return { status: 'verification-sent' };
+  } catch (error) {
+    const current = firebase.auth().currentUser;
+    if (teacherAuthVersion !== startedGeneration || String(current && current.uid || '') !== String(startedUid)) {
+      return { status: 'stale' };
+    }
+    const message = error && error.code
+      ? TeacherEmailAuthCore.safeAuthMessage('signup', error)
+      : String(error && error.message || '가입 정보를 확인해 주세요.');
+    teacherAuthDialogState = { mode: 'signup', status: 'error', email: '', message: '', error: message };
+    clearTeacherAuthPasswords();
+    renderTeacherAuthDialog();
+    return { status: 'error', message };
+  }
+}
+
+async function submitTeacherEmailLogin(event) {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  const startedGeneration = teacherAuthVersion;
+  const startedUser = firebase.auth().currentUser;
+  const startedUid = startedUser && startedUser.uid || '';
+  try {
+    const values = TeacherEmailAuthCore.normalizeLogin({
+      email: teacherEmailAuthFormValue(event && event.currentTarget, 'email'),
+      password: teacherEmailAuthFormValue(event && event.currentTarget, 'password')
+    });
+    const auth = firebase.auth();
+    const login = await auth.signInWithEmailAndPassword(values.email, values.password);
+    const authGeneration = teacherAuthVersion;
+    const uid = login && login.user && login.user.uid;
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    clearTeacherAuthPasswords();
+    await applyTeacherUser(login.user);
+    closeTeacherAuthDialog();
+    return { status: 'signed-in' };
+  } catch (error) {
+    const current = firebase.auth().currentUser;
+    if (teacherAuthVersion !== startedGeneration || String(current && current.uid || '') !== String(startedUid)) {
+      return { status: 'stale' };
+    }
+    const message = error && error.code
+      ? TeacherEmailAuthCore.safeAuthMessage('login', error)
+      : String(error && error.message || '로그인 정보를 확인해 주세요.');
+    teacherAuthDialogState = { mode: 'login', status: 'error', email: '', message: '', error: message };
+    clearTeacherAuthPasswords();
+    renderTeacherAuthDialog();
+    return { status: 'error', message };
+  }
+}
+
+async function sendTeacherVerificationEmail() {
+  const user = firebase.auth().currentUser;
+  if (!user || user.isAnonymous) return { status: 'error' };
+  const authGeneration = teacherAuthVersion;
+  const uid = user.uid;
+  try {
+    await user.sendEmailVerification();
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    teacherAuthDialogState = {
+      mode: 'signup', status: 'verification-sent', email: user.email || '',
+      message: TeacherEmailAuthCore.safeAuthMessage('verification-resend', null), error: ''
+    };
+    renderTeacherAuthDialog();
+    return { status: 'verification-sent' };
+  } catch (error) {
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    const message = TeacherEmailAuthCore.safeAuthMessage('verification-resend', error);
+    teacherAuthDialogState = { mode: 'signup', status: 'verification-sent', email: user.email || '', message: '', error: message };
+    renderTeacherAuthDialog();
+    return { status: 'error', message };
+  }
+}
+
+async function confirmTeacherEmailVerification() {
+  const user = firebase.auth().currentUser;
+  if (!user || user.isAnonymous) return { status: 'error' };
+  const authGeneration = teacherAuthVersion;
+  const uid = user.uid;
+  try {
+    await user.reload();
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    if (!user.emailVerified) {
+      teacherAuthDialogState = {
+        mode: 'signup', status: 'verification-sent', email: user.email || '',
+        message: '아직 이메일 인증이 확인되지 않았습니다. 인증 링크를 연 뒤 다시 확인해 주세요.', error: ''
+      };
+      renderTeacherAuthDialog();
+      return { status: 'unverified' };
+    }
+    await user.getIdToken(true);
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    await applyTeacherUser(user);
+    closeTeacherAuthDialog();
+    return { status: 'verified' };
+  } catch (error) {
+    if (!teacherEmailAuthOperationIsCurrent(authGeneration, uid)) return { status: 'stale' };
+    const message = TeacherEmailAuthCore.safeAuthMessage('verification', error);
+    teacherAuthDialogState = { mode: 'signup', status: 'verification-sent', email: user.email || '', message: '', error: message };
+    renderTeacherAuthDialog();
+    return { status: 'error', message };
+  }
+}
+
+async function sendTeacherPasswordReset(event) {
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  const auth = firebase.auth();
+  const authGeneration = teacherAuthVersion;
+  const currentAtStart = auth.currentUser;
+  const uidAtStart = currentAtStart && currentAtStart.uid || '';
+  let email = '';
+  let error = null;
+  try {
+    email = TeacherEmailAuthCore.normalizeLogin({
+      email: teacherEmailAuthFormValue(event && event.currentTarget, 'email'), password: '12345678'
+    }).email;
+    await auth.sendPasswordResetEmail(email);
+  } catch (caught) {
+    error = caught;
+  }
+  const current = auth.currentUser;
+  if (teacherAuthVersion !== authGeneration || String(current && current.uid || '') !== String(uidAtStart)) {
+    return { status: 'stale' };
+  }
+  const message = TeacherEmailAuthCore.safeAuthMessage('reset', error);
+  teacherAuthDialogState = { mode: 'reset', status: 'reset-sent', email, message, error: '' };
+  renderTeacherAuthDialog();
+  return { status: 'reset-sent', message };
 }
 
 async function recoverPendingAllocationsForTeacher(owner) {
@@ -1648,6 +1905,7 @@ function rerenderEligibleTeacherHome(authGeneration, uid) {
 }
 
 async function applyTeacherUser(user) {
+  if (typeof clearTeacherAuthPasswords === 'function') clearTeacherAuthPasswords();
   const previousState = typeof appliedTeacherState !== 'undefined' && appliedTeacherState
     ? appliedTeacherState : teacherState;
   const previousUid = previousState && previousState.uid || '';
@@ -1684,7 +1942,7 @@ async function applyTeacherUser(user) {
     try { tokenResult = await user.getIdTokenResult(); } catch (error) { console.error(error); }
   }
   if (updateVersion !== teacherAuthVersion) return false;
-  const nextUser = AuthCore.isGoogleSignIn(tokenResult) ? user : null;
+  const nextUser = AuthCore.isSupportedTeacherSignIn(tokenResult) ? user : null;
   let nextAllowance = null;
   if (nextUser && nextUser.emailVerified) {
     const normalizedEmail = String(nextUser.email || '').trim().toLowerCase();
@@ -1784,9 +2042,9 @@ function setTeacherAllowance(allowance) {
 }
 
 function teacherAuthMessage(state) {
-  if (state.status === 'unverified') return 'Google 계정의 이메일 인증을 완료한 뒤 다시 시도해 주세요.';
-  if (state.status === 'unapproved') return '이 Google 계정은 교사 사용 승인을 받지 않았습니다.';
-  return '교사 Google 로그인이 필요합니다.';
+  if (state.status === 'unverified') return '교사 계정의 이메일 인증을 완료한 뒤 다시 시도해 주세요.';
+  if (state.status === 'unapproved') return '이 교사 계정은 사용 승인을 받지 않았습니다.';
+  return '교사 계정 로그인이 필요합니다.';
 }
 
 function showTeacherAuthError(error) {
@@ -1823,6 +2081,7 @@ async function signInTeacher() {
 }
 
 async function signOutTeacher() {
+  clearTeacherAuthPasswords();
   await firebase.auth().signOut();
   applyTeacherUser(null);
   if (location.hash !== '#/' && location.hash !== '') go('home');
@@ -1831,7 +2090,7 @@ async function signOutTeacher() {
 
 async function requireTeacher(next) {
   try {
-    if (!teacherUser) await signInTeacher();
+    if (!teacherUser) { openTeacherAuthDialog('login'); return; }
     if (!AuthCore.isTeacher(teacherState)) {
       alert(teacherAuthMessage(teacherState));
       return;
@@ -1850,7 +2109,7 @@ async function requireTeacher(next) {
 
 async function requireAdmin(next) {
   try {
-    if (!teacherUser) await signInTeacher();
+    if (!teacherUser) { openTeacherAuthDialog('login'); return; }
     if (!AuthCore.isAdmin(teacherState)) {
       alert('관리자 권한이 필요합니다.');
       return;
@@ -1938,6 +2197,7 @@ function parsePlayClassPlanRoute(queryString) {
 }
 
 function router() {
+  if (typeof clearTeacherAuthPasswords === 'function') clearTeacherAuthPasswords();
   if (!authReady) return;
   mkCloseQuestionPreview();
   runCleanups();
@@ -2003,7 +2263,7 @@ function screenHome() {
         '<p>선생님이 알려준 6자리 반 코드를 입력해 들어갑니다.</p></a>' +
       '<a class="home-card" href="#/admin">' +
         '<div class="ico">🔐</div><h3>관리자 통합 조회</h3>' +
-        '<p>전체 반의 응답과 점수를 학년·반·번호별로 모아서 봅니다. 승인된 Google 관리자 계정이 필요합니다.</p></a>' +
+        '<p>전체 반의 응답과 점수를 학년·반·번호별로 모아서 봅니다. 승인된 교사 관리자 계정이 필요합니다.</p></a>' +
     '</div>' +
     (canShowTeacherDashboard
       ? '<section id="teacher-dashboard" class="teacher-dashboard card" aria-live="polite"><div class="empty">오늘의 수업 현황을 불러오는 중…</div></section>'
@@ -2510,11 +2770,11 @@ function renderTeacherRequest(state) {
   const status = state.error
     ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>'
     : state.message ? '<div class="notice ok" role="status">' + esc(state.message) + '</div>' : '';
-  const identity = '<div class="card"><h2>Google 계정 확인</h2><div class="sub">이름과 이메일은 Google 계정에서 가져오며 신청 내용으로 바꿀 수 없습니다.</div>' +
+  const identity = '<div class="card"><h2>교사 계정 확인</h2><div class="sub">이름과 이메일은 현재 교사 계정에서 가져오며 신청 내용으로 바꿀 수 없습니다.</div>' +
     '<div><b>' + esc(draft.displayName) + '</b><br><span class="hint">' + esc(state.email) + '</span></div></div>';
   let body = '';
   if (!request) {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><p class="sub">공용 계정을 쓰지 않고, 지금 로그인한 Google 계정으로 교사 권한을 신청합니다.</p>' + status +
+    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><p class="sub">공용 계정을 쓰지 않고, 지금 로그인한 교사 계정으로 권한을 신청합니다.</p>' + status +
       '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
       '<div class="field"><label class="f" for="teacher-request-organization">소속 (선택)</label><input id="teacher-request-organization" name="organization" maxlength="120" value="' + esc(draft.organization) + '"' + (busy ? ' disabled' : '') + '></div>' +
       '<div class="field"><label class="f" for="teacher-request-note">메모 (선택)</label><textarea id="teacher-request-note" name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(draft.note) + '</textarea></div>' +
@@ -2531,7 +2791,7 @@ function renderTeacherRequest(state) {
       '<div class="field"><label class="f">메모 (선택)<textarea name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(request.note || '') + '</textarea></label></div>' +
       '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>다시 신청</button></form></div>';
   } else if (request.status === 'cancelled') {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice" role="status">신청이 취소되었습니다. 현재 Google 신원을 유지한 채 다시 신청할 수 있습니다.</div>' + status +
+    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice" role="status">신청이 취소되었습니다. 현재 교사 계정을 유지한 채 다시 신청할 수 있습니다.</div>' + status +
       '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
       '<div class="field"><label class="f">소속 (선택)<input name="organization" maxlength="120" value="' + esc(request.organization || '') + '"' + (busy ? ' disabled' : '') + '></label></div>' +
       '<div class="field"><label class="f">메모 (선택)<textarea name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(request.note || '') + '</textarea></label></div>' +
@@ -2878,7 +3138,7 @@ function openCollaboratorDialog(id) {
     '<div class="row" style="justify-content:space-between;align-items:center"><h2>공동 편집자 관리</h2><button class="btn sm" id="collab-close">닫기</button></div>' +
     '<p class="sub">승인된 교사는 콘텐츠를 편집하고 수업을 시작할 수 있습니다. 최대 20명입니다.</p>' +
     '<div id="collab-list">불러오는 중…</div>' +
-    '<form id="collab-add" class="row" style="margin-top:12px"><input id="collab-email" type="email" placeholder="교사 Google 이메일" required style="flex:1 1 240px"><button class="btn primary" type="submit">추가</button></form>' +
+    '<form id="collab-add" class="row" style="margin-top:12px"><input id="collab-email" type="email" placeholder="교사 계정 이메일" required style="flex:1 1 240px"><button class="btn primary" type="submit">추가</button></form>' +
     '<div id="collab-error" class="notice bad" style="display:none;margin-top:10px"></div></div>';
   document.body.appendChild(dialog);
   let closed = false;
@@ -8265,8 +8525,8 @@ function admTeacherAccounts() {
     }).join('');
     const maintenanceWarning = typeof trashMaintenance !== 'undefined' && trashMaintenance && trashMaintenance.warning
       ? '<div class="notice bad">휴지통 자동 정리 실패' + (trashMaintenance.failedSetId ? ' (' + esc(trashMaintenance.failedSetId) + ')' : '') + ': ' + esc(trashMaintenance.warning) + ' <button class="btn sm" onclick="runTrashMaintenancePage()">재시도</button></div>' : '';
-    return '<div class="card"><h2>승인 교사 계정</h2><p class="sub">승인된 Google 계정만 교사 화면을 사용할 수 있습니다. 현재 관리자 계정은 자기 역할 하향·비활성화가 잠겨 있습니다.</p>' + maintenanceWarning +
-      '<div class="notice info">신규 교사는 권한 신청 탭에서 정확한 Google UID 신청을 승인하세요. 이메일만으로 계정을 추가할 수 없습니다.</div>' +
+    return '<div class="card"><h2>승인 교사 계정</h2><p class="sub">승인된 교사 계정만 교사 화면을 사용할 수 있습니다. 현재 관리자 계정은 자기 역할 하향·비활성화가 잠겨 있습니다.</p>' + maintenanceWarning +
+      '<div class="notice info">신규 교사는 권한 신청 탭에서 정확한 교사 계정 UID 신청을 승인하세요. 이메일만으로 계정을 추가할 수 없습니다.</div>' +
       '<div id="adm-teacher-error" class="notice bad" style="display:none"></div><div id="adm-teacher-list">' + (rows || '<div class="empty">등록된 계정이 없습니다.</div>') + '</div></div>';
   }).catch(error => {
     state.loadingAllowances = false;
@@ -8943,7 +9203,7 @@ function admManage(d) {
       '<h2>안내</h2>' +
       '<div style="font-size:13.5px;color:var(--ink-2);line-height:1.9">' +
         '· 이 화면은 학생 개인정보(학년·반·번호·이름)를 다룹니다. 공용 PC에서는 반드시 로그아웃하세요.<br>' +
-        '· 관리자 권한은 검증된 Google 계정과 비공개 승인 목록, Firestore 규칙으로 확인합니다.<br>' +
+        '· 관리자 권한은 검증된 교사 계정과 비공개 승인 목록, Firestore 규칙으로 확인합니다.<br>' +
         '· 세션·응답은 Cloud Firestore의 <span class="mono">sessions/</span> 컬렉션에 저장됩니다.' +
       '</div>' +
     '</div>';
@@ -8993,7 +9253,7 @@ function admExportStudents() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   부팅 — Google 교사 인증 상태 확인 후 라우팅
+   부팅 — 교사 계정 인증 상태 확인 후 라우팅
 
    교사 화면은 현재 Firebase 인증 상태와 비공개 승인 문서를 확인합니다.
    학생 익명 계정은 반 코드 참여 흐름에서만 필요할 때 발급합니다.

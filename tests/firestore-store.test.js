@@ -9294,7 +9294,7 @@ test('타이머 자동 제출은 마감 잠금이 시작된 순간에도 선택 
   assert.equal(sent, 1);
 });
 
-test('a password session linked to Google is removed from the teacher UI state', async () => {
+test('a verified password session remains eligible for the protected allowance probe', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const priorClock = {};
   const context = {
@@ -9321,10 +9321,209 @@ test('a password session linked to Google is removed from the teacher UI state',
     }
   });
 
-  assert.equal(context.teacherUser, null);
+  assert.equal(context.teacherUser.uid, 'password-user');
+  assert.equal(context.teacherState.status, 'teacher');
   assert.equal(context.clockUserId, '');
   assert.equal(context.clockPromise, null);
   assert.equal(context.clockPromiseUid, '');
+});
+
+function teacherEmailAuthTestRuntime(overrides = {}) {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const passwordInputs = [{ value: '' }, { value: '' }];
+  const dialog = {
+    open: false,
+    innerHTML: '',
+    showModal() { this.open = true; },
+    close() { this.open = false; },
+    removeAttribute(name) { if (name === 'open') this.open = false; },
+    querySelectorAll(selector) { return selector === 'input[type="password"]' ? passwordInputs : []; },
+    querySelector() { return null; }
+  };
+  const context = {
+    teacherAuthVersion: 3,
+    teacherAuthDialogState: { mode: 'login', status: 'idle', email: '', message: '', error: '' },
+    TeacherEmailAuthCore: require('../teacher-email-auth-core.js'),
+    esc(value) {
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    },
+    document: {
+      getElementById(id) { return id === 'teacher-auth-dialog' ? dialog : null; },
+      querySelectorAll(selector) { return dialog.querySelectorAll(selector); }
+    },
+    firebase: { auth() { throw new Error('auth fake required'); } },
+    applyTeacherUser() { throw new Error('apply fake required'); },
+    console,
+    ...overrides
+  };
+  loadStageFunctions([
+    'teacherAuthDialogMarkup', 'renderTeacherAuthDialog', 'teacherEmailAuthFormValue',
+    'teacherEmailAuthOperationIsCurrent', 'clearTeacherAuthPasswords',
+    'closeTeacherAuthDialog', 'openTeacherAuthDialog', 'submitTeacherEmailSignup',
+    'submitTeacherEmailLogin', 'sendTeacherVerificationEmail',
+    'confirmTeacherEmailVerification', 'sendTeacherPasswordReset'
+  ], context);
+  return { context, dialog, passwordInputs };
+}
+
+function authForm(values) {
+  return {
+    preventDefault() {},
+    currentTarget: {
+      elements: Object.fromEntries(Object.entries(values).map(([name, value]) => [name, { value }]))
+    }
+  };
+}
+
+test('email signup creates the user, updates the profile, sends verification, and does not show request UI yet', async () => {
+  const calls = [];
+  let teacherRequestRendered = false;
+  const user = {
+    uid: 'email-teacher', email: 'teacher@example.com',
+    async updateProfile(profile) { calls.push('profile:' + profile.displayName); },
+    async sendEmailVerification() { calls.push('verify'); }
+  };
+  const auth = {
+    currentUser: user,
+    async createUserWithEmailAndPassword(email, password) {
+      assert.equal(email, 'teacher@example.com');
+      assert.equal(password, '12345678');
+      calls.push('create');
+      return { user };
+    }
+  };
+  const { context } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    screenTeacherRequest() { teacherRequestRendered = true; }
+  });
+
+  const result = await context.submitTeacherEmailSignup(authForm({
+    displayName: ' 홍교사 ', email: 'Teacher@Example.com', password: '12345678'
+  }));
+
+  assert.deepEqual(calls, ['create', 'profile:홍교사', 'verify']);
+  assert.equal(result.status, 'verification-sent');
+  assert.equal(teacherRequestRendered, false);
+  assert.match(context.teacherAuthDialogState.message, /인증/);
+});
+
+test('verification confirmation reloads and force-refreshes the token before applying the user', async () => {
+  const calls = [];
+  const user = {
+    uid: 'email-teacher', email: 'teacher@example.com', emailVerified: false,
+    async reload() { calls.push('reload'); this.emailVerified = true; },
+    async getIdToken(forceRefresh) { calls.push('token:' + forceRefresh); }
+  };
+  const auth = { currentUser: user };
+  const { context } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    async applyTeacherUser(applied) { assert.equal(applied, user); calls.push('apply'); }
+  });
+
+  const result = await context.confirmTeacherEmailVerification();
+
+  assert.deepEqual(calls, ['reload', 'token:true', 'apply']);
+  assert.equal(result.status, 'verified');
+});
+
+test('password reset returns the same safe text for success and a missing account', async () => {
+  const outcomes = [null, Object.assign(new Error('missing'), { code: 'auth/user-not-found' })];
+  const messages = [];
+  for (const outcome of outcomes) {
+    const auth = {
+      async sendPasswordResetEmail(email) {
+        assert.equal(email, 'teacher@example.com');
+        if (outcome) throw outcome;
+      }
+    };
+    const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+    const result = await context.sendTeacherPasswordReset(authForm({ email: 'Teacher@Example.com' }));
+    messages.push(result.message);
+  }
+  assert.equal(messages[0], messages[1]);
+  assert.equal(messages[0], '입력한 이메일을 확인해 주세요.');
+});
+
+test('provider collision never applies a teacher user or probes an allowance', async () => {
+  let applied = 0;
+  let allowanceProbes = 0;
+  const collision = Object.assign(new Error('collision'), {
+    code: 'auth/account-exists-with-different-credential'
+  });
+  const auth = {
+    currentUser: null,
+    async signInWithEmailAndPassword() { throw collision; }
+  };
+  const { context } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    async applyTeacherUser() { applied += 1; },
+    store: { async probeTeacherAllowance() { allowanceProbes += 1; } }
+  });
+
+  const result = await context.submitTeacherEmailLogin(authForm({
+    email: 'teacher@example.com', password: '12345678'
+  }));
+
+  assert.equal(result.status, 'error');
+  assert.match(result.message, /기존 로그인 방식/);
+  assert.equal(applied, 0);
+  assert.equal(allowanceProbes, 0);
+});
+
+test('closing the teacher auth dialog clears every password input', () => {
+  const { context, dialog, passwordInputs } = teacherEmailAuthTestRuntime();
+  dialog.open = true;
+  passwordInputs[0].value = 'first-secret';
+  passwordInputs[1].value = 'second-secret';
+
+  context.closeTeacherAuthDialog();
+
+  assert.equal(dialog.open, false);
+  assert.deepEqual(passwordInputs.map(input => input.value), ['', '']);
+});
+
+test('verification resend failure is rendered as an accessible error', () => {
+  const { context } = teacherEmailAuthTestRuntime();
+  context.teacherAuthDialogState = {
+    mode: 'signup', status: 'verification-sent', email: 'teacher@example.com',
+    message: '', error: '인증 메일을 다시 보내지 못했습니다.'
+  };
+
+  const markup = context.teacherAuthDialogMarkup();
+
+  assert.match(markup, /role="alert"/);
+  assert.match(markup, /인증 메일을 다시 보내지 못했습니다/);
+});
+
+test('auth generation change prevents a stale signup continuation from rendering verification UI', async () => {
+  let finishVerification;
+  const user = {
+    uid: 'email-teacher', email: 'teacher@example.com',
+    async updateProfile() {},
+    sendEmailVerification() { return new Promise(resolve => { finishVerification = resolve; }); }
+  };
+  const auth = {
+    currentUser: user,
+    async createUserWithEmailAndPassword() { return { user }; }
+  };
+  const { context, dialog } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+  dialog.innerHTML = 'original dialog';
+  const pending = context.submitTeacherEmailSignup(authForm({
+    displayName: '홍교사', email: 'teacher@example.com', password: '12345678'
+  }));
+  for (let turn = 0; turn < 10 && !finishVerification; turn += 1) await Promise.resolve();
+  assert.equal(typeof finishVerification, 'function');
+  context.teacherAuthVersion += 1;
+  auth.currentUser = { uid: 'replacement-user' };
+  finishVerification();
+
+  const result = await pending;
+
+  assert.equal(result.status, 'stale');
+  assert.equal(dialog.innerHTML, 'original dialog');
+  assert.notEqual(context.teacherAuthDialogState.status, 'verification-sent');
 });
 
 test('auth generation 교체는 token 확인을 기다리지 않고 현재 heartbeat timer를 즉시 중단한다', async () => {

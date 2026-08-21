@@ -258,15 +258,31 @@ test('README는 자동 검증과 아직 닫힌 프로덕션 배포 게이트를 
   assert.doesNotMatch(readme, /Firebase 콘솔 규칙 게시, 기존 세트 이전[^\n]*검증을 완료했습니다/);
 });
 
-test('사용자 안내는 Google 관리자 역할과 세트 소유권을 정확히 설명한다', () => {
+test('사용자 안내는 교사 계정 관리자 역할과 세트 소유권을 정확히 설명한다', () => {
   const html = read('index.html');
   const readme = read('README.md');
 
-  assert.match(html, /관리자 통합 조회[\s\S]*?승인된 Google 관리자 계정이 필요합니다/);
+  assert.match(html, /관리자 통합 조회[\s\S]*?승인된 교사 관리자 계정이 필요합니다/);
   assert.doesNotMatch(html, /관리자 통합 조회[\s\S]{0,200}?비밀번호가 필요합니다/);
-  assert.match(html, /부팅 — Google 교사 인증 상태 확인 후 라우팅/);
+  assert.match(html, /부팅 — 교사 계정 인증 상태 확인 후 라우팅/);
   assert.doesNotMatch(html, /교사도 학생도 아무것도 로그인하지 않습니다/);
   assert.match(readme, /\| ✏️ 편집 \| 소유자 또는 소유자가 지정한 공동 편집자가 내용을 고칩니다/);
+});
+
+test('교사 인증은 Google과 이메일 흐름을 한 접근 가능한 dialog에 제공한다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /<dialog id="teacher-auth-dialog"[^>]*aria-labelledby="teacher-auth-title"/);
+  assert.match(html, /Google로 로그인/);
+  assert.match(html, /이메일로 로그인/);
+  assert.match(html, /이메일로 가입/);
+  assert.match(html, /비밀번호 재설정/);
+  assert.match(html, /function openTeacherAuthDialog\(mode\)/);
+  assert.match(html, /function submitTeacherEmailSignup\(event\)/);
+  assert.match(html, /function submitTeacherEmailLogin\(event\)/);
+  assert.match(html, /function sendTeacherVerificationEmail\(\)/);
+  assert.match(html, /function confirmTeacherEmailVerification\(\)/);
+  assert.match(html, /function sendTeacherPasswordReset\(event\)/);
 });
 
 test('counter migration 운영 문서는 staged lock migration strict unlock 순서를 고정한다', () => {
