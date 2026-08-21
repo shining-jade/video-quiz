@@ -105,6 +105,15 @@ test('email authentication validation core loads before the application script',
   assert.ok(coreIndex < applicationIndex, 'email authentication validation core must load before inline application code');
 });
 
+test('public quiz library projection core loads before the application script', () => {
+  const html = read('index.html');
+  const coreIndex = html.indexOf('<script src="public-quiz-library-core.js"></script>');
+  const applicationIndex = html.indexOf('<script>');
+
+  assert.ok(coreIndex >= 0, 'public quiz library projection core must be included');
+  assert.ok(coreIndex < applicationIndex, 'public quiz library projection core must load before inline application code');
+});
+
 test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
   const html = read('index.html');
   const inlineScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
