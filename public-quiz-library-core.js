@@ -10,12 +10,24 @@
     'title', 'description', 'authorDisplayName', 'videos', 'settings',
     'videoCount', 'questionCount', 'imageCount', 'publishedAt', 'updatedAt'
   ]);
+  const PUBLIC_PARENT_KEYS = Object.freeze([
+    'publicationId', 'sourceSetId', 'status', 'moderationStatus', 'revision',
+    'title', 'description', 'authorDisplayName',
+    'revealMode', 'limitSec', 'revealDelaySec', 'autoPause',
+    'videoCount', 'questionCount', 'imageCount', 'publishedAt', 'updatedAt'
+  ]);
   const VIDEO_KEYS = ['videoId', 'videoUrl', 'startSec', 'endSec', 'questions'];
   const QUESTION_KEYS = [
     'type', 't', 'text', 'choices', 'answer', 'answers', 'accept', 'imgUp', 'imgUrl',
     'explain', 'explainImgUp', 'explainImgUrl', 'limitSec'
   ];
   const SETTINGS_KEYS = ['revealMode', 'limitSec', 'revealDelaySec', 'autoPause'];
+  const VIDEO_PART_KEYS = [
+    'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec', 'revision', 'buildToken'
+  ];
+  const QUESTION_PART_KEYS = QUESTION_KEYS.concat([
+    'questionKey', 'videoKey', 'revision', 'buildToken'
+  ]);
   const STATUSES = new Set(['building', 'published', 'withdrawn', 'moderated']);
   const MODERATION_STATUSES = new Set(['clear', 'moderated']);
   const QUESTION_TYPES = new Set(['choice', 'multi', 'ox', 'short', 'long']);
@@ -72,9 +84,16 @@
     return cleaned;
   }
 
-  function copyIfString(source, key, max) {
+  function canonicalHttps(value) {
+    return typeof value === 'string'
+      ? value.replace(/^https:\/\//i, 'https://')
+      : value;
+  }
+
+  function copyIfString(source, key, max, https) {
     if (!own(source, key) || source[key] === undefined || source[key] === null) return undefined;
-    return cleanText(source[key], key, 1, max);
+    const value = cleanText(source[key], key, 1, max);
+    return https ? canonicalHttps(value) : value;
   }
 
   function projectionSettings(source) {
@@ -107,7 +126,9 @@
       if (own(source, key)) question[key] = source[key] === true;
     });
     ['imgUrl', 'explain', 'explainImgUrl'].forEach(key => {
-      const value = copyIfString(source, key, key === 'explain' ? MAX_TEXT : MAX_URL);
+      const value = copyIfString(
+        source, key, key === 'explain' ? MAX_TEXT : MAX_URL, key !== 'explain'
+      );
       if (value !== undefined) question[key] = value;
     });
     if (own(source, 'limitSec')) question.limitSec = source.limitSec;
@@ -120,7 +141,7 @@
     if (!isObject(source)) throw new Error('video must be an object.');
     const video = {
       videoId: source.videoId,
-      videoUrl: source.videoUrl,
+      videoUrl: canonicalHttps(source.videoUrl),
       startSec: source.startSec === undefined ? 0 : source.startSec,
       endSec: source.endSec === undefined || source.endSec === '' ? null : source.endSec,
       questions: Array.isArray(source.questions) ? source.questions.map(projectionQuestion) : []
@@ -271,7 +292,9 @@
       if (own(value, key) && typeof value[key] !== 'boolean') errors.push(path + '.' + key + ' must be boolean.');
     });
     ['imgUrl', 'explainImgUrl'].forEach(key => {
-      if (own(value, key) && !validateString(value[key], path + '.' + key, 1, MAX_URL, errors)) return;
+      if (!own(value, key)) return;
+      if (!validateString(value[key], path + '.' + key, 1, MAX_URL, errors)) return;
+      if (!/^https:\/\//.test(value[key])) errors.push(path + '.' + key + ' must use canonical https://.');
     });
     if (own(value, 'explain')) validateString(value.explain, path + '.explain', 1, MAX_TEXT, errors);
     if (own(value, 'limitSec')) validateNumber(value.limitSec, path + '.limitSec', 0, 600, errors);
@@ -365,10 +388,212 @@
     return { ok: errors.length === 0, errors };
   }
 
+  function parentSettings(value) {
+    return {
+      revealMode: value && value.revealMode,
+      limitSec: value && value.limitSec,
+      revealDelaySec: value && value.revealDelaySec,
+      autoPause: value && value.autoPause
+    };
+  }
+
+  function validateParent(value) {
+    const errors = [];
+    if (!validateUnknownKeys(value, PUBLIC_PARENT_KEYS, 'parent', errors)) {
+      return { ok: false, errors };
+    }
+    ['publicationId', 'sourceSetId'].forEach(key => {
+      if (!canonicalId(value[key])) errors.push(key + ' must be canonical.');
+    });
+    if (value.publicationId !== value.sourceSetId) {
+      errors.push('publicationId and sourceSetId must match.');
+    }
+    if (!STATUSES.has(value.status)) errors.push('status is invalid.');
+    if (!MODERATION_STATUSES.has(value.moderationStatus)) errors.push('moderationStatus is invalid.');
+    validateString(value.revision, 'revision', 1, 200, errors);
+    validateString(value.title, 'title', 1, MAX_TITLE, errors);
+    validateString(value.description, 'description', 0, MAX_DESCRIPTION, errors);
+    validateString(value.authorDisplayName, 'authorDisplayName', 1, MAX_AUTHOR, errors);
+    errors.push(...validateSettings(parentSettings(value), 'settings'));
+    validateNumber(value.videoCount, 'videoCount', 1, MAX_VIDEOS, errors);
+    validateNumber(value.questionCount, 'questionCount', 1, MAX_QUESTIONS, errors);
+    validateNumber(value.imageCount, 'imageCount', 0, Number.MAX_SAFE_INTEGER, errors);
+    const publishedAtMs = value.publishedAt === null ? null : timestampMillis(value.publishedAt);
+    const updatedAtMs = timestampMillis(value.updatedAt);
+    if (value.publishedAt !== null && publishedAtMs === null) errors.push('publishedAt is invalid.');
+    if (updatedAtMs === null) errors.push('updatedAt is invalid.');
+    if (value.status !== 'building' && value.publishedAt === null) {
+      errors.push('visible history requires publishedAt.');
+    }
+    if (publishedAtMs !== null && updatedAtMs !== null && updatedAtMs < publishedAtMs) {
+      errors.push('updatedAt cannot precede publishedAt.');
+    }
+    if ((value.status === 'moderated') !== (value.moderationStatus === 'moderated')) {
+      errors.push('moderationStatus must match status.');
+    }
+    return { ok: errors.length === 0, errors };
+  }
+
+  function validateBinding(value, path, errors) {
+    if (typeof value.revision !== 'string' || !value.revision.trim() || value.revision.length > 200) {
+      errors.push(path + '.revision is invalid.');
+    }
+    if (typeof value.buildToken !== 'string' || !value.buildToken || value.buildToken.length > 200) {
+      errors.push(path + '.buildToken is invalid.');
+    }
+  }
+
+  function validateVideoPart(value, key) {
+    const errors = [];
+    if (!validateUnknownKeys(value, VIDEO_PART_KEYS, 'video', errors)) return errors;
+    if (!/^v(0|[1-9][0-9]*)$/.test(key) || value.videoKey !== key) {
+      errors.push('video.videoKey is invalid.');
+    }
+    validateBinding(value, 'video', errors);
+    const video = {
+      videoId: value.videoId,
+      videoUrl: value.videoUrl,
+      startSec: value.startSec,
+      endSec: value.endSec,
+      questions: [{ type: 'long', t: value.startSec, text: 'binding', choices: [], answer: 0 }]
+    };
+    errors.push(...validateVideo(video, 'video').filter(error => !/questions\[0\]/.test(error)));
+    return errors;
+  }
+
+  function validateQuestionPart(value, key) {
+    const errors = [];
+    if (!validateUnknownKeys(value, QUESTION_PART_KEYS, 'question', errors)) return errors;
+    const match = /^v(0|[1-9][0-9]*)q(0|[1-9][0-9]*)$/.exec(key);
+    if (!match || value.questionKey !== key || value.videoKey !== (match && 'v' + match[1])) {
+      errors.push('question binding key is invalid.');
+    }
+    validateBinding(value, 'question', errors);
+    const question = Object.fromEntries(QUESTION_KEYS
+      .filter(name => own(value, name)).map(name => [name, value[name]]));
+    errors.push(...validateQuestion(question, 'question'));
+    return errors;
+  }
+
   function requireProjection(value) {
     const result = validateProjection(value);
     if (!result.ok) throw new Error(result.errors.join(' '));
     return value;
+  }
+
+  function requireParent(value) {
+    const result = validateParent(value);
+    if (!result.ok) throw new Error(result.errors.join(' '));
+    return value;
+  }
+
+  function flattenProjection(projection, buildToken) {
+    const value = requireProjection(projection);
+    const token = cleanText(buildToken, 'buildToken', 1, 200);
+    const parent = {
+      publicationId: value.publicationId,
+      sourceSetId: value.sourceSetId,
+      status: value.status,
+      moderationStatus: value.moderationStatus,
+      revision: value.revision,
+      title: value.title,
+      description: value.description,
+      authorDisplayName: value.authorDisplayName,
+      revealMode: value.settings.revealMode,
+      limitSec: value.settings.limitSec,
+      revealDelaySec: value.settings.revealDelaySec,
+      autoPause: value.settings.autoPause,
+      videoCount: value.videoCount,
+      questionCount: value.questionCount,
+      imageCount: value.imageCount,
+      publishedAt: value.publishedAt,
+      updatedAt: value.updatedAt
+    };
+    const videos = {};
+    const questions = {};
+    value.videos.forEach((video, videoIndex) => {
+      const videoKey = 'v' + videoIndex;
+      videos[videoKey] = {
+        videoKey,
+        videoId: video.videoId,
+        videoUrl: video.videoUrl,
+        startSec: video.startSec,
+        endSec: video.endSec,
+        revision: value.revision,
+        buildToken: token
+      };
+      video.questions.forEach((question, questionIndex) => {
+        const questionKey = videoKey + 'q' + questionIndex;
+        questions[questionKey] = {
+          ...Object.fromEntries(QUESTION_KEYS
+            .filter(name => own(question, name)).map(name => [name, question[name]])),
+          questionKey,
+          videoKey,
+          revision: value.revision,
+          buildToken: token
+        };
+      });
+    });
+    return { parent: requireParent(parent), videos, questions };
+  }
+
+  function assembleProjection(parentValue, videoValues, questionValues) {
+    const parent = requireParent(parentValue);
+    const videoEntries = Object.entries(videoValues || {});
+    const questionEntries = Object.entries(questionValues || {});
+    if (videoEntries.length !== parent.videoCount) throw new Error('video count mismatch.');
+    if (questionEntries.length !== parent.questionCount) throw new Error('question count mismatch.');
+    const videos = videoEntries.map(([key, value]) => {
+      const errors = validateVideoPart(value, key);
+      if (errors.length || value.revision !== parent.revision) {
+        throw new Error((errors.length ? errors : ['video revision mismatch.']).join(' '));
+      }
+      return [Number(key.slice(1)), key, value];
+    }).sort((left, right) => left[0] - right[0]);
+    videos.forEach(([index], position) => {
+      if (index !== position) throw new Error('video keys must be contiguous.');
+    });
+    const groupedQuestions = new Map(videos.map(([, key]) => [key, []]));
+    questionEntries.forEach(([key, value]) => {
+      const errors = validateQuestionPart(value, key);
+      if (errors.length || value.revision !== parent.revision || !groupedQuestions.has(value.videoKey)) {
+        throw new Error((errors.length ? errors : ['question revision or video binding mismatch.']).join(' '));
+      }
+      const index = Number(key.slice(key.indexOf('q') + 1));
+      groupedQuestions.get(value.videoKey).push([index, value]);
+    });
+    const reconstructedVideos = videos.map(([, key, video]) => {
+      const parts = groupedQuestions.get(key).sort((left, right) => left[0] - right[0]);
+      if (!parts.length) throw new Error('each video must contain a question.');
+      parts.forEach(([index], position) => {
+        if (index !== position) throw new Error('question keys must be contiguous.');
+      });
+      return {
+        videoId: video.videoId,
+        videoUrl: video.videoUrl,
+        startSec: video.startSec,
+        endSec: video.endSec,
+        questions: parts.map(([, question]) => Object.fromEntries(QUESTION_KEYS
+          .filter(name => own(question, name)).map(name => [name, question[name]])))
+      };
+    });
+    return requireProjection({
+      publicationId: parent.publicationId,
+      sourceSetId: parent.sourceSetId,
+      status: parent.status,
+      moderationStatus: parent.moderationStatus,
+      revision: parent.revision,
+      title: parent.title,
+      description: parent.description,
+      authorDisplayName: parent.authorDisplayName,
+      videos: reconstructedVideos,
+      settings: parentSettings(parent),
+      videoCount: parent.videoCount,
+      questionCount: parent.questionCount,
+      imageCount: parent.imageCount,
+      publishedAt: parent.publishedAt,
+      updatedAt: parent.updatedAt
+    });
   }
 
   function copyPatch(projection) {
@@ -385,7 +610,8 @@
   }
 
   function publicSummary(projection) {
-    const value = requireProjection(projection);
+    const parentValidation = validateParent(projection);
+    const value = parentValidation.ok ? projection : requireProjection(projection);
     return {
       publicationId: value.publicationId,
       title: value.title,
@@ -397,5 +623,15 @@
     };
   }
 
-  return { PUBLIC_KEYS, buildProjection, validateProjection, copyPatch, publicSummary };
+  return {
+    PUBLIC_KEYS,
+    PUBLIC_PARENT_KEYS,
+    buildProjection,
+    validateProjection,
+    validateParent,
+    flattenProjection,
+    assembleProjection,
+    copyPatch,
+    publicSummary
+  };
 });

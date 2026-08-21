@@ -207,7 +207,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
     return value;
   }
 
-  function querySnapshot(path, source = documents, filters = []) {
+  function querySnapshot(path, source = documents, filters = [], collectionGroup = false) {
     const limit = filters.find(filter => filter.type === 'limit');
     const order = filters.find(filter => filter.type === 'orderBy');
     const startAfter = filters.find(filter => filter.type === 'startAfter');
@@ -221,7 +221,13 @@ function makeFirestoreFake(initial = {}, options = {}) {
       if (operator === '<') return a < b;
       return false;
     };
-    const docs = collectionDocs(path, source).filter(document =>
+    const sourceDocs = collectionGroup
+      ? [...source.keys()].filter(key => {
+          const segments = key.split('/');
+          return segments.length >= 2 && segments.at(-2) === path;
+        }).sort().map(key => docSnapshot(key, source))
+      : collectionDocs(path, source);
+    const docs = sourceDocs.filter(document =>
       filters.every(filter => ['limit', 'orderBy'].includes(filter.type) ||
         filter.type === 'startAfter' ||
         matches(document.get(filter.field), filter.operator, filter.value))
@@ -320,28 +326,28 @@ function makeFirestoreFake(initial = {}, options = {}) {
     };
   }
 
-  function collectionRef(path, filters = []) {
+  function collectionRef(path, filters = [], collectionGroup = false) {
     return {
       id: path.split('/').at(-1),
       path,
       async get(optionsArg) {
         calls.push({ operation: 'getCollection', path, filters: clone(filters), options: clone(optionsArg) });
-        return querySnapshot(path, documents, filters);
+        return querySnapshot(path, documents, filters, collectionGroup);
       },
       where(field, operator, value) {
         calls.push({ operation: 'where', path, field, operator, value: clone(value) });
-        return collectionRef(path, filters.concat({ field, operator, value }));
+        return collectionRef(path, filters.concat({ field, operator, value }), collectionGroup);
       },
       limit(value) {
-        return collectionRef(path, filters.concat({ type: 'limit', value }));
+        return collectionRef(path, filters.concat({ type: 'limit', value }), collectionGroup);
       },
       orderBy(field, direction) {
         calls.push({ operation: 'orderBy', path, field, direction: direction || 'asc' });
-        return collectionRef(path, filters.concat({ type: 'orderBy', field, direction: direction || 'asc' }));
+        return collectionRef(path, filters.concat({ type: 'orderBy', field, direction: direction || 'asc' }), collectionGroup);
       },
       startAfter(...values) {
         calls.push({ operation: 'startAfter', path, values: clone(values) });
-        return collectionRef(path, filters.concat({ type: 'startAfter', values }));
+        return collectionRef(path, filters.concat({ type: 'startAfter', values }), collectionGroup);
       },
       onSnapshot(next, error) {
         return addListener(collectionListeners, path, next, error, querySnapshot);
@@ -352,6 +358,10 @@ function makeFirestoreFake(initial = {}, options = {}) {
   const db = {
     doc: docRef,
     collection: collectionRef,
+    collectionGroup(path) {
+      calls.push({ operation: 'collectionGroup', path });
+      return collectionRef(path, [], true);
+    },
     batch() {
       const operations = [];
       return {
@@ -2396,16 +2406,59 @@ test('세트 목록은 활성 query와 소유자 휴지통 query를 분리한다
   const fake = makeFirestoreFake({
     'quiz_sets/active': { ownerUid: 'owner', trashedAt: null, purgeStartedAt: null, lifecycleState: 'active' },
     'quiz_sets/trash': { ownerUid: 'owner', trashedAt: 1, lifecycleState: 'trashed' },
-    'quiz_sets/other-trash': { ownerUid: 'other', trashedAt: 1 }
+    'quiz_sets/other-trash': {
+      ownerUid: 'other', trashedAt: 1, lifecycleState: 'trashed'
+    }
   });
   const store = createStore(fake);
-  assert.deepEqual((await store.listQuizSets()).map(set => set.id), ['active']);
+  await assert.rejects(
+    () => store.listQuizSets({ role: 'teacher' }),
+    /ownerUid|소유자/
+  );
+  assert.deepEqual((await store.listQuizSets({ ownerUid: 'owner', role: 'teacher' }))
+    .map(set => set.id), ['active']);
+  assert.ok(fake.calls().some(call => call.operation === 'where' &&
+    call.path === 'quiz_sets' && call.field === 'ownerUid' && call.value === 'owner'));
   await assert.rejects(
     () => store.listQuizSets({ ownerUid: 'owner', includeTrash: true }),
     /휴지통과 정리 중/,
   );
   assert.deepEqual((await store.listTrashQuizSets('owner', 'trashed'))
     .map(set => set.id), ['trash']);
+  assert.deepEqual((await store.listTrash({ role: 'admin' }))
+    .map(set => set.id).sort(), ['other-trash', 'trash']);
+});
+
+test('공동편집 세트 discovery는 exact collaborator email collection-group 결과만 direct get한다', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/shared': { ownerUid: 'owner', lifecycleState: 'active', title: '공유' },
+    'quiz_sets/shared/collaborators/teacher@school.kr': {
+      email: 'teacher@school.kr', addedByUid: 'owner', addedAt: new Timestamp(1)
+    },
+    'quiz_sets/own': { ownerUid: 'teacher', lifecycleState: 'active', title: '내 것' },
+    'quiz_sets/own/collaborators/teacher@school.kr': {
+      email: 'teacher@school.kr', addedByUid: 'teacher', addedAt: new Timestamp(1)
+    },
+    'quiz_sets/hidden': { ownerUid: 'owner', lifecycleState: 'trashed', title: '휴지통' },
+    'quiz_sets/hidden/collaborators/teacher@school.kr': {
+      email: 'teacher@school.kr', addedByUid: 'owner', addedAt: new Timestamp(1)
+    },
+    'quiz_sets/shared/collaborators/other@school.kr': {
+      email: 'other@school.kr', addedByUid: 'owner', addedAt: new Timestamp(1)
+    }
+  });
+  const store = createStore(fake);
+
+  const shared = await store.listSharedQuizSets({
+    uid: 'teacher', email: 'teacher@school.kr', role: 'teacher'
+  });
+
+  assert.deepEqual(shared.map(set => set.id), ['shared']);
+  assert.ok(fake.calls().some(call => call.operation === 'collectionGroup' &&
+    call.path === 'collaborators'));
+  assert.ok(fake.calls().some(call => call.operation === 'where' &&
+    call.path === 'collaborators' && call.field === 'email' &&
+    call.value === 'teacher@school.kr'));
 });
 
 test('사본은 공동 편집·휴지통 상태를 물려받지 않고 활성 빈 상태로 시작한다', async () => {
@@ -2706,7 +2759,7 @@ test('세트 목록과 단건 읽기는 문서 ID를 우선하고 문항 배열�
   });
   const store = createStore(fake);
 
-  assert.deepEqual(await store.listQuizSets(), [{
+  assert.deepEqual(await store.listQuizSets({ role: 'admin', allowAdminAll: true }), [{
     id: 'set1',
     title: '첫 세트',
     trashedAt: null,
@@ -2790,7 +2843,7 @@ test('세트 날짜 Timestamp는 기존 화면과 내보내기가 쓰는 밀리�
   });
   const store = createStore(fake);
 
-  assert.deepEqual(await store.listQuizSets(), [{
+  assert.deepEqual(await store.listQuizSets({ role: 'admin', allowAdminAll: true }), [{
     id: 'set1', title: '날짜 세트', lifecycleState: 'active',
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_100_000
@@ -3871,6 +3924,7 @@ test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면�
   const app = { innerHTML: '' };
   const context = {
     setList: null,
+    teacherState: null,
     store: { listQuizSets: () => new Promise(resolve => { finishList = resolve; }) },
     onCleanup(fn) { cleanup = fn; },
     APP() { return app; },
@@ -3890,6 +3944,34 @@ test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면�
 
   assert.equal(app.innerHTML, '<main>새 화면</main>');
   assert.equal(rendered, 0);
+});
+
+test('세트 목록 화면은 소유자 query와 공동편집 shared discovery를 현재 교사로 제한한다', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const calls = [];
+  const app = { innerHTML: '' };
+  const teacher = { uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher' };
+  const context = {
+    setList: null,
+    teacherState: teacher,
+    store: {
+      async listQuizSets(options) { calls.push(['owned', clone(options)]); return []; },
+      async listSharedQuizSets(actor) { calls.push(['shared', clone(actor)]); return []; },
+      async listTrash() { return []; }
+    },
+    onCleanup() {}, APP() { return app; }, topbar() { return '<nav></nav>'; },
+    normSet(value) { return value; }, renderSetList() {}, esc(value) { return value; },
+    console
+  };
+  vm.runInNewContext(extractFunction(html, 'screenSetList'), context);
+
+  context.screenSetList();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(Object.fromEntries(calls), {
+    owned: { ownerUid: teacher.uid, role: teacher.role },
+    shared: teacher
+  });
 });
 
 test('세트 목록 행은 신구 영상 구조와 표시 상태를 안전하게 렌더링한다', () => {
@@ -14075,7 +14157,7 @@ function publicLibrarySource(overrides = {}) {
   };
 }
 
-function publicLibraryProjection(id = 'set-1', options = {}) {
+function publicLibraryFullProjection(id = 'set-1', options = {}) {
   const revision = options.revision || 'rev-1';
   const source = publicLibrarySource({
     imageCount: options.imageCount ?? 0,
@@ -14098,15 +14180,40 @@ function publicLibraryProjection(id = 'set-1', options = {}) {
   };
 }
 
+function publicLibraryFlat(id = 'set-1', options = {}, buildToken = 'build-token-1') {
+  return PublicQuizLibraryCore.flattenProjection(
+    publicLibraryFullProjection(id, options), buildToken
+  );
+}
+
+function publicLibraryProjection(id = 'set-1', options = {}) {
+  return publicLibraryFlat(id, options).parent;
+}
+
+function publicLibraryStoredDocuments(id = 'set-1', options = {}, buildToken = 'build-token-1') {
+  const flat = publicLibraryFlat(id, options, buildToken);
+  return {
+    [`published_quiz_sets/${id}`]: flat.parent,
+    ...Object.fromEntries(Object.entries(flat.videos).map(([key, value]) => [
+      `published_quiz_sets/${id}/videos/${key}`, value
+    ])),
+    ...Object.fromEntries(Object.entries(flat.questions).map(([key, value]) => [
+      `published_quiz_sets/${id}/questions/${key}`, value
+    ]))
+  };
+}
+
 const PUBLIC_LIBRARY_IMAGE_A = 'data:image/png;base64,AAAA';
 const PUBLIC_LIBRARY_IMAGE_B = 'data:image/png;base64,BBBB';
 
 test('publish keeps a building projection hidden until bound images and the source reread finalize', async () => {
+  const source = publicLibrarySource({ imageCount: 2 });
+  source.videos[0].questions[0].reviewerEmail = 'private-reviewer@school.kr';
   const fake = makeFirestoreFake({
-    'quiz_sets/set-1': publicLibrarySource({ imageCount: 2 }),
+    'quiz_sets/set-1': source,
     'teacher_allowances/owner': publicLibraryAllowance(),
     'images/set-1/q/v0q0': { data: PUBLIC_LIBRARY_IMAGE_A },
-    'images/set-1/q/v0q0e': { data: PUBLIC_LIBRARY_IMAGE_B }
+    'images/set-1/q/v0q0e': { data: 'HTTPS://images.example/explanation.png' }
   }, { committedServerMillis: 1_000 });
   const store = createStore(fake, () => 1_000);
 
@@ -14115,6 +14222,8 @@ test('publish keeps a building projection hidden until bound images and the sour
   assert.equal(result.status, 'published');
   assert.equal(fake.value('published_quiz_sets/set-1').status, 'published');
   assert.equal(fake.value('published_quiz_sets/set-1').buildToken, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').buildVideoCount, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').buildQuestionCount, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').buildImageCount, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').ownerUid, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').ownerEmail, undefined);
@@ -14122,12 +14231,21 @@ test('publish keeps a building projection hidden until bound images and the sour
   assert.equal(fake.value('published_quiz_sets/set-1').updatedAt instanceof Timestamp, true);
   assert.equal(fake.value('published_quiz_sets/set-1').publishedAtMs, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').updatedAtMs, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').videos, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').settings, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').revealMode, 'timer');
   assert.ok(
     fake.value('published_quiz_sets/set-1').updatedAt.toMillis() >=
       fake.value('published_quiz_sets/set-1').publishedAt.toMillis()
   );
   assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').data, PUBLIC_LIBRARY_IMAGE_A);
   assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').revision, 'rev-1');
+  assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0e').data,
+    'https://images.example/explanation.png');
+  assert.equal(fake.value('published_quiz_sets/set-1/videos/v0').videoKey, 'v0');
+  assert.equal(fake.value('published_quiz_sets/set-1/questions/v0q0').questionKey, 'v0q0');
+  assert.equal(fake.value('published_quiz_sets/set-1/questions/v0q0').reviewerEmail, undefined);
+  assert.equal(result.videos[0].questions[0].text, '힘의 단위는?');
 
   const calls = fake.calls();
   const buildingIndex = calls.findIndex(call => call.operation === 'transactionSet' &&
@@ -14213,7 +14331,10 @@ test('publish resumes a partial image build while every incomplete attempt stays
     'teacher_allowances/owner': publicLibraryAllowance(),
     'images/set-1/q/v0q0': { data: PUBLIC_LIBRARY_IMAGE_A },
     'images/set-1/q/v0q0e': { data: PUBLIC_LIBRARY_IMAGE_B }
-  }, { failTransactionAt: 3, failTransactionMessage: 'partial public image write' });
+  }, {
+    failTransactionAfterCommitAt: 4,
+    failTransactionAfterCommitMessage: 'partial public image write'
+  });
   const store = createStore(fake);
 
   await assert.rejects(
@@ -14246,7 +14367,7 @@ test('republish preserves the first publishedAt through a failed hidden build an
     }
   }, {
     committedServerMillis: 1_000,
-    failTransactionAt: 2,
+    failTransactionAt: 4,
     failTransactionMessage: 'planned republish image failure'
   });
   const store = createStore(fake, () => 1_000);
@@ -14273,11 +14394,15 @@ test('publish refuses to overwrite a building projection from another source rev
   const oldProjection = PublicQuizLibraryCore.buildProjection(publicLibrarySource(), {
     setId: 'set-1', authorDisplayName: '홍교사', revision: 'rev-old', nowMs: 1_000
   });
+  const oldParent = PublicQuizLibraryCore.flattenProjection(
+    oldProjection, 'other-build'
+  ).parent;
   const fake = makeFirestoreFake({
     'quiz_sets/set-1': publicLibrarySource({ contentRevision: 'rev-new' }),
     'teacher_allowances/owner': publicLibraryAllowance(),
     'published_quiz_sets/set-1': {
-      ...oldProjection, buildToken: 'other-build', buildImageCount: 0
+      ...oldParent, buildToken: 'other-build', buildVideoCount: 0,
+      buildQuestionCount: 0, buildImageCount: 0
     }
   });
 
@@ -14292,7 +14417,7 @@ test('publish fails closed when source content drifts without changing its revis
   const fake = makeFirestoreFake({
     'quiz_sets/set-1': publicLibrarySource({ title: 'revision 없이 바뀐 제목' }),
     'teacher_allowances/owner': publicLibraryAllowance(),
-    'published_quiz_sets/set-1': publicLibraryProjection()
+    ...publicLibraryStoredDocuments('set-1')
   });
 
   await assert.rejects(
@@ -14493,7 +14618,7 @@ test('restore fails closed unless the paired admin-only moderation audit is exac
 
 test('public projection list and get return only validated published rows with a bounded cursor query', async () => {
   const fake = makeFirestoreFake({
-    'published_quiz_sets/pub-1': publicLibraryProjection('pub-1', { updatedAtMs: 300 }),
+    ...publicLibraryStoredDocuments('pub-1', { updatedAtMs: 300 }),
     'published_quiz_sets/pub-2': publicLibraryProjection('pub-2', { updatedAtMs: 200 }),
     'published_quiz_sets/pub-2b': publicLibraryProjection('pub-2b', { updatedAtMs: 200 }),
     'published_quiz_sets/pub-3': publicLibraryProjection('pub-3', { updatedAtMs: 100 }),
@@ -14561,7 +14686,7 @@ test('copyPublished reads public projection only and finalizes a strict private 
   const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
   const fake = makeFirestoreFake({
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
-    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 2 }),
+    ...publicLibraryStoredDocuments('set-1', { imageCount: 2 }),
     'published_quiz_sets/set-1/images/v0q0': {
       data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
     },
@@ -14602,7 +14727,7 @@ test('copyPublished rejects withdrawal races, moderated rows, partial public ima
   await t.test('withdrawal during copy', async () => {
     const fake = makeFirestoreFake({
       'teacher_allowances/teacher-b': allowance,
-      'published_quiz_sets/set-1': publicLibraryProjection(),
+      ...publicLibraryStoredDocuments('set-1'),
     }, {
       beforeTransactionStart({ attempt, set }) {
         if (attempt === 1) {
@@ -14636,7 +14761,7 @@ test('copyPublished rejects withdrawal races, moderated rows, partial public ima
   await t.test('partial public image projection', async () => {
     const fake = makeFirestoreFake({
       'teacher_allowances/teacher-b': allowance,
-      'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 2 }),
+      ...publicLibraryStoredDocuments('set-1', { imageCount: 2 }),
       'published_quiz_sets/set-1/images/v0q0': {
         data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
       }
@@ -14667,7 +14792,7 @@ test('copyPublished refuses a destination collision before changing either docum
   const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
   const fake = makeFirestoreFake({
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
-    'published_quiz_sets/set-1': publicLibraryProjection(),
+    ...publicLibraryStoredDocuments('set-1'),
     'quiz_sets/copy-1': {
       title: '기존 세트', ownerUid: 'teacher-b', lifecycleState: 'active',
       collaboratorCount: 0, imageCount: 0
@@ -14685,7 +14810,7 @@ test('copyPublished retries safely after an ambiguous final commit without dupli
   const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
   const fake = makeFirestoreFake({
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
-    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 1 }),
+    ...publicLibraryStoredDocuments('set-1', { imageCount: 1 }),
     'published_quiz_sets/set-1/images/v0q0': {
       data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
     }
@@ -14713,7 +14838,7 @@ test('copyPublished resumes a hidden copying destination after an ambiguous imag
   const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
   const fake = makeFirestoreFake({
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
-    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 1 }),
+    ...publicLibraryStoredDocuments('set-1', { imageCount: 1 }),
     'published_quiz_sets/set-1/images/v0q0': {
       data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
     }
@@ -14747,7 +14872,7 @@ test('copyPublished preflight rejects more than 500 writes before destination tr
   const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
   const initial = {
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
-    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 497 })
+    ...publicLibraryStoredDocuments('set-1', { imageCount: 497 })
   };
   for (let index = 0; index < 497; index += 1) {
     initial['published_quiz_sets/set-1/images/v0q' + index] = {

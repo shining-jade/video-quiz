@@ -3271,9 +3271,14 @@ function screenSetList() {
   APP().innerHTML = topbar('<a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
     '<div class="wrap"><div class="empty">세트를 불러오는 중…</div></div>';
 
-  const trashPromise = store.listTrash ? store.listTrash({ ownerUid: teacherState && teacherState.uid, role: teacherState && teacherState.role }).catch(() => []) : Promise.resolve([]);
-  Promise.all([store.listQuizSets(), trashPromise]).then(([all, trash]) => {
+  const listScope = { ownerUid: teacherState && teacherState.uid, role: teacherState && teacherState.role };
+  const trashPromise = store.listTrash ? store.listTrash(listScope).catch(() => []) : Promise.resolve([]);
+  const sharedPromise = store.listSharedQuizSets && teacherState
+    ? store.listSharedQuizSets(teacherState).catch(() => []) : Promise.resolve([]);
+  Promise.all([store.listQuizSets(listScope), sharedPromise, trashPromise]).then(([owned, shared, trash]) => {
     if (setList !== state) return;
+    const seen = new Set();
+    const all = owned.concat(shared).filter(item => item && !seen.has(item.id) && seen.add(item.id));
     state.all = all.map(item => {
       const s = normSet(item);
       const id = item.id;
@@ -3307,7 +3312,7 @@ function renderSetList() {
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
-        '학교 안에서 만들어진 세트가 모두 보입니다. <b>복제</b>하면 원본은 그대로 두고 우리 반용으로 고쳐 쓸 수 있습니다.</p>' +
+        '내 세트와 공동 편집으로 공유된 세트가 보입니다. <b>복제</b>하면 원본은 그대로 두고 우리 반용으로 고쳐 쓸 수 있습니다.</p>' +
       '<div class="notice info">' +
         '<b>다른 프로젝트로 세트 옮기기</b> — 세트마다 있는 <b>[📤 파일]</b>로 내보낸 뒤, 옮길 곳의 이 화면에서 ' +
         '<b>[📥 세트 가져오기]</b>로 넣으면 됩니다. 문항·설정·이미지가 그대로 따라갑니다. 백업으로도 쓸 수 있습니다.' +

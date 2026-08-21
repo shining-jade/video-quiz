@@ -64,6 +64,37 @@ test('projection contains bounded public content and strips every private identi
   assert.equal('updatedAt' in summary, false);
 });
 
+test('flat storage splits exact video and question children and reassembles only a complete revision', () => {
+  const value = projection();
+  const flat = Core.flattenProjection(value, 'build-token-1');
+
+  assert.equal('videos' in flat.parent, false);
+  assert.equal('settings' in flat.parent, false);
+  assert.deepEqual(Object.keys(flat.videos), ['v0']);
+  assert.deepEqual(Object.keys(flat.questions), ['v0q0']);
+  assert.deepEqual(Object.keys(flat.videos.v0).sort(), [
+    'buildToken', 'endSec', 'revision', 'startSec', 'videoId', 'videoKey', 'videoUrl'
+  ]);
+  assert.equal(flat.questions.v0q0.reviewerEmail, undefined);
+  assert.equal(flat.questions.v0q0.studentResponses, undefined);
+  assert.equal(flat.questions.v0q0.questionKey, 'v0q0');
+  assert.equal(flat.questions.v0q0.videoKey, 'v0');
+  assert.equal(flat.parent.revealMode, value.settings.revealMode);
+
+  const rebuilt = Core.assembleProjection(flat.parent, flat.videos, flat.questions);
+  assert.deepEqual(rebuilt, value);
+  assert.throws(() => Core.assembleProjection(
+    flat.parent,
+    flat.videos,
+    { ...flat.questions, v0q1: { ...flat.questions.v0q0, questionKey: 'v0q1' } }
+  ), /count|question|문항/i);
+  assert.throws(() => Core.assembleProjection(
+    flat.parent,
+    { v0: { ...flat.videos.v0, reviewerEmail: 'private@school.kr' } },
+    flat.questions
+  ), /unknown field|video/i);
+});
+
 test('copy patch is private and starts the destination image counter at zero', () => {
   const value = projection();
   assert.equal(value.imageCount, 2, 'source image count remains available for copy preflight');
@@ -118,6 +149,24 @@ test('projection reuses playlist normalization for a legacy single-video set', (
   assert.equal(value.videos[0].videoUrl, 'https://youtu.be/dQw4w9WgXcQ');
 });
 
+test('projection canonicalizes an uppercase HTTPS scheme before Rules-bound storage', () => {
+  const source = structuredClone(privateSet);
+  source.videos[0].videoUrl = 'HTTPS://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  source.videos[0].questions[0].imgUrl = 'HTTPS://images.example/question.png';
+  source.videos[0].questions[0].explainImgUrl = 'HTTPS://images.example/explanation.png';
+
+  const value = Core.buildProjection(source, {
+    setId: 'https-normalized', authorDisplayName: '홍교사', revision: '10:20', nowMs: 100
+  });
+
+  assert.equal(value.videos[0].videoUrl,
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert.equal(value.videos[0].questions[0].imgUrl,
+    'https://images.example/question.png');
+  assert.equal(value.videos[0].questions[0].explainImgUrl,
+    'https://images.example/explanation.png');
+});
+
 test('projection preserves playlist duration bounds that are not public projection fields', () => {
   const source = structuredClone(privateSet);
   source.videos[0].endSec = null;
@@ -133,12 +182,14 @@ test('validation rejects YouTube URL/ID mismatches and question times outside th
   const value = projection();
   value.videos[0].videoUrl = 'https://youtu.be/aaaaaaaaaaa';
   value.videos[0].questions[0].t = 121;
+  value.videos[0].questions[0].explainImgUrl = 'http://images.example/private.png';
 
   const result = Core.validateProjection(value);
 
   assert.equal(result.ok, false);
   assert.ok(result.errors.some(error => /videoUrl/.test(error)));
   assert.ok(result.errors.some(error => /question.*clip/.test(error)));
+  assert.ok(result.errors.some(error => /explainImgUrl.*https/.test(error)));
 });
 
 test('validation keeps editor-compatible choice bounds and exact OX choices', () => {

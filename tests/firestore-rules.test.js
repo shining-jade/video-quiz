@@ -8,6 +8,7 @@ const {
 } = require('@firebase/rules-unit-testing');
 const {
   collection,
+  collectionGroup,
   deleteField,
   deleteDoc,
   doc,
@@ -27,6 +28,7 @@ const {
   writeBatch
 } = require('firebase/firestore');
 const { createFirestoreStore } = require('../firestore-store.js');
+const PublicQuizLibraryCore = require('../public-quiz-library-core.js');
 
 const projectId = 'demo-video-quiz';
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -211,6 +213,7 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
         const snapshot = await getDocs(target);
         return {
           docs: snapshot.docs.map(document => ({
+            exists: true,
             id: document.id,
             ref: reference(`${path}/${document.id}`),
             data: () => document.data()
@@ -465,7 +468,7 @@ function publicRulesSource(patch = {}) {
   };
 }
 
-function publicRulesProjection(publicationId = 'library-set', patch = {}) {
+function publicRulesFullProjection(publicationId = 'library-set', patch = {}) {
   const source = publicRulesSource();
   return {
     publicationId,
@@ -487,19 +490,31 @@ function publicRulesProjection(publicationId = 'library-set', patch = {}) {
   };
 }
 
+function publicRulesFlat(publicationId = 'library-set', patch = {}, buildToken = 'build-token-1') {
+  return PublicQuizLibraryCore.flattenProjection(
+    publicRulesFullProjection(publicationId, patch), buildToken
+  );
+}
+
+function publicRulesProjection(publicationId = 'library-set', patch = {}) {
+  return publicRulesFlat(publicationId, patch).parent;
+}
+
 function publicRulesBuilding(publicationId = 'library-set', patch = {}) {
   return {
     ...publicRulesProjection(publicationId),
     status: 'building',
     publishedAt: null,
     buildToken: 'build-token-1',
+    buildVideoCount: 0,
+    buildQuestionCount: 0,
     buildImageCount: 0,
     ...patch
   };
 }
 
 function publicCopyStart(publicationId, owner = actors.otherTeacher, patch = {}) {
-  const projection = publicRulesProjection(publicationId);
+  const projection = publicRulesFullProjection(publicationId);
   return {
     title: `${projection.title} (사본)`,
     description: projection.description,
@@ -531,11 +546,19 @@ async function seedPublicRulesSource(publicationId = 'library-set', patch = {}, 
 }
 
 async function seedPublishedRulesProjection(publicationId = 'library-set', patch = {}, images = {}) {
-  const projection = publicRulesProjection(publicationId, {
+  const fullProjection = publicRulesFullProjection(publicationId, {
     imageCount: Object.keys(images).length,
     ...patch
   });
+  const flat = PublicQuizLibraryCore.flattenProjection(fullProjection, 'build-token-1');
+  const projection = flat.parent;
   await adminWrite(`published_quiz_sets/${publicationId}`, projection);
+  for (const [key, value] of Object.entries(flat.videos)) {
+    await adminWrite(`published_quiz_sets/${publicationId}/videos/${key}`, value);
+  }
+  for (const [key, value] of Object.entries(flat.questions)) {
+    await adminWrite(`published_quiz_sets/${publicationId}/questions/${key}`, value);
+  }
   for (const [key, data] of Object.entries(images)) {
     await adminWrite(`published_quiz_sets/${publicationId}/images/${key}`, {
       data,
@@ -4007,6 +4030,9 @@ rulesTest('private active original read is exact owner collaborator or admin acc
 
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
   await assertSucceeds(getDoc(doc(admin, 'quiz_sets/set1')));
+  assert.ok((await emulatorStore(admin).listQuizSets({
+    role: 'admin', allowAdminAll: true
+  })).some(set => set.id === 'set1'));
   await assertFails(getDoc(doc(other, 'quiz_sets/set1')));
   await assertFails(getDoc(doc(other, 'images/set1/q/0')));
   await assertFails(getDocs(query(
@@ -4026,6 +4052,64 @@ rulesTest('private active original read is exact owner collaborator or admin acc
   });
   await assertSucceeds(getDoc(doc(other, 'quiz_sets/set1')));
   await assertSucceeds(getDoc(doc(other, 'images/set1/q/0')));
+
+  const shared = collectionGroup(other, 'collaborators');
+  const exactShared = await assertSucceeds(getDocs(query(
+    shared,
+    where('email', '==', actors.otherTeacher.email),
+    queryLimit(50)
+  )));
+  assert.deepEqual(exactShared.docs.map(document => document.ref.parent.parent.id), ['set1']);
+  await assertFails(getDocs(query(shared, queryLimit(50))));
+  await assertFails(getDocs(query(
+    shared,
+    where('email', '==', actors.owner.email),
+    queryLimit(50)
+  )));
+});
+
+rulesTest('FixRound1 private nested reviewer PII exploit cannot cross the flat public projection boundary', async () => {
+  const publicationId = 'pii-boundary';
+  await seedPublicRulesSource(publicationId);
+  const owner = actorFirestore('owner');
+  const sourceReference = doc(owner, `quiz_sets/${publicationId}`);
+  const taintedVideos = publicRulesSource().videos;
+  taintedVideos[0].questions[0].reviewerEmail = 'reviewer-private@school.kr';
+  taintedVideos[0].questions[0].reviewNotes = { studentUid: 'student-secret' };
+
+  // This records the legacy private-schema limitation: arbitrary nested fields are
+  // accepted, so the public boundary must never mirror the raw nested source.
+  await assertSucceeds(updateDoc(sourceReference, { videos: taintedVideos }));
+  await assertFails(setDoc(doc(owner, `published_quiz_sets/${publicationId}`), {
+    ...publicRulesBuilding(publicationId),
+    videos: taintedVideos,
+    updatedAt: serverTimestamp()
+  }));
+
+  const sanitized = await emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner);
+  assert.equal(sanitized.videos[0].questions[0].reviewerEmail, undefined);
+  const storedQuestion = (await getDoc(doc(owner,
+    `published_quiz_sets/${publicationId}/questions/v0q0`))).data();
+  assert.equal(storedQuestion.reviewerEmail, undefined);
+  assert.equal(storedQuestion.reviewNotes, undefined);
+
+  const childPublicationId = 'pii-child-boundary';
+  await seedPublicRulesSource(childPublicationId);
+  await adminWrite(`published_quiz_sets/${childPublicationId}`,
+    publicRulesBuilding(childPublicationId));
+  const forgedQuestion = {
+    ...publicRulesFlat(childPublicationId).questions.v0q0,
+    reviewerEmail: 'reviewer-private@school.kr',
+    reviewNotes: { studentUid: 'student-secret' }
+  };
+  const forged = writeBatch(owner);
+  forged.update(doc(owner, `published_quiz_sets/${childPublicationId}`), {
+    buildQuestionCount: 1,
+    buildMutation: { collection: 'questions', key: 'v0q0', action: 'bind' }
+  });
+  forged.set(doc(owner,
+    `published_quiz_sets/${childPublicationId}/questions/v0q0`), forgedQuestion);
+  await assertFails(forged.commit());
 });
 
 rulesTest('published projection list requires exact visible status order and bounded limit', async () => {
@@ -4149,14 +4233,19 @@ rulesTest('published projection public image reads require a visible exact revis
     v0q0: 'data:image/png;base64,AAAA'
   });
   const other = actorFirestore('otherTeacher');
+  const currentImages = () => getDocs(query(
+    collection(other, 'published_quiz_sets/image-public/images'),
+    where('revision', '==', 'rev-1')
+  ));
   await assertSucceeds(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
-  await assertSucceeds(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
+  await assertFails(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
+  await assertSucceeds(currentImages());
 
   await adminWrite('published_quiz_sets/image-public/images/v0q0', {
     data: 'data:image/png;base64,AAAA', revision: 'stale', buildToken: 'build-token-1'
   });
   await assertFails(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
-  await assertSucceeds(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
+  await assertSucceeds(currentImages());
 
   await adminWrite('published_quiz_sets/image-building', publicRulesBuilding('image-building', {
     imageCount: 1, buildImageCount: 1
@@ -4169,6 +4258,150 @@ rulesTest('published projection public image reads require a visible exact revis
     'published_quiz_sets/image-public/images/standalone'), {
     data: 'data:image/png;base64,AAAA', revision: 'rev-1', buildToken: 'build-token-1'
   }));
+});
+
+rulesTest('FixRound1 public image list requires the visible parent revision query', async () => {
+  await seedPublicRulesSource('image-list-revision', { imageCount: 1 }, {
+    v0q0: 'data:image/png;base64,AAAA'
+  });
+  await seedPublishedRulesProjection('image-list-revision', {}, {
+    v0q0: 'data:image/png;base64,AAAA'
+  });
+  await adminWrite('published_quiz_sets/image-list-revision/images/v0q1', {
+    data: 'data:image/png;base64,STALE', revision: 'rev-stale', buildToken: 'old-build'
+  });
+  const other = actorFirestore('otherTeacher');
+  const images = collection(other, 'published_quiz_sets/image-list-revision/images');
+
+  await assertFails(getDocs(images));
+  const visible = await assertSucceeds(getDocs(query(
+    images,
+    where('revision', '==', 'rev-1')
+  )));
+  assert.deepEqual(visible.docs.map(document => document.id), ['v0q0']);
+});
+
+rulesTest('FixRound1 public image processed counter rejects a standalone parent increment', async () => {
+  await seedPublicRulesSource('image-parent-only', { imageCount: 1 }, {
+    v0q0: 'data:image/png;base64,AAAA'
+  });
+  await adminWrite('published_quiz_sets/image-parent-only', publicRulesBuilding(
+    'image-parent-only', { imageCount: 1, buildImageCount: 0 }
+  ));
+  await assertFails(updateDoc(doc(actorFirestore('owner'),
+    'published_quiz_sets/image-parent-only'), {
+    buildImageCount: 1,
+    buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
+  }));
+});
+
+rulesTest('FixRound1 one public image parent increment cannot bind two child documents', async () => {
+  const images = {
+    v0q0: 'data:image/png;base64,AAAA',
+    v0q1: 'data:image/png;base64,BBBB'
+  };
+  await seedPublicRulesSource('image-double-child', { imageCount: 2 }, images);
+  await adminWrite('published_quiz_sets/image-double-child', publicRulesBuilding(
+    'image-double-child', { imageCount: 2, buildImageCount: 0 }
+  ));
+  const owner = actorFirestore('owner');
+  const batch = writeBatch(owner);
+  batch.update(doc(owner, 'published_quiz_sets/image-double-child'), {
+    buildImageCount: 1,
+    buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
+  });
+  for (const [key, data] of Object.entries(images)) {
+    batch.set(doc(owner, `published_quiz_sets/image-double-child/images/${key}`), {
+      data, revision: 'rev-1', buildToken: 'build-token-1'
+    });
+  }
+  await assertFails(batch.commit());
+});
+
+rulesTest('FixRound1 public image replacement must consume one exact processed marker', async () => {
+  await seedPublicRulesSource('image-replacement', { imageCount: 1 }, {
+    v0q0: 'data:image/png;base64,NEW'
+  });
+  await adminWrite('published_quiz_sets/image-replacement', publicRulesBuilding(
+    'image-replacement', { imageCount: 1, buildImageCount: 0 }
+  ));
+  await adminWrite('published_quiz_sets/image-replacement/images/v0q0', {
+    data: 'data:image/png;base64,OLD', revision: 'old-revision', buildToken: 'old-build'
+  });
+  await assertFails(updateDoc(doc(actorFirestore('owner'),
+    'published_quiz_sets/image-replacement/images/v0q0'), {
+    data: 'data:image/png;base64,NEW', revision: 'rev-1', buildToken: 'build-token-1'
+  }));
+});
+
+rulesTest('FixRound1 a public image cannot be rebound while the building parent instantly finalizes', async () => {
+  const image = 'data:image/png;base64,AAAA';
+  await seedPublicRulesSource('image-instant-finalize', { imageCount: 1 }, { v0q0: image });
+  await adminWrite('published_quiz_sets/image-instant-finalize', publicRulesBuilding(
+    'image-instant-finalize', {
+      imageCount: 1, buildVideoCount: 1, buildQuestionCount: 1, buildImageCount: 0
+    }
+  ));
+  const owner = actorFirestore('owner');
+  const batch = writeBatch(owner);
+  batch.update(doc(owner, 'published_quiz_sets/image-instant-finalize'), {
+    status: 'published', publishedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    buildToken: deleteField(), buildVideoCount: deleteField(),
+    buildQuestionCount: deleteField(), buildImageCount: deleteField()
+  });
+  batch.set(doc(owner, 'published_quiz_sets/image-instant-finalize/images/v0q0'), {
+    data: image, revision: 'rev-1', buildToken: 'build-token-1'
+  });
+  await assertFails(batch.commit());
+});
+
+rulesTest('FixRound1 source revision changed in the finalize batch is evaluated from commit state', async () => {
+  await seedPublicRulesSource('finalize-cas');
+  await adminWrite('published_quiz_sets/finalize-cas', publicRulesBuilding('finalize-cas', {
+    buildVideoCount: 1, buildQuestionCount: 1
+  }));
+  const owner = actorFirestore('owner');
+  const batch = writeBatch(owner);
+  batch.update(doc(owner, 'quiz_sets/finalize-cas'), { contentRevision: 'rev-2' });
+  batch.update(doc(owner, 'published_quiz_sets/finalize-cas'), {
+    status: 'published',
+    publishedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    buildToken: deleteField(),
+    buildVideoCount: deleteField(),
+    buildQuestionCount: deleteField(),
+    buildImageCount: deleteField()
+  });
+  await assertFails(batch.commit());
+});
+
+rulesTest('FixRound1 building create and image bind use commit-state source revision and allowance', async () => {
+  await seedPublicRulesSource('building-create-cas');
+  const owner = actorFirestore('owner');
+  const createBatch = writeBatch(owner);
+  createBatch.update(doc(owner, 'quiz_sets/building-create-cas'), {
+    contentRevision: 'rev-2'
+  });
+  createBatch.set(doc(owner, 'published_quiz_sets/building-create-cas'), {
+    ...publicRulesBuilding('building-create-cas'), updatedAt: serverTimestamp()
+  });
+  await assertFails(createBatch.commit());
+
+  const image = 'data:image/png;base64,AAAA';
+  await seedPublicRulesSource('image-bind-cas', { imageCount: 1 }, { v0q0: image });
+  await adminWrite('published_quiz_sets/image-bind-cas', publicRulesBuilding(
+    'image-bind-cas', { imageCount: 1 }
+  ));
+  const imageBatch = writeBatch(owner);
+  imageBatch.update(doc(owner, 'quiz_sets/image-bind-cas'), { contentRevision: 'rev-2' });
+  imageBatch.update(doc(owner, 'published_quiz_sets/image-bind-cas'), {
+    buildImageCount: 1,
+    buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
+  });
+  imageBatch.set(doc(owner, 'published_quiz_sets/image-bind-cas/images/v0q0'), {
+    data: image, revision: 'rev-1', buildToken: 'build-token-1'
+  });
+  await assertFails(imageBatch.commit());
 });
 
 rulesTest('published projection admin moderation and restore require the exact atomic audit side document', async () => {
@@ -4201,6 +4434,15 @@ rulesTest('published projection admin moderation and restore require the exact a
   await assertFails(updateDoc(doc(admin, 'published_quiz_sets/moderation-set'), {
     status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
   }));
+  const restoreCas = writeBatch(admin);
+  restoreCas.update(doc(admin, 'quiz_sets/moderation-set'), { contentRevision: 'rev-2' });
+  restoreCas.update(doc(admin, 'published_quiz_sets/moderation-set'), {
+    status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
+  });
+  restoreCas.update(doc(admin, 'published_quiz_audits/moderation-set'), {
+    status: 'restored', restoredByUid: actors.admin.uid, restoredAt: serverTimestamp()
+  });
+  await assertFails(restoreCas.commit());
   const restored = await store.adminRestorePublishedQuiz(
     'moderation-set', 'rev-1', requestAdminIdentity
   );
@@ -4285,6 +4527,15 @@ rulesTest('published projection copy uses exact provenance count-zero increments
   await assertFails(setDoc(doc(other, 'quiz_sets/forged-copy'), publicCopyStart(
     'copy-source', actors.otherTeacher, { sourcePublicationRevision: 'forged' }
   )));
+
+  const owner = actorFirestore('owner');
+  const visibilityCas = writeBatch(owner);
+  visibilityCas.update(doc(owner, 'published_quiz_sets/copy-source'), {
+    status: 'withdrawn', updatedAt: serverTimestamp()
+  });
+  visibilityCas.set(doc(owner, 'quiz_sets/copy-cas-destination'),
+    publicCopyStart('copy-source', actors.owner));
+  await assertFails(visibilityCas.commit());
 
   await adminWrite('published_quiz_sets/copy-source', publicRulesProjection(
     'copy-source', { imageCount: 1, status: 'withdrawn' }
