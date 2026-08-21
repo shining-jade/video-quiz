@@ -11,14 +11,19 @@
   const classPlanning = typeof module === 'object' && module.exports
     ? require('./class-planning-core.js')
     : root.ClassPlanningCore;
+  const publicQuizLibrary = typeof module === 'object' && module.exports
+    ? require('./public-quiz-library-core.js')
+    : root.PublicQuizLibraryCore;
   const firestoreTimestamp = typeof module === 'object' && module.exports
     ? require('firebase/firestore').Timestamp
     : root.firebase && root.firebase.firestore && root.firebase.firestore.Timestamp;
-  const api = factory(core, collaboration, teacherAccess, classPlanning, firestoreTimestamp);
+  const api = factory(
+    core, collaboration, teacherAccess, classPlanning, publicQuizLibrary, firestoreTimestamp
+  );
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.FirestoreStore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (
-  core, collaboration, teacherAccess, classPlanning, FirestoreTimestamp
+  core, collaboration, teacherAccess, classPlanning, publicQuizLibrary, FirestoreTimestamp
 ) {
   const { timestampMillis, offsetFromRoundTrip, claimFirstAvailableCode, chunk } = core;
   let fallbackLiveTokenSequence = 0;
@@ -2453,6 +2458,806 @@
       throw new Error('원본 세트가 계속 변경되어 사본을 만들지 못했습니다. 다시 시도해 주세요.');
     }
 
+    function publicLibraryCore() {
+      const value = publicQuizLibrary ||
+        (typeof globalThis !== 'undefined' && globalThis.PublicQuizLibraryCore);
+      if (!value || typeof value.buildProjection !== 'function' ||
+          typeof value.validateProjection !== 'function' ||
+          typeof value.copyPatch !== 'function' ||
+          typeof value.publicSummary !== 'function') {
+        throw new Error('PublicQuizLibraryCore가 준비되지 않았습니다.');
+      }
+      return value;
+    }
+
+    function canonicalPublicationId(value, name) {
+      const id = String(value == null ? '' : value);
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) {
+        throw new Error((name || 'publicationId') + '가 canonical 형식이 아닙니다.');
+      }
+      return id;
+    }
+
+    function contentRevisionToken(value) {
+      if (typeof value === 'string') {
+        const revision = value.trim();
+        if (revision && revision.length <= 200) return revision;
+        return '';
+      }
+      if (Number.isSafeInteger(value) && value >= 0) return String(value);
+      if (value instanceof Date && Number.isSafeInteger(value.getTime()) && value.getTime() >= 0) {
+        return String(value.getTime());
+      }
+      if (value && Number.isInteger(value.seconds) && value.seconds >= 0 &&
+          Number.isInteger(value.nanoseconds) && value.nanoseconds >= 0 &&
+          value.nanoseconds < 1_000_000_000) {
+        const revision = value.seconds + ':' + value.nanoseconds;
+        return revision.length <= 200 ? revision : '';
+      }
+      if (value && typeof value.toMillis === 'function') {
+        const millis = value.toMillis();
+        if (Number.isSafeInteger(millis) && millis >= 0) return String(millis);
+      }
+      return '';
+    }
+
+    function requireContentRevision(source) {
+      const revision = contentRevisionToken(source && source.contentRevision);
+      if (!revision) throw new Error('원본 content revision이 유효하지 않습니다.');
+      return revision;
+    }
+
+    function publicServerNowMs() {
+      const value = Math.trunc(serverNow());
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error('공개 자료실 서버 시각이 유효하지 않습니다.');
+      }
+      return value;
+    }
+
+    function publicProjectionValue(value) {
+      const source = value || {};
+      return Object.fromEntries(publicLibraryCore().PUBLIC_KEYS
+        .filter(key => Object.prototype.hasOwnProperty.call(source, key))
+        .map(key => [key, source[key]]));
+    }
+
+    function storedProjectionAllowedKeys(status) {
+      const allowed = new Set(publicLibraryCore().PUBLIC_KEYS);
+      if (status === 'building') {
+        allowed.add('buildToken');
+        allowed.add('buildImageCount');
+      }
+      if (status === 'moderated') {
+        allowed.add('moderatedByUid');
+        allowed.add('moderatedAt');
+        allowed.add('moderationReason');
+      }
+      return allowed;
+    }
+
+    function requireStoredProjection(value, publicationId, requiredStatus) {
+      const raw = value || {};
+      const status = raw.status;
+      const allowed = storedProjectionAllowedKeys(status);
+      if (Object.keys(raw).some(key => !allowed.has(key))) {
+        throw new Error('공개 projection에 허용되지 않은 필드가 있습니다.');
+      }
+      const projection = publicProjectionValue(raw);
+      const validation = publicLibraryCore().validateProjection(projection);
+      if (!validation.ok || projection.publicationId !== publicationId ||
+          projection.sourceSetId !== publicationId) {
+        throw new Error('공개 projection 형식 또는 원본 연결이 유효하지 않습니다.');
+      }
+      if (requiredStatus && projection.status !== requiredStatus) {
+        throw new Error(requiredStatus + ' 공개 projection만 처리할 수 있습니다.');
+      }
+      if (status === 'building' &&
+          (typeof raw.buildToken !== 'string' || !raw.buildToken ||
+           !Number.isSafeInteger(raw.buildImageCount) || raw.buildImageCount < 0)) {
+        throw new Error('building 공개 projection counter가 유효하지 않습니다.');
+      }
+      if (status === 'moderated') {
+        const reason = typeof raw.moderationReason === 'string'
+          ? raw.moderationReason.trim() : '';
+        if (typeof raw.moderatedByUid !== 'string' || !raw.moderatedByUid ||
+            !Object.prototype.hasOwnProperty.call(raw, 'moderatedAt') ||
+            reason.length < 1 || reason.length > 200) {
+          throw new Error('관리자 공개 중지 감사 필드가 유효하지 않습니다.');
+        }
+      }
+      return projection;
+    }
+
+    function activeAllowanceIdentity(snapshot, uid, email, roles) {
+      if (!snapshot || !snapshot.exists) return null;
+      const value = snapshot.data() || {};
+      const exactEmail = canonicalTeacherEmail(email);
+      const allowedRoles = roles || ['teacher', 'admin'];
+      if (!uid || !exactEmail || value.uid !== uid ||
+          value.emailCanonical !== exactEmail || value.status !== 'active' ||
+          value.enabled !== true || !allowedRoles.includes(value.role)) return null;
+      return value;
+    }
+
+    function requireActiveActorAllowance(snapshot, actor) {
+      const current = actor || {};
+      const allowance = activeAllowanceIdentity(
+        snapshot, current.uid, current.email, ['teacher', 'admin']
+      );
+      if (!allowance) {
+        throw new Error('active 승인 교사 allowance가 유효하지 않습니다.');
+      }
+      return allowance;
+    }
+
+    function requireActiveSourceOwner(source, allowanceSnapshot, actor) {
+      const value = source || {};
+      if (!activeSet(value)) throw new Error('active 원본 세트만 공개할 수 있습니다.');
+      requireAuthoritativeCounters(value);
+      const ownerEmail = canonicalTeacherEmail(value.ownerEmail);
+      if (!value.ownerUid || !ownerEmail) {
+        throw new Error('원본 소유자 UID/email binding이 유효하지 않습니다.');
+      }
+      if (actor && (value.ownerUid !== actor.uid || ownerEmail !== canonicalTeacherEmail(actor.email))) {
+        throw new Error('정확한 세트 소유자만 공개 상태를 변경할 수 있습니다.');
+      }
+      if (!activeAllowanceIdentity(
+        allowanceSnapshot, value.ownerUid, ownerEmail, ['teacher', 'admin']
+      )) {
+        throw new Error('원본 소유자의 active 승인 상태가 유효하지 않습니다.');
+      }
+      return value;
+    }
+
+    async function requireAuthoritativePublicationAdmin(transaction, actor) {
+      const current = assertAdminIdentity(actor);
+      const snapshot = await transaction.get(db.doc('teacher_allowances/' + current.uid));
+      if (!snapshot.exists || !validAuthoritativeAdmin(snapshot.data() || {}, current)) {
+        throw new Error('authoritative active 관리자 allowance가 유효하지 않습니다.');
+      }
+      return current;
+    }
+
+    function allowedPublicImageData(value) {
+      return typeof value === 'string' && value.length > 0 && value.length <= 380_100 &&
+        (value.startsWith('data:image/') || /^https:\/\//i.test(value));
+    }
+
+    function privatePublicationImages(snapshot) {
+      const images = {};
+      for (const document of snapshot.docs || []) {
+        const key = document.id;
+        const data = document.data() || {};
+        if (imageKey(key) !== key || !allowedPublicImageData(data.data)) {
+          throw new Error('원본 공개 이미지 키 또는 크기가 유효하지 않습니다.');
+        }
+        images[key] = data.data;
+      }
+      return images;
+    }
+
+    function storedPublicImages(snapshot, expectedRevision) {
+      const images = {};
+      const documents = {};
+      for (const document of snapshot.docs || []) {
+        const key = document.id;
+        const data = document.data() || {};
+        const keys = Object.keys(data);
+        if (imageKey(key) !== key || keys.length !== 3 ||
+            !keys.every(name => ['data', 'revision', 'buildToken'].includes(name)) ||
+            !allowedPublicImageData(data.data) ||
+            typeof data.revision !== 'string' || !data.revision ||
+            typeof data.buildToken !== 'string' || !data.buildToken) {
+          throw new Error('공개 이미지 projection binding이 유효하지 않습니다.');
+        }
+        if (expectedRevision && data.revision !== expectedRevision) {
+          throw new Error('공개 이미지 revision binding이 일치하지 않습니다.');
+        }
+        images[key] = data.data;
+        documents[key] = data;
+      }
+      return { images, documents };
+    }
+
+    function sameImageValues(left, right) {
+      const leftKeys = Object.keys(left || {}).sort();
+      const rightKeys = Object.keys(right || {}).sort();
+      return leftKeys.length === rightKeys.length &&
+        leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+    }
+
+    function assertPublishedImageBinding(projection, stored, expectedImages) {
+      const entries = Object.entries(stored.documents || {});
+      if (projection.imageCount !== entries.length ||
+          !sameImageValues(stored.images, expectedImages)) {
+        throw new Error('공개 이미지 counter 또는 projection 내용이 일치하지 않습니다.');
+      }
+      const tokens = new Set(entries.map(([, image]) => image.buildToken));
+      if (tokens.size > 1 || entries.some(([, image]) => image.revision !== projection.revision)) {
+        throw new Error('공개 이미지 build binding이 일치하지 않습니다.');
+      }
+    }
+
+    function publicationProjectionFingerprint(left, right) {
+      return JSON.stringify(stableValue(left || null)) === JSON.stringify(stableValue(right || null));
+    }
+
+    function samePublicProjectionContent(left, right) {
+      const keys = [
+        'publicationId', 'sourceSetId', 'revision', 'title', 'description',
+        'authorDisplayName', 'videos', 'settings', 'videoCount', 'questionCount', 'imageCount'
+      ];
+      return publicationProjectionFingerprint(
+        Object.fromEntries(keys.map(key => [key, (left || {})[key]])),
+        Object.fromEntries(keys.map(key => [key, (right || {})[key]]))
+      );
+    }
+
+    async function publishQuizSet(setId, actor) {
+      const publicationId = canonicalPublicationId(setId, 'setId');
+      const currentActor = actor || {};
+      const sourceRef = db.doc('quiz_sets/' + publicationId);
+      const publicRef = db.doc('published_quiz_sets/' + publicationId);
+      const sourceSnapshot = await sourceRef.get({ source: 'server' });
+      const source = quizSetValue(sourceSnapshot);
+      if (!source) throw new Error('게시할 원본 세트를 찾을 수 없습니다.');
+      const ownerAllowanceRef = db.doc('teacher_allowances/' + String(source.ownerUid || ''));
+      const [allowanceSnapshot, imageSnapshot, existingSnapshot, existingImageSnapshot] =
+        await Promise.all([
+          ownerAllowanceRef.get({ source: 'server' }),
+          db.collection('images/' + publicationId + '/q').get({ source: 'server' }),
+          publicRef.get({ source: 'server' }),
+          db.collection('published_quiz_sets/' + publicationId + '/images')
+            .get({ source: 'server' })
+        ]);
+      requireActiveSourceOwner(source, allowanceSnapshot, currentActor);
+      const revision = requireContentRevision(source);
+      const privateImages = privatePublicationImages(imageSnapshot);
+      if (Object.keys(privateImages).length !== source.imageCount) {
+        throw new Error('원본 imageCount와 공개할 이미지 수가 일치하지 않습니다.');
+      }
+      const existingRaw = existingSnapshot.exists ? existingSnapshot.data() || {} : null;
+      const existingPublicImages = storedPublicImages(existingImageSnapshot);
+      if (!existingRaw && Object.keys(existingPublicImages.images).length) {
+        throw new Error('부모 없는 공개 이미지 projection을 덮어쓸 수 없습니다.');
+      }
+      let existingProjection = null;
+      if (existingRaw) existingProjection = requireStoredProjection(existingRaw, publicationId);
+      if (existingProjection && existingProjection.status === 'moderated') {
+        throw new Error('관리자 공개 중지 projection은 소유자가 덮어쓸 수 없습니다.');
+      }
+      if (existingProjection && existingProjection.status === 'building' &&
+          (existingProjection.revision !== revision || !existingRaw.buildToken)) {
+        throw new Error('다른 revision의 building 게시 작업을 덮어쓸 수 없습니다.');
+      }
+      if (existingProjection && existingProjection.status === 'building' &&
+          existingRaw.buildImageCount !== Object.keys(existingPublicImages.images).length) {
+        throw new Error('building 공개 이미지 counter가 실제 문서 수와 일치하지 않습니다.');
+      }
+      if (existingProjection && existingProjection.status === 'published' &&
+          existingProjection.revision === revision) {
+        const boundImages = storedPublicImages(existingImageSnapshot, revision);
+        assertPublishedImageBinding(existingProjection, boundImages, privateImages);
+      }
+
+      const nowMs = publicServerNowMs();
+      const desiredBuilding = publicLibraryCore().buildProjection(source, {
+        setId: publicationId,
+        authorDisplayName: String(currentActor.displayName || '').trim(),
+        revision,
+        nowMs
+      });
+      if (existingProjection && existingProjection.revision === revision &&
+          !samePublicProjectionContent(existingProjection, desiredBuilding)) {
+        throw new Error('같은 revision의 원본 content와 공개 projection이 일치하지 않습니다.');
+      }
+      const buildToken = existingProjection && existingProjection.status === 'building'
+        ? existingRaw.buildToken : createLiveToken();
+      const initialCount = Object.keys(existingPublicImages.images).length;
+      const buildingDocument = {
+        ...desiredBuilding, buildToken, buildImageCount: initialCount
+      };
+      const publicImageOperations = Object.entries(privateImages).map(([key, data]) => ({
+        path: 'published_quiz_sets/' + publicationId + '/images/' + key,
+        value: { data, revision, buildToken }
+      }));
+      assertRequestAllowed(operationsEstimate([
+        { path: 'published_quiz_sets/' + publicationId, value: buildingDocument },
+        ...publicImageOperations
+      ]));
+
+      const initialized = await db.runTransaction(async transaction => {
+        const latestSourceSnapshot = await transaction.get(sourceRef);
+        const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
+        const latestPublicSnapshot = await transaction.get(publicRef);
+        const latestSource = quizSetValue(latestSourceSnapshot);
+        requireActiveSourceOwner(latestSource, latestAllowanceSnapshot, currentActor);
+        if (requireContentRevision(latestSource) !== revision ||
+            latestSource.imageCount !== source.imageCount) {
+          throw new Error('원본 content revision 또는 image counter가 변경되었습니다.');
+        }
+        const latestRaw = latestPublicSnapshot.exists ? latestPublicSnapshot.data() || {} : null;
+        if (!publicationProjectionFingerprint(existingRaw, latestRaw)) {
+          throw new Error('공개 projection이 게시 준비 중 변경되었습니다.');
+        }
+        if (latestRaw) {
+          const latestProjection = requireStoredProjection(latestRaw, publicationId);
+          if (latestProjection.status === 'published' && latestProjection.revision === revision) {
+            return { alreadyPublished: true, projection: latestProjection };
+          }
+          if (latestProjection.status === 'building') {
+            if (latestProjection.revision !== revision || latestRaw.buildToken !== buildToken ||
+                latestRaw.buildImageCount !== initialCount) {
+              throw new Error('building 게시 작업 token 또는 counter가 변경되었습니다.');
+            }
+            return { alreadyBuilding: true };
+          }
+          if (latestProjection.status === 'moderated') {
+            throw new Error('관리자 공개 중지 projection은 게시할 수 없습니다.');
+          }
+        }
+        transaction.set(publicRef, buildingDocument);
+        return { building: true };
+      });
+      if (initialized.alreadyPublished) return initialized.projection;
+
+      for (const [key, data] of Object.entries(privateImages)) {
+        const imageRef = db.doc(
+          'published_quiz_sets/' + publicationId + '/images/' + key
+        );
+        await db.runTransaction(async transaction => {
+          const parentSnapshot = await transaction.get(publicRef);
+          const childSnapshot = await transaction.get(imageRef);
+          if (!parentSnapshot.exists) throw new Error('building 공개 projection이 사라졌습니다.');
+          const parentRaw = parentSnapshot.data() || {};
+          const parent = requireStoredProjection(parentRaw, publicationId, 'building');
+          if (parent.revision !== revision || parentRaw.buildToken !== buildToken) {
+            throw new Error('building 공개 projection token 또는 revision이 변경되었습니다.');
+          }
+          const currentCount = parentRaw.buildImageCount;
+          if (childSnapshot.exists) {
+            const existing = childSnapshot.data() || {};
+            if (existing.data === data && existing.revision === revision &&
+                existing.buildToken === buildToken) return;
+            transaction.set(imageRef, { data, revision, buildToken });
+            return;
+          }
+          transaction.set(imageRef, { data, revision, buildToken });
+          transaction.set(publicRef, { buildImageCount: currentCount + 1 }, { merge: true });
+        });
+      }
+
+      for (const key of Object.keys(existingPublicImages.images)) {
+        if (Object.prototype.hasOwnProperty.call(privateImages, key)) continue;
+        const imageRef = db.doc(
+          'published_quiz_sets/' + publicationId + '/images/' + key
+        );
+        await db.runTransaction(async transaction => {
+          const parentSnapshot = await transaction.get(publicRef);
+          const childSnapshot = await transaction.get(imageRef);
+          if (!parentSnapshot.exists) throw new Error('building 공개 projection이 사라졌습니다.');
+          const parentRaw = parentSnapshot.data() || {};
+          const parent = requireStoredProjection(parentRaw, publicationId, 'building');
+          if (parent.revision !== revision || parentRaw.buildToken !== buildToken) {
+            throw new Error('building 공개 projection token 또는 revision이 변경되었습니다.');
+          }
+          if (!childSnapshot.exists) return;
+          if (parentRaw.buildImageCount < 1) {
+            throw new Error('building 공개 이미지 counter underflow를 거부했습니다.');
+          }
+          transaction.delete(imageRef);
+          transaction.set(publicRef, {
+            buildImageCount: parentRaw.buildImageCount - 1
+          }, { merge: true });
+        });
+      }
+
+      const finalized = await db.runTransaction(async transaction => {
+        const latestSourceSnapshot = await transaction.get(sourceRef);
+        const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
+        const latestPublicSnapshot = await transaction.get(publicRef);
+        const latestSource = quizSetValue(latestSourceSnapshot);
+        requireActiveSourceOwner(latestSource, latestAllowanceSnapshot, currentActor);
+        if (requireContentRevision(latestSource) !== revision ||
+            latestSource.imageCount !== Object.keys(privateImages).length) {
+          throw new Error('최종 게시 전 원본 revision 또는 image counter가 변경되었습니다.');
+        }
+        if (!latestPublicSnapshot.exists) throw new Error('building 공개 projection이 없습니다.');
+        const parentRaw = latestPublicSnapshot.data() || {};
+        const parent = requireStoredProjection(parentRaw, publicationId, 'building');
+        if (parent.revision !== revision || parentRaw.buildToken !== buildToken ||
+            parentRaw.buildImageCount !== Object.keys(privateImages).length) {
+          throw new Error('공개 이미지 build counter가 완료되지 않았습니다.');
+        }
+        const publishedAtMs = existingProjection &&
+          Number.isSafeInteger(existingProjection.publishedAtMs)
+          ? existingProjection.publishedAtMs : publicServerNowMs();
+        const updatedAtMs = Math.max(publishedAtMs, publicServerNowMs());
+        const next = {
+          ...publicProjectionValue(parentRaw),
+          status: 'published', moderationStatus: 'clear', publishedAtMs, updatedAtMs
+        };
+        const validation = publicLibraryCore().validateProjection(next);
+        if (!validation.ok) throw new Error('최종 공개 projection이 유효하지 않습니다.');
+        transaction.set(publicRef, next);
+        return next;
+      });
+      return finalized;
+    }
+
+    async function withdrawPublishedQuizSet(setId, actor) {
+      const publicationId = canonicalPublicationId(setId, 'setId');
+      const sourceRef = db.doc('quiz_sets/' + publicationId);
+      const publicRef = db.doc('published_quiz_sets/' + publicationId);
+      return db.runTransaction(async transaction => {
+        const sourceSnapshot = await transaction.get(sourceRef);
+        const source = quizSetValue(sourceSnapshot);
+        if (!source) throw new Error('철회할 원본 세트를 찾을 수 없습니다.');
+        const allowanceRef = db.doc('teacher_allowances/' + String(source.ownerUid || ''));
+        const allowanceSnapshot = await transaction.get(allowanceRef);
+        const publicSnapshot = await transaction.get(publicRef);
+        requireActiveSourceOwner(source, allowanceSnapshot, actor || {});
+        if (!publicSnapshot.exists) throw new Error('철회할 공개 projection이 없습니다.');
+        const projection = requireStoredProjection(
+          publicSnapshot.data() || {}, publicationId, 'published'
+        );
+        if (requireContentRevision(source) !== projection.revision) {
+          throw new Error('원본과 공개 projection revision이 일치하지 않습니다.');
+        }
+        const next = {
+          ...projection,
+          status: 'withdrawn', moderationStatus: 'clear',
+          updatedAtMs: Math.max(projection.publishedAtMs, publicServerNowMs())
+        };
+        if (!publicLibraryCore().validateProjection(next).ok) {
+          throw new Error('철회 projection이 유효하지 않습니다.');
+        }
+        transaction.set(publicRef, next);
+        return next;
+      });
+    }
+
+    function exactPublicationRevision(value) {
+      if (typeof value !== 'string' || !value.trim() || value.trim().length > 200) {
+        throw new Error('정확한 publication revision이 필요합니다.');
+      }
+      return value.trim();
+    }
+
+    async function adminModeratePublishedQuiz(setId, expectedRevision, reason, admin) {
+      const publicationId = canonicalPublicationId(setId, 'setId');
+      const expected = exactPublicationRevision(expectedRevision);
+      const moderationReason = typeof reason === 'string' ? reason.trim() : '';
+      if (moderationReason.length < 1 || moderationReason.length > 200) {
+        throw new Error('관리자 공개 중지 사유는 1~200자여야 합니다.');
+      }
+      const publicRef = db.doc('published_quiz_sets/' + publicationId);
+      return db.runTransaction(async transaction => {
+        const currentAdmin = await requireAuthoritativePublicationAdmin(transaction, admin);
+        const snapshot = await transaction.get(publicRef);
+        if (!snapshot.exists) throw new Error('중지할 공개 projection이 없습니다.');
+        const projection = requireStoredProjection(snapshot.data() || {}, publicationId, 'published');
+        if (projection.revision !== expected) {
+          throw new Error('공개 projection revision이 변경되었습니다.');
+        }
+        const nextProjection = {
+          ...projection,
+          status: 'moderated', moderationStatus: 'moderated',
+          updatedAtMs: Math.max(projection.publishedAtMs, publicServerNowMs())
+        };
+        if (!publicLibraryCore().validateProjection(nextProjection).ok) {
+          throw new Error('관리자 공개 중지 projection이 유효하지 않습니다.');
+        }
+        const next = {
+          ...nextProjection,
+          moderatedByUid: currentAdmin.uid,
+          moderatedAt: fieldValue.serverTimestamp(),
+          moderationReason
+        };
+        transaction.set(publicRef, next);
+        return next;
+      });
+    }
+
+    async function adminRestorePublishedQuiz(setId, expectedRevision, admin) {
+      const publicationId = canonicalPublicationId(setId, 'setId');
+      const expected = exactPublicationRevision(expectedRevision);
+      const sourceRef = db.doc('quiz_sets/' + publicationId);
+      const publicRef = db.doc('published_quiz_sets/' + publicationId);
+      return db.runTransaction(async transaction => {
+        await requireAuthoritativePublicationAdmin(transaction, admin);
+        const sourceSnapshot = await transaction.get(sourceRef);
+        const source = quizSetValue(sourceSnapshot);
+        if (!source) throw new Error('복구할 공개 projection의 원본이 없습니다.');
+        const ownerAllowanceRef = db.doc(
+          'teacher_allowances/' + String(source.ownerUid || '')
+        );
+        const ownerAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
+        const publicSnapshot = await transaction.get(publicRef);
+        requireActiveSourceOwner(source, ownerAllowanceSnapshot);
+        if (!publicSnapshot.exists) throw new Error('복구할 공개 projection이 없습니다.');
+        const projection = requireStoredProjection(
+          publicSnapshot.data() || {}, publicationId, 'moderated'
+        );
+        if (projection.revision !== expected || requireContentRevision(source) !== expected) {
+          throw new Error('원본 또는 공개 projection revision이 변경되었습니다.');
+        }
+        const next = {
+          ...projection,
+          status: 'published', moderationStatus: 'clear',
+          updatedAtMs: Math.max(projection.publishedAtMs, publicServerNowMs())
+        };
+        if (!publicLibraryCore().validateProjection(next).ok) {
+          throw new Error('복구할 공개 projection이 유효하지 않습니다.');
+        }
+        transaction.set(publicRef, next);
+        return next;
+      });
+    }
+
+    async function listPublishedQuizSets(options) {
+      const config = options || {};
+      const limit = config.limit == null ? 50 : Number(config.limit);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+        throw new Error('공개 자료실 limit은 1~50이어야 합니다.');
+      }
+      if (config.cursor != null &&
+          (!config.cursor || typeof config.cursor.id !== 'string' ||
+           typeof config.cursor.get !== 'function')) {
+        throw new Error('공개 자료실 cursor가 유효하지 않습니다.');
+      }
+      let query = db.collection('published_quiz_sets')
+        .where('status', '==', 'published')
+        .orderBy('updatedAtMs', 'desc');
+      if (config.cursor != null) query = query.startAfter(config.cursor);
+      const snapshot = await query.limit(limit).get({ source: 'server' });
+      const items = [];
+      for (const document of snapshot.docs || []) {
+        try {
+          const projection = requireStoredProjection(
+            document.data() || {}, document.id, 'published'
+          );
+          items.push(publicLibraryCore().publicSummary(projection));
+        } catch (_) {
+          // A malformed row must never become visible; the raw cursor still advances.
+        }
+      }
+      const last = (snapshot.docs || []).at(-1);
+      const lastUpdatedAtMs = last && (last.data() || {}).updatedAtMs;
+      return {
+        items,
+        nextCursor: (snapshot.docs || []).length === limit &&
+          Number.isSafeInteger(lastUpdatedAtMs) ? last : null
+      };
+    }
+
+    async function getPublishedQuizSet(publicationId) {
+      const id = canonicalPublicationId(publicationId, 'publicationId');
+      const snapshot = await db.doc('published_quiz_sets/' + id)
+        .get({ source: 'server' });
+      if (!snapshot.exists) return null;
+      try {
+        return requireStoredProjection(snapshot.data() || {}, id, 'published');
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function publicCopyParent(projection, newId, actor) {
+      const patch = publicLibraryCore().copyPatch(projection);
+      return {
+        title: ((projection.title || '제목 없음') + ' (사본)').slice(0, 200),
+        description: projection.description,
+        videos: projection.videos,
+        settings: projection.settings,
+        ...patch,
+        sourcePublicationRevision: projection.revision,
+        ownerUid: actor.uid,
+        ownerEmail: canonicalTeacherEmail(actor.email),
+        lifecycleState: 'copying',
+        copyStatus: 'building',
+        collaboratorCount: 0,
+        imageCount: 0,
+        createdAt: fieldValue.serverTimestamp(),
+        updatedAt: fieldValue.serverTimestamp(),
+        contentRevision: fieldValue.serverTimestamp()
+      };
+    }
+
+    function samePublicCopyDestination(destination, expected, actor, imageCount) {
+      const value = destination || {};
+      if (value.ownerUid !== actor.uid ||
+          canonicalTeacherEmail(value.ownerEmail) !== canonicalTeacherEmail(actor.email) ||
+          value.publicationId !== expected.publicationId ||
+          value.sourcePublicationRevision !== expected.sourcePublicationRevision ||
+          value.visibility !== 'private' || value.collaboratorCount !== 0 ||
+          !Number.isSafeInteger(value.imageCount) || value.imageCount < 0 ||
+          value.imageCount > imageCount || value.trashedAt || value.purgeStartedAt ||
+          !['copying', 'active'].includes(value.lifecycleState)) return false;
+      for (const key of [
+        'title', 'description', 'videos', 'settings', 'sourceTitle',
+        'sourceAuthorDisplayName'
+      ]) {
+        if (!publicationProjectionFingerprint(value[key], expected[key])) return false;
+      }
+      if (value.lifecycleState === 'copying') return value.copyStatus === 'building';
+      return value.copyStatus === undefined && value.imageCount === imageCount;
+    }
+
+    function exactDestinationImages(snapshot, sourceImages) {
+      const stored = {};
+      for (const document of snapshot.docs || []) {
+        const data = document.data() || {};
+        if (imageKey(document.id) !== document.id ||
+            Object.keys(data).length !== 1 || typeof data.data !== 'string') {
+          return false;
+        }
+        stored[document.id] = data.data;
+      }
+      return sameImageValues(stored, sourceImages);
+    }
+
+    async function copyPublishedQuizSet(publicationId, newSetId, actor) {
+      const id = canonicalPublicationId(publicationId, 'publicationId');
+      const destinationId = canonicalPublicationId(newSetId, 'newSetId');
+      if (id === destinationId) throw new Error('공개 원본과 사본 목적지 ID가 같을 수 없습니다.');
+      const currentActor = actor || {};
+      const actorAllowanceRef = db.doc(
+        'teacher_allowances/' + String(currentActor.uid || '')
+      );
+      const publicRef = db.doc('published_quiz_sets/' + id);
+      const destinationRef = db.doc('quiz_sets/' + destinationId);
+      const [allowanceSnapshot, publicSnapshot, publicImageSnapshot] = await Promise.all([
+        actorAllowanceRef.get({ source: 'server' }),
+        publicRef.get({ source: 'server' }),
+        db.collection('published_quiz_sets/' + id + '/images').get({ source: 'server' })
+      ]);
+      requireActiveActorAllowance(allowanceSnapshot, currentActor);
+      if (!publicSnapshot.exists) throw new Error('복사할 published 공개 projection이 없습니다.');
+      const projection = requireStoredProjection(
+        publicSnapshot.data() || {}, id, 'published'
+      );
+      const publicImages = storedPublicImages(publicImageSnapshot, projection.revision);
+      assertPublishedImageBinding(projection, publicImages, publicImages.images);
+      const expectedParent = publicCopyParent(projection, destinationId, currentActor);
+      assertRequestAllowed(requestEstimate(expectedParent, publicImages.images, {
+        setPath: 'quiz_sets/' + destinationId,
+        imagePath: 'images/' + destinationId + '/q'
+      }));
+
+      const initialized = await db.runTransaction(async transaction => {
+        const latestPublicSnapshot = await transaction.get(publicRef);
+        const latestAllowanceSnapshot = await transaction.get(actorAllowanceRef);
+        const destinationSnapshot = await transaction.get(destinationRef);
+        requireActiveActorAllowance(latestAllowanceSnapshot, currentActor);
+        if (!latestPublicSnapshot.exists) {
+          throw new Error('복사 중 공개 projection이 철회되었습니다.');
+        }
+        const latestProjection = requireStoredProjection(
+          latestPublicSnapshot.data() || {}, id, 'published'
+        );
+        if (latestProjection.revision !== projection.revision ||
+            !publicationProjectionFingerprint(latestProjection, projection)) {
+          throw new Error('복사 중 published 공개 projection이 변경되었습니다.');
+        }
+        if (destinationSnapshot.exists) {
+          const destination = destinationSnapshot.data() || {};
+          if (!samePublicCopyDestination(
+            destination, expectedParent, currentActor, projection.imageCount
+          )) {
+            throw new Error('사본 destination ID가 이미 존재하거나 충돌했습니다.');
+          }
+          return {
+            complete: destination.lifecycleState === 'active', destination
+          };
+        }
+        transaction.set(destinationRef, expectedParent);
+        return { complete: false, destination: expectedParent };
+      });
+
+      if (initialized.complete) {
+        const destinationImages = await db.collection(
+          'images/' + destinationId + '/q'
+        ).get({ source: 'server' });
+        if (!exactDestinationImages(destinationImages, publicImages.images)) {
+          throw new Error('완료된 사본 destination 이미지가 provenance와 일치하지 않습니다.');
+        }
+        return { ...initialized.destination, id: destinationId };
+      }
+
+      for (const [key, data] of Object.entries(publicImages.images)) {
+        const destinationImageRef = db.doc(
+          'images/' + destinationId + '/q/' + key
+        );
+        await db.runTransaction(async transaction => {
+          const latestPublicSnapshot = await transaction.get(publicRef);
+          const latestAllowanceSnapshot = await transaction.get(actorAllowanceRef);
+          const destinationSnapshot = await transaction.get(destinationRef);
+          const destinationImageSnapshot = await transaction.get(destinationImageRef);
+          requireActiveActorAllowance(latestAllowanceSnapshot, currentActor);
+          if (!latestPublicSnapshot.exists) {
+            throw new Error('복사 중 공개 projection이 철회되었습니다.');
+          }
+          const latestProjection = requireStoredProjection(
+            latestPublicSnapshot.data() || {}, id, 'published'
+          );
+          if (latestProjection.revision !== projection.revision ||
+              !publicationProjectionFingerprint(latestProjection, projection)) {
+            throw new Error('복사 중 published 공개 projection이 변경되었습니다.');
+          }
+          if (!destinationSnapshot.exists) throw new Error('사본 destination 부모가 없습니다.');
+          const destination = destinationSnapshot.data() || {};
+          if (!samePublicCopyDestination(
+            destination, expectedParent, currentActor, projection.imageCount
+          ) || destination.lifecycleState !== 'copying') {
+            throw new Error('사본 destination 상태 또는 provenance가 변경되었습니다.');
+          }
+          if (destinationImageSnapshot.exists) {
+            const stored = destinationImageSnapshot.data() || {};
+            if (Object.keys(stored).length !== 1 || stored.data !== data) {
+              throw new Error('사본 destination 이미지 충돌을 거부했습니다.');
+            }
+            return;
+          }
+          const nextCount = destination.imageCount + 1;
+          if (nextCount > projection.imageCount) {
+            throw new Error('사본 destination image counter overflow를 거부했습니다.');
+          }
+          transaction.set(destinationImageRef, { data });
+          transaction.set(destinationRef, {
+            imageCount: nextCount,
+            imageMutation: { key, action: 'add' },
+            updatedAt: fieldValue.serverTimestamp(),
+            contentRevision: fieldValue.serverTimestamp()
+          }, { merge: true });
+        });
+      }
+
+      const finalized = await db.runTransaction(async transaction => {
+        const latestPublicSnapshot = await transaction.get(publicRef);
+        const latestAllowanceSnapshot = await transaction.get(actorAllowanceRef);
+        const destinationSnapshot = await transaction.get(destinationRef);
+        requireActiveActorAllowance(latestAllowanceSnapshot, currentActor);
+        if (!latestPublicSnapshot.exists) {
+          throw new Error('최종 복사 전 공개 projection이 철회되었습니다.');
+        }
+        const latestProjection = requireStoredProjection(
+          latestPublicSnapshot.data() || {}, id, 'published'
+        );
+        if (latestProjection.revision !== projection.revision ||
+            !publicationProjectionFingerprint(latestProjection, projection)) {
+          throw new Error('최종 복사 전 published 공개 projection이 변경되었습니다.');
+        }
+        if (!destinationSnapshot.exists) throw new Error('사본 destination 부모가 없습니다.');
+        const destination = destinationSnapshot.data() || {};
+        if (!samePublicCopyDestination(
+          destination, expectedParent, currentActor, projection.imageCount
+        ) || destination.lifecycleState !== 'copying' ||
+            destination.imageCount !== projection.imageCount) {
+          throw new Error('사본 destination image counter가 완료되지 않았습니다.');
+        }
+        const deletion = deleteFieldValue();
+        transaction.set(destinationRef, {
+          lifecycleState: 'active',
+          copyStatus: deletion,
+          imageMutation: deletion,
+          updatedAt: fieldValue.serverTimestamp(),
+          contentRevision: fieldValue.serverTimestamp()
+        }, { merge: true });
+        return {
+          ...destination,
+          lifecycleState: 'active',
+          copyStatus: undefined,
+          imageMutation: undefined,
+          id: destinationId
+        };
+      });
+      delete finalized.copyStatus;
+      delete finalized.imageMutation;
+      return finalized;
+    }
+
     function claimSessionCode(code, sessionId, session) {
       const setSnapshot = session && session.setSnapshot;
       const snapshotImages = normalizedImages(session && session.snapshotImages);
@@ -3314,6 +4119,13 @@
       replaceImages,
       copyQuizSet,
       copyOwnedQuizSet,
+      publishQuizSet,
+      withdrawPublishedQuizSet,
+      adminModeratePublishedQuiz,
+      adminRestorePublishedQuiz,
+      listPublishedQuizSets,
+      getPublishedQuizSet,
+      copyPublishedQuizSet,
       startSession,
       activateSessionAllocation,
       renewSessionActivationLease,

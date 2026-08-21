@@ -193,6 +193,7 @@ function makeFirestoreFake(initial = {}, options = {}) {
   function querySnapshot(path, source = documents, filters = []) {
     const limit = filters.find(filter => filter.type === 'limit');
     const order = filters.find(filter => filter.type === 'orderBy');
+    const startAfter = filters.find(filter => filter.type === 'startAfter');
     const matches = (left, operator, right) => {
       const a = queryComparable(left);
       const b = queryComparable(right);
@@ -205,11 +206,22 @@ function makeFirestoreFake(initial = {}, options = {}) {
     };
     const docs = collectionDocs(path, source).filter(document =>
       filters.every(filter => ['limit', 'orderBy'].includes(filter.type) ||
+        filter.type === 'startAfter' ||
         matches(document.get(filter.field), filter.operator, filter.value))
     ).sort((left, right) => {
       if (!order) return 0;
       const compared = queryComparable(left.get(order.field)) - queryComparable(right.get(order.field));
       return order.direction === 'desc' ? -compared : compared;
+    }).filter(document => {
+      if (!startAfter || !order) return true;
+      const cursorDocument = startAfter.values[0];
+      const isDocumentCursor = cursorDocument &&
+        typeof cursorDocument.get === 'function' && typeof cursorDocument.id === 'string';
+      const current = queryComparable(document.get(order.field));
+      const cursor = queryComparable(isDocumentCursor
+        ? cursorDocument.get(order.field) : cursorDocument);
+      if (current === cursor && isDocumentCursor) return document.id > cursorDocument.id;
+      return order.direction === 'desc' ? current < cursor : current > cursor;
     }).slice(0, limit ? limit.value : undefined);
     return {
       docs,
@@ -310,6 +322,10 @@ function makeFirestoreFake(initial = {}, options = {}) {
         calls.push({ operation: 'orderBy', path, field, direction: direction || 'asc' });
         return collectionRef(path, filters.concat({ type: 'orderBy', field, direction: direction || 'asc' }));
       },
+      startAfter(...values) {
+        calls.push({ operation: 'startAfter', path, values: clone(values) });
+        return collectionRef(path, filters.concat({ type: 'startAfter', values }));
+      },
       onSnapshot(next, error) {
         return addListener(collectionListeners, path, next, error, querySnapshot);
       }
@@ -364,6 +380,13 @@ function makeFirestoreFake(initial = {}, options = {}) {
     },
     async runTransaction(updateFunction) {
       calls.push({ operation: 'runTransaction' });
+      if (options.beforeTransactionStart) {
+        await options.beforeTransactionStart({
+          attempt: transactionCommitCount + 1,
+          set(path, value) { documents.set(path, clone(value)); },
+          delete(path) { documents.delete(path); }
+        });
+      }
       const staged = new Map(documents);
       const touched = new Set();
       const requestOperations = [];
@@ -421,6 +444,10 @@ function makeFirestoreFake(initial = {}, options = {}) {
       documents.clear();
       staged.forEach((value, path) => documents.set(path, value));
       touched.forEach(notify);
+      if (options.failTransactionAfterCommitAt === transactionCommitCount) {
+        throw new Error(options.failTransactionAfterCommitMessage ||
+          'planned ambiguous transaction failure ' + transactionCommitCount);
+      }
       return result;
     }
   };
@@ -13991,4 +14018,514 @@ test('request-marker home router and dashboard rerender are mutually exclusive',
   await context.applyTeacherUser(user);
 
   assert.deepEqual(events, ['router']);
+});
+
+const PublicQuizLibraryCore = require('../public-quiz-library-core.js');
+
+function publicLibraryActor(uid = 'owner', email = 'owner@school.kr', overrides = {}) {
+  return {
+    uid, email, displayName: uid === 'owner' ? '홍교사' : '김교사', role: 'teacher',
+    ...overrides
+  };
+}
+
+function publicLibraryAllowance(uid = 'owner', email = 'owner@school.kr', overrides = {}) {
+  return {
+    uid, emailCanonical: email, role: 'teacher', status: 'active', enabled: true,
+    revision: 1, ...overrides
+  };
+}
+
+function publicLibrarySource(overrides = {}) {
+  return {
+    title: '공개 과학 퀴즈',
+    description: '힘과 운동 복습',
+    settings: { revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true },
+    videos: [{
+      videoId: 'dQw4w9WgXcQ',
+      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      startSec: 0,
+      endSec: 120,
+      questions: [{
+        type: 'choice', t: 10, text: '힘의 단위는?', choices: ['N', 'm'], answer: 0,
+        imgUp: true
+      }]
+    }],
+    ownerUid: 'owner', ownerEmail: 'owner@school.kr',
+    lifecycleState: 'active', collaboratorCount: 0, imageCount: 0,
+    contentRevision: 'rev-1',
+    ...overrides
+  };
+}
+
+function publicLibraryProjection(id = 'set-1', options = {}) {
+  const revision = options.revision || 'rev-1';
+  const source = publicLibrarySource({
+    imageCount: options.imageCount ?? 0,
+    contentRevision: revision
+  });
+  const projection = PublicQuizLibraryCore.buildProjection(source, {
+    setId: id,
+    authorDisplayName: options.authorDisplayName || '홍교사',
+    revision,
+    nowMs: options.updatedAtMs ?? 1_000
+  });
+  return {
+    ...projection,
+    status: 'published', moderationStatus: 'clear',
+    publishedAtMs: options.publishedAtMs ?? Math.min(900, options.updatedAtMs ?? 1_000),
+    updatedAtMs: options.updatedAtMs ?? 1_000,
+    ...(options.patch || {})
+  };
+}
+
+const PUBLIC_LIBRARY_IMAGE_A = 'data:image/png;base64,AAAA';
+const PUBLIC_LIBRARY_IMAGE_B = 'data:image/png;base64,BBBB';
+
+test('publish keeps a building projection hidden until bound images and the source reread finalize', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ imageCount: 2 }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'images/set-1/q/v0q0': { data: PUBLIC_LIBRARY_IMAGE_A },
+    'images/set-1/q/v0q0e': { data: PUBLIC_LIBRARY_IMAGE_B }
+  }, { committedServerMillis: 1_000 });
+  const store = createStore(fake, () => 1_000);
+
+  const result = await store.publishQuizSet('set-1', publicLibraryActor());
+
+  assert.equal(result.status, 'published');
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'published');
+  assert.equal(fake.value('published_quiz_sets/set-1').buildToken, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').buildImageCount, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').ownerUid, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').ownerEmail, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').data, PUBLIC_LIBRARY_IMAGE_A);
+  assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').revision, 'rev-1');
+
+  const calls = fake.calls();
+  const buildingIndex = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1' && call.value.status === 'building');
+  const imageIndex = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1/images/v0q0');
+  const publishedIndex = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1' && call.value.status === 'published');
+  const finalSourceRead = calls.findLastIndex(call => call.operation === 'transactionGet' &&
+    call.path === 'quiz_sets/set-1');
+  assert.ok(buildingIndex >= 0 && buildingIndex < imageIndex);
+  assert.ok(imageIndex < finalSourceRead && finalSourceRead < publishedIndex);
+});
+
+test('publish rejects collaborator authority, stale source revision, trash, and suspended owner without exposure', async t => {
+  await t.test('collaborator authority', async () => {
+    const fake = makeFirestoreFake({
+      'quiz_sets/set-1': publicLibrarySource(),
+      'teacher_allowances/editor': publicLibraryAllowance('editor', 'editor@school.kr'),
+      'quiz_sets/set-1/collaborators/editor%40school.kr': {
+        uid: 'editor', email: 'editor@school.kr', role: 'editor'
+      }
+    });
+    await assert.rejects(
+      () => createStore(fake).publishQuizSet(
+        'set-1', publicLibraryActor('editor', 'editor@school.kr')
+      ),
+      /소유자/
+    );
+    assert.equal(fake.value('published_quiz_sets/set-1'), undefined);
+  });
+
+  await t.test('stale source revision', async () => {
+    let fake;
+    fake = makeFirestoreFake({
+      'quiz_sets/set-1': publicLibrarySource(),
+      'teacher_allowances/owner': publicLibraryAllowance()
+    }, {
+      beforeTransactionStart({ attempt, set }) {
+        if (attempt === 1) {
+          set('quiz_sets/set-1', {
+            ...fake.value('quiz_sets/set-1'), contentRevision: 'rev-2'
+          });
+        }
+      }
+    });
+    await assert.rejects(
+      () => createStore(fake).publishQuizSet('set-1', publicLibraryActor()),
+      /revision|리비전|변경/
+    );
+    assert.equal(fake.value('published_quiz_sets/set-1'), undefined);
+  });
+
+  for (const [name, source, allowance] of [
+    ['trash source', publicLibrarySource({ lifecycleState: 'trashed', trashedAt: 10 }), publicLibraryAllowance()],
+    ['suspended owner', publicLibrarySource(), publicLibraryAllowance('owner', 'owner@school.kr', {
+      status: 'suspended', enabled: false
+    })]
+  ]) {
+    await t.test(name, async () => {
+      const fake = makeFirestoreFake({
+        'quiz_sets/set-1': source,
+        'teacher_allowances/owner': allowance
+      });
+      await assert.rejects(
+        () => createStore(fake).publishQuizSet('set-1', publicLibraryActor()),
+        /active|활성|승인|중지/
+      );
+      assert.equal(fake.value('published_quiz_sets/set-1'), undefined);
+    });
+  }
+});
+
+test('publish resumes a partial image build while every incomplete attempt stays hidden', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ imageCount: 2 }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'images/set-1/q/v0q0': { data: PUBLIC_LIBRARY_IMAGE_A },
+    'images/set-1/q/v0q0e': { data: PUBLIC_LIBRARY_IMAGE_B }
+  }, { failTransactionAt: 3, failTransactionMessage: 'partial public image write' });
+  const store = createStore(fake);
+
+  await assert.rejects(
+    () => store.publishQuizSet('set-1', publicLibraryActor()),
+    /partial public image write/
+  );
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'building');
+  assert.equal(fake.value('published_quiz_sets/set-1').buildImageCount, 1);
+  assert.equal(await store.getPublishedQuizSet('set-1'), null);
+
+  const result = await store.publishQuizSet('set-1', publicLibraryActor());
+  assert.equal(result.status, 'published');
+  assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').data, PUBLIC_LIBRARY_IMAGE_A);
+  assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0e').data, PUBLIC_LIBRARY_IMAGE_B);
+});
+
+test('publish refuses to overwrite a building projection from another source revision and token', async () => {
+  const oldProjection = PublicQuizLibraryCore.buildProjection(publicLibrarySource(), {
+    setId: 'set-1', authorDisplayName: '홍교사', revision: 'rev-old', nowMs: 1_000
+  });
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ contentRevision: 'rev-new' }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'published_quiz_sets/set-1': {
+      ...oldProjection, buildToken: 'other-build', buildImageCount: 0
+    }
+  });
+
+  await assert.rejects(
+    () => createStore(fake).publishQuizSet('set-1', publicLibraryActor()),
+    /building|게시 작업|revision|리비전/
+  );
+  assert.equal(fake.value('published_quiz_sets/set-1').buildToken, 'other-build');
+});
+
+test('publish fails closed when source content drifts without changing its revision', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ title: 'revision 없이 바뀐 제목' }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'published_quiz_sets/set-1': publicLibraryProjection()
+  });
+
+  await assert.rejects(
+    () => createStore(fake).publishQuizSet('set-1', publicLibraryActor()),
+    /content|projection|revision|리비전|불일치/
+  );
+  assert.equal(fake.value('published_quiz_sets/set-1').title, '공개 과학 퀴즈');
+});
+
+test('withdraw uses owner and source revision CAS and immediately hides the projection', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource(),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'published_quiz_sets/set-1': publicLibraryProjection()
+  });
+  const store = createStore(fake);
+
+  const result = await store.withdrawPublishedQuizSet('set-1', publicLibraryActor());
+
+  assert.equal(result.status, 'withdrawn');
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
+  assert.equal(await store.getPublishedQuizSet('set-1'), null);
+
+  const stale = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ contentRevision: 'rev-2' }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'published_quiz_sets/set-1': publicLibraryProjection()
+  });
+  await assert.rejects(
+    () => createStore(stale).withdrawPublishedQuizSet('set-1', publicLibraryActor()),
+    /revision|리비전/
+  );
+  assert.equal(stale.value('published_quiz_sets/set-1').status, 'published');
+});
+
+test('moderate and restore require authoritative admin CAS and active source owner state', async () => {
+  const admin = publicLibraryActor('admin', 'admin@school.kr', {
+    displayName: '관리자', role: 'admin'
+  });
+  const initial = {
+    'quiz_sets/set-1': publicLibrarySource(),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'teacher_allowances/admin': publicLibraryAllowance('admin', 'admin@school.kr', {
+      role: 'admin'
+    }),
+    'published_quiz_sets/set-1': publicLibraryProjection()
+  };
+  const fake = makeFirestoreFake(initial);
+  const store = createStore(fake);
+
+  const moderated = await store.adminModeratePublishedQuiz(
+    'set-1', 'rev-1', '저작권 확인 필요', admin
+  );
+  assert.equal(moderated.status, 'moderated');
+  assert.equal(fake.value('published_quiz_sets/set-1').moderatedByUid, 'admin');
+  assert.equal(fake.value('published_quiz_sets/set-1').moderationReason, '저작권 확인 필요');
+  assert.equal(await store.getPublishedQuizSet('set-1'), null);
+
+  const restored = await store.adminRestorePublishedQuiz('set-1', 'rev-1', admin);
+  assert.equal(restored.status, 'published');
+  assert.equal(fake.value('published_quiz_sets/set-1').moderatedByUid, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').moderationReason, undefined);
+
+  const stale = makeFirestoreFake(initial);
+  await assert.rejects(
+    () => createStore(stale).adminModeratePublishedQuiz(
+      'set-1', 'rev-stale', '사유', admin
+    ),
+    /revision|리비전/
+  );
+  assert.equal(stale.value('published_quiz_sets/set-1').status, 'published');
+
+  const suspendedOwner = makeFirestoreFake({
+    ...initial,
+    'teacher_allowances/owner': publicLibraryAllowance('owner', 'owner@school.kr', {
+      status: 'suspended', enabled: false
+    }),
+    'published_quiz_sets/set-1': {
+      ...publicLibraryProjection(), status: 'moderated', moderationStatus: 'moderated',
+      moderatedByUid: 'admin', moderationReason: '사유', moderatedAt: 1_000
+    }
+  });
+  await assert.rejects(
+    () => createStore(suspendedOwner).adminRestorePublishedQuiz('set-1', 'rev-1', admin),
+    /active|활성|중지/
+  );
+  assert.equal(suspendedOwner.value('published_quiz_sets/set-1').status, 'moderated');
+});
+
+test('public projection list and get return only validated published rows with a bounded cursor query', async () => {
+  const fake = makeFirestoreFake({
+    'published_quiz_sets/pub-1': publicLibraryProjection('pub-1', { updatedAtMs: 300 }),
+    'published_quiz_sets/pub-2': publicLibraryProjection('pub-2', { updatedAtMs: 200 }),
+    'published_quiz_sets/pub-2b': publicLibraryProjection('pub-2b', { updatedAtMs: 200 }),
+    'published_quiz_sets/pub-3': publicLibraryProjection('pub-3', { updatedAtMs: 100 }),
+    'published_quiz_sets/building': {
+      ...PublicQuizLibraryCore.buildProjection(publicLibrarySource(), {
+        setId: 'building', authorDisplayName: '홍교사', revision: 'rev-1', nowMs: 400
+      }),
+      buildToken: 'hidden', buildImageCount: 0
+    },
+    'published_quiz_sets/withdrawn': publicLibraryProjection('withdrawn', {
+      patch: { status: 'withdrawn' }
+    }),
+    'published_quiz_sets/moderated': publicLibraryProjection('moderated', {
+      patch: { status: 'moderated', moderationStatus: 'moderated' }
+    })
+  });
+  const store = createStore(fake);
+
+  const first = await store.listPublishedQuizSets({ limit: 2 });
+  assert.deepEqual(first.items.map(item => item.publicationId), ['pub-1', 'pub-2']);
+  assert.equal(first.nextCursor.id, 'pub-2');
+  assert.deepEqual(Object.keys(first.items[0]).sort(), [
+    'authorDisplayName', 'description', 'publicationId', 'questionCount',
+    'title', 'updatedAtMs', 'videoCount'
+  ]);
+
+  const second = await store.listPublishedQuizSets({ limit: 2, cursor: first.nextCursor });
+  assert.deepEqual(second.items.map(item => item.publicationId), ['pub-2b', 'pub-3']);
+  assert.equal(second.nextCursor.id, 'pub-3');
+  const third = await store.listPublishedQuizSets({ limit: 2, cursor: second.nextCursor });
+  assert.deepEqual(third.items, []);
+  assert.equal(third.nextCursor, null);
+  assert.equal((await store.getPublishedQuizSet('pub-1')).status, 'published');
+  assert.equal(await store.getPublishedQuizSet('building'), null);
+  assert.equal(await store.getPublishedQuizSet('withdrawn'), null);
+  assert.equal(await store.getPublishedQuizSet('moderated'), null);
+
+  await assert.rejects(() => store.listPublishedQuizSets({ limit: 51 }), /1.*50|limit/);
+  const calls = fake.calls();
+  assert.ok(calls.some(call => call.operation === 'where' && call.field === 'status' && call.value === 'published'));
+  assert.ok(calls.some(call => call.operation === 'orderBy' && call.field === 'updatedAtMs' && call.direction === 'desc'));
+  assert.ok(calls.some(call => call.operation === 'startAfter' && call.values[0].id === 'pub-2'));
+});
+
+test('copyPublished reads public projection only and finalizes a strict private counter destination', async () => {
+  const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 2 }),
+    'published_quiz_sets/set-1/images/v0q0': {
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+    },
+    'published_quiz_sets/set-1/images/v0q0e': {
+      data: PUBLIC_LIBRARY_IMAGE_B, revision: 'rev-1', buildToken: 'build-1'
+    }
+  });
+  const store = createStore(fake);
+
+  const result = await store.copyPublishedQuizSet('set-1', 'copy-1', actor);
+
+  assert.equal(result.id, 'copy-1');
+  assert.equal(fake.value('quiz_sets/copy-1').ownerUid, 'teacher-b');
+  assert.equal(fake.value('quiz_sets/copy-1').ownerEmail, 'teacher-b@school.kr');
+  assert.equal(fake.value('quiz_sets/copy-1').visibility, 'private');
+  assert.equal(fake.value('quiz_sets/copy-1').lifecycleState, 'active');
+  assert.equal(fake.value('quiz_sets/copy-1').collaboratorCount, 0);
+  assert.equal(fake.value('quiz_sets/copy-1').imageCount, 2);
+  assert.equal(fake.value('quiz_sets/copy-1').publicationId, 'set-1');
+  assert.equal(fake.value('quiz_sets/copy-1').sourcePublicationRevision, 'rev-1');
+  assert.equal(fake.value('quiz_sets/copy-1').copyStatus, undefined);
+  assert.equal(fake.value('images/copy-1/q/v0q0').data, PUBLIC_LIBRARY_IMAGE_A);
+  assert.equal(fake.value('images/copy-1/q/v0q0e').data, PUBLIC_LIBRARY_IMAGE_B);
+
+  const calls = fake.calls();
+  assert.equal(calls.some(call => call.path === 'quiz_sets/set-1'), false);
+  assert.equal(calls.some(call => call.path === 'images/set-1/q'), false);
+  const increments = calls.filter(call => call.operation === 'transactionSet' &&
+    call.path === 'quiz_sets/copy-1' && call.value.imageMutation &&
+    call.value.imageMutation.action === 'add');
+  assert.deepEqual(increments.map(call => call.value.imageCount), [1, 2]);
+});
+
+test('copyPublished rejects withdrawal races, moderated rows, partial public images, and suspended copier', async t => {
+  const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
+  const allowance = publicLibraryAllowance('teacher-b', 'teacher-b@school.kr');
+
+  await t.test('withdrawal during copy', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_allowances/teacher-b': allowance,
+      'published_quiz_sets/set-1': publicLibraryProjection(),
+    }, {
+      beforeTransactionStart({ attempt, set }) {
+        if (attempt === 1) {
+          set('published_quiz_sets/set-1', publicLibraryProjection('set-1', {
+            updatedAtMs: 1_100, patch: { status: 'withdrawn' }
+          }));
+        }
+      }
+    });
+    await assert.rejects(
+      () => createStore(fake).copyPublishedQuizSet('set-1', 'copy-1', actor),
+      /published|공개|철회|변경/
+    );
+    assert.equal(fake.value('quiz_sets/copy-1'), undefined);
+  });
+
+  await t.test('moderated projection', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_allowances/teacher-b': allowance,
+      'published_quiz_sets/set-1': publicLibraryProjection('set-1', {
+        patch: { status: 'moderated', moderationStatus: 'moderated' }
+      })
+    });
+    await assert.rejects(
+      () => createStore(fake).copyPublishedQuizSet('set-1', 'copy-1', actor),
+      /published|공개|중지/
+    );
+    assert.equal(fake.calls().some(call => call.operation === 'runTransaction'), false);
+  });
+
+  await t.test('partial public image projection', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_allowances/teacher-b': allowance,
+      'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 2 }),
+      'published_quiz_sets/set-1/images/v0q0': {
+        data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+      }
+    });
+    await assert.rejects(
+      () => createStore(fake).copyPublishedQuizSet('set-1', 'copy-1', actor),
+      /image|이미지|counter/
+    );
+    assert.equal(fake.value('quiz_sets/copy-1'), undefined);
+  });
+
+  await t.test('suspended copier', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_allowances/teacher-b': publicLibraryAllowance(
+        'teacher-b', 'teacher-b@school.kr', { status: 'suspended', enabled: false }
+      ),
+      'published_quiz_sets/set-1': publicLibraryProjection()
+    });
+    await assert.rejects(
+      () => createStore(fake).copyPublishedQuizSet('set-1', 'copy-1', actor),
+      /active|활성|승인|중지/
+    );
+    assert.equal(fake.calls().some(call => call.operation === 'runTransaction'), false);
+  });
+});
+
+test('copyPublished refuses a destination collision before changing either document', async () => {
+  const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
+    'published_quiz_sets/set-1': publicLibraryProjection(),
+    'quiz_sets/copy-1': {
+      title: '기존 세트', ownerUid: 'teacher-b', lifecycleState: 'active',
+      collaboratorCount: 0, imageCount: 0
+    }
+  });
+
+  await assert.rejects(
+    () => createStore(fake).copyPublishedQuizSet('set-1', 'copy-1', actor),
+    /destination|목적지|이미 존재|충돌/
+  );
+  assert.equal(fake.value('quiz_sets/copy-1').title, '기존 세트');
+});
+
+test('copyPublished retries safely after an ambiguous final commit without duplicating image counters', async () => {
+  const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 1 }),
+    'published_quiz_sets/set-1/images/v0q0': {
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+    }
+  }, {
+    failTransactionAfterCommitAt: 3,
+    failTransactionAfterCommitMessage: 'ambiguous copy commit'
+  });
+  const store = createStore(fake);
+
+  await assert.rejects(
+    () => store.copyPublishedQuizSet('set-1', 'copy-1', actor),
+    /ambiguous copy commit/
+  );
+  assert.equal(fake.value('quiz_sets/copy-1').lifecycleState, 'active');
+  assert.equal(fake.value('quiz_sets/copy-1').imageCount, 1);
+
+  const result = await store.copyPublishedQuizSet('set-1', 'copy-1', actor);
+  assert.equal(result.id, 'copy-1');
+  assert.equal(fake.value('quiz_sets/copy-1').imageCount, 1);
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet' &&
+    call.path === 'images/copy-1/q/v0q0').length, 1);
+});
+
+test('copyPublished preflight rejects more than 500 writes before destination transaction', async () => {
+  const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
+  const initial = {
+    'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 497 })
+  };
+  for (let index = 0; index < 497; index += 1) {
+    initial['published_quiz_sets/set-1/images/v0q' + index] = {
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+    };
+  }
+  const fake = makeFirestoreFake(initial, { maxRequestWrites: 500 });
+
+  await assert.rejects(
+    () => createStore(fake).copyPublishedQuizSet('set-1', 'copy-1', actor),
+    /500개.*변환/
+  );
+  assert.equal(fake.calls().some(call => call.operation === 'runTransaction'), false);
+  assert.equal(fake.value('quiz_sets/copy-1'), undefined);
 });
