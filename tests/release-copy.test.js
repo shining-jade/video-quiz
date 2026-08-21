@@ -5,6 +5,15 @@ const vm = require('node:vm');
 
 const read = file => fs.readFileSync(file, 'utf8');
 
+test('email authentication validation core loads before the application script', () => {
+  const html = read('index.html');
+  const coreIndex = html.indexOf('<script src="teacher-email-auth-core.js"></script>');
+  const applicationIndex = html.indexOf('<script>');
+
+  assert.ok(coreIndex >= 0, 'email authentication validation core must be included');
+  assert.ok(coreIndex < applicationIndex, 'email authentication validation core must load before inline application code');
+});
+
 test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
   const html = read('index.html');
   const inlineScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
