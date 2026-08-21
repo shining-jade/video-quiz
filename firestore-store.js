@@ -1842,17 +1842,17 @@
     async function listSharedQuizSets(actor) {
       const current = actor || {};
       const email = actorEmail(current);
-      if (!current.uid || !email || !['teacher', 'admin'].includes(current.role) ||
-          typeof db.collectionGroup !== 'function') {
-        if (typeof db.collectionGroup !== 'function') return [];
+      if (!current.uid || !email || !['teacher', 'admin'].includes(current.role)) {
         throw new Error('공동편집 shared discovery에는 승인 교사 identity가 필요합니다.');
       }
-      const snapshot = await db.collectionGroup('collaborators')
-        .where('email', '==', email).limit(50).get({ source: 'server' });
+      const snapshot = await db.collection('quiz_set_shares/' + email + '/sets')
+        .limit(50).get({ source: 'server' });
       const setIds = [...new Set((snapshot.docs || []).map(document => {
-        const path = document && document.ref && document.ref.path || '';
-        const match = /^quiz_sets\/([^/]+)\/collaborators\/[^/]+$/.exec(path);
-        return match ? match[1] : '';
+        const value = document && typeof document.data === 'function'
+          ? document.data() || {} : {};
+        return value.email === email && value.setId === document.id &&
+          /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(document.id)
+          ? document.id : '';
       }).filter(Boolean))];
       const sets = await Promise.all(setIds.map(getQuizSet));
       return sets.filter(set => set && set.ownerUid !== current.uid && activeSet(set));
@@ -1995,6 +1995,9 @@
             collaboratorCount: count - 1,
             collaboratorMutation: { email: document.id, action: 'purge-remove' }
           }, { merge: true });
+          transaction.delete(db.doc(
+            'quiz_set_shares/' + document.id + '/sets/' + setId
+          ));
         } else {
           requireAuthoritativeCounters(parent);
           const count = parent.imageCount;
@@ -2103,6 +2106,9 @@
       const collaboratorReference = db.doc(
         'quiz_sets/' + setId + '/collaborators/' + normalizedEmail
       );
+      const shareReference = db.doc(
+        'quiz_set_shares/' + normalizedEmail + '/sets/' + setId
+      );
       const [setSnapshot, collaboratorsSnapshot] = await Promise.all([
         setReference.get({ source: 'server' }),
         db.collection('quiz_sets/' + setId + '/collaborators').get()
@@ -2138,6 +2144,10 @@
             addedByUid: current.uid,
             addedAt: fieldValue.serverTimestamp()
           });
+          transaction.set(shareReference, {
+            email: normalizedEmail,
+            setId
+          });
           transaction.set(setReference, {
             collaboratorCount: count + 1,
             collaboratorMutation: { email: normalizedEmail, action: 'add' }
@@ -2159,6 +2169,9 @@
       const collaboratorReference = db.doc(
         'quiz_sets/' + setId + '/collaborators/' + normalizedEmail
       );
+      const shareReference = db.doc(
+        'quiz_set_shares/' + normalizedEmail + '/sets/' + setId
+      );
       return db.runTransaction(async transaction => {
         const setSnapshot = await transaction.get(setReference);
         const collaboratorSnapshot = await transaction.get(collaboratorReference);
@@ -2171,6 +2184,7 @@
         const count = set.collaboratorCount;
         if (count < 1) throw new Error('공동 편집자 수가 올바르지 않습니다.');
         transaction.delete(collaboratorReference);
+        transaction.delete(shareReference);
         transaction.set(setReference, {
           collaboratorCount: count - 1,
           collaboratorMutation: { email: normalizedEmail, action: 'remove' }

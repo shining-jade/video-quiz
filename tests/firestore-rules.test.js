@@ -3553,6 +3553,9 @@ rulesTest('purging child reads let the real store finish owner/admin purge and d
     await adminWrite(`quiz_sets/${setId}/collaborators/other@school.kr`, {
       email: actors.otherTeacher.email, addedByUid: actors.owner.uid, addedAt: Timestamp.fromMillis(1)
     });
+    await adminWrite(`quiz_set_shares/other@school.kr/sets/${setId}`, {
+      email: actors.otherTeacher.email, setId
+    });
     await adminWrite(`images/${setId}/q/v0q0`, { data: 'purge-image' });
   }
 
@@ -3562,6 +3565,9 @@ rulesTest('purging child reads let the real store finish owner/admin purge and d
   assert.deepEqual(await ownerStore.continueSetPurge('owner-purge-store'), {
     done: false, deleted: 2, parentDeleted: false
   });
+  assert.equal(await adminRead(
+    'quiz_set_shares/other@school.kr/sets/owner-purge-store'
+  ), undefined);
   assert.deepEqual(await ownerStore.continueSetPurge('owner-purge-store'), {
     done: true, deleted: 0, parentDeleted: true
   });
@@ -3572,6 +3578,9 @@ rulesTest('purging child reads let the real store finish owner/admin purge and d
   assert.deepEqual(await adminStore.continueSetPurge('admin-purge-store'), {
     done: false, deleted: 2, parentDeleted: false
   });
+  assert.equal(await adminRead(
+    'quiz_set_shares/other@school.kr/sets/admin-purge-store'
+  ), undefined);
   assert.deepEqual(await adminStore.continueSetPurge('admin-purge-store'), {
     done: true, deleted: 0, parentDeleted: true
   });
@@ -3750,7 +3759,7 @@ rulesTest('missing or locked gate fails closed for counters and stale-zero paren
   });
 });
 
-rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서만 바뀐다', async () => {
+rulesTest('FixRound2 collaborator count and discovery index require an exact 3-write batch', async () => {
   await resetFirestore();
   const owner = actorFirestore('owner');
   const target = 'other@school.kr';
@@ -3762,6 +3771,20 @@ rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서
   }, { merge: true });
   await assertFails(forged.commit());
 
+  const missingIndex = writeBatch(owner);
+  missingIndex.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 1,
+    collaboratorMutation: { email: target, action: 'add' }
+  }, { merge: true });
+  missingIndex.set(doc(owner, `quiz_sets/set1/collaborators/${target}`), {
+    email: target, addedByUid: actors.owner.uid, addedAt: serverTimestamp()
+  });
+  await assertFails(missingIndex.commit());
+
+  await assertFails(setDoc(doc(owner, `quiz_set_shares/${target}/sets/set1`), {
+    email: target, setId: 'set1'
+  }));
+
   const add = writeBatch(owner);
   add.set(doc(owner, 'quiz_sets/set1'), {
     collaboratorCount: 1,
@@ -3770,17 +3793,43 @@ rulesTest('공동 편집자 수는 정확한 child add/delete 원자 batch에서
   add.set(doc(owner, `quiz_sets/set1/collaborators/${target}`), {
     email: target, addedByUid: actors.owner.uid, addedAt: serverTimestamp()
   });
+  add.set(doc(owner, `quiz_set_shares/${target}/sets/set1`), {
+    email: target, setId: 'set1'
+  });
   await assertSucceeds(add.commit());
 
   const editor = actorFirestore('otherTeacher');
   await assertSucceeds(updateDoc(doc(editor, 'quiz_sets/set1'), { title: '공동 편집' }));
   await assertFails(updateDoc(doc(editor, 'quiz_sets/set1'), { archived: true }));
+
+  await adminWrite(`quiz_set_shares/${target}/sets/set1`, undefined);
+  const missingStoredIndexDelete = writeBatch(owner);
+  missingStoredIndexDelete.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 0,
+    collaboratorMutation: { email: target, action: 'remove' }
+  }, { merge: true });
+  missingStoredIndexDelete.delete(doc(owner, `quiz_sets/set1/collaborators/${target}`));
+  missingStoredIndexDelete.delete(doc(owner, `quiz_set_shares/${target}/sets/set1`));
+  await assertFails(missingStoredIndexDelete.commit());
+  await adminWrite(`quiz_set_shares/${target}/sets/set1`, {
+    email: target, setId: 'set1'
+  });
+
+  const missingIndexDelete = writeBatch(owner);
+  missingIndexDelete.set(doc(owner, 'quiz_sets/set1'), {
+    collaboratorCount: 0,
+    collaboratorMutation: { email: target, action: 'remove' }
+  }, { merge: true });
+  missingIndexDelete.delete(doc(owner, `quiz_sets/set1/collaborators/${target}`));
+  await assertFails(missingIndexDelete.commit());
+
   const remove = writeBatch(owner);
   remove.set(doc(owner, 'quiz_sets/set1'), {
     collaboratorCount: 0,
     collaboratorMutation: { email: target, action: 'remove' }
   }, { merge: true });
   remove.delete(doc(owner, `quiz_sets/set1/collaborators/${target}`));
+  remove.delete(doc(owner, `quiz_set_shares/${target}/sets/set1`));
   await assertSucceeds(remove.commit());
   await assertFails(updateDoc(doc(editor, 'quiz_sets/set1'), { title: '제거 후 저장' }));
 });
@@ -4023,7 +4072,7 @@ rulesTest('private active original은 소유자·공동편집자만 수업에 �
   }));
 });
 
-rulesTest('private active original read is exact owner collaborator or admin access', async () => {
+rulesTest('FixRound2 private read and shared discovery use exact quiz_sets paths without collection-group leakage', async () => {
   const owner = actorFirestore('owner');
   const other = actorFirestore('otherTeacher');
   const admin = actorFirestore('admin');
@@ -4048,24 +4097,53 @@ rulesTest('private active original read is exact owner collaborator or admin acc
   await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
     email: actors.otherTeacher.email,
     addedByUid: actors.owner.uid,
+    addedAt: Timestamp.fromMillis(1),
+    secret: 'malformed-collaborator-data'
+  });
+  await assertFails(getDoc(doc(other, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(other, 'images/set1/q/0')));
+
+  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    addedByUid: actors.owner.uid,
     addedAt: Timestamp.fromMillis(1)
+  });
+  await adminWrite('quiz_set_shares/other@school.kr/sets/set1', {
+    email: actors.otherTeacher.email,
+    setId: 'set1'
+  });
+  await adminWrite('admin_private/secret/collaborators/other@school.kr', {
+    email: actors.otherTeacher.email,
+    secret: 'victim-private-data'
   });
   await assertSucceeds(getDoc(doc(other, 'quiz_sets/set1')));
   await assertSucceeds(getDoc(doc(other, 'images/set1/q/0')));
+  await assertSucceeds(getDoc(doc(other, 'quiz_sets/set1/collaborators/other@school.kr')));
+  await assertFails(getDoc(doc(other,
+    'admin_private/secret/collaborators/other@school.kr')));
+  await assertFails(getDocs(query(
+    collection(other, 'quiz_set_shares/owner@school.kr/sets'),
+    queryLimit(50)
+  )));
 
   const shared = collectionGroup(other, 'collaborators');
-  const exactShared = await assertSucceeds(getDocs(query(
+  await assertFails(getDocs(query(
     shared,
     where('email', '==', actors.otherTeacher.email),
     queryLimit(50)
   )));
-  assert.deepEqual(exactShared.docs.map(document => document.ref.parent.parent.id), ['set1']);
   await assertFails(getDocs(query(shared, queryLimit(50))));
   await assertFails(getDocs(query(
     shared,
     where('email', '==', actors.owner.email),
     queryLimit(50)
   )));
+
+  const discovered = await emulatorStore(other).listSharedQuizSets({
+    ...actors.otherTeacher,
+    role: 'teacher'
+  });
+  assert.deepEqual(discovered.map(set => set.id), ['set1']);
 });
 
 rulesTest('FixRound1 private nested reviewer PII exploit cannot cross the flat public projection boundary', async () => {
@@ -4110,6 +4188,58 @@ rulesTest('FixRound1 private nested reviewer PII exploit cannot cross the flat p
   forged.set(doc(owner,
     `published_quiz_sets/${childPublicationId}/questions/v0q0`), forgedQuestion);
   await assertFails(forged.commit());
+});
+
+rulesTest('FixRound2 actual store publishes a supported legacy single-video source through Rules', async () => {
+  const publicationId = 'legacy-flat-publication';
+  const source = publicRulesSource();
+  const [video] = source.videos;
+  delete source.videos;
+  source.videoId = video.videoId;
+  source.videoUrl = video.videoUrl;
+  source.startSec = video.startSec;
+  source.endSec = video.endSec;
+  source.questions = video.questions;
+  await adminWrite(`quiz_sets/${publicationId}`, source);
+
+  const owner = actorFirestore('owner');
+  const published = await emulatorStore(owner).publishQuizSet(
+    publicationId,
+    publicRulesOwner
+  );
+
+  assert.equal(published.status, 'published');
+  assert.equal(published.videos.length, 1);
+  assert.equal(published.videos[0].videoId, 'dQw4w9WgXcQ');
+  assert.equal((await getDoc(doc(owner,
+    `published_quiz_sets/${publicationId}/videos/v0`))).data().videoId,
+    'dQw4w9WgXcQ');
+
+  const adminStore = emulatorStore(actorFirestore('admin'));
+  assert.equal((await adminStore.adminModeratePublishedQuiz(
+    publicationId,
+    'rev-1',
+    'legacy lifecycle check',
+    requestAdminIdentity
+  )).status, 'moderated');
+  assert.equal((await adminStore.adminRestorePublishedQuiz(
+    publicationId,
+    'rev-1',
+    requestAdminIdentity
+  )).status, 'published');
+
+  for (const [suffix, patch] of [
+    ['bad-video-id', { videoId: 'not-canonical' }],
+    ['empty-questions', { questions: [] }],
+    ['missing-settings', { settings: null }]
+  ]) {
+    const invalidId = `legacy-${suffix}`;
+    await adminWrite(`quiz_sets/${invalidId}`, { ...source, ...patch });
+    await assertFails(setDoc(doc(owner, `published_quiz_sets/${invalidId}`), {
+      ...publicRulesBuilding(invalidId),
+      updatedAt: serverTimestamp()
+    }));
+  }
 });
 
 rulesTest('published projection list requires exact visible status order and bounded limit', async () => {

@@ -641,9 +641,39 @@ service cloud.firestore {
       return /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(request.auth.token.email);
     }
 
+    function collaboratorSharePath(setId, email) {
+      return /databases/$(database)/documents/quiz_set_shares/$(email)/sets/$(setId);
+    }
+
+    function validStoredCollaboratorData(data, email) {
+      return canonicalAllowanceId(email) &&
+        data.keys().hasAll(['email', 'addedByUid', 'addedAt']) &&
+        data.keys().hasOnly(['email', 'addedByUid', 'addedAt']) &&
+        data.email == email && data.addedByUid is string &&
+        data.addedByUid.size() >= 1 && data.addedByUid.size() <= 128 &&
+        data.addedAt is timestamp;
+    }
+
+    function validCollaboratorShareData(data, setId, email) {
+      return canonicalAllowanceId(email) && setId.matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') &&
+        data.keys().hasAll(['email', 'setId']) && data.keys().hasOnly(['email', 'setId']) &&
+        data.email == email && data.setId == setId;
+    }
+
+    function validCollaboratorShareAfter(setId, email, action) {
+      let path = collaboratorSharePath(setId, email);
+      return action == 'add'
+        ? !exists(path) && existsAfter(path) &&
+          validCollaboratorShareData(getAfter(path).data, setId, email)
+        : exists(path) && !existsAfter(path);
+    }
+
     function isSetCollaborator(setId) {
       return isApprovedTeacher() && activeSet(setId) && exists(collaboratorPath(setId)) &&
-        get(collaboratorPath(setId)).data.get('email', '') == request.auth.token.email;
+        validStoredCollaboratorData(
+          get(collaboratorPath(setId)).data,
+          request.auth.token.email
+        );
     }
 
     function canEditSet(setId) {
@@ -757,6 +787,7 @@ service cloud.firestore {
       let parentPath = /databases/$(database)/documents/quiz_sets/$(setId);
       let childPath = /databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email);
       return canPurgeSet(setId) && exists(childPath) && !existsAfter(childPath) &&
+        validCollaboratorShareAfter(setId, email, 'remove') &&
         validAuthoritativeCounters(get(parentPath).data) &&
         validAuthoritativeCounters(getAfter(parentPath).data) &&
         getAfter(parentPath).data.get('collaboratorCount', -1) ==
@@ -819,7 +850,10 @@ service cloud.firestore {
 
     function isSetCollaboratorAfter(setId) {
       return isApprovedTeacher() && activeSetAfter(setId) && exists(collaboratorPath(setId)) &&
-        get(collaboratorPath(setId)).data.get('email', '') == request.auth.token.email;
+        validStoredCollaboratorData(
+          get(collaboratorPath(setId)).data,
+          request.auth.token.email
+        );
     }
 
     function canEditSetAfter(setId) {
@@ -837,11 +871,8 @@ service cloud.firestore {
     }
 
     function validCollaboratorData(email) {
-      return canonicalAllowanceId(email) &&
-        request.resource.data.keys().hasOnly(['email', 'addedByUid', 'addedAt']) &&
-        request.resource.data.email == email &&
+      return validStoredCollaboratorData(request.resource.data, email) &&
         request.resource.data.addedByUid == request.auth.uid &&
-        request.resource.data.addedAt is timestamp &&
         exists(/databases/$(database)/documents/teacher_allowlist/$(email)) &&
         get(/databases/$(database)/documents/teacher_allowlist/$(email)).data.enabled == true &&
         get(/databases/$(database)/documents/teacher_allowlist/$(email)).data.role in ['teacher', 'admin'];
@@ -860,11 +891,13 @@ service cloud.firestore {
           (after == before + 1 &&
             mutation.action == 'add' && mutation.email is string &&
             canonicalAllowanceId(mutation.email) && !exists(targetPath) &&
-            existsAfter(targetPath) && getAfter(targetPath).data.email == mutation.email) ||
+            existsAfter(targetPath) && getAfter(targetPath).data.email == mutation.email &&
+            validCollaboratorShareAfter(setId, mutation.email, 'add')) ||
           (after == before - 1 &&
             mutation.action == 'remove' && mutation.email is string &&
             canonicalAllowanceId(mutation.email) && exists(targetPath) &&
-            !existsAfter(targetPath)));
+            !existsAfter(targetPath) &&
+            validCollaboratorShareAfter(setId, mutation.email, 'remove')));
     }
 
     function validCollaboratorMutation(setId, email, action) {
@@ -1051,6 +1084,17 @@ service cloud.firestore {
         source.ownerUid == request.auth.uid && source.ownerEmail == request.auth.token.email;
     }
 
+    function validPublicationSourceMedia(data, source) {
+      return (source.get('videos', null) is list &&
+          data.videoCount == source.videos.size()) ||
+        (!('videos' in source) && source.get('videoId', '') is string &&
+          source.videoId.matches('^[A-Za-z0-9_-]{11}$') &&
+          source.get('videoUrl', '') is string && source.videoUrl.size() >= 1 &&
+          source.videoUrl.size() <= 2048 && source.get('questions', null) is list &&
+          source.questions.size() >= 1 && source.questions.size() <= 500 &&
+          data.videoCount == 1 && data.questionCount == source.questions.size());
+    }
+
     function publicMatchesActiveSourceAfter(data, setId) {
       let source = getAfter(publicationSourcePath(setId)).data;
       return validActivePublicationSourceAfter(setId) &&
@@ -1058,8 +1102,7 @@ service cloud.firestore {
         source.title is string && data.title == source.title.trim() &&
         source.get('description', '') is string &&
         data.description == source.get('description', '').trim() &&
-        source.videos is list && data.videoCount == source.videos.size() &&
-        source.get('settings', {}) is map &&
+        validPublicationSourceMedia(data, source) && source.get('settings', {}) is map &&
         data.revealMode == source.get('settings', {}).get('revealMode', 'timer') &&
         data.limitSec == source.get('settings', {}).get('limitSec', 20) &&
         data.revealDelaySec == source.get('settings', {}).get('revealDelaySec', 5) &&
@@ -1092,8 +1135,7 @@ service cloud.firestore {
         source.title is string && data.title == source.title.trim() &&
         source.get('description', '') is string &&
         data.description == source.get('description', '').trim() &&
-        source.videos is list && data.videoCount == source.videos.size() &&
-        source.get('settings', {}) is map &&
+        validPublicationSourceMedia(data, source) && source.get('settings', {}) is map &&
         data.revealMode == source.get('settings', {}).get('revealMode', 'timer') &&
         data.limitSec == source.get('settings', {}).get('limitSec', 20) &&
         data.revealDelaySec == source.get('settings', {}).get('revealDelaySec', 5) &&
@@ -1412,7 +1454,7 @@ service cloud.firestore {
       let auditAfter = getAfter(auditPath).data;
       return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
         exists(auditPath) && existsAfter(auditPath) &&
-        validPublicParentShape(after, setId) &&
+        after.keys().hasAll(publicParentKeys()) && after.keys().hasOnly(publicParentKeys()) &&
         before.status == 'moderated' && before.moderationStatus == 'moderated' &&
         after.status == 'published' && after.moderationStatus == 'clear' &&
         after.revision == before.revision && publicMatchesActiveSourceAfter(after, setId) &&
@@ -1773,8 +1815,10 @@ service cloud.firestore {
               ? true
               : source.get('lifecycleState', 'active') == 'active' &&
                 exists(collaboratorPath(setId)) &&
-                get(collaboratorPath(setId)).data.get('email', '') ==
-                  request.auth.token.email;
+                validStoredCollaboratorData(
+                  get(collaboratorPath(setId)).data,
+                  request.auth.token.email
+                );
     }
 
     function validEditablePrivateSetUpdate(setId) {
@@ -2852,19 +2896,48 @@ service cloud.firestore {
     }
 
     match /quiz_sets/{setId}/collaborators/{email} {
-      allow get: if ownsSet(setId) || isSetCollaborator(setId) || canPurgeSet(setId);
-      allow list: if ownsSet(setId) || canPurgeSet(setId) ||
-        (isApprovedTeacher() && resource.data.get('email', '') == request.auth.token.email &&
-          request.query.limit != null && request.query.limit <= 50);
+      allow get: if ((ownsSet(setId) || canPurgeSet(setId)) &&
+          (!exists(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)) ||
+            validStoredCollaboratorData(resource.data, email))) ||
+        (validStoredCollaboratorData(resource.data, email) && isSetCollaborator(setId));
+      allow list: if ownsSet(setId) || canPurgeSet(setId);
       allow create: if counterMigrationUnlocked() && ownsSet(setId) && activeSet(setId) &&
         !exists(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)) &&
         canonicalAllowanceId(email) &&
         email != get(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('ownerEmail', '') &&
         validCollaboratorData(email) &&
-        validCollaboratorMutation(setId, email, 'add');
-      allow delete: if counterMigrationUnlocked() && ((ownsSet(setId) && activeSet(setId) &&
-        validCollaboratorMutation(setId, email, 'remove')) ||
-        validPurgeCollaboratorDelete(setId, email));
+        validCollaboratorMutation(setId, email, 'add') &&
+        validCollaboratorShareAfter(setId, email, 'add');
+      allow delete: if counterMigrationUnlocked() &&
+        validStoredCollaboratorData(resource.data, email) &&
+        validCollaboratorShareAfter(setId, email, 'remove') &&
+        ((ownsSet(setId) && activeSet(setId) &&
+          validCollaboratorMutation(setId, email, 'remove')) ||
+          validPurgeCollaboratorDelete(setId, email));
+      allow update: if false;
+      allow read, write: if false;
+    }
+
+    match /quiz_set_shares/{email}/sets/{setId} {
+      allow get: if isApprovedTeacher() && email == request.auth.token.email &&
+        validCollaboratorShareData(resource.data, setId, email);
+      allow list: if isApprovedTeacher() && email == request.auth.token.email &&
+        request.query.limit != null && request.query.limit >= 1 &&
+        request.query.limit <= 50;
+      allow create: if counterMigrationUnlocked() && ownsSet(setId) && activeSet(setId) &&
+        validCollaboratorShareData(request.resource.data, setId, email) &&
+        !exists(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)) &&
+        existsAfter(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)) &&
+        validStoredCollaboratorData(
+          getAfter(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)).data,
+          email
+        ) && validCollaboratorMutation(setId, email, 'add');
+      allow delete: if counterMigrationUnlocked() &&
+        exists(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)) &&
+        !existsAfter(/databases/$(database)/documents/quiz_sets/$(setId)/collaborators/$(email)) &&
+        ((ownsSet(setId) && activeSet(setId) &&
+          validCollaboratorMutation(setId, email, 'remove')) ||
+          validPurgeCollaboratorDelete(setId, email));
       allow update: if false;
       allow read, write: if false;
     }
@@ -3081,16 +3154,6 @@ service cloud.firestore {
         sampleId.matches('^' + request.auth.uid + '-[A-Za-z0-9]+$');
       allow list: if false;
       allow read, write: if false;
-    }
-
-    // Firestore collection-group queries require a recursive wildcard match.
-    // Client writes to every collaborators collection remain confined to the
-    // exact quiz_sets match above, so this bounded email query is discovery-only.
-    match /{parentPath=**}/collaborators/{email} {
-      allow list: if isApprovedTeacher() &&
-        resource.data.get('email', '') == request.auth.token.email &&
-        request.query.limit != null && request.query.limit <= 50;
-      allow get, create, update, delete: if false;
     }
 
     match /{document=**} {

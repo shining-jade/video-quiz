@@ -2330,11 +2330,15 @@ test('공동 편집자는 승인된 교사만 소유자 트랜잭션으로 추�
   await store.addCollaborator('set1', 'EDITOR@School.KR', owner);
   assert.equal(fake.value('quiz_sets/set1').collaboratorCount, 1);
   assert.equal(fake.value('quiz_sets/set1/collaborators/editor@school.kr').email, 'editor@school.kr');
+  assert.deepEqual(fake.value('quiz_set_shares/editor@school.kr/sets/set1'), {
+    email: 'editor@school.kr', setId: 'set1'
+  });
   assert.equal(await store.canEditQuizSet('set1', editor), true);
   assert.deepEqual((await store.listCollaborators('set1', owner)).map(item => item.email), ['editor@school.kr']);
   await assert.rejects(store.addCollaborator('set1', 'other@school.kr', editor), /소유자/);
   assert.equal(await store.removeCollaborator('set1', 'EDITOR@School.KR', owner), true);
   assert.equal(fake.value('quiz_sets/set1').collaboratorCount, 0);
+  assert.equal(fake.value('quiz_set_shares/editor@school.kr/sets/set1'), undefined);
   assert.equal(await store.canEditQuizSet('set1', editor), false);
 });
 
@@ -2429,22 +2433,22 @@ test('세트 목록은 활성 query와 소유자 휴지통 query를 분리한다
     .map(set => set.id).sort(), ['other-trash', 'trash']);
 });
 
-test('공동편집 세트 discovery는 exact collaborator email collection-group 결과만 direct get한다', async () => {
+test('공동편집 세트 discovery는 자기 전용 exact index 결과만 direct get한다', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/shared': { ownerUid: 'owner', lifecycleState: 'active', title: '공유' },
-    'quiz_sets/shared/collaborators/teacher@school.kr': {
-      email: 'teacher@school.kr', addedByUid: 'owner', addedAt: new Timestamp(1)
+    'quiz_set_shares/teacher@school.kr/sets/shared': {
+      email: 'teacher@school.kr', setId: 'shared'
     },
     'quiz_sets/own': { ownerUid: 'teacher', lifecycleState: 'active', title: '내 것' },
-    'quiz_sets/own/collaborators/teacher@school.kr': {
-      email: 'teacher@school.kr', addedByUid: 'teacher', addedAt: new Timestamp(1)
+    'quiz_set_shares/teacher@school.kr/sets/own': {
+      email: 'teacher@school.kr', setId: 'own'
     },
     'quiz_sets/hidden': { ownerUid: 'owner', lifecycleState: 'trashed', title: '휴지통' },
-    'quiz_sets/hidden/collaborators/teacher@school.kr': {
-      email: 'teacher@school.kr', addedByUid: 'owner', addedAt: new Timestamp(1)
+    'quiz_set_shares/teacher@school.kr/sets/hidden': {
+      email: 'teacher@school.kr', setId: 'hidden'
     },
-    'quiz_sets/shared/collaborators/other@school.kr': {
-      email: 'other@school.kr', addedByUid: 'owner', addedAt: new Timestamp(1)
+    'quiz_set_shares/other@school.kr/sets/shared': {
+      email: 'other@school.kr', setId: 'shared'
     }
   });
   const store = createStore(fake);
@@ -2454,11 +2458,9 @@ test('공동편집 세트 discovery는 exact collaborator email collection-group
   });
 
   assert.deepEqual(shared.map(set => set.id), ['shared']);
-  assert.ok(fake.calls().some(call => call.operation === 'collectionGroup' &&
-    call.path === 'collaborators'));
-  assert.ok(fake.calls().some(call => call.operation === 'where' &&
-    call.path === 'collaborators' && call.field === 'email' &&
-    call.value === 'teacher@school.kr'));
+  assert.ok(fake.calls().some(call => call.operation === 'getCollection' &&
+    call.path === 'quiz_set_shares/teacher@school.kr/sets'));
+  assert.equal(fake.calls().some(call => call.operation === 'collectionGroup'), false);
 });
 
 test('사본은 공동 편집·휴지통 상태를 물려받지 않고 활성 빈 상태로 시작한다', async () => {
