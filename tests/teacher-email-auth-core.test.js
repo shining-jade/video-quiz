@@ -17,11 +17,29 @@ test('login canonicalizes email and requires an 8 character password', () => {
   assert.throws(() => Core.normalizeLogin({ email: 'teacher@example.com', password: '1234567' }));
 });
 
-test('password reset never discloses whether an account exists', () => {
+test('verification profile retry accepts only a bounded display name', () => {
+  assert.equal(Core.normalizeDisplayName(' 홍교사 '), '홍교사');
+  assert.throws(() => Core.normalizeDisplayName(''));
+  assert.throws(() => Core.normalizeDisplayName('x'.repeat(81)));
+});
+
+test('password reset treats only success and missing-account as the exact neutral success', () => {
   assert.equal(Core.RESET_SENT_MESSAGE, '입력한 이메일을 확인해 주세요.');
-  assert.equal(Core.safeAuthMessage('reset', { code: 'auth/user-not-found' }), Core.RESET_SENT_MESSAGE);
-  assert.equal(Core.safeAuthMessage('reset', { code: 'auth/email-already-in-use' }), Core.RESET_SENT_MESSAGE);
+  assert.deepEqual(Core.passwordResetOutcome(null), {
+    status: 'reset-sent', message: Core.RESET_SENT_MESSAGE
+  });
+  assert.deepEqual(Core.passwordResetOutcome({ code: 'auth/user-not-found' }), {
+    status: 'reset-sent', message: Core.RESET_SENT_MESSAGE
+  });
+  assert.deepEqual(Core.passwordResetOutcome({ code: 'auth/network-request-failed' }), {
+    status: 'error', message: '네트워크 연결을 확인한 뒤 다시 시도해 주세요.'
+  });
+  assert.deepEqual(Core.passwordResetOutcome({ code: 'auth/too-many-requests' }), {
+    status: 'error', message: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.'
+  });
   assert.equal(Core.safeAuthMessage('reset', null), Core.RESET_SENT_MESSAGE);
+  assert.equal(Core.safeAuthMessage('reset', { code: 'auth/user-not-found' }), Core.RESET_SENT_MESSAGE);
+  assert.notEqual(Core.safeAuthMessage('reset', { code: 'auth/email-already-in-use' }), Core.RESET_SENT_MESSAGE);
 });
 
 test('authentication failures use bounded Korean messages', () => {

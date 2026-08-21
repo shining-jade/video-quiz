@@ -9347,6 +9347,11 @@ function teacherEmailAuthTestRuntime(overrides = {}) {
     teacherAuthVersion: 3,
     teacherAuthDialogRevision: 0,
     teacherAuthDialogState: { mode: 'login', status: 'idle', email: '', message: '', error: '' },
+    teacherEmailAuthRequests: {
+      signup: { inFlight: null, cooldownUntil: 0 },
+      resend: { inFlight: null, cooldownUntil: 0 },
+      reset: { inFlight: null, cooldownUntil: 0 }
+    },
     TeacherEmailAuthCore: require('../teacher-email-auth-core.js'),
     esc(value) {
       return String(value == null ? '' : value)
@@ -9364,8 +9369,11 @@ function teacherEmailAuthTestRuntime(overrides = {}) {
   };
   loadStageFunctions([
     'teacherAuthDialogMarkup', 'renderTeacherAuthDialog', 'teacherEmailAuthFormValue',
-    'teacherEmailAuthOperationIsCurrent', 'clearTeacherAuthPasswords',
-    'invalidateTeacherAuthDialog', 'closeTeacherAuthDialog', 'openTeacherAuthDialog', 'submitTeacherEmailSignup',
+    'teacherEmailAuthOperationIsCurrent', 'teacherEmailAuthRequestEntry',
+    'beginTeacherEmailAuthRequest', 'finishTeacherEmailAuthRequest',
+    'buildTeacherVerificationState', 'teacherVerificationStateIsCurrent',
+    'clearTeacherAuthPasswords', 'invalidateTeacherAuthDialog', 'closeTeacherAuthDialog',
+    'openTeacherAuthDialog', 'resumeTeacherEmailVerificationState', 'submitTeacherEmailSignup',
     'submitTeacherEmailLogin', 'sendTeacherVerificationEmail',
     'confirmTeacherEmailVerification', 'sendTeacherPasswordReset'
   ], context);
@@ -9415,14 +9423,24 @@ test('email signup creates the user, updates the profile, sends verification, an
   assert.equal(event.currentTarget.elements.password.value, '');
 });
 
-test('post-create profile or verification failure binds the new user, uses bounded copy, and clears the password', async t => {
+test('post-create profile or verification failure keeps a bound recovery state and retries the missing step', async t => {
   for (const failureStage of ['profile', 'verification']) {
     await t.test(failureStage, async () => {
       const raw = 'backend internal detail must stay private';
+      let profileCalls = 0;
+      let verificationCalls = 0;
       const user = {
-        uid: 'new-email-user', email: 'teacher@example.com',
-        async updateProfile() { if (failureStage === 'profile') throw new Error(raw); },
-        async sendEmailVerification() { if (failureStage === 'verification') throw new Error(raw); }
+        uid: 'new-email-user', email: 'teacher@example.com', displayName: '',
+        emailVerified: false, isAnonymous: false,
+        async updateProfile(profile) {
+          profileCalls += 1;
+          if (failureStage === 'profile' && profileCalls === 1) throw new Error(raw);
+          this.displayName = profile.displayName;
+        },
+        async sendEmailVerification() {
+          verificationCalls += 1;
+          if (failureStage === 'verification' && verificationCalls === 1) throw new Error(raw);
+        }
       };
       const auth = {
         currentUser: null,
@@ -9438,12 +9456,99 @@ test('post-create profile or verification failure binds the new user, uses bound
 
       const result = await context.submitTeacherEmailSignup(event);
 
-      assert.equal(result.status, 'error');
+      assert.equal(result.status, 'verification-recovery');
       assert.equal(result.message, '인증 처리에 실패했습니다. 다시 시도해 주세요.');
+      assert.equal(context.teacherAuthDialogState.status, 'verification-sent');
+      assert.equal(context.teacherAuthDialogState.uid, 'new-email-user');
+      assert.equal(context.teacherAuthDialogState.authGeneration, context.teacherAuthVersion);
+      assert.equal(context.teacherAuthDialogState.needsProfile, failureStage === 'profile');
       assert.doesNotMatch(context.teacherAuthDialogState.error, /backend internal/);
       assert.equal(event.currentTarget.elements.password.value, '');
+
+      const retry = await context.sendTeacherVerificationEmail(authForm({ displayName: ' 홍교사 ' }));
+      assert.equal(retry.status, 'verification-sent');
+      assert.equal(profileCalls, failureStage === 'profile' ? 2 : 1);
+      assert.equal(verificationCalls, failureStage === 'verification' ? 2 : 1);
+      assert.equal(user.displayName, '홍교사');
+      assert.equal(context.teacherAuthDialogState.needsProfile, false);
     });
   }
+});
+
+test('an observed unverified password user resumes a UID and generation bound verification dialog', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let verificationCalls = 0;
+  const user = {
+    uid: 'password-user', email: 'teacher@example.com', displayName: '홍교사',
+    emailVerified: false, isAnonymous: false,
+    async sendEmailVerification() { verificationCalls += 1; },
+    async getIdTokenResult() {
+      return { claims: { firebase: { sign_in_provider: 'password' } } };
+    }
+  };
+  const auth = { currentUser: user };
+  const { context, dialog } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    teacherUser: null,
+    teacherAllowance: null,
+    teacherState: require('../auth-core.js').teacherState(null, null),
+    appliedTeacherState: require('../auth-core.js').teacherState(null, null),
+    clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'),
+    authReady: false,
+    renderTeacherAuthArea() {},
+    store: {}
+  });
+  vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
+  context.closeTeacherAuthDialog();
+
+  const applied = await context.applyTeacherUser(user);
+
+  assert.equal(applied, true);
+  assert.equal(dialog.open, true);
+  assert.equal(context.teacherAuthDialogState.status, 'verification-sent');
+  assert.equal(context.teacherAuthDialogState.uid, 'password-user');
+  assert.equal(context.teacherAuthDialogState.authGeneration, context.teacherAuthVersion);
+  assert.equal(context.teacherAuthDialogState.needsProfile, false);
+  assert.equal(verificationCalls, 0);
+});
+
+test('password relogin leaves an unverified user in recovery instead of closing the dialog', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const user = {
+    uid: 'password-user', email: 'teacher@example.com', displayName: '',
+    emailVerified: false, isAnonymous: false,
+    async getIdTokenResult() {
+      return { claims: { firebase: { sign_in_provider: 'password' } } };
+    }
+  };
+  const auth = {
+    currentUser: null,
+    async signInWithEmailAndPassword() { this.currentUser = user; return { user }; }
+  };
+  const { context, dialog } = teacherEmailAuthTestRuntime({
+    firebase: { auth() { return auth; } },
+    teacherUser: null,
+    teacherAllowance: null,
+    teacherState: require('../auth-core.js').teacherState(null, null),
+    appliedTeacherState: require('../auth-core.js').teacherState(null, null),
+    clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'),
+    authReady: false,
+    renderTeacherAuthArea() {},
+    store: {}
+  });
+  vm.runInNewContext(extractFunction(html, 'applyTeacherUser'), context);
+  context.openTeacherAuthDialog('login');
+
+  const result = await context.submitTeacherEmailLogin(authForm({
+    email: 'teacher@example.com', password: '12345678'
+  }));
+
+  assert.equal(result.status, 'verification-required');
+  assert.equal(dialog.open, true);
+  assert.equal(context.teacherAuthDialogState.status, 'verification-sent');
+  assert.equal(context.teacherAuthDialogState.needsProfile, true);
 });
 
 test('verification confirmation reloads and force-refreshes the token before applying the user', async () => {
@@ -9458,6 +9563,11 @@ test('verification confirmation reloads and force-refreshes the token before app
     firebase: { auth() { return auth; } },
     async applyTeacherUser(applied) { assert.equal(applied, user); calls.push('apply'); }
   });
+  context.teacherAuthDialogState = {
+    mode: 'signup', status: 'verification-sent', uid: user.uid,
+    authGeneration: context.teacherAuthVersion, email: user.email,
+    displayName: '홍교사', needsProfile: false, message: '', error: ''
+  };
 
   const result = await context.confirmTeacherEmailVerification();
 
@@ -9481,6 +9591,170 @@ test('password reset returns the same safe text for success and a missing accoun
   }
   assert.equal(messages[0], messages[1]);
   assert.equal(messages[0], '입력한 이메일을 확인해 주세요.');
+});
+
+test('password reset renders account-neutral network and throttle failures as retry errors', async t => {
+  const cases = [
+    ['auth/network-request-failed', /네트워크/],
+    ['auth/too-many-requests', /요청이 너무 많/]
+  ];
+  for (const [code, copy] of cases) {
+    await t.test(code, async () => {
+      const auth = {
+        currentUser: null,
+        async sendPasswordResetEmail() {
+          throw Object.assign(new Error('private backend detail'), { code });
+        }
+      };
+      const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+
+      const result = await context.sendTeacherPasswordReset(authForm({ email: 'Teacher@Example.com' }));
+
+      assert.equal(result.status, 'error');
+      assert.match(result.message, copy);
+      assert.equal(context.teacherAuthDialogState.message, '');
+      assert.match(context.teacherAuthDialogState.error, copy);
+      assert.doesNotMatch(result.message, /계정|가입|등록|존재/);
+      assert.doesNotMatch(context.teacherAuthDialogState.error, /private backend detail/);
+    });
+  }
+});
+
+test('verification actions reject a recovery state after its UID or auth generation changes', async t => {
+  for (const mismatch of ['uid', 'generation']) {
+    await t.test(mismatch, async () => {
+      let sends = 0;
+      const user = {
+        uid: 'password-user', email: 'teacher@example.com', displayName: '홍교사',
+        emailVerified: false, isAnonymous: false,
+        async sendEmailVerification() { sends += 1; }
+      };
+      const auth = { currentUser: user };
+      const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+      context.teacherAuthDialogState = {
+        mode: 'signup', status: 'verification-sent', uid: user.uid,
+        authGeneration: context.teacherAuthVersion, email: user.email,
+        displayName: user.displayName, needsProfile: false, message: '', error: ''
+      };
+      if (mismatch === 'uid') auth.currentUser = { ...user, uid: 'replacement-user' };
+      else context.teacherAuthVersion += 1;
+
+      const result = await context.sendTeacherVerificationEmail();
+
+      assert.equal(result.status, 'stale');
+      assert.equal(sends, 0);
+    });
+  }
+});
+
+test('signup, verification resend, and reset suppress in-flight duplicates and immediate cooldown retries', async t => {
+  await t.test('signup', async () => {
+    let createCalls = 0;
+    let finishCreate;
+    const user = {
+      uid: 'new-user', email: 'teacher@example.com', displayName: '',
+      emailVerified: false, isAnonymous: false,
+      async updateProfile(profile) { this.displayName = profile.displayName; },
+      async sendEmailVerification() {}
+    };
+    const auth = {
+      currentUser: null,
+      createUserWithEmailAndPassword() {
+        createCalls += 1;
+        return new Promise(resolve => {
+          finishCreate = () => { this.currentUser = user; resolve({ user }); };
+        });
+      }
+    };
+    let now = 1000;
+    const { context } = teacherEmailAuthTestRuntime({
+      firebase: { auth() { return auth; } },
+      Date: { now() { return now; } }
+    });
+    const event = authForm({ displayName: '홍교사', email: 'teacher@example.com', password: 'signup-secret' });
+
+    const first = context.submitTeacherEmailSignup(event);
+    const duplicate = context.submitTeacherEmailSignup(authForm({
+      displayName: '홍교사', email: 'teacher@example.com', password: 'other-secret'
+    }));
+
+    assert.equal(createCalls, 1);
+    assert.equal((await duplicate).status, 'busy');
+    assert.equal(context.teacherAuthDialogState.busy, true);
+    assert.match(context.teacherAuthDialogMarkup(), /disabled aria-busy="true"/);
+    assert.doesNotMatch(JSON.stringify(context.teacherEmailAuthRequests), /signup-secret|other-secret/);
+    finishCreate();
+    assert.equal((await first).status, 'verification-sent');
+    assert.equal((await context.submitTeacherEmailSignup(authForm({
+      displayName: '홍교사', email: 'teacher@example.com', password: 'third-secret'
+    }))).status, 'cooldown');
+    assert.equal(createCalls, 1);
+    now += 3001;
+  });
+
+  await t.test('verification resend', async () => {
+    let sends = 0;
+    let finishSend;
+    const user = {
+      uid: 'password-user', email: 'teacher@example.com', displayName: '홍교사',
+      emailVerified: false, isAnonymous: false,
+      sendEmailVerification() {
+        sends += 1;
+        return new Promise(resolve => { finishSend = resolve; });
+      }
+    };
+    const auth = { currentUser: user };
+    const { context } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
+    context.teacherAuthDialogState = {
+      mode: 'signup', status: 'verification-sent', uid: user.uid,
+      authGeneration: context.teacherAuthVersion, email: user.email,
+      displayName: user.displayName, needsProfile: false, message: '', error: ''
+    };
+
+    const first = context.sendTeacherVerificationEmail();
+    const duplicate = context.sendTeacherVerificationEmail();
+
+    assert.equal(sends, 1);
+    assert.equal((await duplicate).status, 'busy');
+    assert.equal(context.teacherAuthDialogState.busy, true);
+    finishSend();
+    assert.equal((await first).status, 'verification-sent');
+    assert.equal((await context.sendTeacherVerificationEmail()).status, 'cooldown');
+    assert.equal(sends, 1);
+  });
+
+  await t.test('password reset cooldown expires deterministically', async () => {
+    let sends = 0;
+    const resolvers = [];
+    const auth = {
+      currentUser: null,
+      sendPasswordResetEmail() {
+        sends += 1;
+        return new Promise(resolve => { resolvers.push(resolve); });
+      }
+    };
+    let now = 5000;
+    const { context } = teacherEmailAuthTestRuntime({
+      firebase: { auth() { return auth; } },
+      Date: { now() { return now; } }
+    });
+    const event = () => authForm({ email: 'teacher@example.com' });
+
+    const first = context.sendTeacherPasswordReset(event());
+    const duplicate = context.sendTeacherPasswordReset(event());
+
+    assert.equal(sends, 1);
+    assert.equal((await duplicate).status, 'busy');
+    resolvers.shift()();
+    assert.equal((await first).status, 'reset-sent');
+    assert.equal((await context.sendTeacherPasswordReset(event())).status, 'cooldown');
+    assert.equal(sends, 1);
+    now += 3001;
+    const afterCooldown = context.sendTeacherPasswordReset(event());
+    assert.equal(sends, 2);
+    resolvers.shift()();
+    assert.equal((await afterCooldown).status, 'reset-sent');
+  });
 });
 
 test('provider collision never applies a teacher user or probes an allowance', async () => {
@@ -9598,6 +9872,8 @@ test('auth generation change prevents a stale signup continuation from rendering
   const pending = context.submitTeacherEmailSignup(event);
   for (let turn = 0; turn < 10 && !finishVerification; turn += 1) await Promise.resolve();
   assert.equal(typeof finishVerification, 'function');
+  const busyDialog = dialog.innerHTML;
+  assert.match(busyDialog, /aria-busy="true"/);
   context.teacherAuthVersion += 1;
   auth.currentUser = { uid: 'replacement-user' };
   finishVerification();
@@ -9605,7 +9881,7 @@ test('auth generation change prevents a stale signup continuation from rendering
   const result = await pending;
 
   assert.equal(result.status, 'stale');
-  assert.equal(dialog.innerHTML, 'original dialog');
+  assert.equal(dialog.innerHTML, busyDialog);
   assert.notEqual(context.teacherAuthDialogState.status, 'verification-sent');
   assert.equal(event.currentTarget.elements.password.value, '');
 });
@@ -9696,6 +9972,11 @@ test('an older verification resend cannot overwrite a newly selected login mode'
   const auth = { currentUser: user };
   const { context, dialog } = teacherEmailAuthTestRuntime({ firebase: { auth() { return auth; } } });
   context.openTeacherAuthDialog('signup');
+  context.teacherAuthDialogState = {
+    mode: 'signup', status: 'verification-sent', uid: user.uid,
+    authGeneration: context.teacherAuthVersion, email: user.email,
+    displayName: '홍교사', needsProfile: false, message: '', error: ''
+  };
   const pending = context.sendTeacherVerificationEmail();
   context.openTeacherAuthDialog('login');
   const currentMarkup = dialog.innerHTML;

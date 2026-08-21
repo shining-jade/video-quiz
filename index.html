@@ -1432,6 +1432,11 @@ let adminTeacherRequestScreen = null;
 let teacherDashboard = null;
 let teacherAuthDialogState = { mode: 'login', status: 'idle', email: '', message: '', error: '' };
 let teacherAuthDialogRevision = 0;
+let teacherEmailAuthRequests = {
+  signup: { inFlight: null, cooldownUntil: 0 },
+  resend: { inFlight: null, cooldownUntil: 0 },
+  reset: { inFlight: null, cooldownUntil: 0 }
+};
 let classPlanningThresholds = ClassPlanningCore.normalizeThresholds();
 let teacherDeletionScreen = null;
 
@@ -1581,6 +1586,9 @@ function teacherAuthDialogMarkup() {
   const state = teacherAuthDialogState || { mode: 'login', status: 'idle' };
   const mode = ['login', 'signup', 'reset'].includes(state.mode) ? state.mode : 'login';
   const email = esc(state.email || '');
+  const displayName = esc(state.displayName || '');
+  const busy = state.busy === true;
+  const busyAttributes = busy ? ' disabled aria-busy="true"' : '';
   const feedback = state.error
     ? '<div class="notice" role="alert">' + esc(state.error) + '</div>'
     : state.message
@@ -1588,21 +1596,27 @@ function teacherAuthDialogMarkup() {
       : '';
   let form = '';
   if (state.status === 'verification-sent') {
+    const resend = state.needsProfile
+      ? '<form onsubmit="sendTeacherVerificationEmail(event)">' +
+        '<div class="field"><label class="f" for="teacher-verification-name">이름</label>' +
+        '<input id="teacher-verification-name" name="displayName" type="text" maxlength="80" value="' + displayName + '" autocomplete="name" required></div>' +
+        '<button id="teacher-verification-resend" class="btn" type="submit"' + busyAttributes + '>이름 저장 및 인증 메일 보내기</button></form>'
+      : '<button id="teacher-verification-resend" class="btn" type="button" onclick="sendTeacherVerificationEmail()"' + busyAttributes + '>인증 메일 다시 보내기</button>';
     form = (state.error ? feedback : '<div class="notice info" role="status">' +
       esc(state.message || '인증 메일을 보냈습니다. 이메일 인증을 완료해 주세요.') + '</div>') +
       '<p class="sub"><strong>' + email + '</strong>의 받은편지함과 스팸함을 확인해 주세요.</p>' +
-      '<div class="row"><button id="teacher-verification-resend" class="btn" type="button" onclick="sendTeacherVerificationEmail()">인증 메일 다시 보내기</button>' +
-      '<button id="teacher-verification-confirm" class="btn primary" type="button" onclick="confirmTeacherEmailVerification()">인증 완료 확인</button></div>';
+      '<div class="row">' + resend +
+      '<button id="teacher-verification-confirm" class="btn primary" type="button" onclick="confirmTeacherEmailVerification()"' + busyAttributes + '>인증 완료 확인</button></div>';
   } else if (mode === 'signup') {
     form = feedback + '<form onsubmit="submitTeacherEmailSignup(event)">' +
-      '<div class="field"><label class="f" for="teacher-signup-name">이름</label><input id="teacher-signup-name" name="displayName" type="text" maxlength="80" autocomplete="name" required></div>' +
+      '<div class="field"><label class="f" for="teacher-signup-name">이름</label><input id="teacher-signup-name" name="displayName" type="text" maxlength="80" value="' + displayName + '" autocomplete="name" required></div>' +
       '<div class="field"><label class="f" for="teacher-signup-email">이메일</label><input id="teacher-signup-email" name="email" type="email" value="' + email + '" autocomplete="email" required></div>' +
       '<div class="field"><label class="f" for="teacher-signup-password">비밀번호</label><input id="teacher-signup-password" name="password" type="password" minlength="8" autocomplete="new-password" required><div class="hint">8자 이상 입력해 주세요. 비밀번호는 저장하지 않습니다.</div></div>' +
-      '<button class="btn primary block" type="submit">이메일로 가입</button></form>';
+      '<button class="btn primary block" type="submit"' + busyAttributes + '>이메일로 가입</button></form>';
   } else if (mode === 'reset') {
     form = feedback + '<form onsubmit="sendTeacherPasswordReset(event)">' +
       '<div class="field"><label class="f" for="teacher-reset-email">이메일</label><input id="teacher-reset-email" name="email" type="email" value="' + email + '" autocomplete="email" required></div>' +
-      '<button class="btn primary block" type="submit">비밀번호 재설정 메일 보내기</button></form>';
+      '<button class="btn primary block" type="submit"' + busyAttributes + '>비밀번호 재설정 메일 보내기</button></form>';
   } else {
     form = feedback + '<form onsubmit="submitTeacherEmailLogin(event)">' +
       '<div class="field"><label class="f" for="teacher-login-email">이메일</label><input id="teacher-login-email" name="email" type="email" value="' + email + '" autocomplete="email" required></div>' +
@@ -1627,7 +1641,7 @@ function renderTeacherAuthDialog(dialogRevision) {
   dialog.innerHTML = teacherAuthDialogMarkup();
   const state = teacherAuthDialogState || {};
   const selector = state.status === 'verification-sent'
-    ? '#teacher-verification-confirm'
+    ? (state.needsProfile ? '#teacher-verification-name' : '#teacher-verification-confirm')
     : state.mode === 'signup'
       ? '#teacher-signup-name'
       : state.mode === 'reset'
@@ -1647,6 +1661,81 @@ function teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)
   const current = firebase.auth().currentUser;
   return teacherAuthDialogRevision === dialogRevision && teacherAuthVersion === authGeneration &&
     String(current && current.uid || '') === String(uid || '');
+}
+
+function teacherEmailAuthRequestEntry(operation) {
+  if (!teacherEmailAuthRequests || typeof teacherEmailAuthRequests !== 'object') {
+    teacherEmailAuthRequests = {};
+  }
+  if (!teacherEmailAuthRequests[operation]) {
+    teacherEmailAuthRequests[operation] = { inFlight: null, cooldownUntil: 0 };
+  }
+  return teacherEmailAuthRequests[operation];
+}
+
+function beginTeacherEmailAuthRequest(operation) {
+  const entry = teacherEmailAuthRequestEntry(operation);
+  const now = Date.now();
+  if (entry.inFlight) return { status: 'busy', token: null };
+  if (entry.cooldownUntil > now) return { status: 'cooldown', token: null };
+  const token = { operation, startedAt: now };
+  entry.inFlight = token;
+  return { status: 'started', token };
+}
+
+function finishTeacherEmailAuthRequest(operation, token) {
+  const entry = teacherEmailAuthRequestEntry(operation);
+  if (!token || entry.inFlight !== token) return false;
+  entry.inFlight = null;
+  entry.cooldownUntil = Date.now() + 3000;
+  return true;
+}
+
+function buildTeacherVerificationState(user, authGeneration, patch) {
+  const displayName = String(user && user.displayName || '').trim();
+  return {
+    mode: 'signup', status: 'verification-sent',
+    uid: String(user && user.uid || ''), authGeneration,
+    email: String(user && user.email || ''), displayName,
+    needsProfile: !displayName, busy: false, message: '', error: '',
+    ...(patch || {})
+  };
+}
+
+function teacherVerificationStateIsCurrent(state) {
+  const current = firebase.auth().currentUser;
+  return !!state && state.status === 'verification-sent' &&
+    state.authGeneration === teacherAuthVersion &&
+    String(state.uid || '') === String(current && current.uid || '');
+}
+
+function resumeTeacherEmailVerificationState(user, authGeneration) {
+  if (!user || user.isAnonymous || user.emailVerified ||
+      teacherAuthVersion !== authGeneration ||
+      String(firebase.auth().currentUser && firebase.auth().currentUser.uid || '') !== String(user.uid || '')) {
+    return false;
+  }
+  const signupRequest = typeof teacherEmailAuthRequests !== 'undefined' &&
+    teacherEmailAuthRequests && teacherEmailAuthRequests.signup;
+  if (signupRequest && signupRequest.inFlight) return false;
+  const dialog = document.getElementById('teacher-auth-dialog');
+  if (!dialog) return false;
+  let dialogRevision = teacherAuthDialogRevision;
+  if (!dialog.open) {
+    dialogRevision = invalidateTeacherAuthDialog();
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  } else {
+    clearTeacherAuthPasswords();
+  }
+  if (teacherAuthVersion !== authGeneration ||
+      String(firebase.auth().currentUser && firebase.auth().currentUser.uid || '') !== String(user.uid || '')) {
+    return false;
+  }
+  teacherAuthDialogState = buildTeacherVerificationState(user, authGeneration, {
+    message: '이메일 인증을 완료한 뒤 확인해 주세요.'
+  });
+  return renderTeacherAuthDialog(dialogRevision);
 }
 
 function clearTeacherAuthPasswords() {
@@ -1691,6 +1780,9 @@ async function submitTeacherEmailSignup(event) {
   let boundUser = auth.currentUser;
   let uid = boundUser && boundUser.uid || '';
   let values = null;
+  let createdUser = null;
+  let profileComplete = false;
+  let requestToken = null;
   try {
     try {
       values = TeacherEmailAuthCore.normalizeSignup({
@@ -1705,34 +1797,72 @@ async function submitTeacherEmailSignup(event) {
       renderTeacherAuthDialog(dialogRevision);
       return { status: 'error', message };
     }
+    const password = form && form.elements && form.elements.password;
+    if (password) password.value = '';
+    const request = beginTeacherEmailAuthRequest('signup');
+    if (request.status !== 'started') {
+      if (request.status === 'cooldown' && teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) {
+        teacherAuthDialogState = {
+          ...teacherAuthDialogState, mode: 'signup', busy: false,
+          message: '', error: '잠시 후 다시 시도해 주세요.'
+        };
+        renderTeacherAuthDialog(dialogRevision);
+      }
+      return { status: request.status, message: request.status === 'busy'
+        ? '요청을 처리 중입니다.' : '잠시 후 다시 시도해 주세요.' };
+    }
+    requestToken = request.token;
+    teacherAuthDialogState = {
+      mode: 'signup', status: 'idle', email: values.email, displayName: values.displayName,
+      busy: true, message: '가입 요청을 처리 중입니다.', error: ''
+    };
+    renderTeacherAuthDialog(dialogRevision);
     const credential = await auth.createUserWithEmailAndPassword(values.email, values.password);
     const user = credential && credential.user;
+    createdUser = user;
     authGeneration = teacherAuthVersion;
     boundUser = user;
     uid = user && user.uid || '';
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
     await user.updateProfile({ displayName: values.displayName });
+    profileComplete = true;
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
     await user.sendEmailVerification();
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
-    teacherAuthDialogState = {
-      mode: 'signup', status: 'verification-sent', email: values.email,
+    teacherAuthDialogState = buildTeacherVerificationState(user, authGeneration, {
+      email: values.email, displayName: values.displayName, needsProfile: false,
       message: '인증 메일을 보냈습니다. 이메일 인증을 완료한 뒤 확인해 주세요.', error: ''
-    };
+    });
     renderTeacherAuthDialog(dialogRevision);
     return { status: 'verification-sent' };
   } catch (error) {
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
     const message = TeacherEmailAuthCore.safeAuthMessage('signup', error);
+    if (createdUser) {
+      teacherAuthDialogState = buildTeacherVerificationState(createdUser, authGeneration, {
+        email: values && values.email || createdUser.email || '',
+        displayName: values && values.displayName || createdUser.displayName || '',
+        needsProfile: !profileComplete, message: '', error: message
+      });
+      renderTeacherAuthDialog(dialogRevision);
+      return { status: 'verification-recovery', message };
+    }
     teacherAuthDialogState = {
-      mode: 'signup', status: 'error', email: values && values.email || '', message: '', error: message
+      mode: 'signup', status: 'error', email: values && values.email || '',
+      displayName: values && values.displayName || '', busy: false, message: '', error: message
     };
     renderTeacherAuthDialog(dialogRevision);
     return { status: 'error', message };
   } finally {
     const password = form && form.elements && form.elements.password;
     if (password) password.value = '';
+    if (requestToken) finishTeacherEmailAuthRequest('signup', requestToken);
     if (teacherAuthDialogRevision === dialogRevision) clearTeacherAuthPasswords();
+    if (createdUser && !createdUser.emailVerified && teacherAuthDialogRevision === dialogRevision &&
+        String(auth.currentUser && auth.currentUser.uid || '') === String(createdUser.uid || '') &&
+        teacherAuthDialogState.status !== 'verification-sent') {
+      resumeTeacherEmailVerificationState(createdUser, teacherAuthVersion);
+    }
   }
 }
 
@@ -1767,6 +1897,7 @@ async function submitTeacherEmailLogin(event) {
     if (applied === false || teacherAuthDialogRevision !== dialogRevision) return { status: 'stale' };
     authGeneration = teacherAuthVersion;
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
+    if (!boundUser.emailVerified) return { status: 'verification-required' };
     closeTeacherAuthDialog();
     return { status: 'signed-in' };
   } catch (error) {
@@ -1785,43 +1916,97 @@ async function submitTeacherEmailLogin(event) {
 }
 
 async function sendTeacherVerificationEmail() {
+  const event = arguments[0];
+  if (event && typeof event.preventDefault === 'function') event.preventDefault();
   const dialogRevision = teacherAuthDialogRevision;
+  const verificationState = teacherAuthDialogState;
+  if (!teacherVerificationStateIsCurrent(verificationState)) return { status: 'stale' };
   const user = firebase.auth().currentUser;
   if (!user || user.isAnonymous) return { status: 'error' };
-  const authGeneration = teacherAuthVersion;
-  const uid = user.uid;
+  const authGeneration = verificationState.authGeneration;
+  const uid = verificationState.uid;
+  let displayName = String(verificationState.displayName || user.displayName || '').trim();
+  let profileComplete = verificationState.needsProfile !== true;
+  let requestToken = null;
   try {
+    if (!profileComplete) {
+      try {
+        displayName = TeacherEmailAuthCore.normalizeDisplayName(
+          teacherEmailAuthFormValue(event && event.currentTarget, 'displayName') || displayName
+        );
+      } catch (validationError) {
+        if (!teacherVerificationStateIsCurrent(verificationState)) return { status: 'stale' };
+        const message = String(validationError && validationError.message || '이름을 확인해 주세요.');
+        teacherAuthDialogState = { ...verificationState, busy: false, message: '', error: message };
+        renderTeacherAuthDialog(dialogRevision);
+        return { status: 'error', message };
+      }
+    }
+    const request = beginTeacherEmailAuthRequest('resend');
+    if (request.status !== 'started') {
+      if (request.status === 'cooldown' && teacherVerificationStateIsCurrent(verificationState)) {
+        teacherAuthDialogState = {
+          ...verificationState, busy: false, message: '', error: '잠시 후 다시 시도해 주세요.'
+        };
+        renderTeacherAuthDialog(dialogRevision);
+      }
+      return { status: request.status, message: request.status === 'busy'
+        ? '요청을 처리 중입니다.' : '잠시 후 다시 시도해 주세요.' };
+    }
+    requestToken = request.token;
+    teacherAuthDialogState = {
+      ...verificationState, displayName, busy: true,
+      message: '인증 메일 요청을 처리 중입니다.', error: ''
+    };
+    renderTeacherAuthDialog(dialogRevision);
+    if (!profileComplete) {
+      await user.updateProfile({ displayName });
+      profileComplete = true;
+      if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
+    }
     await user.sendEmailVerification();
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
-    teacherAuthDialogState = {
-      mode: 'signup', status: 'verification-sent', email: user.email || '',
+    teacherAuthDialogState = buildTeacherVerificationState(user, authGeneration, {
+      displayName, needsProfile: false,
       message: TeacherEmailAuthCore.safeAuthMessage('verification-resend', null), error: ''
-    };
+    });
     renderTeacherAuthDialog(dialogRevision);
     return { status: 'verification-sent' };
   } catch (error) {
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
     const message = TeacherEmailAuthCore.safeAuthMessage('verification-resend', error);
-    teacherAuthDialogState = { mode: 'signup', status: 'verification-sent', email: user.email || '', message: '', error: message };
+    teacherAuthDialogState = buildTeacherVerificationState(user, authGeneration, {
+      displayName, needsProfile: !profileComplete, message: '', error: message
+    });
     renderTeacherAuthDialog(dialogRevision);
     return { status: 'error', message };
+  } finally {
+    if (requestToken) finishTeacherEmailAuthRequest('resend', requestToken);
   }
 }
 
 async function confirmTeacherEmailVerification() {
   const dialogRevision = teacherAuthDialogRevision;
+  const verificationState = teacherAuthDialogState;
+  if (!teacherVerificationStateIsCurrent(verificationState)) return { status: 'stale' };
   const user = firebase.auth().currentUser;
   if (!user || user.isAnonymous) return { status: 'error' };
-  const authGeneration = teacherAuthVersion;
-  const uid = user.uid;
+  const authGeneration = verificationState.authGeneration;
+  const uid = verificationState.uid;
+  if (verificationState.needsProfile) {
+    const message = '이름을 저장하고 인증 메일을 보내 주세요.';
+    teacherAuthDialogState = { ...verificationState, message: '', error: message };
+    renderTeacherAuthDialog(dialogRevision);
+    return { status: 'profile-required', message };
+  }
   try {
     await user.reload();
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
     if (!user.emailVerified) {
-      teacherAuthDialogState = {
-        mode: 'signup', status: 'verification-sent', email: user.email || '',
+      teacherAuthDialogState = buildTeacherVerificationState(user, authGeneration, {
+        displayName: verificationState.displayName, needsProfile: false,
         message: '아직 이메일 인증이 확인되지 않았습니다. 인증 링크를 연 뒤 다시 확인해 주세요.', error: ''
-      };
+      });
       renderTeacherAuthDialog(dialogRevision);
       return { status: 'unverified' };
     }
@@ -1836,7 +2021,9 @@ async function confirmTeacherEmailVerification() {
   } catch (error) {
     if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uid)) return { status: 'stale' };
     const message = TeacherEmailAuthCore.safeAuthMessage('verification', error);
-    teacherAuthDialogState = { mode: 'signup', status: 'verification-sent', email: user.email || '', message: '', error: message };
+    teacherAuthDialogState = buildTeacherVerificationState(user, authGeneration, {
+      displayName: verificationState.displayName, needsProfile: false, message: '', error: message
+    });
     renderTeacherAuthDialog(dialogRevision);
     return { status: 'error', message };
   }
@@ -1850,22 +2037,60 @@ async function sendTeacherPasswordReset(event) {
   const currentAtStart = auth.currentUser;
   const uidAtStart = currentAtStart && currentAtStart.uid || '';
   let email = '';
-  let error = null;
+  let requestToken = null;
   try {
-    email = TeacherEmailAuthCore.normalizeLogin({
-      email: teacherEmailAuthFormValue(event && event.currentTarget, 'email'), password: '12345678'
-    }).email;
-    await auth.sendPasswordResetEmail(email);
-  } catch (caught) {
-    error = caught;
+    try {
+      email = TeacherEmailAuthCore.normalizeLogin({
+        email: teacherEmailAuthFormValue(event && event.currentTarget, 'email'), password: '12345678'
+      }).email;
+    } catch (validationError) {
+      if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uidAtStart)) {
+        return { status: 'stale' };
+      }
+      const message = String(validationError && validationError.message || '이메일을 확인해 주세요.');
+      teacherAuthDialogState = {
+        mode: 'reset', status: 'error', email, busy: false, message: '', error: message
+      };
+      renderTeacherAuthDialog(dialogRevision);
+      return { status: 'error', message };
+    }
+    const request = beginTeacherEmailAuthRequest('reset');
+    if (request.status !== 'started') {
+      if (request.status === 'cooldown' &&
+          teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uidAtStart)) {
+        teacherAuthDialogState = {
+          mode: 'reset', status: 'error', email, busy: false,
+          message: '', error: '잠시 후 다시 시도해 주세요.'
+        };
+        renderTeacherAuthDialog(dialogRevision);
+      }
+      return { status: request.status, message: request.status === 'busy'
+        ? '요청을 처리 중입니다.' : '잠시 후 다시 시도해 주세요.' };
+    }
+    requestToken = request.token;
+    teacherAuthDialogState = {
+      mode: 'reset', status: 'idle', email, busy: true,
+      message: '비밀번호 재설정 요청을 처리 중입니다.', error: ''
+    };
+    renderTeacherAuthDialog(dialogRevision);
+    let error = null;
+    try {
+      await auth.sendPasswordResetEmail(email);
+    } catch (caught) {
+      error = caught;
+    }
+    if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uidAtStart)) {
+      return { status: 'stale' };
+    }
+    const outcome = TeacherEmailAuthCore.passwordResetOutcome(error);
+    teacherAuthDialogState = outcome.status === 'reset-sent'
+      ? { mode: 'reset', status: outcome.status, email, busy: false, message: outcome.message, error: '' }
+      : { mode: 'reset', status: outcome.status, email, busy: false, message: '', error: outcome.message };
+    renderTeacherAuthDialog(dialogRevision);
+    return outcome;
+  } finally {
+    if (requestToken) finishTeacherEmailAuthRequest('reset', requestToken);
   }
-  if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, uidAtStart)) {
-    return { status: 'stale' };
-  }
-  const message = TeacherEmailAuthCore.safeAuthMessage('reset', error);
-  teacherAuthDialogState = { mode: 'reset', status: 'reset-sent', email, message, error: '' };
-  renderTeacherAuthDialog(dialogRevision);
-  return { status: 'reset-sent', message };
 }
 
 async function recoverPendingAllocationsForTeacher(owner) {
@@ -2017,6 +2242,8 @@ async function applyTeacherUser(user) {
     try { tokenResult = await user.getIdTokenResult(); } catch (error) { console.error(error); }
   }
   if (!authObserverIsCurrent()) return abortStaleObserver();
+  const signInProvider = tokenResult && tokenResult.claims && tokenResult.claims.firebase &&
+    tokenResult.claims.firebase.sign_in_provider;
   const nextUser = AuthCore.isSupportedTeacherSignIn(tokenResult) ? user : null;
   let nextAllowance = null;
   if (nextUser && nextUser.emailVerified) {
@@ -2049,6 +2276,10 @@ async function applyTeacherUser(user) {
   teacherState = typeof teacherStateFromAllowance === 'function'
     ? teacherStateFromAllowance(teacherUser, teacherAllowance)
     : AuthCore.teacherState(teacherUser, teacherAllowance);
+  if (nextUser && !nextUser.emailVerified && signInProvider === 'password' &&
+      typeof resumeTeacherEmailVerificationState === 'function') {
+    resumeTeacherEmailVerificationState(nextUser, updateVersion);
+  }
   if (AuthCore.isTeacher(teacherState) &&
       typeof recoverPendingAllocationsForTeacher === 'function') {
     await recoverPendingAllocationsForTeacher(teacherState);

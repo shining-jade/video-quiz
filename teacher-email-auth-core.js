@@ -21,15 +21,20 @@
     }
   }
 
-  function normalizeSignup(input) {
-    const values = input || {};
-    const displayName = String(values.displayName || '').trim();
-    const email = canonicalEmail(values.email);
-    const password = String(values.password || '');
-
+  function normalizeDisplayName(value) {
+    const displayName = String(value || '').trim();
     if (!displayName || displayName.length > 80) {
       throw new Error('이름은 1~80자여야 합니다.');
     }
+    return displayName;
+  }
+
+  function normalizeSignup(input) {
+    const values = input || {};
+    const displayName = normalizeDisplayName(values.displayName);
+    const email = canonicalEmail(values.email);
+    const password = String(values.password || '');
+
     validateEmail(email);
     validatePassword(password);
     return { displayName, email, password };
@@ -45,9 +50,23 @@
     return { email, password };
   }
 
+  function passwordResetOutcome(error) {
+    const code = String(error && error.code || '');
+    if (!error || code === 'auth/user-not-found') {
+      return { status: 'reset-sent', message: RESET_SENT_MESSAGE };
+    }
+    if (code === 'auth/network-request-failed') {
+      return { status: 'error', message: '네트워크 연결을 확인한 뒤 다시 시도해 주세요.' };
+    }
+    if (code === 'auth/too-many-requests') {
+      return { status: 'error', message: '요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' };
+    }
+    return { status: 'error', message: '비밀번호 재설정 메일을 보내지 못했습니다. 잠시 후 다시 시도해 주세요.' };
+  }
+
   function safeAuthMessage(operation, error) {
     if (operation === 'reset') {
-      return RESET_SENT_MESSAGE;
+      return passwordResetOutcome(error).message;
     }
 
     const code = String(error && error.code || '');
@@ -77,5 +96,12 @@
     return '인증 처리에 실패했습니다. 다시 시도해 주세요.';
   }
 
-  return { normalizeSignup, normalizeLogin, safeAuthMessage, RESET_SENT_MESSAGE };
+  return {
+    normalizeDisplayName,
+    normalizeSignup,
+    normalizeLogin,
+    passwordResetOutcome,
+    safeAuthMessage,
+    RESET_SENT_MESSAGE
+  };
 });
