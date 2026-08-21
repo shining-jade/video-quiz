@@ -177,6 +177,21 @@ textarea { resize: vertical; min-height: 62px; }
 .teacher-dashboard .plan-row .admin-identity { display: block; margin-top: 2px; color: var(--ink-2); font-size: 12px; font-weight: 500; }
 @media (max-width: 560px) { .teacher-dashboard .plan-row { grid-template-columns: 1fr auto; } .teacher-dashboard .plan-row .time { grid-column: 1 / -1; } }
 
+/* 공개 자료실 */
+.public-library-grid { display: grid; gap: 12px; }
+.public-library-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; }
+.public-library-card h2 { overflow-wrap: anywhere; }
+.public-library-meta { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
+.public-library-actions { display: grid; grid-template-columns: repeat(2, max-content); gap: 8px; }
+.public-library-preview-card { width: min(760px, 100%); max-height: min(86vh, 820px); overflow: auto; }
+.public-library-preview-questions { margin: 12px 0 0; padding-left: 22px; color: var(--ink-2); }
+@media (max-width: 720px) {
+  .public-library-card { grid-template-columns: 1fr; }
+  .public-library-actions { grid-template-columns: 1fr; }
+  .public-library-actions .btn { width: 100%; }
+  .public-library-preview-card { max-height: calc(100vh - 24px); }
+}
+
 /* ══════════════════════════════════════════════════════════
    세트 제작
    ══════════════════════════════════════════════════════════ */
@@ -1302,6 +1317,7 @@ function normSet(raw) {
   return {
     title: raw.title || '제목 없음',
     author: raw.author || '',
+    description: raw.description || '',
     ownerUid: raw.ownerUid || '',
     ownerEmail: raw.ownerEmail || '',
     createdAt: raw.createdAt || 0,
@@ -1311,6 +1327,9 @@ function normSet(raw) {
     purgeStartedAt: raw.purgeStartedAt || null,
     lifecycleState: raw.lifecycleState || (raw.trashedAt ? 'trashed' : 'active'),
     collaboratorCount: Number.isInteger(raw.collaboratorCount) ? raw.collaboratorCount : 0,
+    imageCount: Number.isInteger(raw.imageCount) ? raw.imageCount : 0,
+    publicationStatus: ['published', 'moderated'].includes(raw.publicationStatus)
+      ? raw.publicationStatus : 'private',
     collaboratorEmails: Array.isArray(raw.collaboratorEmails) ? raw.collaboratorEmails : [],
     settings: normSettings(raw.settings),
     videos: videos
@@ -1440,6 +1459,8 @@ let teacherEmailAuthRequests = {
 };
 let classPlanningThresholds = ClassPlanningCore.normalizeThresholds();
 let teacherDeletionScreen = null;
+let publicQuizLibraryState = null;
+let publicLibraryRequestSerial = 0;
 
 function teacherStateFromAllowance(user, allowance) {
   const state = AuthCore.teacherState(user, allowance);
@@ -2183,6 +2204,7 @@ function rerenderEligibleTeacherHome(authGeneration, uid) {
 
 async function applyTeacherUser(user) {
   if (typeof clearTeacherAuthPasswords === 'function') clearTeacherAuthPasswords();
+  if (typeof clearPublicQuizLibraryScreen === 'function') clearPublicQuizLibraryScreen(true);
   const previousState = typeof appliedTeacherState !== 'undefined' && appliedTeacherState
     ? appliedTeacherState : teacherState;
   const previousUid = previousState && previousState.uid || '';
@@ -2483,7 +2505,7 @@ let authReady = false;
 function teacherRouteRequirement() {
   const name = location.hash.replace(/^#\/?/, '').split('/')[0] || 'home';
   if (name === 'admin') return 'admin';
-  return ['sets', 'make', 'play', 'live'].includes(name) ? 'teacher' : '';
+  return ['sets', 'library', 'make', 'play', 'live'].includes(name) ? 'teacher' : '';
 }
 
 function retractProtectedTeacherScreen() {
@@ -2548,6 +2570,7 @@ function router() {
   switch (name) {
     case 'home':  screenHome(); break;
     case 'sets':  requireTeacher(screenSetList); break;
+    case 'library': requireTeacher(screenPublicQuizLibrary); break;
     case 'trash': requireTeacher(screenTrash); break;
     case 'make':  requireTeacher(() => screenMake(arg)); break;
     case 'play':  requireTeacher(() => screenPlay(arg, parsePlayClassPlanRoute(routeQuery))); break;
@@ -2581,7 +2604,7 @@ function screenHome() {
     return;
   }
   const canShowTeacherDashboard = AuthCore.isTeacher(teacherState);
-  APP().innerHTML = topbar() + '<div class="wrap wide">' +
+  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a>') + '<div class="wrap wide">' +
     '<div class="home-hero">' +
       '<h1>영상 퀴즈 실시간 진행 도구</h1>' +
       '<p>영상 속 정해진 순간에 퀴즈가 뜨고, 학생들은 각자 폰으로 그 문제만 풉니다.</p>' +
@@ -3287,7 +3310,14 @@ function screenSetList() {
     }).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
     state.trashCount = Array.isArray(trash) ? trash.length : 0;
     const checks = state.all.map(s => {
-      if (!s.ownerUid || !teacherState || s.ownerUid === teacherState.uid || !store.canEditQuizSet) return Promise.resolve(s);
+      if (s.ownerUid && teacherState && s.ownerUid === teacherState.uid && store.getPublishedQuizSet) {
+        return store.getPublishedQuizSet(s.id).then(projection => {
+          s.publicationStatus = projection && projection.status === 'published' ? 'published' : 'private';
+          s.publicationRevision = projection && projection.revision || '';
+          return s;
+        }).catch(() => { s.publicationStatus = 'private'; return s; });
+      }
+      if (!s.ownerUid || !teacherState || !store.canEditQuizSet) return Promise.resolve(s);
       return store.canEditQuizSet(s.id, teacherState).then(ok => { s.isCollaborator = !!ok; return s; }).catch(() => s);
     });
     Promise.all(checks).then(() => { if (setList === state) { state.loadingAccess = false; renderSetList(); } });
@@ -3308,7 +3338,7 @@ function renderSetList() {
     .filter(s => setList.showHidden ? true : !s.archived)
     .filter(s => !kw || (s.title + ' ' + (s.author || '')).toLowerCase().indexOf(kw) >= 0);
 
-  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/trash">🗑 휴지통' + (nTrash ? ' (' + nTrash + ')' : '') + '</a><a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
+  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a><a class="btn sm ghost" href="#/trash">🗑 휴지통' + (nTrash ? ' (' + nTrash + ')' : '') + '</a><a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
@@ -3354,6 +3384,23 @@ function setListRow(s) {
   const editable = canEditSet(s, teacherState);
   const owner = !!(s.ownerUid && teacherState && s.ownerUid === teacherState.uid);
   const collaborator = !owner && editable;
+  const publicationStatus = owner && ['published', 'moderated'].includes(s.publicationStatus)
+    ? s.publicationStatus : 'private';
+  const publicationBusy = !!s.publicationBusy;
+  const publicationBadge = owner
+    ? (publicationStatus === 'published'
+      ? '<span class="tag ok" style="margin-right:6px">공개 중</span>'
+      : publicationStatus === 'moderated'
+        ? '<span class="tag bad" style="margin-right:6px">관리자 공개 중지</span>'
+        : '<span class="tag mute" style="margin-right:6px">비공개</span>') : '';
+  const publicationAction = owner && !s.trashedAt && !s.purgeStartedAt
+    ? (publicationStatus === 'published'
+      ? '<button class="btn sm danger" onclick="withdrawQuizSetFromList(\'' + esc(s.id) + '\')"' +
+        (publicationBusy ? ' disabled' : '') + '>공개 철회</button>'
+      : publicationStatus === 'moderated'
+        ? ''
+        : '<button class="btn sm" onclick="publishQuizSetFromList(\'' + esc(s.id) + '\')"' +
+          (publicationBusy ? ' disabled' : '') + '>공개 자료실에 게시</button>') : '';
   const startAndCopy =
     '<a class="btn sm primary" href="#/play/' + esc(s.id) + '">▶ 우리 반 시작하기</a>' +
     '<button class="btn sm" onclick="setDuplicate(\'' + esc(s.id) + '\')">⧉ 사본 만들기</button>';
@@ -3376,7 +3423,7 @@ function setListRow(s) {
         (owner ? '<button class="btn sm" onclick="openCollaboratorDialog(\'' + esc(s.id) + '\')">👥 공동 편집자</button>' : '<span class="tag ok" title="공동 편집 권한">공동 편집</span>') +
         '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')" title="다른 프로젝트로 옮기거나 백업할 때">📤 파일</button>' +
         '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>' +
-        (owner ? '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
+        (owner ? publicationAction + '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
           '<button class="btn sm danger" onclick="setMoveToTrash(\'' + esc(s.id) + '\')">🗑 휴지통</button>' : ''))
     : startAndCopy;
   return '<div class="card" style="padding:15px;margin-bottom:10px' + (s.archived ? ';opacity:.6' : '') + '">' +
@@ -3386,6 +3433,7 @@ function setListRow(s) {
           (s.archived ? '<span class="tag mute" style="margin-right:6px">숨김</span>' : '') +
           (trashed || purging ? '<span class="tag warn" style="margin-right:6px">' + (purging ? '정리 중' : '휴지통') + '</span>' : '') +
           (collaborator ? '<span class="tag ok" style="margin-right:6px">공동 편집</span>' : '') +
+          publicationBadge +
           (!s.ownerUid ? '<span class="tag mute" style="margin-right:6px">읽기 전용</span>' : '') +
           esc(s.title) + '</div>' +
         '<div style="font-size:12.5px;color:var(--ink-2);margin-top:3px">' +
@@ -3403,6 +3451,298 @@ function setListRow(s) {
 
 function setCurrentListSet(id) {
   return setList && setList.all && setList.all.find(s => s.id === id);
+}
+
+function publicLibraryActor() {
+  return Object.assign({}, teacherState || {}, {
+    uid: teacherState && teacherState.uid || teacherUser && teacherUser.uid || '',
+    email: teacherState && teacherState.email || teacherUser && teacherUser.email || '',
+    displayName: teacherUser && String(teacherUser.displayName || '').trim() || '',
+    authGeneration: teacherAuthVersion,
+    currentAuthGeneration: teacherAuthVersion
+  });
+}
+
+function publishQuizSetFromList(setId) {
+  const current = setCurrentListSet(setId);
+  const listState = setList;
+  const uid = teacherState && teacherState.uid;
+  const authGeneration = teacherAuthVersion;
+  if (!current || !uid || current.ownerUid !== uid || current.publicationBusy) {
+    toast('소유자만 공개 자료실 게시를 관리할 수 있습니다.');
+    return Promise.resolve(false);
+  }
+  const imageCount = Number.isSafeInteger(current.imageCount) ? current.imageCount : 0;
+  const authorDisplayName = String(current.author || teacherUser && teacherUser.displayName || '').trim() || '표시 이름 없음';
+  const notice = '다음 정보를 공개 자료실에 게시할까요?\n\n' +
+    '제목: ' + current.title + '\n' +
+    '설명: ' + (current.description || '설명 없음') + '\n' +
+    '제작자 표시명: ' + authorDisplayName + '\n' +
+    '포함 이미지: 이미지 ' + imageCount + '개\n\n' +
+    '저작권과 개인정보가 없는 자료인지 확인해 주세요.';
+  if (!confirm(notice)) return Promise.resolve(false);
+  current.publicationBusy = true;
+  renderSetList();
+  const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
+    teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
+  return store.publishQuizSet(setId, publicLibraryActor()).then(() => {
+    if (!isCurrent()) return null;
+    return store.getPublishedQuizSet(setId);
+  }).then(projection => {
+    if (!isCurrent() || !projection || projection.status !== 'published') return false;
+    current.publicationBusy = false;
+    current.publicationStatus = 'published';
+    current.publicationRevision = projection.revision || '';
+    renderSetList();
+    toast('공개 자료실 게시를 확인했습니다.');
+    return true;
+  }).catch(error => {
+    if (!isCurrent()) return false;
+    current.publicationBusy = false;
+    if (error && String(error.message || '').includes('관리자 공개 중지')) {
+      current.publicationStatus = 'moderated';
+    }
+    renderSetList();
+    alert('게시 상태를 서버에서 확인하지 못했습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
+    return false;
+  });
+}
+
+function withdrawQuizSetFromList(setId) {
+  const current = setCurrentListSet(setId);
+  const listState = setList;
+  const uid = teacherState && teacherState.uid;
+  const authGeneration = teacherAuthVersion;
+  if (!current || !uid || current.ownerUid !== uid || current.publicationStatus !== 'published' ||
+      current.publicationBusy) return Promise.resolve(false);
+  if (!confirm('「' + current.title + '」의 공개를 철회할까요?\n\n이미 완성된 다른 교사의 사본은 유지됩니다.')) {
+    return Promise.resolve(false);
+  }
+  current.publicationBusy = true;
+  renderSetList();
+  const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
+    teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
+  return store.withdrawPublishedQuizSet(setId, publicLibraryActor()).then(result => {
+    if (!isCurrent() || !result || result.status !== 'withdrawn') return false;
+    return store.getPublishedQuizSet(setId).then(visible => {
+      if (!isCurrent() || visible) return false;
+      current.publicationBusy = false;
+      current.publicationStatus = 'private';
+      current.publicationRevision = '';
+      renderSetList();
+      toast('공개 철회를 서버에서 확인했습니다.');
+      return true;
+    });
+  }).catch(() => {
+    if (!isCurrent()) return false;
+    current.publicationBusy = false;
+    renderSetList();
+    alert('공개 철회 상태를 확인하지 못했습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
+    return false;
+  });
+}
+
+function publicLibrarySafeSummary(value) {
+  const raw = value || {};
+  const publicationId = typeof raw.publicationId === 'string' ? raw.publicationId.trim() : '';
+  const title = typeof raw.title === 'string' ? raw.title.slice(0, 200) : '';
+  const description = typeof raw.description === 'string' ? raw.description.slice(0, 1000) : '';
+  const authorDisplayName = typeof raw.authorDisplayName === 'string'
+    ? raw.authorDisplayName.slice(0, 120) : '';
+  if (!publicationId || !title || !authorDisplayName || publicationId.includes('/') ||
+      !Number.isSafeInteger(raw.videoCount) || raw.videoCount < 0 ||
+      !Number.isSafeInteger(raw.questionCount) || raw.questionCount < 0) return null;
+  return {
+    publicationId, title, description, authorDisplayName,
+    videoCount: raw.videoCount, questionCount: raw.questionCount,
+    updatedAtMs: Number.isFinite(Number(raw.updatedAtMs)) ? Number(raw.updatedAtMs) : 0
+  };
+}
+
+function publicLibraryScreenIsCurrent(state, requestId) {
+  return publicQuizLibraryState === state && !!state && state.requestId === requestId &&
+    teacherAuthVersion === state.authGeneration && !!teacherUser && teacherUser.uid === state.uid &&
+    !!teacherState && teacherState.uid === state.uid && AuthCore.isTeacher(teacherState) &&
+    String(location.hash || '') === '#/library';
+}
+
+function clearPublicQuizLibraryScreen(clearDom) {
+  const state = publicQuizLibraryState;
+  if (state) state.requestId = ++publicLibraryRequestSerial;
+  publicQuizLibraryState = null;
+  if (typeof document !== 'undefined') {
+    const preview = document.getElementById('published-quiz-preview');
+    if (preview && typeof preview.remove === 'function') preview.remove();
+  }
+  if (clearDom && typeof location !== 'undefined' && String(location.hash || '') === '#/library' &&
+      typeof APP === 'function') APP().innerHTML = '';
+  return true;
+}
+
+function renderPublicQuizLibrary() {
+  const state = publicQuizLibraryState;
+  if (!state) return false;
+  const query = String(state.query || '').trim().toLowerCase().slice(0, 200);
+  const items = (state.items || []).filter(item => !query ||
+    (item.title + ' ' + item.description + ' ' + item.authorDisplayName).toLowerCase().includes(query));
+  const rows = items.length ? items.map(item =>
+    '<article class="card public-library-card">' +
+      '<div><h2>' + esc(item.title) + '</h2>' +
+      '<p class="sub">' + esc(item.description || '설명 없음') + '</p>' +
+      '<div class="public-library-meta">제작자 ' + esc(item.authorDisplayName) +
+        ' · 영상 ' + item.videoCount + '개 · 문항 ' + item.questionCount + '개' +
+        (item.updatedAtMs ? ' · 갱신 ' + esc(fmtDate(item.updatedAtMs)) : '') + '</div></div>' +
+      '<div class="public-library-actions">' +
+        '<button class="btn" onclick="openPublishedQuizPreview(\'' + esc(item.publicationId) + '\')">미리보기</button>' +
+        '<button class="btn primary" aria-label="내 세트로 복사" onclick="copyPublishedQuizSetFromLibrary(\'' + esc(item.publicationId) + '\')"' +
+          (state.copyingId ? ' disabled' : '') + '>' +
+          (state.copyingId === item.publicationId ? '복사 중…' : '내 세트로 복사') + '</button>' +
+      '</div></article>'
+  ).join('') : '<div class="card"><div class="empty">' +
+    (state.loading ? '공개 퀴즈를 불러오는 중…' : query ? '검색 결과가 없습니다.' : '게시된 공개 퀴즈가 없습니다.') +
+    '</div></div>';
+  const status = state.error ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>' : '';
+  const preview = state.preview ? '<div class="overlay" id="published-quiz-preview" role="dialog" aria-modal="true" aria-labelledby="published-preview-title">' +
+    '<div class="card public-library-preview-card"><div class="row" style="align-items:center;justify-content:space-between">' +
+      '<h2 id="published-preview-title">' + esc(state.preview.title) + '</h2>' +
+      '<button class="btn sm" aria-label="공개 퀴즈 미리보기 닫기" onclick="closePublishedQuizPreview()">닫기</button></div>' +
+    '<p class="sub">' + esc(state.preview.description || '설명 없음') + '</p>' +
+    '<div class="public-library-meta">제작자 ' + esc(state.preview.authorDisplayName) +
+      ' · 영상 ' + state.preview.videoCount + '개 · 문항 ' + state.preview.questionCount + '개</div>' +
+    (state.preview.questionTexts.length
+      ? '<ol class="public-library-preview-questions">' + state.preview.questionTexts.map(text => '<li>' + esc(text) + '</li>').join('') + '</ol>'
+      : '<div class="empty">표시할 문항 요약이 없습니다.</div>') +
+    '<div class="public-library-actions" style="margin-top:16px"><button class="btn primary" aria-label="내 세트로 복사" onclick="copyPublishedQuizSetFromLibrary(\'' + esc(state.preview.publicationId) + '\')">내 세트로 복사</button></div>' +
+    '</div></div>' : '';
+  APP().innerHTML = topbar('<a class="btn sm" href="#/sets">📚 내 세트</a>') +
+    '<main class="wrap"><h1 style="font-size:24px">공개 자료실</h1>' +
+    '<p class="sub">승인된 교사가 공개한 퀴즈를 확인하고 비공개 독립 사본으로 가져옵니다.</p>' +
+    '<div class="card"><label class="f" for="public-library-search">공개 자료 검색</label>' +
+      '<input id="public-library-search" type="text" maxlength="200" value="' + esc(state.query || '') +
+        '" placeholder="제목, 설명 또는 제작자 표시명" oninput="publicLibrarySearchChanged(this.value)"></div>' +
+    status + '<div class="public-library-grid">' + rows + '</div>' +
+    (state.nextCursor ? '<button class="btn block" style="margin-top:12px" onclick="publicLibraryNextPage()"' +
+      (state.loading ? ' disabled' : '') + '>다음 50개</button>' : '') + '</main>' + preview;
+  return true;
+}
+
+function loadPublicQuizLibraryPage(useCursor) {
+  const state = publicQuizLibraryState;
+  if (!state || state.loading) return Promise.resolve(false);
+  const requestId = ++publicLibraryRequestSerial;
+  state.requestId = requestId;
+  state.loading = true;
+  state.error = '';
+  renderPublicQuizLibrary();
+  return store.listPublishedQuizSets({ limit: 50, cursor: useCursor ? state.cursor : null }).then(result => {
+    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
+    state.items = (result && Array.isArray(result.items) ? result.items : [])
+      .map(publicLibrarySafeSummary).filter(Boolean).slice(0, 50);
+    state.cursor = result && result.nextCursor || null;
+    state.nextCursor = state.cursor;
+    state.loading = false;
+    renderPublicQuizLibrary();
+    return true;
+  }).catch(() => {
+    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
+    state.loading = false;
+    state.error = '공개 자료실을 불러오지 못했습니다. 다시 시도해 주세요.';
+    renderPublicQuizLibrary();
+    return false;
+  });
+}
+
+function screenPublicQuizLibrary() {
+  if (!teacherUser || !teacherState || !AuthCore.isTeacher(teacherState)) return Promise.resolve(false);
+  const state = publicQuizLibraryState = {
+    uid: teacherUser.uid, authGeneration: teacherAuthVersion,
+    requestId: ++publicLibraryRequestSerial, cursor: null,
+    nextCursor: null, items: [], query: '', loading: false,
+    preview: null, copyingId: '', error: ''
+  };
+  onCleanup(() => {
+    if (publicQuizLibraryState === state) clearPublicQuizLibraryScreen(false);
+  });
+  renderPublicQuizLibrary();
+  return loadPublicQuizLibraryPage(false);
+}
+
+function publicLibrarySearchChanged(value) {
+  const state = publicQuizLibraryState;
+  if (!state) return false;
+  state.query = String(value || '').slice(0, 200);
+  renderPublicQuizLibrary();
+  return true;
+}
+
+function publicLibraryNextPage() {
+  return loadPublicQuizLibraryPage(true);
+}
+
+function openPublishedQuizPreview(publicationId) {
+  const state = publicQuizLibraryState;
+  if (!state || state.loading) return Promise.resolve(false);
+  const item = (state.items || []).find(value => value.publicationId === publicationId);
+  if (!item) return Promise.resolve(false);
+  const requestId = ++publicLibraryRequestSerial;
+  state.requestId = requestId;
+  state.error = '';
+  return store.getPublishedQuizSet(publicationId).then(projection => {
+    if (!publicLibraryScreenIsCurrent(state, requestId) || !projection || projection.status !== 'published') return false;
+    const safe = publicLibrarySafeSummary(Object.assign({}, item, projection));
+    if (!safe) return false;
+    const questionTexts = [];
+    (Array.isArray(projection.videos) ? projection.videos : []).slice(0, 50).forEach(video => {
+      (Array.isArray(video.questions) ? video.questions : []).slice(0, 200).forEach(question => {
+        if (questionTexts.length < 500 && question && typeof question.text === 'string') {
+          questionTexts.push(question.text.slice(0, 2000));
+        }
+      });
+    });
+    state.preview = Object.assign({}, safe, { questionTexts });
+    renderPublicQuizLibrary();
+    return true;
+  }).catch(() => {
+    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
+    state.error = '공개 미리보기를 불러오지 못했습니다. 게시 상태를 다시 확인해 주세요.';
+    renderPublicQuizLibrary();
+    return false;
+  });
+}
+
+function closePublishedQuizPreview() {
+  if (!publicQuizLibraryState) return false;
+  publicQuizLibraryState.preview = null;
+  renderPublicQuizLibrary();
+  return true;
+}
+
+function copyPublishedQuizSetFromLibrary(publicationId) {
+  const state = publicQuizLibraryState;
+  if (!state || state.loading || state.copyingId ||
+      !(state.items || []).some(item => item.publicationId === publicationId)) return Promise.resolve(false);
+  const requestId = ++publicLibraryRequestSerial;
+  state.requestId = requestId;
+  state.copyingId = publicationId;
+  state.error = '';
+  renderPublicQuizLibrary();
+  const destinationId = rid(20);
+  return store.copyPublishedQuizSet(publicationId, destinationId, publicLibraryActor()).then(result => {
+    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
+    if (!result || result.id !== destinationId || result.visibility !== 'private') {
+      throw new Error('private copy readback mismatch');
+    }
+    state.copyingId = '';
+    toast('비공개 독립 사본을 만들었습니다.');
+    go('make/' + destinationId);
+    return true;
+  }).catch(() => {
+    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
+    state.copyingId = '';
+    state.error = '사본을 만들지 못했습니다. 게시 상태를 확인한 뒤 다시 시도해 주세요.';
+    renderPublicQuizLibrary();
+    return false;
+  });
 }
 
 function uiTrashMillis(value) {
@@ -9106,13 +9446,147 @@ function screenAdmin() {
     from: '', to: '', setFilter: '', gradeFilter: '', klassFilter: '',
     tab: 'sessions', loading: false, detail: null,
     loadGeneration: 0, displayedSessionIds: [], purgeSessionIds: [], purgeFilterSnapshot: null, displayedRange: null,
-    rangeRejected: false, rejectedSessionCount: 0
+    rangeRejected: false, rejectedSessionCount: 0, publicLibrary: null
   };
   onCleanup(() => { adm = null; });
   admRenderShell();
 }
 function admLogout() {
   signOutTeacher();
+}
+
+function adminPublishedScreenIsCurrent(state) {
+  return !!state && !!adm && adm.tab === 'publications' && adm.publicLibrary === state &&
+    teacherAuthVersion === state.authGeneration && !!teacherUser && teacherUser.uid === state.uid &&
+    !!teacherState && teacherState.uid === state.uid && AuthCore.isAdmin(teacherState);
+}
+
+function renderAdminPublishedQuizSets() {
+  const body = $('#adm-body');
+  if (!body || !adm) return false;
+  let state = adm.publicLibrary;
+  if (!state) {
+    state = adm.publicLibrary = {
+      uid: teacherUser && teacherUser.uid || '', authGeneration: teacherAuthVersion,
+      requestId: ++publicLibraryRequestSerial, items: [], busyId: '', loading: true, error: ''
+    };
+    body.innerHTML = '<div class="empty">공개 세트를 불러오는 중…</div>';
+    const requestId = state.requestId;
+    store.listPublishedQuizSets({ limit: 50, cursor: null }).then(result => {
+      if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+      const summaries = (result && Array.isArray(result.items) ? result.items : []).slice(0, 50);
+      return Promise.all(summaries.map(summary => store.getPublishedQuizSet(summary.publicationId)
+        .then(projection => projection && projection.status === 'published' ? projection : null)
+        .catch(() => null))).then(projections => {
+          if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+          state.items = projections.filter(Boolean);
+          state.loading = false;
+          renderAdminPublishedQuizSets();
+          return true;
+        });
+    }).catch(() => {
+      if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+      state.loading = false;
+      state.error = '공개 세트 목록을 불러오지 못했습니다. 다시 시도해 주세요.';
+      renderAdminPublishedQuizSets();
+      return false;
+    });
+    return true;
+  }
+  const rows = (state.items || []).map(item => {
+    const id = String(item.publicationId || '');
+    const revision = String(item.revision || '');
+    const moderated = item.status === 'moderated';
+    const busy = state.busyId === id;
+    return '<div class="card" data-publication-id="' + esc(id) + '">' +
+      '<div class="row" style="align-items:center;justify-content:space-between"><div>' +
+        '<h2>' + esc(item.title || '제목 없음') + '</h2>' +
+        '<div class="public-library-meta">제작자 ' + esc(item.authorDisplayName || '') +
+          ' · 영상 ' + Number(item.videoCount || 0) + '개 · 문항 ' + Number(item.questionCount || 0) +
+          '개 · revision <span class="mono">' + esc(revision) + '</span></div></div>' +
+        (moderated ? '<span class="tag bad">관리자 공개 중지</span>' : '<span class="tag ok">공개 중</span>') + '</div>' +
+      (moderated
+        ? '<button class="btn" style="margin-top:12px" onclick="adminRestorePublishedQuizFromPanel(\'' + esc(id) + '\',\'' + esc(revision) + '\')"' + (busy ? ' disabled' : '') + '>공개 복구</button>'
+        : '<div class="field" style="margin-top:12px"><label class="f" for="admin-public-reason-' + esc(id) + '">공개 중지 사유</label>' +
+          '<textarea id="admin-public-reason-' + esc(id) + '" maxlength="200" placeholder="1~200자"' + (busy ? ' disabled' : '') + '></textarea></div>' +
+          '<button class="btn danger" onclick="adminModeratePublishedQuizFromPanel(\'' + esc(id) + '\',\'' + esc(revision) + '\')"' + (busy ? ' disabled' : '') + '>공개 중지</button>') +
+      '</div>';
+  }).join('');
+  body.innerHTML = (state.error ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>' : '') +
+    (state.loading ? '<div class="empty">공개 세트를 불러오는 중…</div>' :
+      rows || '<div class="card"><div class="empty">현재 공개 중인 세트가 없습니다.</div></div>');
+  return true;
+}
+
+function adminModeratePublishedQuizFromPanel(publicationId, expectedRevision, suppliedReason) {
+  const state = adm && adm.publicLibrary;
+  if (!adminPublishedScreenIsCurrent(state) || state.busyId) return Promise.resolve(false);
+  const item = (state.items || []).find(value => value.publicationId === publicationId);
+  if (!item || item.status !== 'published' || item.revision !== expectedRevision) return Promise.resolve(false);
+  const input = $('#admin-public-reason-' + publicationId);
+  const reason = String(suppliedReason === undefined ? input && input.value || '' : suppliedReason).trim();
+  if (reason.length < 1 || reason.length > 200) {
+    state.error = '공개 중지 사유를 1~200자로 입력해 주세요.';
+    renderAdminPublishedQuizSets();
+    return Promise.resolve(false);
+  }
+  const requestId = ++publicLibraryRequestSerial;
+  state.requestId = requestId;
+  state.busyId = publicationId;
+  state.error = '';
+  renderAdminPublishedQuizSets();
+  return store.adminModeratePublishedQuiz(
+    publicationId, expectedRevision, reason, publicLibraryActor()
+  ).then(projection => {
+    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+    if (!projection || projection.publicationId !== publicationId ||
+        projection.revision !== expectedRevision || projection.status !== 'moderated') {
+      state.items = state.items.filter(value => value.publicationId !== publicationId);
+      return false;
+    }
+    state.items = state.items.map(value => value.publicationId === publicationId ? projection : value);
+    state.busyId = '';
+    renderAdminPublishedQuizSets();
+    return true;
+  }).catch(() => {
+    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+    state.busyId = '';
+    state.error = '공개 중지 상태를 서버에서 확인하지 못했습니다. 다시 조회해 주세요.';
+    renderAdminPublishedQuizSets();
+    return false;
+  });
+}
+
+function adminRestorePublishedQuizFromPanel(publicationId, expectedRevision) {
+  const state = adm && adm.publicLibrary;
+  if (!adminPublishedScreenIsCurrent(state) || state.busyId) return Promise.resolve(false);
+  const item = (state.items || []).find(value => value.publicationId === publicationId);
+  if (!item || item.status !== 'moderated' || item.revision !== expectedRevision) return Promise.resolve(false);
+  const requestId = ++publicLibraryRequestSerial;
+  state.requestId = requestId;
+  state.busyId = publicationId;
+  state.error = '';
+  renderAdminPublishedQuizSets();
+  return store.adminRestorePublishedQuiz(
+    publicationId, expectedRevision, publicLibraryActor()
+  ).then(projection => {
+    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+    if (!projection || projection.publicationId !== publicationId ||
+        projection.revision !== expectedRevision || projection.status !== 'published') {
+      state.items = state.items.filter(value => value.publicationId !== publicationId);
+      return false;
+    }
+    state.items = state.items.map(value => value.publicationId === publicationId ? projection : value);
+    state.busyId = '';
+    renderAdminPublishedQuizSets();
+    return true;
+  }).catch(() => {
+    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
+    state.busyId = '';
+    state.error = '공개 복구 상태를 서버에서 확인하지 못했습니다. 다시 조회해 주세요.';
+    renderAdminPublishedQuizSets();
+    return false;
+  });
 }
 
 function admRenderShell() {
@@ -9140,6 +9614,7 @@ function admRenderShell() {
           '<button class="btn sm" onclick="admTab(\'classes\')">학년·반 집계</button>' +
           '<div style="flex:1"></div>' +
           '<button class="btn sm ghost" onclick="admTab(\'accounts\')">👥 교사 계정</button>' +
+          '<button class="btn sm ghost" onclick="admTab(\'publications\')">🌐 공개 세트</button>' +
           '<button class="btn sm ghost" onclick="admTab(\'manage\')">⚙ 관리</button>' +
           '<button class="btn sm ghost" onclick="admTab(\'requests\')">교사 신청</button>' +
         '</div>' +
@@ -9365,6 +9840,7 @@ function admRenderBody() {
   if (!body || adm.loading) return;
   if (adm.tab === 'accounts') { admAccountsView(); return; }
   if (adm.tab === 'requests') { renderAdminTeacherRequests(); return; }
+  if (adm.tab === 'publications') { renderAdminPublishedQuizSets(); return; }
   if (adm.rangeRejected) {
     adm.displayedSessionIds = [];
     body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' +

@@ -4130,6 +4130,363 @@ test('세트 목록은 소유자만 편집·숨김을 표시하고 공유·이�
   assert.doesNotMatch(legacy, /편집|숨기기|다시 표시|📤 파일|🔗 링크/);
 });
 
+test('owner card defaults private and exposes publish while collaborator card does not', () => {
+  const context = {
+    PlaylistCore: require('../playlist-core.js'),
+    AuthCore: require('../auth-core.js'),
+    REVEAL_LABEL: { timer: '타이머 종료 후 자동' },
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+    esc(value) { return String(value); }, fmtDate() { return ''; }, linkTo(value) { return value; }
+  };
+  loadStageFunctions(['canEditSet', 'setListRow'], context);
+  const base = {
+    id: 'set-1', title: '과학 퀴즈', description: '힘과 운동', author: '홍교사',
+    ownerUid: 'owner-1', archived: false, imageCount: 2,
+    settings: { revealMode: 'timer' }, videos: [{ questions: [{ text: '문항' }] }]
+  };
+
+  const ownerCard = context.setListRow(base);
+  assert.match(ownerCard, /비공개/);
+  assert.match(ownerCard, /공개 자료실에 게시/);
+
+  const publishedCard = context.setListRow({ ...base, publicationStatus: 'published' });
+  assert.match(publishedCard, /공개 중/);
+  assert.match(publishedCard, /공개 철회/);
+
+  const moderatedCard = context.setListRow({ ...base, publicationStatus: 'moderated' });
+  assert.match(moderatedCard, /관리자 공개 중지/);
+  assert.doesNotMatch(moderatedCard, /공개 자료실에 게시/);
+
+  const collaboratorCard = context.setListRow({ ...base, ownerUid: 'owner-2', isCollaborator: true });
+  assert.doesNotMatch(collaboratorCard, /공개 자료실에 게시|공개 철회/);
+});
+
+test('owner publication confirmation is complete and success waits for authoritative status reread', async () => {
+  let resolvePublish;
+  const calls = [];
+  const confirmations = [];
+  const notices = [];
+  const set = {
+    id: 'set-1', title: '과학 퀴즈', description: '힘과 운동', author: '홍교사',
+    ownerUid: 'owner-1', imageCount: 2, publicationStatus: 'private',
+    settings: { revealMode: 'timer' }, videos: [{ questions: [{ text: '문항' }] }]
+  };
+  const context = {
+    setList: { all: [set] },
+    teacherUser: { uid: 'owner-1', displayName: '홍교사' },
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+    teacherAuthVersion: 4,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      publishQuizSet(id, actor) {
+        calls.push(['publish', id, actor.uid, actor.displayName]);
+        return new Promise(resolve => { resolvePublish = resolve; });
+      },
+      async getPublishedQuizSet(id) {
+        calls.push(['reread', id]);
+        return { publicationId: id, status: 'published', revision: 'rev-1' };
+      }
+    },
+    confirm(message) { confirmations.push(message); return true; },
+    renderSetList() {}, toast(message) { notices.push(message); }
+  };
+  loadStageFunctions(['setCurrentListSet', 'publicLibraryActor', 'publishQuizSetFromList'], context);
+
+  const publishing = context.publishQuizSetFromList('set-1');
+  assert.equal(set.publicationBusy, true);
+  assert.match(confirmations[0], /과학 퀴즈/);
+  assert.match(confirmations[0], /힘과 운동/);
+  assert.match(confirmations[0], /홍교사/);
+  assert.match(confirmations[0], /이미지 2개/);
+  assert.match(confirmations[0], /저작권/);
+  resolvePublish({ publicationId: 'set-1', status: 'published', revision: 'rev-1' });
+
+  assert.equal(await publishing, true);
+  assert.deepEqual(calls, [
+    ['publish', 'set-1', 'owner-1', '홍교사'],
+    ['reread', 'set-1']
+  ]);
+  assert.equal(set.publicationBusy, false);
+  assert.equal(set.publicationStatus, 'published');
+  assert.deepEqual(notices, ['공개 자료실 게시를 확인했습니다.']);
+});
+
+test('owner withdrawal stays busy until the authoritative published reread is empty', async () => {
+  const calls = [];
+  const notices = [];
+  const set = {
+    id: 'set-1', title: '과학 퀴즈', ownerUid: 'owner-1', publicationStatus: 'published'
+  };
+  const context = {
+    setList: { all: [set] }, teacherUser: { uid: 'owner-1', displayName: '홍교사' },
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher' },
+    teacherAuthVersion: 4, AuthCore: require('../auth-core.js'),
+    store: {
+      async withdrawPublishedQuizSet(id, actor) {
+        calls.push(['withdraw', id, actor.uid]);
+        return { publicationId: id, status: 'withdrawn', revision: 'rev-1' };
+      },
+      async getPublishedQuizSet(id) { calls.push(['reread', id]); return null; }
+    },
+    confirm() { return true; }, renderSetList() {}, toast(message) { notices.push(message); }, alert() {}
+  };
+  loadStageFunctions(['setCurrentListSet', 'publicLibraryActor', 'withdrawQuizSetFromList'], context);
+
+  assert.equal(await context.withdrawQuizSetFromList('set-1'), true);
+  assert.deepEqual(calls, [['withdraw', 'set-1', 'owner-1'], ['reread', 'set-1']]);
+  assert.equal(set.publicationBusy, false);
+  assert.equal(set.publicationStatus, 'private');
+  assert.deepEqual(notices, ['공개 철회를 서버에서 확인했습니다.']);
+});
+
+test('public library renders summary only and copy routes to the new private set', async () => {
+  const app = { innerHTML: '' };
+  const routes = [];
+  const calls = [];
+  const context = {
+    publicQuizLibraryState: null, publicLibraryRequestSerial: 0,
+    teacherUser: { uid: 'teacher-b', displayName: '김교사' },
+    teacherState: { uid: 'teacher-b', email: 'teacher-b@school.kr', role: 'teacher' },
+    teacherAuthVersion: 7, location: { hash: '#/library' },
+    AuthCore: require('../auth-core.js'),
+    store: {
+      async listPublishedQuizSets(options) {
+        calls.push(['list', options.limit]);
+        return { items: [{
+          publicationId: 'pub-1', title: '공개 과학', description: '요약',
+          authorDisplayName: '홍교사', videoCount: 1, questionCount: 2,
+          updatedAtMs: 100, ownerEmail: 'owner@example.com', ownerUid: 'owner-secret'
+        }], nextCursor: null };
+      },
+      async copyPublishedQuizSet(publicationId, destinationId, actor) {
+        calls.push(['copy', publicationId, destinationId, actor.uid]);
+        return { id: destinationId, visibility: 'private' };
+      }
+    },
+    APP() { return app; }, topbar(extra) { return '<nav>' + (extra || '') + '</nav>'; },
+    onCleanup() {}, esc(value) { return String(value); }, fmtDate() { return '날짜'; },
+    rid() { return 'copy-1'; }, go(route) { routes.push('#/' + route); }, toast() {}
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'publicLibrarySafeSummary', 'publicLibraryScreenIsCurrent',
+    'renderPublicQuizLibrary', 'loadPublicQuizLibraryPage', 'screenPublicQuizLibrary',
+    'copyPublishedQuizSetFromLibrary'
+  ], context);
+
+  assert.equal(await context.screenPublicQuizLibrary(), true);
+  assert.match(app.innerHTML, /공개 과학/);
+  assert.match(app.innerHTML, /홍교사/);
+  assert.doesNotMatch(app.innerHTML, /owner@example\.com|owner-secret/);
+  assert.equal(await context.copyPublishedQuizSetFromLibrary('pub-1'), true);
+  assert.deepEqual(routes, ['#/make/copy-1']);
+  assert.deepEqual(calls, [
+    ['list', 50],
+    ['copy', 'pub-1', 'copy-1', 'teacher-b']
+  ]);
+});
+
+test('public library stale list preview and copy completions cannot rerender or route', async () => {
+  const app = { innerHTML: '' };
+  let resolveList;
+  let resolvePreview;
+  let resolveCopy;
+  const routes = [];
+  const context = {
+    publicQuizLibraryState: null, publicLibraryRequestSerial: 0,
+    teacherUser: { uid: 'teacher-a', displayName: 'A' },
+    teacherState: { uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' },
+    teacherAuthVersion: 1, location: { hash: '#/library' },
+    AuthCore: require('../auth-core.js'),
+    store: {
+      listPublishedQuizSets() { return new Promise(resolve => { resolveList = resolve; }); },
+      getPublishedQuizSet() { return new Promise(resolve => { resolvePreview = resolve; }); },
+      copyPublishedQuizSet() { return new Promise(resolve => { resolveCopy = resolve; }); }
+    },
+    APP() { return app; }, topbar() { return '<nav></nav>'; }, onCleanup() {},
+    esc(value) { return String(value); }, fmtDate() { return ''; }, rid() { return 'copy-stale'; },
+    go(route) { routes.push(route); }, toast() {}
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'publicLibrarySafeSummary', 'publicLibraryScreenIsCurrent',
+    'clearPublicQuizLibraryScreen', 'renderPublicQuizLibrary', 'loadPublicQuizLibraryPage',
+    'screenPublicQuizLibrary', 'openPublishedQuizPreview', 'copyPublishedQuizSetFromLibrary'
+  ], context);
+
+  const listing = context.screenPublicQuizLibrary();
+  const staleState = context.publicQuizLibraryState;
+  context.teacherAuthVersion = 2;
+  context.teacherUser = { uid: 'teacher-b', displayName: 'B' };
+  context.teacherState = { uid: 'teacher-b', email: 'b@school.kr', role: 'teacher' };
+  context.clearPublicQuizLibraryScreen(true);
+  assert.equal(context.publicQuizLibraryState, null);
+  assert.equal(app.innerHTML, '');
+
+  resolveList({ items: [{ publicationId: 'pub-1', title: 'A 전용' }], nextCursor: null });
+  assert.equal(await listing, false);
+  assert.equal(staleState.items.length, 0);
+  assert.equal(app.innerHTML, '');
+
+  const summary = {
+    publicationId: 'pub-1', title: '공개 퀴즈', description: '', authorDisplayName: '홍교사',
+    videoCount: 1, questionCount: 1, updatedAtMs: 1
+  };
+  context.store.listPublishedQuizSets = async () => ({ items: [summary], nextCursor: null });
+  context.location.hash = '#/library';
+  assert.equal(await context.screenPublicQuizLibrary(), true);
+  const previewing = context.openPublishedQuizPreview('pub-1');
+  context.teacherAuthVersion = 3;
+  context.clearPublicQuizLibraryScreen(true);
+  resolvePreview({ ...summary, status: 'published', videos: [{ questions: [{ text: 'A 미리보기' }] }] });
+  assert.equal(await previewing, false);
+  assert.doesNotMatch(app.innerHTML, /A 미리보기/);
+
+  context.teacherAuthVersion = 4;
+  context.teacherUser = { uid: 'teacher-c', displayName: 'C' };
+  context.teacherState = { uid: 'teacher-c', email: 'c@school.kr', role: 'teacher' };
+  assert.equal(await context.screenPublicQuizLibrary(), true);
+  const copying = context.copyPublishedQuizSetFromLibrary('pub-1');
+  context.teacherAuthVersion = 5;
+  context.clearPublicQuizLibraryScreen(true);
+  resolveCopy({ id: 'copy-stale', visibility: 'private' });
+  assert.equal(await copying, false);
+  assert.deepEqual(routes, []);
+});
+
+test('teacher A to B auth replacement or signout synchronously clears public library and preview DOM', async () => {
+  const app = { innerHTML: '<main>owner-a@example.com</main><div id="published-quiz-preview">A preview</div>' };
+  let resolveToken;
+  const context = {
+    authReady: true, location: { hash: '#/library' }, teacherRequestReroute: null,
+    teacherUser: { uid: 'teacher-a', email: 'a@school.kr' }, teacherAllowance: null,
+    teacherState: { uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' },
+    appliedTeacherState: { uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' },
+    publicQuizLibraryState: { uid: 'teacher-a', authGeneration: 1, requestId: 1, cursor: null },
+    publicLibraryRequestSerial: 1,
+    teacherAuthVersion: 1, clockUserId: '', clockPromise: null, clockPromiseUid: '',
+    AuthCore: require('../auth-core.js'), renderTeacherAuthArea() {}, APP() { return app; },
+    topbar() { return '<nav></nav>'; }, runCleanups() {}, reconcileTeacherRoute() {},
+    retractProtectedTeacherScreen() {}, store: { async probeTeacherAllowance() { return null; } }, console
+  };
+  loadStageFunctions(['clearPublicQuizLibraryScreen', 'applyTeacherUser'], context);
+  const userB = {
+    uid: 'teacher-b', email: 'b@school.kr', emailVerified: true, isAnonymous: false,
+    getIdTokenResult() { return new Promise(resolve => { resolveToken = resolve; }); }
+  };
+
+  const applying = context.applyTeacherUser(userB);
+  assert.equal(context.publicQuizLibraryState, null);
+  assert.doesNotMatch(app.innerHTML, /owner-a@example\.com|A preview/);
+  resolveToken({ claims: { firebase: { sign_in_provider: 'google.com' } } });
+  await applying;
+
+  context.publicQuizLibraryState = {
+    uid: 'teacher-b', authGeneration: context.teacherAuthVersion,
+    requestId: 8, cursor: null
+  };
+  app.innerHTML = '<main>teacher-b@example.com</main><div id="published-quiz-preview">B preview</div>';
+  const signingOut = context.applyTeacherUser(null);
+  assert.equal(context.publicQuizLibraryState, null);
+  assert.doesNotMatch(app.innerHTML, /teacher-b@example\.com|B preview/);
+  await signingOut;
+});
+
+test('admin public panel uses exact revision CAS and authoritative moderation result', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const calls = [];
+  const context = {
+    adm: { tab: 'publications', publicLibrary: { uid: 'admin-1', authGeneration: 3, requestId: 1, items: [{
+      publicationId: 'pub-1', title: '공개 과학', authorDisplayName: '홍교사',
+      revision: 'rev-7', status: 'published', moderationStatus: 'clear',
+      videoCount: 1, questionCount: 2
+    }], busyId: '', error: '' } },
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3,
+    publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      async adminModeratePublishedQuiz(id, revision, reason, actor) {
+        calls.push([id, revision, reason, actor.uid]);
+        return { publicationId: id, title: '공개 과학', authorDisplayName: '홍교사',
+          revision, status: 'moderated', moderationStatus: 'moderated', videoCount: 1, questionCount: 2 };
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'adminModeratePublishedQuizFromPanel'
+  ], context);
+
+  context.renderAdminPublishedQuizSets();
+  assert.match(body.innerHTML, /rev-7/);
+  assert.match(body.innerHTML, /maxlength="200"/);
+  assert.equal(await context.adminModeratePublishedQuizFromPanel('pub-1', 'rev-7', '저작권 확인 필요'), true);
+  assert.deepEqual(calls, [['pub-1', 'rev-7', '저작권 확인 필요', 'admin-1']]);
+  assert.equal(context.adm.publicLibrary.items[0].status, 'moderated');
+  assert.match(body.innerHTML, /공개 복구/);
+});
+
+test('admin restore uses the moderated row exact revision and replaces it only with authoritative published status', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const calls = [];
+  const context = {
+    adm: { tab: 'publications', publicLibrary: { uid: 'admin-1', authGeneration: 3, requestId: 1, items: [{
+      publicationId: 'pub-1', title: '공개 과학', authorDisplayName: '홍교사',
+      revision: 'rev-7', status: 'moderated', moderationStatus: 'moderated',
+      videoCount: 1, questionCount: 2
+    }], busyId: '', error: '' } },
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      async adminRestorePublishedQuiz(id, revision, actor) {
+        calls.push([id, revision, actor.uid]);
+        return { publicationId: id, title: '공개 과학', authorDisplayName: '홍교사',
+          revision, status: 'published', moderationStatus: 'clear', videoCount: 1, questionCount: 2 };
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'adminRestorePublishedQuizFromPanel'
+  ], context);
+
+  assert.equal(await context.adminRestorePublishedQuizFromPanel('pub-1', 'rev-7'), true);
+  assert.deepEqual(calls, [['pub-1', 'rev-7', 'admin-1']]);
+  assert.equal(context.adm.publicLibrary.items[0].status, 'published');
+  assert.match(body.innerHTML, /공개 중지 사유/);
+});
+
+test('stale admin publication load cannot overwrite a different admin tab', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  let resolveList;
+  const context = {
+    adm: { tab: 'publications', publicLibrary: null },
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      listPublishedQuizSets() { return new Promise(resolve => { resolveList = resolve; }); },
+      async getPublishedQuizSet() { return { publicationId: 'pub-1', status: 'published' }; }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions(['adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets'], context);
+
+  context.renderAdminPublishedQuizSets();
+  context.adm.tab = 'sessions';
+  body.innerHTML = '<section>진행 기록 탭</section>';
+  resolveList({ items: [{ publicationId: 'pub-1' }], nextCursor: null });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(body.innerHTML, '<section>진행 기록 탭</section>');
+});
+
 test('공유 세트 진행 화면은 시작·사본만 제공하고 소유자에게만 편집 링크를 표시한다', () => {
   const app = { innerHTML: '' };
   const context = {

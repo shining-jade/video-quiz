@@ -154,6 +154,25 @@ test('교사 홈 현황판은 역할별 조회와 재시도 진입점을 포함�
   assert.match(html, /혼잡도는 수업 운영을 돕는 안내/);
 });
 
+test('공개 자료실 route controls and mobile accessibility contract are present', () => {
+  const html = read('index.html');
+
+  for (const name of [
+    'screenPublicQuizLibrary', 'openPublishedQuizPreview',
+    'publishQuizSetFromList', 'withdrawQuizSetFromList',
+    'copyPublishedQuizSetFromLibrary', 'renderAdminPublishedQuizSets'
+  ]) {
+    assert.match(html, new RegExp('function ' + name + '\\('));
+  }
+  assert.match(html, /case 'library':\s*requireTeacher\(screenPublicQuizLibrary\)/);
+  assert.match(html, /href="#\/library"[\s\S]{0,160}공개 자료실/);
+  assert.match(html, /<label[^>]*for="public-library-search"[^>]*>[^<]*공개 자료 검색/);
+  assert.match(html, /id="public-library-search"[^>]*maxlength="200"/);
+  assert.match(html, /aria-label="공개 퀴즈 미리보기 닫기"/);
+  assert.match(html, /aria-label="내 세트로 복사"/);
+  assert.match(html, /@media \(max-width:\s*720px\)[\s\S]*?\.public-library-actions\s*\{[^}]*grid-template-columns:\s*1fr/s);
+});
+
 test('편집기 Ctrl+S는 브라우저 기본 동작 없이 현재 위치에서 저장 완료 알림을 표시한다', () => {
   const html = read('index.html');
 
