@@ -14230,6 +14230,45 @@ test('publish resumes a partial image build while every incomplete attempt stays
   assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0e').data, PUBLIC_LIBRARY_IMAGE_B);
 });
 
+test('republish preserves the first publishedAt through a failed hidden build and retry', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ imageCount: 1 }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'images/set-1/q/v0q0': { data: PUBLIC_LIBRARY_IMAGE_A },
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', {
+      imageCount: 1,
+      publishedAtMs: 400,
+      updatedAtMs: 600,
+      patch: { status: 'withdrawn' }
+    }),
+    'published_quiz_sets/set-1/images/v0q0': {
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'first-build'
+    }
+  }, {
+    committedServerMillis: 1_000,
+    failTransactionAt: 2,
+    failTransactionMessage: 'planned republish image failure'
+  });
+  const store = createStore(fake, () => 1_000);
+
+  await assert.rejects(
+    () => store.publishQuizSet('set-1', publicLibraryActor()),
+    /planned republish image failure/
+  );
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'building');
+  assert.equal(fake.value('published_quiz_sets/set-1').publishedAt.toMillis(), 400);
+
+  const result = await store.publishQuizSet('set-1', publicLibraryActor());
+  assert.equal(result.status, 'published');
+  assert.equal(result.publishedAt.toMillis(), 400);
+  assert.equal(result.updatedAt.toMillis(), 1_000);
+  const finalWrite = fake.calls().findLast(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1' && call.value.status === 'published');
+  assert.equal(finalWrite.value.publishedAt instanceof Timestamp, true);
+  assert.equal(finalWrite.value.publishedAt.toMillis(), 400);
+  assert.equal(finalWrite.value.updatedAt, SERVER_TIMESTAMP);
+});
+
 test('publish refuses to overwrite a building projection from another source revision and token', async () => {
   const oldProjection = PublicQuizLibraryCore.buildProjection(publicLibrarySource(), {
     setId: 'set-1', authorDisplayName: '홍교사', revision: 'rev-old', nowMs: 1_000
@@ -14319,6 +14358,25 @@ test('withdraw uses owner and source revision CAS and immediately hides the proj
     /revision|리비전/
   );
   assert.equal(stale.value('published_quiz_sets/set-1').status, 'published');
+});
+
+test('withdraw lowers visibility despite same-revision source content and counter drift', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({
+      title: 'revision을 올리지 않고 바뀐 private 제목',
+      imageCount: -1
+    }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'published_quiz_sets/set-1': publicLibraryProjection()
+  });
+
+  const result = await createStore(fake).withdrawPublishedQuizSet(
+    'set-1', publicLibraryActor()
+  );
+
+  assert.equal(result.status, 'withdrawn');
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
+  assert.equal(fake.value('published_quiz_sets/set-1').title, '공개 과학 퀴즈');
 });
 
 test('moderate and restore require authoritative admin CAS and active source owner state', async () => {

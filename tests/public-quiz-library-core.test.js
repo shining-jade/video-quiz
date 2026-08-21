@@ -187,6 +187,14 @@ test('public storage uses Timestamp-like fields and rejects legacy numeric times
   assert.ok(invalid.errors.some(error => /updatedAt/.test(error)));
 });
 
+test('a hidden rebuilding projection may carry the original valid publishedAt', () => {
+  const value = projection();
+  value.publishedAt = timestamp(90);
+  value.updatedAt = timestamp(100);
+
+  assert.deepEqual(Core.validateProjection(value), { ok: true, errors: [] });
+});
+
 test('the exported allowlist cannot weaken internal unknown-field validation', () => {
   const keys = Core.PUBLIC_KEYS;
   assert.throws(() => keys.push('ownerUid'), TypeError);

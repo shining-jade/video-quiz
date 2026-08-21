@@ -2647,10 +2647,9 @@
       return allowance;
     }
 
-    function requireActiveSourceOwner(source, allowanceSnapshot, actor) {
+    function requireActiveSourceOwnerIdentity(source, allowanceSnapshot, actor) {
       const value = source || {};
       if (!activeSet(value)) throw new Error('active 원본 세트만 공개할 수 있습니다.');
-      requireAuthoritativeCounters(value);
       const ownerEmail = canonicalTeacherEmail(value.ownerEmail);
       if (!value.ownerUid || !ownerEmail) {
         throw new Error('원본 소유자 UID/email binding이 유효하지 않습니다.');
@@ -2663,6 +2662,14 @@
       )) {
         throw new Error('원본 소유자의 active 승인 상태가 유효하지 않습니다.');
       }
+      return value;
+    }
+
+    function requireActiveSourceOwner(source, allowanceSnapshot, actor) {
+      const value = requireActiveSourceOwnerIdentity(
+        source, allowanceSnapshot, actor
+      );
+      requireAuthoritativeCounters(value);
       return value;
     }
 
@@ -2842,6 +2849,8 @@
       const initialCount = Object.keys(existingPublicImages.images).length;
       const buildingDocument = {
         ...desiredBuilding,
+        publishedAt: existingProjection && existingProjection.publishedAt !== null
+          ? existingProjection.publishedAt : null,
         updatedAt: fieldValue.serverTimestamp(),
         buildToken,
         buildImageCount: initialCount
@@ -2986,18 +2995,19 @@
             !samePublicProjectionContent(parent, desiredBuilding)) {
           throw new Error('공개 이미지 build counter가 완료되지 않았습니다.');
         }
+        const firstPublishedAt = parent.publishedAt;
         const validationProjection = {
           ...publicProjectionValue(parentRaw),
           status: 'published',
           moderationStatus: 'clear',
-          publishedAt: parent.updatedAt,
+          publishedAt: firstPublishedAt || parent.updatedAt,
           updatedAt: parent.updatedAt
         };
         const validation = publicLibraryCore().validateProjection(validationProjection);
         if (!validation.ok) throw new Error('최종 공개 projection이 유효하지 않습니다.');
         const next = {
           ...validationProjection,
-          publishedAt: fieldValue.serverTimestamp(),
+          publishedAt: firstPublishedAt || fieldValue.serverTimestamp(),
           updatedAt: fieldValue.serverTimestamp()
         };
         transaction.set(publicRef, next);
@@ -3019,14 +3029,14 @@
         const allowanceRef = db.doc('teacher_allowances/' + String(source.ownerUid || ''));
         const allowanceSnapshot = await transaction.get(allowanceRef);
         const publicSnapshot = await transaction.get(publicRef);
-        requireActiveSourceOwner(source, allowanceSnapshot, actor || {});
+        requireActiveSourceOwnerIdentity(source, allowanceSnapshot, actor || {});
         if (!publicSnapshot.exists) throw new Error('철회할 공개 projection이 없습니다.');
         const projection = requireStoredProjection(
           publicSnapshot.data() || {}, publicationId, 'published'
         );
-        requireMatchingPublicationSource(
-          source, allowanceSnapshot, actor || {}, projection
-        );
+        if (requireContentRevision(source) !== projection.revision) {
+          throw new Error('원본과 공개 projection revision이 일치하지 않습니다.');
+        }
         const validationProjection = {
           ...projection,
           status: 'withdrawn', moderationStatus: 'clear',

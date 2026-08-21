@@ -355,7 +355,6 @@
     const updatedAtMs = timestampMillis(value.updatedAt);
     if (value.publishedAt !== null && publishedAtMs === null) errors.push('publishedAt is invalid.');
     if (updatedAtMs === null) errors.push('updatedAt is invalid.');
-    if (value.status === 'building' && value.publishedAt !== null) errors.push('building projection cannot have publishedAt.');
     if (value.status !== 'building' && value.publishedAt === null) errors.push('visible history requires publishedAt.');
     if (publishedAtMs !== null && updatedAtMs !== null && updatedAtMs < publishedAtMs) {
       errors.push('updatedAt cannot precede publishedAt.');
