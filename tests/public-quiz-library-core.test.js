@@ -15,6 +15,7 @@ const privateSet = {
     ownerEmail: 'leak@example.com',
     questions: [{
       type: 'choice', t: 10, text: '힘의 단위는?', choices: ['N', 'm'], answer: 0,
+      imgUp: true, explainImgUrl: 'https://images.example/explanation.png',
       studentResponses: [{ email: 'student@example.com' }]
     }]
   }],
@@ -43,6 +44,8 @@ test('projection contains bounded public content and strips every private identi
   assert.equal(value.title, '우리 반 과학 퀴즈');
   assert.equal(value.videos[0].ownerEmail, undefined);
   assert.equal(value.videos[0].questions[0].studentResponses, undefined);
+  assert.equal(value.videos[0].questions[0].imgUp, true);
+  assert.equal(value.videos[0].questions[0].explainImgUrl, 'https://images.example/explanation.png');
   for (const key of [
     'ownerUid', 'ownerEmail', 'collaborators', 'students', 'sessions', 'responses',
     'scores', 'plans', 'adminAudit'
@@ -52,13 +55,14 @@ test('projection contains bounded public content and strips every private identi
   assert.deepEqual(Core.validateProjection(value), { ok: true, errors: [] });
 });
 
-test('copy patch is private and resets collaborators and lifecycle counters', () => {
+test('copy patch is private and starts the destination image counter at zero', () => {
   const value = projection();
+  assert.equal(value.imageCount, 2, 'source image count remains available for copy preflight');
 
   assert.deepEqual(Core.copyPatch(value), {
     publicationId: 'set-1', sourceTitle: value.title,
     sourceAuthorDisplayName: '홍교사', visibility: 'private',
-    collaboratorCount: 0, imageCount: value.imageCount, lifecycleState: 'active'
+    collaboratorCount: 0, imageCount: 0, lifecycleState: 'active'
   });
 });
 
@@ -66,7 +70,7 @@ test('validation rejects unknown public fields, noncanonical identifiers, unsafe
   const value = projection();
   value.ownerUid = 'leaked';
   value.publicationId = 'set/1';
-  value.videoCount = Number.MAX_SAFE_INTEGER;
+  value.videoCount = Number.MAX_SAFE_INTEGER + 1;
   value.status = 'visible';
 
   const result = Core.validateProjection(value);
@@ -76,6 +80,88 @@ test('validation rejects unknown public fields, noncanonical identifiers, unsafe
   assert.ok(result.errors.some(error => /publicationId/.test(error)));
   assert.ok(result.errors.some(error => /videoCount/.test(error)));
   assert.ok(result.errors.some(error => /status/.test(error)));
+});
+
+test('projection keeps a safe source image count without inventing an unsupported 300-image ceiling', () => {
+  const source = structuredClone(privateSet);
+  source.imageCount = 301;
+
+  const value = Core.buildProjection(source, {
+    setId: 'set-301', authorDisplayName: '홍교사', revision: '10:20', nowMs: 100
+  });
+
+  assert.equal(value.imageCount, 301);
+  assert.deepEqual(Core.copyPatch(value).imageCount, 0);
+});
+
+test('projection reuses playlist normalization for a legacy single-video set', () => {
+  const legacy = structuredClone(privateSet);
+  delete legacy.videos;
+  legacy.videoId = 'dQw4w9WgXcQ';
+  legacy.videoUrl = 'https://youtu.be/dQw4w9WgXcQ';
+  legacy.questions = [{ type: 'choice', t: 10, text: 'legacy', choices: ['a', 'b'], answer: 0 }];
+
+  const value = Core.buildProjection(legacy, {
+    setId: 'legacy-1', authorDisplayName: '홍교사', revision: '10:20', nowMs: 100
+  });
+
+  assert.equal(value.videos.length, 1);
+  assert.equal(value.videos[0].videoUrl, 'https://youtu.be/dQw4w9WgXcQ');
+});
+
+test('projection preserves playlist duration bounds that are not public projection fields', () => {
+  const source = structuredClone(privateSet);
+  source.videos[0].endSec = null;
+  source.videos[0].durationSec = 100;
+  source.videos[0].questions[0].t = 101;
+
+  assert.throws(() => Core.buildProjection(source, {
+    setId: 'duration-1', authorDisplayName: '홍교사', revision: '10:20', nowMs: 100
+  }), /playback range/);
+});
+
+test('validation rejects YouTube URL/ID mismatches and question times outside the clip', () => {
+  const value = projection();
+  value.videos[0].videoUrl = 'https://youtu.be/aaaaaaaaaaa';
+  value.videos[0].questions[0].t = 121;
+
+  const result = Core.validateProjection(value);
+
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(error => /videoUrl/.test(error)));
+  assert.ok(result.errors.some(error => /question.*clip/.test(error)));
+});
+
+test('validation keeps editor-compatible choice bounds and exact OX choices', () => {
+  const tooLong = projection();
+  tooLong.videos[0].questions[0].choices[0] = 'x'.repeat(201);
+  const ox = projection();
+  ox.videos[0].questions[0] = { type: 'ox', t: 10, text: 'O/X', choices: ['O', 'X', 'extra'], answer: 0 };
+
+  assert.equal(Core.validateProjection(tooLong).ok, false);
+  assert.equal(Core.validateProjection(ox).ok, false);
+});
+
+test('moderation and publication timestamps have exact state relations', () => {
+  const value = projection();
+  value.status = 'moderated';
+  value.moderationStatus = 'clear';
+  value.publishedAtMs = 101;
+  value.updatedAtMs = 100;
+
+  const result = Core.validateProjection(value);
+
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some(error => /moderationStatus/.test(error)));
+  assert.ok(result.errors.some(error => /updatedAtMs/.test(error)));
+});
+
+test('the exported allowlist cannot weaken internal unknown-field validation', () => {
+  const keys = Core.PUBLIC_KEYS;
+  assert.throws(() => keys.push('ownerUid'), TypeError);
+  const value = projection();
+  value.ownerUid = 'leaked';
+  assert.equal(Core.validateProjection(value).ok, false);
 });
 
 test('validation rejects oversized public copy, malformed videos, and malformed questions', () => {

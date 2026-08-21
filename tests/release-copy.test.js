@@ -105,13 +105,18 @@ test('email authentication validation core loads before the application script',
   assert.ok(coreIndex < applicationIndex, 'email authentication validation core must load before inline application code');
 });
 
-test('public quiz library projection core loads before the application script', () => {
+test('public quiz library projection core loads after playlist normalization and before store and application scripts', () => {
   const html = read('index.html');
+  const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
   const coreIndex = html.indexOf('<script src="public-quiz-library-core.js"></script>');
+  const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
   const applicationIndex = html.indexOf('<script>');
 
+  assert.ok(playlistIndex >= 0, 'playlist normalization core must be included');
   assert.ok(coreIndex >= 0, 'public quiz library projection core must be included');
-  assert.ok(coreIndex < applicationIndex, 'public quiz library projection core must load before inline application code');
+  assert.ok(playlistIndex < coreIndex, 'playlist core must load before public projection core');
+  assert.ok(coreIndex < storeIndex, 'public projection core must load before firestore store');
+  assert.ok(storeIndex < applicationIndex, 'firestore store must load before inline application code');
 });
 
 test('모든 non-module inline script는 JavaScript로 파싱된다', () => {

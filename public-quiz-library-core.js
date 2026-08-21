@@ -1,13 +1,15 @@
 (function (root, factory) {
-  const api = factory();
+  const playlist = typeof module === 'object' && module.exports
+    ? require('./playlist-core.js') : root && root.PlaylistCore;
+  const api = factory(playlist);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else if (root) root.PublicQuizLibraryCore = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  const PUBLIC_KEYS = [
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (playlist) {
+  const PUBLIC_KEYS = Object.freeze([
     'publicationId', 'sourceSetId', 'status', 'moderationStatus', 'revision',
     'title', 'description', 'authorDisplayName', 'videos', 'settings',
     'videoCount', 'questionCount', 'imageCount', 'publishedAtMs', 'updatedAtMs'
-  ];
+  ]);
   const VIDEO_KEYS = ['videoId', 'videoUrl', 'startSec', 'endSec', 'questions'];
   const QUESTION_KEYS = [
     'type', 't', 'text', 'choices', 'answer', 'answers', 'accept', 'imgUp', 'imgUrl',
@@ -20,12 +22,12 @@
   const REVEAL_MODES = new Set(['instant', 'timer', 'manual', 'never']);
   const MAX_VIDEOS = 50;
   const MAX_QUESTIONS = 500;
-  const MAX_IMAGES = 300;
   const MAX_TITLE = 200;
   const MAX_DESCRIPTION = 1000;
   const MAX_AUTHOR = 80;
   const MAX_TEXT = 1000;
-  const MAX_CHOICES = 20;
+  const MAX_CHOICES = 6;
+  const MAX_CHOICE_TEXT = 200;
   const MAX_URL = 2048;
 
   function own(value, key) {
@@ -97,7 +99,7 @@
     return question;
   }
 
-  function projectionVideo(source) {
+  function projectionVideo(source, durationSec) {
     if (!isObject(source)) throw new Error('video must be an object.');
     const video = {
       videoId: source.videoId,
@@ -108,21 +110,38 @@
     };
     const errors = validateVideo(video, 'video');
     if (errors.length) throw new Error(errors.join(' '));
+    if (!playlist || typeof playlist.validateVideo !== 'function') {
+      throw new Error('PlaylistCore.validateVideo is required.');
+    }
+    if (playlist.validateVideo(video, durationSec).length) {
+      throw new Error('video playback range is invalid.');
+    }
     return video;
+  }
+
+  function sourceDuration(set, index) {
+    const source = Array.isArray(set.videos) && set.videos.length
+      ? set.videos[index] : index === 0 ? set : null;
+    return source && source.durationSec;
   }
 
   function buildProjection(set, context) {
     if (!isObject(set) || !isObject(context)) throw new Error('set and context are required.');
     const setId = context.setId;
     if (!canonicalId(setId)) throw new Error('setId must be canonical.');
-    const videos = Array.isArray(set.videos) ? set.videos.map(projectionVideo) : [];
+    if (!playlist || typeof playlist.normalizeVideos !== 'function') {
+      throw new Error('PlaylistCore.normalizeVideos is required.');
+    }
+    const normalizedVideos = playlist.normalizeVideos(set);
+    const videos = Array.isArray(normalizedVideos)
+      ? normalizedVideos.map((video, index) => projectionVideo(video, sourceDuration(set, index))) : [];
     if (videos.length < 1 || videos.length > MAX_VIDEOS) throw new Error('videos must contain 1 to ' + MAX_VIDEOS + ' entries.');
     const questionCount = videos.reduce((count, video) => count + video.questions.length, 0);
     if (questionCount < 1 || questionCount > MAX_QUESTIONS) {
       throw new Error('questions must contain 1 to ' + MAX_QUESTIONS + ' entries.');
     }
     const imageCount = set.imageCount === undefined ? 0 : set.imageCount;
-    if (!safeInteger(imageCount) || imageCount > MAX_IMAGES) throw new Error('imageCount must be a safe bounded count.');
+    if (!safeInteger(imageCount)) throw new Error('imageCount must be a safe count.');
     const nowMs = context.nowMs;
     if (!safeInteger(nowMs)) throw new Error('nowMs must be a safe timestamp.');
     const projection = {
@@ -202,6 +221,14 @@
     } else if (value.choices.length !== 0) {
       errors.push(path + '.choices must be empty for text questions.');
     }
+    if (Array.isArray(value.choices) && value.choices.some(choice =>
+      typeof choice !== 'string' || choice.length > MAX_CHOICE_TEXT
+    )) {
+      errors.push(path + '.choices must contain strings up to ' + MAX_CHOICE_TEXT + ' characters.');
+    }
+    if (value.type === 'ox' && Array.isArray(value.choices) && value.choices.length !== 2) {
+      errors.push(path + '.choices must contain exactly two OX choices.');
+    }
     if (!Number.isSafeInteger(value.answer) || value.answer < 0 ||
         (Array.isArray(value.choices) && value.choices.length && value.answer >= value.choices.length)) {
       errors.push(path + '.answer is invalid.');
@@ -234,6 +261,21 @@
     return errors;
   }
 
+  function youtubeIdFromUrl(value) {
+    try {
+      const parsed = new URL(value);
+      const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+      if (host === 'youtu.be') return parsed.pathname.split('/').filter(Boolean)[0] || '';
+      if (host !== 'youtube.com' && host !== 'm.youtube.com') return '';
+      const queryId = parsed.searchParams.get('v');
+      if (queryId) return queryId;
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      return ['embed', 'shorts', 'live'].includes(segments[0]) ? (segments[1] || '') : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
   function validateVideo(value, path) {
     const errors = [];
     if (!validateUnknownKeys(value, VIDEO_KEYS, path, errors)) return errors;
@@ -241,7 +283,7 @@
       errors.push(path + '.videoId must be a canonical YouTube id.');
     }
     if (typeof value.videoUrl !== 'string' || value.videoUrl.length < 1 || value.videoUrl.length > MAX_URL ||
-        !/^https:\/\//.test(value.videoUrl)) {
+        !/^https:\/\//.test(value.videoUrl) || youtubeIdFromUrl(value.videoUrl) !== value.videoId) {
       errors.push(path + '.videoUrl is invalid.');
     }
     if (typeof value.startSec !== 'number' || !Number.isFinite(value.startSec) || value.startSec < 0) {
@@ -256,6 +298,10 @@
     } else {
       value.questions.forEach((question, index) => {
         errors.push(...validateQuestion(question, path + '.questions[' + index + ']'));
+        if (question && typeof question.t === 'number' && Number.isFinite(question.t) &&
+            (question.t < value.startSec || (value.endSec !== null && question.t > value.endSec))) {
+          errors.push(path + '.questions[' + index + '] is outside the clip.');
+        }
       });
     }
     return errors;
@@ -285,13 +331,19 @@
       : 0;
     validateNumber(value.videoCount, 'videoCount', 1, MAX_VIDEOS, errors);
     validateNumber(value.questionCount, 'questionCount', 1, MAX_QUESTIONS, errors);
-    validateNumber(value.imageCount, 'imageCount', 0, MAX_IMAGES, errors);
+    validateNumber(value.imageCount, 'imageCount', 0, Number.MAX_SAFE_INTEGER, errors);
     if (Array.isArray(value.videos) && value.videoCount !== value.videos.length) errors.push('videoCount does not match videos.');
     if (value.questionCount !== actualQuestionCount) errors.push('questionCount does not match videos.');
     if (value.publishedAtMs !== null && !safeInteger(value.publishedAtMs)) errors.push('publishedAtMs is invalid.');
     if (!safeInteger(value.updatedAtMs)) errors.push('updatedAtMs is invalid.');
-    if (value.status === 'published' && value.publishedAtMs === null) errors.push('published projection requires publishedAtMs.');
-    if (value.status !== 'moderated' && value.moderationStatus !== 'clear') errors.push('only moderated projections may be moderated.');
+    if (value.status === 'building' && value.publishedAtMs !== null) errors.push('building projection cannot have publishedAtMs.');
+    if (value.status !== 'building' && value.publishedAtMs === null) errors.push('visible history requires publishedAtMs.');
+    if (value.publishedAtMs !== null && safeInteger(value.updatedAtMs) && value.updatedAtMs < value.publishedAtMs) {
+      errors.push('updatedAtMs cannot precede publishedAtMs.');
+    }
+    if ((value.status === 'moderated') !== (value.moderationStatus === 'moderated')) {
+      errors.push('moderationStatus must match status.');
+    }
     return { ok: errors.length === 0, errors };
   }
 
@@ -309,7 +361,7 @@
       sourceAuthorDisplayName: value.authorDisplayName,
       visibility: 'private',
       collaboratorCount: 0,
-      imageCount: value.imageCount,
+      imageCount: 0,
       lifecycleState: 'active'
     };
   }
