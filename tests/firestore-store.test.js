@@ -28,6 +28,21 @@ test('browser script order exposes class planning thresholds before firestore st
 const SERVER_TIMESTAMP = Symbol('server timestamp');
 const DELETE_FIELD = Symbol('delete field');
 
+class Timestamp {
+  constructor(milliseconds) {
+    this.seconds = Math.floor(milliseconds / 1000);
+    this.nanoseconds = Math.trunc((milliseconds - this.seconds * 1000) * 1_000_000);
+  }
+
+  toMillis() {
+    return this.seconds * 1000 + this.nanoseconds / 1_000_000;
+  }
+
+  toDate() {
+    return new Date(this.toMillis());
+  }
+}
+
 function clone(value) {
   if (value === undefined) return undefined;
   if (value === SERVER_TIMESTAMP) return value;
@@ -152,9 +167,11 @@ function makeFirestoreFake(initial = {}, options = {}) {
 
   function resolveServerTimestamps(value) {
     if (value === SERVER_TIMESTAMP) {
-      return { toMillis: () => committedServerMillis };
+      return new Timestamp(committedServerMillis);
     }
     if (value instanceof Date) return new Date(value.getTime());
+    if (value && value.constructor && value.constructor.name === 'Timestamp' &&
+        typeof value.toMillis === 'function' && typeof value.toDate === 'function') return value;
     if (Array.isArray(value)) return value.map(resolveServerTimestamps);
     if (value && typeof value === 'object') {
       return Object.fromEntries(
@@ -14073,8 +14090,10 @@ function publicLibraryProjection(id = 'set-1', options = {}) {
   return {
     ...projection,
     status: 'published', moderationStatus: 'clear',
-    publishedAtMs: options.publishedAtMs ?? Math.min(900, options.updatedAtMs ?? 1_000),
-    updatedAtMs: options.updatedAtMs ?? 1_000,
+    publishedAt: new Timestamp(
+      options.publishedAtMs ?? Math.min(900, options.updatedAtMs ?? 1_000)
+    ),
+    updatedAt: new Timestamp(options.updatedAtMs ?? 1_000),
     ...(options.patch || {})
   };
 }
@@ -14099,6 +14118,14 @@ test('publish keeps a building projection hidden until bound images and the sour
   assert.equal(fake.value('published_quiz_sets/set-1').buildImageCount, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').ownerUid, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').ownerEmail, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').publishedAt instanceof Timestamp, true);
+  assert.equal(fake.value('published_quiz_sets/set-1').updatedAt instanceof Timestamp, true);
+  assert.equal(fake.value('published_quiz_sets/set-1').publishedAtMs, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').updatedAtMs, undefined);
+  assert.ok(
+    fake.value('published_quiz_sets/set-1').updatedAt.toMillis() >=
+      fake.value('published_quiz_sets/set-1').publishedAt.toMillis()
+  );
   assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').data, PUBLIC_LIBRARY_IMAGE_A);
   assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0').revision, 'rev-1');
 
@@ -14109,10 +14136,16 @@ test('publish keeps a building projection hidden until bound images and the sour
     call.path === 'published_quiz_sets/set-1/images/v0q0');
   const publishedIndex = calls.findIndex(call => call.operation === 'transactionSet' &&
     call.path === 'published_quiz_sets/set-1' && call.value.status === 'published');
+  const authoritativePublishedRead = calls.findIndex((call, index) => index > publishedIndex &&
+    call.operation === 'get' && call.path === 'published_quiz_sets/set-1');
   const finalSourceRead = calls.findLastIndex(call => call.operation === 'transactionGet' &&
     call.path === 'quiz_sets/set-1');
   assert.ok(buildingIndex >= 0 && buildingIndex < imageIndex);
   assert.ok(imageIndex < finalSourceRead && finalSourceRead < publishedIndex);
+  assert.ok(publishedIndex < authoritativePublishedRead);
+  assert.equal(calls[buildingIndex].value.updatedAt, SERVER_TIMESTAMP);
+  assert.equal(calls[publishedIndex].value.publishedAt, SERVER_TIMESTAMP);
+  assert.equal(calls[publishedIndex].value.updatedAt, SERVER_TIMESTAMP);
 });
 
 test('publish rejects collaborator authority, stale source revision, trash, and suspended owner without exposure', async t => {
@@ -14230,6 +14263,32 @@ test('publish fails closed when source content drifts without changing its revis
   assert.equal(fake.value('published_quiz_sets/set-1').title, '공개 과학 퀴즈');
 });
 
+test('publish rebuilds the normalized source fingerprint inside every image transaction', async () => {
+  let fake;
+  fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({ imageCount: 1 }),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'images/set-1/q/v0q0': { data: PUBLIC_LIBRARY_IMAGE_A }
+  }, {
+    beforeTransactionStart({ attempt, set }) {
+      if (attempt === 2) {
+        set('quiz_sets/set-1', {
+          ...fake.value('quiz_sets/set-1'),
+          title: 'revision 없이 transaction 사이에 바뀐 제목'
+        });
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => createStore(fake).publishQuizSet('set-1', publicLibraryActor()),
+    /content|projection|fingerprint|revision|변경|불일치/
+  );
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'building');
+  assert.equal(fake.value('published_quiz_sets/set-1').buildImageCount, 0);
+  assert.equal(fake.value('published_quiz_sets/set-1/images/v0q0'), undefined);
+});
+
 test('withdraw uses owner and source revision CAS and immediately hides the projection', async () => {
   const fake = makeFirestoreFake({
     'quiz_sets/set-1': publicLibrarySource(),
@@ -14241,8 +14300,14 @@ test('withdraw uses owner and source revision CAS and immediately hides the proj
   const result = await store.withdrawPublishedQuizSet('set-1', publicLibraryActor());
 
   assert.equal(result.status, 'withdrawn');
+  assert.equal(result.updatedAt instanceof Timestamp, true);
   assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
   assert.equal(await store.getPublishedQuizSet('set-1'), null);
+  const withdrawalWrite = fake.calls().findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1' && call.value.status === 'withdrawn');
+  assert.equal(fake.calls()[withdrawalWrite].value.updatedAt, SERVER_TIMESTAMP);
+  assert.ok(fake.calls().some((call, index) => index > withdrawalWrite &&
+    call.operation === 'get' && call.path === 'published_quiz_sets/set-1'));
 
   const stale = makeFirestoreFake({
     'quiz_sets/set-1': publicLibrarySource({ contentRevision: 'rev-2' }),
@@ -14275,14 +14340,47 @@ test('moderate and restore require authoritative admin CAS and active source own
     'set-1', 'rev-1', '저작권 확인 필요', admin
   );
   assert.equal(moderated.status, 'moderated');
-  assert.equal(fake.value('published_quiz_sets/set-1').moderatedByUid, 'admin');
-  assert.equal(fake.value('published_quiz_sets/set-1').moderationReason, '저작권 확인 필요');
+  assert.equal(fake.value('published_quiz_sets/set-1').moderatedByUid, undefined);
+  assert.equal(fake.value('published_quiz_sets/set-1').moderationReason, undefined);
+  assert.deepEqual(Object.keys(fake.value('published_quiz_audits/set-1')).sort(), [
+    'moderatedAt', 'moderatedByUid', 'moderationReason', 'publicationId', 'revision', 'status'
+  ]);
+  assert.equal(fake.value('published_quiz_audits/set-1').moderatedByUid, 'admin');
+  assert.equal(fake.value('published_quiz_audits/set-1').moderationReason, '저작권 확인 필요');
+  assert.equal(fake.value('published_quiz_audits/set-1').moderatedAt instanceof Timestamp, true);
   assert.equal(await store.getPublishedQuizSet('set-1'), null);
 
   const restored = await store.adminRestorePublishedQuiz('set-1', 'rev-1', admin);
   assert.equal(restored.status, 'published');
   assert.equal(fake.value('published_quiz_sets/set-1').moderatedByUid, undefined);
   assert.equal(fake.value('published_quiz_sets/set-1').moderationReason, undefined);
+  assert.deepEqual(Object.keys(fake.value('published_quiz_audits/set-1')).sort(), [
+    'moderatedAt', 'moderatedByUid', 'moderationReason', 'publicationId', 'restoredAt',
+    'restoredByUid', 'revision', 'status'
+  ]);
+  assert.equal(fake.value('published_quiz_audits/set-1').status, 'restored');
+  assert.equal(fake.value('published_quiz_audits/set-1').restoredByUid, 'admin');
+  assert.equal(fake.value('published_quiz_audits/set-1').restoredAt instanceof Timestamp, true);
+
+  const calls = fake.calls();
+  const moderatedPublicWrite = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1' && call.value.status === 'moderated');
+  const moderatedAuditWrite = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_audits/set-1' && call.value.status === 'moderated');
+  const restoredPublicWrite = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_sets/set-1' && call.value.status === 'published');
+  const restoredAuditWrite = calls.findIndex(call => call.operation === 'transactionSet' &&
+    call.path === 'published_quiz_audits/set-1' && call.value.status === 'restored');
+  assert.ok(moderatedPublicWrite >= 0 && moderatedAuditWrite > moderatedPublicWrite);
+  assert.ok(restoredPublicWrite > moderatedAuditWrite && restoredAuditWrite > restoredPublicWrite);
+  assert.equal(calls[moderatedPublicWrite].value.updatedAt, SERVER_TIMESTAMP);
+  assert.equal(calls[moderatedAuditWrite].value.moderatedAt, SERVER_TIMESTAMP);
+  assert.equal(calls[restoredPublicWrite].value.updatedAt, SERVER_TIMESTAMP);
+  assert.equal(calls[restoredAuditWrite].value.restoredAt, SERVER_TIMESTAMP);
+  assert.ok(calls.some((call, index) => index > moderatedAuditWrite &&
+    call.operation === 'get' && call.path === 'published_quiz_audits/set-1'));
+  assert.ok(calls.some((call, index) => index > restoredAuditWrite &&
+    call.operation === 'get' && call.path === 'published_quiz_audits/set-1'));
 
   const stale = makeFirestoreFake(initial);
   await assert.rejects(
@@ -14299,8 +14397,11 @@ test('moderate and restore require authoritative admin CAS and active source own
       status: 'suspended', enabled: false
     }),
     'published_quiz_sets/set-1': {
-      ...publicLibraryProjection(), status: 'moderated', moderationStatus: 'moderated',
-      moderatedByUid: 'admin', moderationReason: '사유', moderatedAt: 1_000
+      ...publicLibraryProjection(), status: 'moderated', moderationStatus: 'moderated'
+    },
+    'published_quiz_audits/set-1': {
+      publicationId: 'set-1', revision: 'rev-1', status: 'moderated',
+      moderatedByUid: 'admin', moderationReason: '사유', moderatedAt: new Timestamp(1_000)
     }
   });
   await assert.rejects(
@@ -14308,6 +14409,28 @@ test('moderate and restore require authoritative admin CAS and active source own
     /active|활성|중지/
   );
   assert.equal(suspendedOwner.value('published_quiz_sets/set-1').status, 'moderated');
+});
+
+test('restore fails closed unless the paired admin-only moderation audit is exact', async () => {
+  const admin = publicLibraryActor('admin', 'admin@school.kr', {
+    displayName: '관리자', role: 'admin'
+  });
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource(),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    'teacher_allowances/admin': publicLibraryAllowance('admin', 'admin@school.kr', {
+      role: 'admin'
+    }),
+    'published_quiz_sets/set-1': {
+      ...publicLibraryProjection(), status: 'moderated', moderationStatus: 'moderated'
+    }
+  });
+
+  await assert.rejects(
+    () => createStore(fake).adminRestorePublishedQuiz('set-1', 'rev-1', admin),
+    /audit|감사|moderation|중지/
+  );
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'moderated');
 });
 
 test('public projection list and get return only validated published rows with a bounded cursor query', async () => {
@@ -14353,8 +14476,27 @@ test('public projection list and get return only validated published rows with a
   await assert.rejects(() => store.listPublishedQuizSets({ limit: 51 }), /1.*50|limit/);
   const calls = fake.calls();
   assert.ok(calls.some(call => call.operation === 'where' && call.field === 'status' && call.value === 'published'));
-  assert.ok(calls.some(call => call.operation === 'orderBy' && call.field === 'updatedAtMs' && call.direction === 'desc'));
+  assert.ok(calls.some(call => call.operation === 'orderBy' && call.field === 'updatedAt' && call.direction === 'desc'));
   assert.ok(calls.some(call => call.operation === 'startAfter' && call.values[0].id === 'pub-2'));
+});
+
+test('public list advances its DocumentSnapshot cursor when the page boundary row is malformed', async () => {
+  const fake = makeFirestoreFake({
+    'published_quiz_sets/pub-1': publicLibraryProjection('pub-1', { updatedAtMs: 300 }),
+    'published_quiz_sets/malformed': {
+      ...publicLibraryProjection('malformed', { updatedAtMs: 250 }),
+      ownerEmail: 'must-not-leak@example.com'
+    },
+    'published_quiz_sets/pub-2': publicLibraryProjection('pub-2', { updatedAtMs: 200 })
+  });
+  const store = createStore(fake);
+
+  const first = await store.listPublishedQuizSets({ limit: 2 });
+  assert.deepEqual(first.items.map(item => item.publicationId), ['pub-1']);
+  assert.equal(first.nextCursor.id, 'malformed');
+
+  const second = await store.listPublishedQuizSets({ limit: 2, cursor: first.nextCursor });
+  assert.deepEqual(second.items.map(item => item.publicationId), ['pub-2']);
 });
 
 test('copyPublished reads public projection only and finalizes a strict private counter destination', async () => {
@@ -14507,6 +14649,40 @@ test('copyPublished retries safely after an ambiguous final commit without dupli
   assert.equal(fake.value('quiz_sets/copy-1').imageCount, 1);
   assert.equal(fake.calls().filter(call => call.operation === 'transactionSet' &&
     call.path === 'images/copy-1/q/v0q0').length, 1);
+});
+
+test('copyPublished resumes a hidden copying destination after an ambiguous image commit', async () => {
+  const actor = publicLibraryActor('teacher-b', 'teacher-b@school.kr');
+  const fake = makeFirestoreFake({
+    'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', { imageCount: 1 }),
+    'published_quiz_sets/set-1/images/v0q0': {
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+    }
+  }, {
+    failTransactionAfterCommitAt: 2,
+    failTransactionAfterCommitMessage: 'ambiguous destination image commit'
+  });
+  const store = createStore(fake);
+
+  await assert.rejects(
+    () => store.copyPublishedQuizSet('set-1', 'copy-1', actor),
+    /ambiguous destination image commit/
+  );
+  assert.equal(fake.value('quiz_sets/copy-1').lifecycleState, 'copying');
+  assert.equal(fake.value('quiz_sets/copy-1').copyStatus, 'building');
+  assert.equal(fake.value('quiz_sets/copy-1').imageCount, 1);
+
+  const result = await store.copyPublishedQuizSet('set-1', 'copy-1', actor);
+  assert.equal(result.id, 'copy-1');
+  assert.equal(fake.value('quiz_sets/copy-1').lifecycleState, 'active');
+  assert.equal(fake.value('quiz_sets/copy-1').imageCount, 1);
+  assert.equal(fake.calls().filter(call => call.operation === 'transactionSet' &&
+    call.path === 'images/copy-1/q/v0q0').length, 1);
+  const increments = fake.calls().filter(call => call.operation === 'transactionSet' &&
+    call.path === 'quiz_sets/copy-1' && call.value.imageMutation &&
+    call.value.imageMutation.action === 'add');
+  assert.equal(increments.length, 1);
 });
 
 test('copyPublished preflight rejects more than 500 writes before destination transaction', async () => {

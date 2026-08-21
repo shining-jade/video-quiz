@@ -8,7 +8,7 @@
   const PUBLIC_KEYS = Object.freeze([
     'publicationId', 'sourceSetId', 'status', 'moderationStatus', 'revision',
     'title', 'description', 'authorDisplayName', 'videos', 'settings',
-    'videoCount', 'questionCount', 'imageCount', 'publishedAtMs', 'updatedAtMs'
+    'videoCount', 'questionCount', 'imageCount', 'publishedAt', 'updatedAt'
   ]);
   const VIDEO_KEYS = ['videoId', 'videoUrl', 'startSec', 'endSec', 'questions'];
   const QUESTION_KEYS = [
@@ -40,6 +40,23 @@
 
   function safeInteger(value) {
     return Number.isSafeInteger(value) && value >= 0;
+  }
+
+  function timestampMillis(value) {
+    try {
+      const millis = value instanceof Date
+        ? value.getTime()
+        : value && typeof value.toMillis === 'function'
+          ? value.toMillis()
+          : value && Number.isInteger(value.seconds) && Number.isInteger(value.nanoseconds) &&
+              value.nanoseconds >= 0 && value.nanoseconds < 1_000_000_000
+            ? value.seconds * 1000 + value.nanoseconds / 1_000_000
+            : null;
+      return typeof millis === 'number' && Number.isFinite(millis) && millis >= 0
+        ? millis : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   function canonicalId(value) {
@@ -159,8 +176,8 @@
       videoCount: videos.length,
       questionCount,
       imageCount,
-      publishedAtMs: null,
-      updatedAtMs: nowMs
+      publishedAt: null,
+      updatedAt: new Date(nowMs)
     };
     const validation = validateProjection(projection);
     if (!validation.ok) throw new Error(validation.errors.join(' '));
@@ -334,12 +351,14 @@
     validateNumber(value.imageCount, 'imageCount', 0, Number.MAX_SAFE_INTEGER, errors);
     if (Array.isArray(value.videos) && value.videoCount !== value.videos.length) errors.push('videoCount does not match videos.');
     if (value.questionCount !== actualQuestionCount) errors.push('questionCount does not match videos.');
-    if (value.publishedAtMs !== null && !safeInteger(value.publishedAtMs)) errors.push('publishedAtMs is invalid.');
-    if (!safeInteger(value.updatedAtMs)) errors.push('updatedAtMs is invalid.');
-    if (value.status === 'building' && value.publishedAtMs !== null) errors.push('building projection cannot have publishedAtMs.');
-    if (value.status !== 'building' && value.publishedAtMs === null) errors.push('visible history requires publishedAtMs.');
-    if (value.publishedAtMs !== null && safeInteger(value.updatedAtMs) && value.updatedAtMs < value.publishedAtMs) {
-      errors.push('updatedAtMs cannot precede publishedAtMs.');
+    const publishedAtMs = value.publishedAt === null ? null : timestampMillis(value.publishedAt);
+    const updatedAtMs = timestampMillis(value.updatedAt);
+    if (value.publishedAt !== null && publishedAtMs === null) errors.push('publishedAt is invalid.');
+    if (updatedAtMs === null) errors.push('updatedAt is invalid.');
+    if (value.status === 'building' && value.publishedAt !== null) errors.push('building projection cannot have publishedAt.');
+    if (value.status !== 'building' && value.publishedAt === null) errors.push('visible history requires publishedAt.');
+    if (publishedAtMs !== null && updatedAtMs !== null && updatedAtMs < publishedAtMs) {
+      errors.push('updatedAt cannot precede publishedAt.');
     }
     if ((value.status === 'moderated') !== (value.moderationStatus === 'moderated')) {
       errors.push('moderationStatus must match status.');
@@ -375,7 +394,7 @@
       authorDisplayName: value.authorDisplayName,
       videoCount: value.videoCount,
       questionCount: value.questionCount,
-      updatedAtMs: value.updatedAtMs
+      updatedAtMs: timestampMillis(value.updatedAt)
     };
   }
 

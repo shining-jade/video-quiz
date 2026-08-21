@@ -36,10 +36,16 @@ function projection() {
   });
 }
 
+function timestamp(ms) {
+  return { toMillis() { return ms; } };
+}
+
 test('projection contains bounded public content and strips every private identity field', () => {
   const value = projection();
 
   assert.equal(value.status, 'building');
+  assert.equal(value.publishedAt, null);
+  assert.equal(value.updatedAt instanceof Date, true);
   assert.equal(value.authorDisplayName, '홍교사');
   assert.equal(value.title, '우리 반 과학 퀴즈');
   assert.equal(value.videos[0].ownerEmail, undefined);
@@ -53,6 +59,9 @@ test('projection contains bounded public content and strips every private identi
     assert.equal(key in value, false, key + ' must not be public');
   }
   assert.deepEqual(Core.validateProjection(value), { ok: true, errors: [] });
+  const summary = Core.publicSummary(value);
+  assert.equal(summary.updatedAtMs, 100);
+  assert.equal('updatedAt' in summary, false);
 });
 
 test('copy patch is private and starts the destination image counter at zero', () => {
@@ -146,14 +155,36 @@ test('moderation and publication timestamps have exact state relations', () => {
   const value = projection();
   value.status = 'moderated';
   value.moderationStatus = 'clear';
-  value.publishedAtMs = 101;
-  value.updatedAtMs = 100;
+  value.publishedAt = timestamp(101);
+  value.updatedAt = timestamp(100);
 
   const result = Core.validateProjection(value);
 
   assert.equal(result.ok, false);
   assert.ok(result.errors.some(error => /moderationStatus/.test(error)));
-  assert.ok(result.errors.some(error => /updatedAtMs/.test(error)));
+  assert.ok(result.errors.some(error => /updatedAt/.test(error)));
+});
+
+test('public storage uses Timestamp-like fields and rejects legacy numeric timestamp fields', () => {
+  const value = projection();
+  value.status = 'published';
+  value.publishedAt = timestamp(90);
+  value.updatedAt = timestamp(100);
+
+  assert.deepEqual(Core.validateProjection(value), { ok: true, errors: [] });
+  assert.equal(Core.publicSummary(value).updatedAtMs, 100);
+  assert.equal('updatedAt' in Core.publicSummary(value), false);
+  assert.equal(Core.PUBLIC_KEYS.includes('publishedAt'), true);
+  assert.equal(Core.PUBLIC_KEYS.includes('updatedAt'), true);
+  assert.equal(Core.PUBLIC_KEYS.includes('publishedAtMs'), false);
+  assert.equal(Core.PUBLIC_KEYS.includes('updatedAtMs'), false);
+
+  value.updatedAt = 100;
+  value.publishedAtMs = 90;
+  const invalid = Core.validateProjection(value);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.errors.some(error => /unknown field: .*publishedAtMs/.test(error)));
+  assert.ok(invalid.errors.some(error => /updatedAt/.test(error)));
 });
 
 test('the exported allowlist cannot weaken internal unknown-field validation', () => {
@@ -186,4 +217,5 @@ test('summary is a bounded allowlist item and never returns publication content'
   ]);
   assert.equal('videos' in summary, false);
   assert.equal('settings' in summary, false);
+  assert.equal(summary.updatedAtMs, 100);
 });

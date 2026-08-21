@@ -2528,11 +2528,6 @@
         allowed.add('buildToken');
         allowed.add('buildImageCount');
       }
-      if (status === 'moderated') {
-        allowed.add('moderatedByUid');
-        allowed.add('moderatedAt');
-        allowed.add('moderationReason');
-      }
       return allowed;
     }
 
@@ -2557,14 +2552,75 @@
            !Number.isSafeInteger(raw.buildImageCount) || raw.buildImageCount < 0)) {
         throw new Error('building 공개 projection counter가 유효하지 않습니다.');
       }
-      if (status === 'moderated') {
-        const reason = typeof raw.moderationReason === 'string'
-          ? raw.moderationReason.trim() : '';
-        if (typeof raw.moderatedByUid !== 'string' || !raw.moderatedByUid ||
-            !Object.prototype.hasOwnProperty.call(raw, 'moderatedAt') ||
-            reason.length < 1 || reason.length > 200) {
-          throw new Error('관리자 공개 중지 감사 필드가 유효하지 않습니다.');
+      return projection;
+    }
+
+    function publicTimestampMillis(value, name) {
+      let millis = null;
+      try {
+        millis = value instanceof Date
+          ? value.getTime()
+          : timestampMillis(value);
+        if (millis === null && value && Number.isInteger(value.seconds) &&
+            Number.isInteger(value.nanoseconds) && value.nanoseconds >= 0 &&
+            value.nanoseconds < 1_000_000_000) {
+          millis = value.seconds * 1000 + value.nanoseconds / 1_000_000;
         }
+      } catch (_) {
+        millis = null;
+      }
+      if (typeof millis !== 'number' || !Number.isFinite(millis) || millis < 0) {
+        throw new Error((name || '공개 timestamp') + '가 유효하지 않습니다.');
+      }
+      return millis;
+    }
+
+    function requireModerationAudit(value, publicationId, revision, requiredStatus) {
+      const raw = value || {};
+      const status = raw.status;
+      const allowed = status === 'restored'
+        ? [
+            'publicationId', 'revision', 'status', 'moderatedByUid',
+            'moderationReason', 'moderatedAt', 'restoredByUid', 'restoredAt'
+          ]
+        : [
+            'publicationId', 'revision', 'status', 'moderatedByUid',
+            'moderationReason', 'moderatedAt'
+          ];
+      const reason = typeof raw.moderationReason === 'string'
+        ? raw.moderationReason.trim() : '';
+      if (!['moderated', 'restored'].includes(status) ||
+          Object.keys(raw).length !== allowed.length ||
+          Object.keys(raw).some(key => !allowed.includes(key)) ||
+          raw.publicationId !== publicationId || raw.revision !== revision ||
+          typeof raw.moderatedByUid !== 'string' || !raw.moderatedByUid ||
+          reason.length < 1 || reason.length > 200) {
+        throw new Error('관리자 공개 중지 audit 문서가 유효하지 않습니다.');
+      }
+      const moderatedAtMs = publicTimestampMillis(raw.moderatedAt, 'moderatedAt');
+      if (status === 'restored' &&
+          (typeof raw.restoredByUid !== 'string' || !raw.restoredByUid ||
+           publicTimestampMillis(raw.restoredAt, 'restoredAt') < moderatedAtMs)) {
+        throw new Error('관리자 공개 복구 audit 문서가 유효하지 않습니다.');
+      }
+      if (requiredStatus && status !== requiredStatus) {
+        throw new Error(requiredStatus + ' audit 문서만 처리할 수 있습니다.');
+      }
+      return raw;
+    }
+
+    async function authoritativePublicProjection(
+      publicRef, publicationId, requiredStatus, previousUpdatedAt
+    ) {
+      const snapshot = await publicRef.get({ source: 'server' });
+      if (!snapshot.exists) throw new Error('서버 공개 projection 재읽기에 실패했습니다.');
+      const projection = requireStoredProjection(
+        snapshot.data() || {}, publicationId, requiredStatus
+      );
+      const nextUpdatedAtMs = publicTimestampMillis(projection.updatedAt, 'updatedAt');
+      if (previousUpdatedAt !== undefined && previousUpdatedAt !== null &&
+          nextUpdatedAtMs < publicTimestampMillis(previousUpdatedAt, '이전 updatedAt')) {
+        throw new Error('서버 공개 projection updatedAt이 이전 시각보다 퇴행했습니다.');
       }
       return projection;
     }
@@ -2694,6 +2750,36 @@
       );
     }
 
+    function rebuiltSourceProjection(
+      source, publicationId, revision, authorDisplayName
+    ) {
+      return publicLibraryCore().buildProjection(source, {
+        setId: publicationId,
+        authorDisplayName,
+        revision,
+        nowMs: publicServerNowMs()
+      });
+    }
+
+    function requireMatchingPublicationSource(
+      source, allowanceSnapshot, actor, initialProjection
+    ) {
+      requireActiveSourceOwner(source, allowanceSnapshot, actor);
+      if (requireContentRevision(source) !== initialProjection.revision) {
+        throw new Error('원본 content revision이 게시 준비 중 변경되었습니다.');
+      }
+      const rebuilt = rebuiltSourceProjection(
+        source,
+        initialProjection.publicationId,
+        initialProjection.revision,
+        initialProjection.authorDisplayName
+      );
+      if (!samePublicProjectionContent(rebuilt, initialProjection)) {
+        throw new Error('같은 revision의 원본 content fingerprint가 변경되었습니다.');
+      }
+      return rebuilt;
+    }
+
     async function publishQuizSet(setId, actor) {
       const publicationId = canonicalPublicationId(setId, 'setId');
       const currentActor = actor || {};
@@ -2741,13 +2827,12 @@
         assertPublishedImageBinding(existingProjection, boundImages, privateImages);
       }
 
-      const nowMs = publicServerNowMs();
-      const desiredBuilding = publicLibraryCore().buildProjection(source, {
-        setId: publicationId,
-        authorDisplayName: String(currentActor.displayName || '').trim(),
+      const desiredBuilding = rebuiltSourceProjection(
+        source,
+        publicationId,
         revision,
-        nowMs
-      });
+        String(currentActor.displayName || '').trim()
+      );
       if (existingProjection && existingProjection.revision === revision &&
           !samePublicProjectionContent(existingProjection, desiredBuilding)) {
         throw new Error('같은 revision의 원본 content와 공개 projection이 일치하지 않습니다.');
@@ -2756,7 +2841,10 @@
         ? existingRaw.buildToken : createLiveToken();
       const initialCount = Object.keys(existingPublicImages.images).length;
       const buildingDocument = {
-        ...desiredBuilding, buildToken, buildImageCount: initialCount
+        ...desiredBuilding,
+        updatedAt: fieldValue.serverTimestamp(),
+        buildToken,
+        buildImageCount: initialCount
       };
       const publicImageOperations = Object.entries(privateImages).map(([key, data]) => ({
         path: 'published_quiz_sets/' + publicationId + '/images/' + key,
@@ -2772,11 +2860,9 @@
         const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
         const latestPublicSnapshot = await transaction.get(publicRef);
         const latestSource = quizSetValue(latestSourceSnapshot);
-        requireActiveSourceOwner(latestSource, latestAllowanceSnapshot, currentActor);
-        if (requireContentRevision(latestSource) !== revision ||
-            latestSource.imageCount !== source.imageCount) {
-          throw new Error('원본 content revision 또는 image counter가 변경되었습니다.');
-        }
+        requireMatchingPublicationSource(
+          latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
+        );
         const latestRaw = latestPublicSnapshot.exists ? latestPublicSnapshot.data() || {} : null;
         if (!publicationProjectionFingerprint(existingRaw, latestRaw)) {
           throw new Error('공개 projection이 게시 준비 중 변경되었습니다.');
@@ -2802,13 +2888,38 @@
       });
       if (initialized.alreadyPublished) return initialized.projection;
 
+      const authoritativeBuildingSnapshot = await publicRef.get({ source: 'server' });
+      if (!authoritativeBuildingSnapshot.exists) {
+        throw new Error('서버 building 공개 projection 재읽기에 실패했습니다.');
+      }
+      const authoritativeBuildingRaw = authoritativeBuildingSnapshot.data() || {};
+      const authoritativeBuilding = requireStoredProjection(
+        authoritativeBuildingRaw, publicationId, 'building'
+      );
+      if (authoritativeBuildingRaw.buildToken !== buildToken ||
+          authoritativeBuildingRaw.buildImageCount !== initialCount ||
+          !samePublicProjectionContent(authoritativeBuilding, desiredBuilding)) {
+        throw new Error('서버 building 공개 projection binding이 일치하지 않습니다.');
+      }
+      if (existingProjection &&
+          publicTimestampMillis(authoritativeBuilding.updatedAt, 'building updatedAt') <
+            publicTimestampMillis(existingProjection.updatedAt, '이전 updatedAt')) {
+        throw new Error('서버 building 공개 projection updatedAt이 이전 시각보다 퇴행했습니다.');
+      }
+
       for (const [key, data] of Object.entries(privateImages)) {
         const imageRef = db.doc(
           'published_quiz_sets/' + publicationId + '/images/' + key
         );
         await db.runTransaction(async transaction => {
+          const latestSourceSnapshot = await transaction.get(sourceRef);
+          const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
           const parentSnapshot = await transaction.get(publicRef);
           const childSnapshot = await transaction.get(imageRef);
+          const latestSource = quizSetValue(latestSourceSnapshot);
+          requireMatchingPublicationSource(
+            latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
+          );
           if (!parentSnapshot.exists) throw new Error('building 공개 projection이 사라졌습니다.');
           const parentRaw = parentSnapshot.data() || {};
           const parent = requireStoredProjection(parentRaw, publicationId, 'building');
@@ -2834,8 +2945,14 @@
           'published_quiz_sets/' + publicationId + '/images/' + key
         );
         await db.runTransaction(async transaction => {
+          const latestSourceSnapshot = await transaction.get(sourceRef);
+          const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
           const parentSnapshot = await transaction.get(publicRef);
           const childSnapshot = await transaction.get(imageRef);
+          const latestSource = quizSetValue(latestSourceSnapshot);
+          requireMatchingPublicationSource(
+            latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
+          );
           if (!parentSnapshot.exists) throw new Error('building 공개 projection이 사라졌습니다.');
           const parentRaw = parentSnapshot.data() || {};
           const parent = requireStoredProjection(parentRaw, publicationId, 'building');
@@ -2858,39 +2975,44 @@
         const latestAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
         const latestPublicSnapshot = await transaction.get(publicRef);
         const latestSource = quizSetValue(latestSourceSnapshot);
-        requireActiveSourceOwner(latestSource, latestAllowanceSnapshot, currentActor);
-        if (requireContentRevision(latestSource) !== revision ||
-            latestSource.imageCount !== Object.keys(privateImages).length) {
-          throw new Error('최종 게시 전 원본 revision 또는 image counter가 변경되었습니다.');
-        }
+        requireMatchingPublicationSource(
+          latestSource, latestAllowanceSnapshot, currentActor, desiredBuilding
+        );
         if (!latestPublicSnapshot.exists) throw new Error('building 공개 projection이 없습니다.');
         const parentRaw = latestPublicSnapshot.data() || {};
         const parent = requireStoredProjection(parentRaw, publicationId, 'building');
         if (parent.revision !== revision || parentRaw.buildToken !== buildToken ||
-            parentRaw.buildImageCount !== Object.keys(privateImages).length) {
+            parentRaw.buildImageCount !== Object.keys(privateImages).length ||
+            !samePublicProjectionContent(parent, desiredBuilding)) {
           throw new Error('공개 이미지 build counter가 완료되지 않았습니다.');
         }
-        const publishedAtMs = existingProjection &&
-          Number.isSafeInteger(existingProjection.publishedAtMs)
-          ? existingProjection.publishedAtMs : publicServerNowMs();
-        const updatedAtMs = Math.max(publishedAtMs, publicServerNowMs());
-        const next = {
+        const validationProjection = {
           ...publicProjectionValue(parentRaw),
-          status: 'published', moderationStatus: 'clear', publishedAtMs, updatedAtMs
+          status: 'published',
+          moderationStatus: 'clear',
+          publishedAt: parent.updatedAt,
+          updatedAt: parent.updatedAt
         };
-        const validation = publicLibraryCore().validateProjection(next);
+        const validation = publicLibraryCore().validateProjection(validationProjection);
         if (!validation.ok) throw new Error('최종 공개 projection이 유효하지 않습니다.');
+        const next = {
+          ...validationProjection,
+          publishedAt: fieldValue.serverTimestamp(),
+          updatedAt: fieldValue.serverTimestamp()
+        };
         transaction.set(publicRef, next);
-        return next;
+        return { previousUpdatedAt: parent.updatedAt };
       });
-      return finalized;
+      return authoritativePublicProjection(
+        publicRef, publicationId, 'published', finalized.previousUpdatedAt
+      );
     }
 
     async function withdrawPublishedQuizSet(setId, actor) {
       const publicationId = canonicalPublicationId(setId, 'setId');
       const sourceRef = db.doc('quiz_sets/' + publicationId);
       const publicRef = db.doc('published_quiz_sets/' + publicationId);
-      return db.runTransaction(async transaction => {
+      const transition = await db.runTransaction(async transaction => {
         const sourceSnapshot = await transaction.get(sourceRef);
         const source = quizSetValue(sourceSnapshot);
         if (!source) throw new Error('철회할 원본 세트를 찾을 수 없습니다.');
@@ -2902,20 +3024,27 @@
         const projection = requireStoredProjection(
           publicSnapshot.data() || {}, publicationId, 'published'
         );
-        if (requireContentRevision(source) !== projection.revision) {
-          throw new Error('원본과 공개 projection revision이 일치하지 않습니다.');
-        }
-        const next = {
+        requireMatchingPublicationSource(
+          source, allowanceSnapshot, actor || {}, projection
+        );
+        const validationProjection = {
           ...projection,
           status: 'withdrawn', moderationStatus: 'clear',
-          updatedAtMs: Math.max(projection.publishedAtMs, publicServerNowMs())
+          updatedAt: projection.updatedAt
         };
-        if (!publicLibraryCore().validateProjection(next).ok) {
+        if (!publicLibraryCore().validateProjection(validationProjection).ok) {
           throw new Error('철회 projection이 유효하지 않습니다.');
         }
+        const next = {
+          ...validationProjection,
+          updatedAt: fieldValue.serverTimestamp()
+        };
         transaction.set(publicRef, next);
-        return next;
+        return { previousUpdatedAt: projection.updatedAt };
       });
+      return authoritativePublicProjection(
+        publicRef, publicationId, 'withdrawn', transition.previousUpdatedAt
+      );
     }
 
     function exactPublicationRevision(value) {
@@ -2933,7 +3062,8 @@
         throw new Error('관리자 공개 중지 사유는 1~200자여야 합니다.');
       }
       const publicRef = db.doc('published_quiz_sets/' + publicationId);
-      return db.runTransaction(async transaction => {
+      const auditRef = db.doc('published_quiz_audits/' + publicationId);
+      const transition = await db.runTransaction(async transaction => {
         const currentAdmin = await requireAuthoritativePublicationAdmin(transaction, admin);
         const snapshot = await transaction.get(publicRef);
         if (!snapshot.exists) throw new Error('중지할 공개 projection이 없습니다.');
@@ -2944,20 +3074,35 @@
         const nextProjection = {
           ...projection,
           status: 'moderated', moderationStatus: 'moderated',
-          updatedAtMs: Math.max(projection.publishedAtMs, publicServerNowMs())
+          updatedAt: projection.updatedAt
         };
         if (!publicLibraryCore().validateProjection(nextProjection).ok) {
           throw new Error('관리자 공개 중지 projection이 유효하지 않습니다.');
         }
-        const next = {
-          ...nextProjection,
+        const nextAudit = {
+          publicationId,
+          revision: projection.revision,
+          status: 'moderated',
           moderatedByUid: currentAdmin.uid,
-          moderatedAt: fieldValue.serverTimestamp(),
-          moderationReason
+          moderationReason,
+          moderatedAt: fieldValue.serverTimestamp()
         };
-        transaction.set(publicRef, next);
-        return next;
+        transaction.set(publicRef, {
+          ...nextProjection,
+          updatedAt: fieldValue.serverTimestamp()
+        });
+        transaction.set(auditRef, nextAudit);
+        return { previousUpdatedAt: projection.updatedAt };
       });
+      const projection = await authoritativePublicProjection(
+        publicRef, publicationId, 'moderated', transition.previousUpdatedAt
+      );
+      const auditSnapshot = await auditRef.get({ source: 'server' });
+      if (!auditSnapshot.exists) throw new Error('관리자 공개 중지 audit 재읽기에 실패했습니다.');
+      requireModerationAudit(
+        auditSnapshot.data() || {}, publicationId, expected, 'moderated'
+      );
+      return projection;
     }
 
     async function adminRestorePublishedQuiz(setId, expectedRevision, admin) {
@@ -2965,8 +3110,9 @@
       const expected = exactPublicationRevision(expectedRevision);
       const sourceRef = db.doc('quiz_sets/' + publicationId);
       const publicRef = db.doc('published_quiz_sets/' + publicationId);
-      return db.runTransaction(async transaction => {
-        await requireAuthoritativePublicationAdmin(transaction, admin);
+      const auditRef = db.doc('published_quiz_audits/' + publicationId);
+      const transition = await db.runTransaction(async transaction => {
+        const currentAdmin = await requireAuthoritativePublicationAdmin(transaction, admin);
         const sourceSnapshot = await transaction.get(sourceRef);
         const source = quizSetValue(sourceSnapshot);
         if (!source) throw new Error('복구할 공개 projection의 원본이 없습니다.');
@@ -2975,25 +3121,56 @@
         );
         const ownerAllowanceSnapshot = await transaction.get(ownerAllowanceRef);
         const publicSnapshot = await transaction.get(publicRef);
-        requireActiveSourceOwner(source, ownerAllowanceSnapshot);
+        const auditSnapshot = await transaction.get(auditRef);
         if (!publicSnapshot.exists) throw new Error('복구할 공개 projection이 없습니다.');
         const projection = requireStoredProjection(
           publicSnapshot.data() || {}, publicationId, 'moderated'
         );
-        if (projection.revision !== expected || requireContentRevision(source) !== expected) {
+        if (projection.revision !== expected) {
           throw new Error('원본 또는 공개 projection revision이 변경되었습니다.');
         }
-        const next = {
+        requireMatchingPublicationSource(
+          source, ownerAllowanceSnapshot, null, projection
+        );
+        if (!auditSnapshot.exists) {
+          throw new Error('복구할 관리자 moderation audit 문서가 없습니다.');
+        }
+        const audit = requireModerationAudit(
+          auditSnapshot.data() || {}, publicationId, expected, 'moderated'
+        );
+        const nextProjection = {
           ...projection,
           status: 'published', moderationStatus: 'clear',
-          updatedAtMs: Math.max(projection.publishedAtMs, publicServerNowMs())
+          updatedAt: projection.updatedAt
         };
-        if (!publicLibraryCore().validateProjection(next).ok) {
+        if (!publicLibraryCore().validateProjection(nextProjection).ok) {
           throw new Error('복구할 공개 projection이 유효하지 않습니다.');
         }
-        transaction.set(publicRef, next);
-        return next;
+        transaction.set(publicRef, {
+          ...nextProjection,
+          updatedAt: fieldValue.serverTimestamp()
+        });
+        transaction.set(auditRef, {
+          publicationId,
+          revision: expected,
+          status: 'restored',
+          moderatedByUid: audit.moderatedByUid,
+          moderationReason: audit.moderationReason,
+          moderatedAt: audit.moderatedAt,
+          restoredByUid: currentAdmin.uid,
+          restoredAt: fieldValue.serverTimestamp()
+        });
+        return { previousUpdatedAt: projection.updatedAt };
       });
+      const projection = await authoritativePublicProjection(
+        publicRef, publicationId, 'published', transition.previousUpdatedAt
+      );
+      const auditSnapshot = await auditRef.get({ source: 'server' });
+      if (!auditSnapshot.exists) throw new Error('관리자 공개 복구 audit 재읽기에 실패했습니다.');
+      requireModerationAudit(
+        auditSnapshot.data() || {}, publicationId, expected, 'restored'
+      );
+      return projection;
     }
 
     async function listPublishedQuizSets(options) {
@@ -3009,7 +3186,7 @@
       }
       let query = db.collection('published_quiz_sets')
         .where('status', '==', 'published')
-        .orderBy('updatedAtMs', 'desc');
+        .orderBy('updatedAt', 'desc');
       if (config.cursor != null) query = query.startAfter(config.cursor);
       const snapshot = await query.limit(limit).get({ source: 'server' });
       const items = [];
@@ -3024,11 +3201,9 @@
         }
       }
       const last = (snapshot.docs || []).at(-1);
-      const lastUpdatedAtMs = last && (last.data() || {}).updatedAtMs;
       return {
         items,
-        nextCursor: (snapshot.docs || []).length === limit &&
-          Number.isSafeInteger(lastUpdatedAtMs) ? last : null
+        nextCursor: (snapshot.docs || []).length === limit ? last : null
       };
     }
 
