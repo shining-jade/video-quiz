@@ -4690,6 +4690,220 @@ test('stale admin publication load cannot overwrite a different admin tab', asyn
   assert.equal(body.innerHTML, '<section>진행 기록 탭</section>');
 });
 
+test('admin publication initial load leave and re-entry resets pending state and ignores stale completion', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const requests = [];
+  const row = id => ({
+    publicationId: id, title: id, authorDisplayName: '홍교사', revision: 'rev-1',
+    status: 'published', moderationStatus: 'clear', videoCount: 1, questionCount: 1
+  });
+  const context = {
+    adm: { tab: 'publications', publicLibrary: null }, adminTeacherRequestScreen: null,
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      listAdminPublishedQuizSets(options) {
+        return new Promise((resolve, reject) => requests.push({ options, resolve, reject }));
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets', 'admTab'
+  ], context);
+  context.admRenderBody = () => {
+    if (context.adm.tab === 'publications') return context.renderAdminPublishedQuizSets();
+    body.innerHTML = '<section>다른 관리자 탭</section>';
+    return true;
+  };
+
+  context.renderAdminPublishedQuizSets();
+  const abandonedState = context.adm.publicLibrary;
+  assert.equal(abandonedState.loading, true);
+  context.admTab('sessions');
+  assert.equal(abandonedState.loading, false);
+  assert.equal(abandonedState.busyId, '');
+  assert.equal(context.adm.publicLibrary, null);
+  context.admTab('publications');
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ items: [row('fresh')], nextCursor: null });
+  await new Promise(resolve => setImmediate(resolve));
+  requests[0].resolve({ items: [row('stale')], nextCursor: null });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(context.adm.publicLibrary.items.length, 1);
+  assert.equal(context.adm.publicLibrary.items[0].publicationId, 'fresh');
+  assert.match(body.innerHTML, /fresh/);
+  assert.doesNotMatch(body.innerHTML, /stale/);
+});
+
+test('admin publication pagination leave and re-entry starts a fresh first page and ignores stale page', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const requests = [];
+  const row = id => ({
+    publicationId: id, title: id, authorDisplayName: '홍교사', revision: 'rev-1',
+    status: 'published', moderationStatus: 'clear', videoCount: 1, questionCount: 1
+  });
+  const context = {
+    adm: { tab: 'publications', publicLibrary: {
+      uid: 'admin-1', authGeneration: 3, requestId: 1, items: [row('first-page')],
+      cursor: { id: 'page-50' }, busyId: '', loading: false, error: ''
+    } },
+    adminTeacherRequestScreen: null,
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      listAdminPublishedQuizSets(options) {
+        return new Promise((resolve, reject) => requests.push({ options, resolve, reject }));
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets', 'adminPublishedQuizSetsNextPage', 'admTab'
+  ], context);
+  context.admRenderBody = () => {
+    if (context.adm.tab === 'publications') return context.renderAdminPublishedQuizSets();
+    body.innerHTML = '<section>다른 관리자 탭</section>';
+    return true;
+  };
+
+  const abandonedState = context.adm.publicLibrary;
+  const stalePage = context.adminPublishedQuizSetsNextPage();
+  assert.equal(abandonedState.loading, true);
+  assert.equal(requests[0].options.cursor.id, 'page-50');
+  context.admTab('sessions');
+  assert.equal(abandonedState.loading, false);
+  context.admTab('publications');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].options.cursor, null);
+  requests[1].resolve({ items: [row('fresh-first-page')], nextCursor: null });
+  await new Promise(resolve => setImmediate(resolve));
+  requests[0].resolve({ items: [row('stale-next-page')], nextCursor: null });
+  assert.equal(await stalePage, false);
+
+  assert.equal(context.adm.publicLibrary.items.length, 1);
+  assert.equal(context.adm.publicLibrary.items[0].publicationId, 'fresh-first-page');
+  assert.match(body.innerHTML, /fresh-first-page/);
+  assert.doesNotMatch(body.innerHTML, /stale-next-page/);
+});
+
+test('admin moderation leave and re-entry clears busy, refetches, and ignores stale mutation completion', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const initial = {
+    publicationId: 'pub-1', title: '기존', authorDisplayName: '홍교사', revision: 'rev-7',
+    status: 'published', moderationStatus: 'clear', videoCount: 1, questionCount: 1
+  };
+  let resolveMutation;
+  const listRequests = [];
+  const context = {
+    adm: { tab: 'publications', publicLibrary: {
+      uid: 'admin-1', authGeneration: 3, requestId: 1, items: [initial],
+      cursor: null, busyId: '', loading: false, error: ''
+    } },
+    adminTeacherRequestScreen: null,
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      adminModeratePublishedQuiz() { return new Promise(resolve => { resolveMutation = resolve; }); },
+      listAdminPublishedQuizSets(options) {
+        return new Promise(resolve => listRequests.push({ options, resolve }));
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets', 'adminModeratePublishedQuizFromPanel', 'admTab'
+  ], context);
+  context.admRenderBody = () => {
+    if (context.adm.tab === 'publications') return context.renderAdminPublishedQuizSets();
+    body.innerHTML = '<section>다른 관리자 탭</section>';
+    return true;
+  };
+
+  const abandonedState = context.adm.publicLibrary;
+  const staleMutation = context.adminModeratePublishedQuizFromPanel('pub-1', 'rev-7', '사유');
+  assert.equal(abandonedState.busyId, 'pub-1');
+  context.admTab('sessions');
+  assert.equal(abandonedState.busyId, '');
+  context.admTab('publications');
+  assert.equal(listRequests.length, 1);
+  listRequests[0].resolve({ items: [{ ...initial, title: '서버 최신' }], nextCursor: null });
+  await new Promise(resolve => setImmediate(resolve));
+  resolveMutation({ ...initial, title: '오래된 완료', status: 'moderated', moderationStatus: 'moderated' });
+  assert.equal(await staleMutation, false);
+
+  assert.equal(context.adm.publicLibrary.loading, false);
+  assert.equal(context.adm.publicLibrary.busyId, '');
+  assert.equal(context.adm.publicLibrary.items[0].title, '서버 최신');
+  assert.match(body.innerHTML, /서버 최신/);
+  assert.doesNotMatch(body.innerHTML, /오래된 완료/);
+});
+
+test('admin restore leave and re-entry clears busy, refetches, and ignores stale mutation completion', async () => {
+  const body = { innerHTML: '', querySelectorAll() { return []; } };
+  const initial = {
+    publicationId: 'pub-1', title: '기존', authorDisplayName: '홍교사', revision: 'rev-7',
+    status: 'moderated', moderationStatus: 'moderated', videoCount: 1, questionCount: 1
+  };
+  let resolveMutation;
+  const listRequests = [];
+  const context = {
+    adm: { tab: 'publications', publicLibrary: {
+      uid: 'admin-1', authGeneration: 3, requestId: 1, items: [initial],
+      cursor: null, busyId: '', loading: false, error: ''
+    } },
+    adminTeacherRequestScreen: null,
+    teacherUser: { uid: 'admin-1' },
+    teacherState: { uid: 'admin-1', email: 'admin@school.kr', role: 'admin' },
+    teacherAuthVersion: 3, publicLibraryRequestSerial: 1,
+    AuthCore: require('../auth-core.js'),
+    store: {
+      adminRestorePublishedQuiz() { return new Promise(resolve => { resolveMutation = resolve; }); },
+      listAdminPublishedQuizSets(options) {
+        return new Promise(resolve => listRequests.push({ options, resolve }));
+      }
+    },
+    $() { return body; }, esc(value) { return String(value); }
+  };
+  loadStageFunctions([
+    'publicLibraryActor', 'adminPublishedScreenIsCurrent', 'renderAdminPublishedQuizSets',
+    'loadAdminPublishedQuizSets', 'adminRestorePublishedQuizFromPanel', 'admTab'
+  ], context);
+  context.admRenderBody = () => {
+    if (context.adm.tab === 'publications') return context.renderAdminPublishedQuizSets();
+    body.innerHTML = '<section>다른 관리자 탭</section>';
+    return true;
+  };
+
+  const abandonedState = context.adm.publicLibrary;
+  const staleMutation = context.adminRestorePublishedQuizFromPanel('pub-1', 'rev-7');
+  assert.equal(abandonedState.busyId, 'pub-1');
+  context.admTab('sessions');
+  assert.equal(abandonedState.busyId, '');
+  context.admTab('publications');
+  assert.equal(listRequests.length, 1);
+  listRequests[0].resolve({ items: [{ ...initial, title: '서버 최신' }], nextCursor: null });
+  await new Promise(resolve => setImmediate(resolve));
+  resolveMutation({ ...initial, title: '오래된 완료', status: 'published', moderationStatus: 'clear' });
+  assert.equal(await staleMutation, false);
+
+  assert.equal(context.adm.publicLibrary.loading, false);
+  assert.equal(context.adm.publicLibrary.busyId, '');
+  assert.equal(context.adm.publicLibrary.items[0].title, '서버 최신');
+  assert.match(body.innerHTML, /서버 최신/);
+  assert.doesNotMatch(body.innerHTML, /오래된 완료/);
+});
+
 test('admin publication panel reloads moderated rows and paginates with its bounded cursor', async () => {
   const body = { innerHTML: '', querySelectorAll() { return []; } };
   const cursor = { id: 'pub-50', get() {} };

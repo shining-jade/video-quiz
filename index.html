@@ -9747,6 +9747,15 @@ function admRenderShell() {
 
 function admTab(t) {
   if (t !== 'requests') adminTeacherRequestScreen = null;
+  if (adm.tab === 'publications' && t !== 'publications') {
+    const state = adm.publicLibrary;
+    if (state) {
+      state.requestId = ++publicLibraryRequestSerial;
+      state.loading = false;
+      state.busyId = '';
+    }
+    adm.publicLibrary = null;
+  }
   adm.tab = t;
   admRenderBody();
 }
