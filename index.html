@@ -3041,7 +3041,14 @@ function requestTeacherDeletion(acknowledgmentInput) {
   state.error = '';
   state.message = '';
   renderTeacherDeletion(state);
-  return store.requestTeacherDeletion(state.uid).then(allowance => {
+  const actor = Object.assign({}, teacherState, {
+    uid: state.uid,
+    email: teacherState && teacherState.email || teacherUser && teacherUser.email || '',
+    authGeneration: state.authGeneration,
+    currentAuthGeneration: teacherAuthVersion,
+    isCurrent: () => teacherDeletionScreenIsCurrent(state)
+  });
+  return store.requestTeacherDeletion(state.uid, actor).then(allowance => {
     if (!teacherDeletionScreenIsCurrent(state)) return false;
     state.busy = false;
     state.allowance = allowance;
@@ -9475,7 +9482,22 @@ async function admSaveTeacherAllowance(uid, email, revision, role, enabled) {
   if (self && (enabled === false || role === 'teacher')) throw new Error('현재 관리자 계정은 자기 계정을 낮추거나 비활성화할 수 없습니다.');
   if (enabled === false && adm && adm.allowances && adm.allowances[normalized] && adm.allowances[normalized].role === 'admin' &&
       typeof confirm === 'function' && !confirm(normalized + ' 관리자 계정을 비활성화할까요?')) return false;
-  const actor = Object.assign({}, teacherState, { authGeneration: teacherAuthVersion, currentAuthGeneration: teacherAuthVersion });
+  const adminState = adm;
+  const adminTab = adminState && adminState.tab;
+  const authGeneration = teacherAuthVersion;
+  const actorIdentity = teacherState;
+  const isCurrent = () => {
+    const route = typeof location === 'undefined' ? '#/admin' : String(location.hash || '');
+    return adm === adminState && adm && adm.tab === adminTab &&
+      teacherState === actorIdentity &&
+      teacherAuthVersion === authGeneration && AuthCore.isAdmin(teacherState) &&
+      route === '#/admin';
+  };
+  const actor = Object.assign({}, teacherState, {
+    authGeneration,
+    currentAuthGeneration: teacherAuthVersion,
+    isCurrent
+  });
   if (!store.adminUpdateTeacherAllowance) throw new Error('authoritative allowance API를 사용할 수 없습니다.');
   await store.adminUpdateTeacherAllowance({
     uid, emailCanonical: normalized, expectedRevision: revision,
@@ -9483,7 +9505,9 @@ async function admSaveTeacherAllowance(uid, email, revision, role, enabled) {
     status: enabled === false ? 'suspended' : 'active',
     reason: enabled === false ? '관리자 UI 중지' : ''
   }, actor);
+  if (!isCurrent()) return false;
   await admTeacherAccounts();
+  if (!isCurrent()) return false;
   if (typeof admRenderBody === 'function') admRenderBody();
   return true;
 }

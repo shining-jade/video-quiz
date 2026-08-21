@@ -14549,6 +14549,9 @@ test('관리자 계정 UI는 행의 UID email revision으로 authoritative API�
     uid: 'teacher-uid', emailCanonical: 'teacher@school.kr', expectedRevision: 8,
     role: 'admin', status: 'active', reason: ''
   });
+  assert.equal(calls[0][1].authGeneration, 4);
+  assert.equal(typeof calls[0][1].isCurrent, 'function');
+  assert.equal(calls[0][1].isCurrent(), true);
   await assert.rejects(context.admSaveTeacherAllowance(
     '', 'teacher@school.kr', 8, 'teacher', false
   ), /UID/);
@@ -15236,6 +15239,39 @@ test('publish keeps a building projection hidden until bound images and the sour
   assert.equal(calls[publishedIndex].value.updatedAt, SERVER_TIMESTAMP);
 });
 
+test('탈퇴 lifecycle UI actor는 인증 세대와 현재 route에 묶인다', async () => {
+  let capturedActor;
+  const state = {
+    uid: 'owner-uid', authGeneration: 4,
+    allowance: { uid: 'owner-uid', status: 'active' }, busy: false
+  };
+  const context = {
+    teacherDeletionScreen: state,
+    teacherAuthVersion: 4,
+    teacherUser: { uid: 'owner-uid', email: 'owner@school.kr' },
+    teacherState: {
+      uid: 'owner-uid', email: 'owner@school.kr', role: 'teacher', status: 'teacher'
+    },
+    location: { hash: '#/' },
+    renderTeacherDeletion() {},
+    alert() {},
+    store: {
+      async requestTeacherDeletion(uid, actor) {
+        assert.equal(uid, 'owner-uid');
+        capturedActor = actor;
+        context.location.hash = '#/admin';
+        throw new Error('stale lifecycle route');
+      }
+    }
+  };
+  loadStageFunctions(['teacherDeletionScreenIsCurrent', 'requestTeacherDeletion'], context);
+
+  assert.equal(await context.requestTeacherDeletion({ value: '계정 사용 종료 요청' }), false);
+  assert.equal(capturedActor.authGeneration, 4);
+  assert.equal(capturedActor.currentAuthGeneration, 4);
+  assert.equal(capturedActor.isCurrent(), false);
+});
+
 test('publish rejects collaborator authority, stale source revision, trash, and suspended owner without exposure', async t => {
   await t.test('collaborator authority', async () => {
     const fake = makeFirestoreFake({
@@ -15472,6 +15508,175 @@ test('withdraw lowers visibility despite same-revision source content and counte
   assert.equal(result.status, 'withdrawn');
   assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
   assert.equal(fake.value('published_quiz_sets/set-1').title, '공개 과학 퀴즈');
+});
+
+test('trash atomically withdraws a published set and restore remains private', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource(),
+    'teacher_allowances/owner': publicLibraryAllowance(),
+    ...publicLibraryStoredDocuments('set-1')
+  });
+  const store = createStore(fake);
+
+  await store.moveSetToTrash('set-1', publicLibraryActor());
+
+  assert.equal(fake.value('quiz_sets/set-1').lifecycleState, 'trashed');
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
+  const trashWrites = fake.calls().filter(call => call.operation === 'transactionSet');
+  assert.ok(trashWrites.some(call => call.path === 'quiz_sets/set-1' &&
+    call.value.lifecycleState === 'trashed'));
+  assert.ok(trashWrites.some(call => call.path === 'published_quiz_sets/set-1' &&
+    call.value.status === 'withdrawn'));
+
+  await store.restoreSet('set-1', publicLibraryActor());
+
+  assert.equal(fake.value('quiz_sets/set-1').lifecycleState, 'active');
+  assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
+});
+
+test('lifecycle withdrawal audits bounded pages and returns zero visible publications', async () => {
+  const initial = {
+    'teacher_allowances/owner': publicLibraryAllowance()
+  };
+  for (let index = 0; index < 51; index += 1) {
+    const id = `owned-${String(index).padStart(2, '0')}`;
+    initial[`quiz_sets/${id}`] = publicLibrarySource();
+    initial[`published_quiz_sets/${id}`] = publicLibraryProjection(id);
+  }
+  const fake = makeFirestoreFake(initial);
+  const store = createStore(fake);
+
+  const result = await store.withdrawOwnedPublicationsForLifecycle(
+    'owner', 1, 'teacher-suspension', publicLibraryActor()
+  );
+
+  assert.deepEqual(result, { withdrawnCount: 51, remainingVisibleCount: 0 });
+  for (let index = 0; index < 51; index += 1) {
+    const id = `owned-${String(index).padStart(2, '0')}`;
+    assert.equal(fake.value(`published_quiz_sets/${id}`).status, 'withdrawn');
+  }
+  const sourceQueries = fake.calls().filter(call => call.operation === 'getCollection' &&
+    call.path === 'quiz_sets');
+  assert.ok(sourceQueries.length >= 4);
+  assert.ok(sourceQueries.every(call => call.filters.some(filter =>
+    filter.type === 'limit' && filter.value <= 50)));
+  assert.ok(sourceQueries.every(call => call.filters.some(filter =>
+    filter.field === 'ownerUid' && filter.operator === '==' && filter.value === 'owner')));
+});
+
+test('suspension and deletion pending withdraw every publication before access is removed', async t => {
+  const approvedAt = new Timestamp(1);
+  const adminAllowance = activeTeacherAllowance({
+    uid: 'admin-uid', emailCanonical: 'admin@school.kr', displayName: '관리자',
+    role: 'admin', revision: 2, approvedAt, approvedByUid: 'root',
+    updatedAt: approvedAt, updatedByUid: 'root'
+  });
+  const targetAllowance = activeTeacherAllowance({
+    uid: 'owner', emailCanonical: 'owner@school.kr', displayName: '홍교사',
+    revision: 1, approvedAt, approvedByUid: 'admin-uid',
+    updatedAt: approvedAt, updatedByUid: 'admin-uid'
+  });
+
+  await t.test('admin suspension', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_allowances/admin-uid': adminAllowance,
+      'teacher_allowances/owner': targetAllowance,
+      'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' },
+      'teacher_allowlist/owner@school.kr': { enabled: true, role: 'teacher' },
+      'quiz_sets/set-1': publicLibrarySource(),
+      ...publicLibraryStoredDocuments('set-1')
+    });
+    const store = createStore(fake);
+    const actor = {
+      uid: 'admin-uid', email: 'admin@school.kr', role: 'admin',
+      authGeneration: 4, currentAuthGeneration: 4, isCurrent: () => true
+    };
+
+    await store.adminUpdateTeacherAllowance({
+      uid: 'owner', emailCanonical: 'owner@school.kr', expectedRevision: 1,
+      role: 'teacher', status: 'suspended', reason: 'hold'
+    }, actor);
+
+    assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
+    assert.equal(fake.value('teacher_allowances/owner').status, 'suspended');
+  });
+
+  await t.test('owner deletion request', async () => {
+    const fake = makeFirestoreFake({
+      'teacher_allowances/owner': targetAllowance,
+      'teacher_allowlist/owner@school.kr': { enabled: true, role: 'teacher' },
+      'quiz_sets/set-1': publicLibrarySource(),
+      ...publicLibraryStoredDocuments('set-1')
+    });
+    const store = createStore(fake);
+
+    await store.requestTeacherDeletion('owner', {
+      ...publicLibraryActor(), authGeneration: 7, currentAuthGeneration: 7,
+      isCurrent: () => true
+    });
+
+    assert.equal(fake.value('published_quiz_sets/set-1').status, 'withdrawn');
+    assert.equal(fake.value('teacher_allowances/owner').status, 'deletion_pending');
+  });
+});
+
+test('a resumable lifecycle failure keeps allowance active and preserves earlier withdrawals', async () => {
+  const approvedAt = new Timestamp(1);
+  const fake = makeFirestoreFake({
+    'teacher_allowances/admin-uid': activeTeacherAllowance({
+      uid: 'admin-uid', emailCanonical: 'admin@school.kr', displayName: '관리자',
+      role: 'admin', revision: 2, approvedAt, approvedByUid: 'root',
+      updatedAt: approvedAt, updatedByUid: 'root'
+    }),
+    'teacher_allowances/owner': activeTeacherAllowance({
+      uid: 'owner', emailCanonical: 'owner@school.kr', displayName: '홍교사',
+      revision: 1, approvedAt, approvedByUid: 'admin-uid',
+      updatedAt: approvedAt, updatedByUid: 'admin-uid'
+    }),
+    'teacher_allowlist/admin@school.kr': { enabled: true, role: 'admin' },
+    'teacher_allowlist/owner@school.kr': { enabled: true, role: 'teacher' },
+    'quiz_sets/a': publicLibrarySource(),
+    'quiz_sets/b': publicLibrarySource(),
+    'published_quiz_sets/a': publicLibraryProjection('a'),
+    'published_quiz_sets/b': publicLibraryProjection('b')
+  }, {
+    failTransactionAt: 2,
+    failTransactionMessage: 'planned lifecycle batch failure'
+  });
+
+  await assert.rejects(() => createStore(fake).adminUpdateTeacherAllowance({
+    uid: 'owner', emailCanonical: 'owner@school.kr', expectedRevision: 1,
+    role: 'teacher', status: 'suspended', reason: 'hold'
+  }, { uid: 'admin-uid', email: 'admin@school.kr', role: 'admin' }),
+  /planned lifecycle batch failure/);
+
+  assert.equal(fake.value('published_quiz_sets/a').status, 'withdrawn');
+  assert.equal(fake.value('published_quiz_sets/b').status, 'published');
+  assert.equal(fake.value('teacher_allowances/owner').status, 'active');
+});
+
+test('purge removes bounded public images and refuses parent deletion while an orphan remains', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set-1': publicLibrarySource({
+      lifecycleState: 'trashed', trashedAt: 1, purgeStartedAt: null
+    }),
+    'published_quiz_sets/set-1': publicLibraryProjection('set-1', {
+      imageCount: 1, patch: { status: 'withdrawn' }
+    }),
+    'published_quiz_sets/set-1/images/v0q0': {
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-token-1'
+    }
+  });
+  const store = createStore(fake);
+
+  await store.beginSetPurge('set-1', 'immediate', publicLibraryActor());
+  const first = await store.continueSetPurge('set-1');
+
+  assert.deepEqual(first, { done: false, deleted: 1, parentDeleted: false });
+  assert.equal(fake.has('published_quiz_sets/set-1/images/v0q0'), false);
+  assert.equal(fake.has('quiz_sets/set-1'), true);
+  const done = await store.continueSetPurge('set-1');
+  assert.equal(done.parentDeleted, true);
 });
 
 test('moderate and restore require authoritative admin CAS and active source owner state', async () => {

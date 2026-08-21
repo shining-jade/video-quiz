@@ -743,14 +743,16 @@ service cloud.firestore {
             after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
             after.get('imageCount', -1) == before.get('imageCount', -1) &&
             after.get('collaboratorMutation', null) == before.get('collaboratorMutation', null) &&
-            after.get('imageMutation', null) == before.get('imageMutation', null) && ownsSet(setId)) ||
+            after.get('imageMutation', null) == before.get('imageMutation', null) &&
+            ownsSet(setId) && validLifecyclePublicationBarrier(setId)) ||
           (before.get('lifecycleState', '') == 'trashed' &&
             after.get('lifecycleState', '') == 'active' &&
             !('trashedAt' in after) && after.get('purgeStartedAt', null) == null &&
             after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
             after.get('imageCount', -1) == before.get('imageCount', -1) &&
             after.get('collaboratorMutation', null) == before.get('collaboratorMutation', null) &&
-            after.get('imageMutation', null) == before.get('imageMutation', null) && ownsSet(setId)) ||
+            after.get('imageMutation', null) == before.get('imageMutation', null) &&
+            ownsSet(setId) && validLifecyclePublicationBarrier(setId)) ||
           (before.get('lifecycleState', '') == 'trashed' &&
             after.get('lifecycleState', '') == 'purging' &&
             counterMigrationUnlocked() &&
@@ -765,7 +767,8 @@ service cloud.firestore {
             after.get('imageMutation', null) == before.get('imageMutation', null) &&
             (ownsSet(setId) ||
               (isAdmin() && before.get('trashedAt', null) is timestamp &&
-                request.time >= before.trashedAt + duration.value(30, 'd')))) ||
+                request.time >= before.trashedAt + duration.value(30, 'd'))) &&
+            validLifecyclePublicationBarrier(setId)) ||
           (before.get('lifecycleState', '') == 'purging' &&
             after.get('lifecycleState', '') == 'purging' &&
             before.get('purgeStartedAt', null) == after.get('purgeStartedAt', null) &&
@@ -1084,6 +1087,13 @@ service cloud.firestore {
         source.ownerUid == request.auth.uid && source.ownerEmail == request.auth.token.email;
     }
 
+    function lifecycleOwnerMayAuditPublication(setId) {
+      let path = publicationSourcePath(setId);
+      return exists(path) && isApprovedTeacher() &&
+        get(path).data.ownerUid == request.auth.uid &&
+        get(path).data.ownerEmail == request.auth.token.email;
+    }
+
     function validPublicationSourceMedia(data, source) {
       return (source.get('videos', null) is list &&
           data.videoCount == source.videos.size()) ||
@@ -1358,6 +1368,43 @@ service cloud.firestore {
         after.updatedAt == request.time && after.updatedAt >= before.updatedAt;
     }
 
+    function validLifecycleWithdrawal(setId) {
+      let sourcePath = publicationSourcePath(setId);
+      let source = get(sourcePath).data;
+      let allowancePath = /databases/$(database)/documents/teacher_allowances/$(source.ownerUid);
+      let allowance = get(allowancePath).data;
+      let before = resource.data;
+      let after = request.resource.data;
+      let exactOwner = verifiedEmail() && exists(allowancePath) &&
+        source.ownerUid == request.auth.uid && source.ownerEmail == request.auth.token.email &&
+        [allowance.uid, allowance.emailCanonical, allowance.status, allowance.enabled] ==
+          [source.ownerUid, source.ownerEmail, 'active', true] &&
+        allowance.role in ['teacher', 'admin'];
+      return exists(sourcePath) && (exactOwner || isAdmin()) &&
+        sourceRevision(source) == before.revision && validPublicParentShape(after, setId) &&
+        before.status == 'published' && before.moderationStatus == 'clear' &&
+        after.status == 'withdrawn' && after.moderationStatus == 'clear' &&
+        after.diff(before).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+        after.updatedAt == request.time && after.updatedAt >= before.updatedAt;
+    }
+
+    function validLifecyclePublicationBarrier(setId) {
+      let path = publicationPath(setId);
+      let before = exists(path) ? get(path).data : {};
+      let after = existsAfter(path) ? getAfter(path).data : {};
+      return !exists(path)
+        ? !existsAfter(path)
+        : existsAfter(path) &&
+          (before.get('status', '') == 'published'
+            ? before.get('moderationStatus', '') == 'clear' &&
+              after.get('status', '') == 'withdrawn' &&
+              after.get('moderationStatus', '') == 'clear' &&
+              after.get('revision', '') == before.get('revision', '') &&
+              after.diff(before).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+              after.get('updatedAt', request.time) == request.time
+            : after == before);
+    }
+
     function validModeratedAudit(data, setId, revision) {
       let keys = [
         'publicationId', 'revision', 'status', 'moderatedByUid',
@@ -1566,6 +1613,12 @@ service cloud.firestore {
         (!exists(path) || get(path).data.get('status', '') in ['building', 'withdrawn']);
     }
 
+    function lifecycleManagerMayReadHiddenPublication(setId) {
+      let sourcePath = publicationSourcePath(setId);
+      return exists(sourcePath) && isApprovedTeacher() &&
+        (get(sourcePath).data.ownerUid == request.auth.uid || isAdmin());
+    }
+
     function ownerMayReadPublicationStatus(setId) {
       let path = publicationPath(setId);
       return requesterOwnsPublicationSource(setId) &&
@@ -1576,14 +1629,15 @@ service cloud.firestore {
     function validPublicationGet(setId) {
       let path = publicationPath(setId);
       return !exists(path)
-        ? requesterOwnsPublicationSource(setId)
+        ? lifecycleOwnerMayAuditPublication(setId) || isAdmin()
         : resource.data.get('status', '') == 'published'
           ? isApprovedTeacher() && validPublicParentShape(resource.data, setId)
           : isAdmin()
             ? (resource.data.get('status', '') == 'building'
               ? validPublicBuildingShape(resource.data, setId)
               : validPublicParentShape(resource.data, setId))
-            : ownerMayReadPublicationStatus(setId) &&
+            : (ownerMayReadPublicationStatus(setId) ||
+                lifecycleManagerMayReadHiddenPublication(setId)) &&
               (resource.data.get('status', '') == 'building'
                 ? validPublicBuildingShape(resource.data, setId)
                 : validPublicParentShape(resource.data, setId));
@@ -1593,20 +1647,32 @@ service cloud.firestore {
       let childPath = publicationImagePath(setId, key);
       let parent = get(publicationPath(setId)).data;
       return !exists(childPath)
-        ? ownerMayReadHiddenPublication(setId)
+        ? (ownerMayReadHiddenPublication(setId) ||
+            lifecycleManagerMayReadHiddenPublication(setId))
         : parent.get('status', '') == 'published'
         ? visiblePublicImage(setId, data)
-        : ownerMayReadHiddenPublication(setId) &&
+        : (ownerMayReadHiddenPublication(setId) ||
+            lifecycleManagerMayReadHiddenPublication(setId)) &&
           validPublicImageData(data, data.revision, data.buildToken);
     }
 
     function validPublicImageList(setId, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
-      return exists(path) && data.revision == parent.revision &&
-        (parent.get('status', '') == 'published'
-          ? isApprovedTeacher() && validPublicParentShape(parent, setId)
-          : ownerMayReadHiddenPublication(setId));
+      return !exists(path)
+        ? canPurgeSet(setId)
+        : parent.get('status', '') == 'published'
+          ? data.revision == parent.revision && isApprovedTeacher() &&
+            validPublicParentShape(parent, setId)
+          : ownerMayReadHiddenPublication(setId) ||
+            lifecycleManagerMayReadHiddenPublication(setId);
+    }
+
+    function validPublicImagePurgeDelete(setId, key) {
+      let parentPath = publicationPath(setId);
+      return canPurgeSet(setId) && validPublicImageKey(key) && exists(parentPath) &&
+        get(parentPath).data.get('status', '') != 'published' &&
+        validPublicImageData(resource.data, resource.data.revision, resource.data.buildToken);
     }
 
     function validPublicVideoGet(setId, key, data) {
@@ -1846,7 +1912,13 @@ service cloud.firestore {
         ? (request.resource.data.get('lifecycleState', '') == 'copying'
           ? validCopyImageIncrement(setId)
           : validPrivateCopyFinalize(setId))
-        : validEditablePrivateSetUpdate(setId) || validSetLifecycleTransition(setId);
+        : resource.data.get('lifecycleState', '') == 'purging' ||
+          request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'trashedAt', 'purgeStartedAt', 'lifecycleState', 'imageCount',
+            'imageMutation'
+          ])
+          ? validSetLifecycleTransition(setId)
+          : validEditablePrivateSetUpdate(setId);
     }
 
     function validPrivateImageCreate(setId, key) {
@@ -1867,7 +1939,9 @@ service cloud.firestore {
           ? (after.status == 'building'
             ? validBuildingReplace(setId)
             : after.status == 'withdrawn'
-              ? validOwnerWithdrawal(setId)
+              ? requesterOwnsPublicationSource(setId)
+                ? validOwnerWithdrawal(setId)
+                : validLifecycleWithdrawal(setId)
               : validModerationParent(setId))
           : before.status == 'withdrawn'
             ? validBuildingReplace(setId)
@@ -2851,7 +2925,7 @@ service cloud.firestore {
         allow get: if validPublicImageGet(setId, key, resource.data);
         allow list: if validPublicImageList(setId, resource.data);
         allow create, update: if validPublicImageBind(setId, key);
-        allow delete: if false;
+        allow delete: if validPublicImagePurgeDelete(setId, key);
         allow read, write: if false;
       }
     }

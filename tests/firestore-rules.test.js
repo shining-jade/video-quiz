@@ -4529,6 +4529,107 @@ rulesTest('published projection owner protocol admits actual building image fina
   }));
 });
 
+rulesTest('publication trash is atomic, restore stays private, and moderated content cannot resurrect', async () => {
+  const publicationId = 'lifecycle-trash';
+  await seedPublicRulesSource(publicationId);
+  await seedPublishedRulesProjection(publicationId);
+  const ownerDb = actorFirestore('owner');
+  const ownerStore = emulatorStore(ownerDb);
+
+  await assertFails(updateDoc(doc(ownerDb, `quiz_sets/${publicationId}`), {
+    lifecycleState: 'trashed', trashedAt: serverTimestamp(),
+    purgeStartedAt: null, contentRevision: serverTimestamp()
+  }));
+
+  await ownerStore.moveSetToTrash(publicationId, publicRulesOwner);
+  assert.equal((await getDoc(doc(ownerDb,
+    `published_quiz_sets/${publicationId}`))).data().status, 'withdrawn');
+  await ownerStore.restoreSet(publicationId, publicRulesOwner);
+  assert.equal((await getDoc(doc(ownerDb,
+    `published_quiz_sets/${publicationId}`))).data().status, 'withdrawn');
+
+  const moderatedId = 'lifecycle-moderated';
+  await seedPublicRulesSource(moderatedId);
+  await adminWrite(`published_quiz_sets/${moderatedId}`, publicRulesProjection(moderatedId, {
+    status: 'moderated', moderationStatus: 'moderated'
+  }));
+  await adminWrite(`published_quiz_audits/${moderatedId}`, {
+    publicationId: moderatedId, revision: 'rev-1', status: 'moderated',
+    moderatedByUid: actors.admin.uid, moderationReason: 'hold',
+    moderatedAt: Timestamp.fromMillis(1_000)
+  });
+
+  await ownerStore.moveSetToTrash(moderatedId, publicRulesOwner);
+  await ownerStore.restoreSet(moderatedId, publicRulesOwner);
+  assert.equal((await adminRead(`published_quiz_sets/${moderatedId}`)).status, 'moderated');
+  await assertFails(updateDoc(doc(ownerDb, `published_quiz_sets/${moderatedId}`), {
+    status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
+  }));
+});
+
+rulesTest('publication suspension and deletion preflight hide copies before allowance removal', async () => {
+  const publicationId = 'lifecycle-suspend';
+  await seedPublicRulesSource(publicationId);
+  await seedPublishedRulesProjection(publicationId);
+  await adminWrite('teacher_allowances/owner-uid', {
+    ...(await adminRead('teacher_allowances/owner-uid')), revision: 1
+  });
+  const adminStore = emulatorStore(actorFirestore('admin'));
+
+  await adminStore.adminUpdateTeacherAllowance({
+    uid: actors.owner.uid, emailCanonical: actors.owner.email, expectedRevision: 1,
+    role: 'teacher', status: 'suspended', reason: 'hold'
+  }, requestAdminIdentity);
+
+  assert.equal((await adminRead(`published_quiz_sets/${publicationId}`)).status, 'withdrawn');
+  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'suspended');
+  await assert.rejects(() => emulatorStore(actorFirestore('otherTeacher'))
+    .copyPublishedQuizSet(publicationId, 'copy-after-suspend', {
+      uid: actors.otherTeacher.uid, email: actors.otherTeacher.email, role: 'teacher'
+    }), /permission|published|공개|승인|active/i);
+
+  const deletionId = 'lifecycle-delete';
+  await adminWrite('teacher_allowances/owner-uid', {
+    ...(await adminRead('teacher_allowances/owner-uid')),
+    status: 'active', enabled: true, administrativeHold: false, revision: 3
+  });
+  await adminWrite('teacher_allowlist/owner@school.kr', {
+    uid: actors.owner.uid, enabled: true, role: 'teacher',
+    updatedAt: Timestamp.fromMillis(1), updatedByUid: actors.admin.uid
+  });
+  await seedPublicRulesSource(deletionId);
+  await seedPublishedRulesProjection(deletionId);
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+
+  await ownerStore.requestTeacherDeletion(actors.owner.uid, publicRulesOwner);
+
+  assert.equal((await adminRead(`published_quiz_sets/${deletionId}`)).status, 'withdrawn');
+  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'deletion_pending');
+});
+
+rulesTest('publication purge deletes bounded public images before the private parent', async () => {
+  const publicationId = 'lifecycle-purge';
+  await seedPublicRulesSource(publicationId, {
+    lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1),
+    purgeStartedAt: null, imageCount: 0
+  });
+  await seedPublishedRulesProjection(publicationId, {
+    status: 'withdrawn', imageCount: 1
+  }, { v0q0: 'data:image/png;base64,AAAA' });
+  const ownerDb = actorFirestore('owner');
+  const ownerStore = emulatorStore(ownerDb);
+
+  await ownerStore.beginSetPurge(publicationId, 'immediate', publicRulesOwner);
+  const first = await ownerStore.continueSetPurge(publicationId);
+  assert.deepEqual(first, { done: false, deleted: 1, parentDeleted: false });
+  assert.equal(await adminRead(
+    `published_quiz_sets/${publicationId}/images/v0q0`), undefined);
+  assert.notEqual(await adminRead(`quiz_sets/${publicationId}`), undefined);
+
+  const done = await ownerStore.continueSetPurge(publicationId);
+  assert.equal(done.parentDeleted, true);
+});
+
 rulesTest('published projection public image reads require a visible exact revision binding', async () => {
   await seedPublicRulesSource('image-public', { imageCount: 1 }, {
     v0q0: 'data:image/png;base64,AAAA'

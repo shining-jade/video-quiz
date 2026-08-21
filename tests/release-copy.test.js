@@ -477,3 +477,37 @@ test('공동 편집과 휴지통 공개 문구는 무료 정리의 한계와 보
   assert.match(handoff, /staged gate Rules 배포/);
   assert.match(handoff, /safeToDeployStrictRules/);
 });
+
+test('public library release guide fixes privacy lifecycle deployment and rollback contracts', () => {
+  const guide = read('docs/PUBLIC-QUIZ-LIBRARY.md');
+  const readme = read('README.md');
+  const handoff = read('HANDOFF.md');
+  const combined = [guide, readme, handoff].join('\n');
+
+  for (const marker of [
+    'private by default', 'published_quiz_sets', '승인 교사만',
+    '독립 사본', '이메일과 UID 비공개', '롤백'
+  ]) {
+    assert.match(combined, new RegExp(marker));
+  }
+  const ordered = [
+    'production dry-run',
+    'Rules를 먼저 배포',
+    '정적 앱을 배포',
+    'privacy smoke'
+  ];
+  let cursor = -1;
+  for (const marker of ordered) {
+    const next = guide.indexOf(marker);
+    assert.ok(next > cursor, `public library release order missing or unsafe: ${marker}`);
+    cursor = next;
+  }
+  for (const actor of [
+    '소유자', '공동 편집자', '다른 승인 교사', '관리자',
+    '학생', '익명', 'suspended', 'deletion_pending'
+  ]) {
+    assert.match(guide, new RegExp(actor));
+  }
+  assert.match(guide, /public image[^\n]*orphan audit/i);
+  assert.match(guide, /backfill[^\n]*(하지|없)/i);
+});

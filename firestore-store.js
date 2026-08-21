@@ -479,6 +479,18 @@
       return { ...value, email };
     }
 
+    function assertLifecycleOperationCurrent(actor) {
+      const value = actor || {};
+      if (value.authGeneration != null && value.currentAuthGeneration != null &&
+          value.authGeneration !== value.currentAuthGeneration) {
+        throw new Error('로그인 상태가 변경되어 lifecycle 작업을 다시 시도해 주세요.');
+      }
+      if (typeof value.isCurrent === 'function' && value.isCurrent() !== true) {
+        throw new Error('화면 또는 로그인 상태가 변경되어 lifecycle 작업을 다시 시도해 주세요.');
+      }
+      return value;
+    }
+
     function validAuthoritativeAdmin(data, actor) {
       return !!data && data.uid === actor.uid &&
         data.emailCanonical === actor.email && data.status === 'active' &&
@@ -739,9 +751,24 @@
       return teacherAllowanceValue(snapshot);
     }
 
-    async function requestTeacherDeletion(uid) {
+    async function requestTeacherDeletion(uid, lifecycleActor) {
       const exactUid = assertUid(uid);
       const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      const initialSnapshot = await allowanceRef.get({ source: 'server' });
+      const initialAllowance = assertDeletionTeacherAllowance(initialSnapshot, exactUid);
+      const initialRevision = allowanceRevision(initialAllowance);
+      if (initialAllowance.status === 'active') {
+        const actor = lifecycleActor || {
+          uid: exactUid,
+          email: initialAllowance.emailCanonical,
+          role: 'teacher'
+        };
+        assertLifecycleOperationCurrent(actor);
+        await withdrawOwnedPublicationsForLifecycle(
+          exactUid, initialRevision, 'teacher-deletion-pending', actor
+        );
+        assertLifecycleOperationCurrent(actor);
+      }
       const first = await db.runTransaction(async transaction => {
         const allowanceSnapshot = await transaction.get(allowanceRef);
         const allowance = assertDeletionTeacherAllowance(allowanceSnapshot, exactUid);
@@ -762,6 +789,10 @@
             allowance.administrativeHold !== false) {
           throw new Error('administrative hold가 없는 active teacher만 탈퇴를 요청할 수 있습니다.');
         }
+        if (allowanceRevision(allowance) !== initialRevision) {
+          throw new Error('publication preflight 뒤 teacher allowance revision이 변경되었습니다.');
+        }
+        assertLifecycleOperationCurrent(lifecycleActor);
         const revision = allowanceRevision(allowance) + 1;
         const timestamp = fieldValue.serverTimestamp();
         transaction.update(allowanceRef, {
@@ -1036,6 +1067,17 @@
       const suspensionReason = String(reason || '');
       if (suspensionReason.length > 200) throw new Error('중지 사유는 200자 이하여야 합니다.');
       const allowanceRef = db.doc('teacher_allowances/' + exactUid);
+      assertLifecycleOperationCurrent(adminIdentity);
+      await requireCurrentAdmin(adminIdentity);
+      const initialSnapshot = await allowanceRef.get({ source: 'server' });
+      const initialAllowance = assertAllowanceIdentity(initialSnapshot, exactUid);
+      const initialRevision = allowanceRevision(initialAllowance);
+      if (['active', 'deletion_pending'].includes(initialAllowance.status)) {
+        await withdrawOwnedPublicationsForLifecycle(
+          exactUid, initialRevision, 'teacher-suspension', adminIdentity
+        );
+      }
+      assertLifecycleOperationCurrent(adminIdentity);
       return db.runTransaction(async transaction => {
         const admin = await requireTransactionAdmin(transaction, adminIdentity);
         const allowanceSnapshot = await transaction.get(allowanceRef);
@@ -1049,6 +1091,10 @@
             (allowance.status === 'active' ? allowance.enabled !== true : allowance.enabled !== false)) {
           throw new Error('active 또는 deletion_pending 교사만 중지할 수 있습니다.');
         }
+        if (allowanceRevision(allowance) !== initialRevision) {
+          throw new Error('publication preflight 뒤 teacher allowance revision이 변경되었습니다.');
+        }
+        assertLifecycleOperationCurrent(adminIdentity);
         const pendingDeletion = allowance.status === 'deletion_pending';
         const timestamp = fieldValue.serverTimestamp();
         transaction.set(allowanceRef, {
@@ -1910,22 +1956,47 @@
       return timestampMillis(value && value.purgeStartedAt);
     }
 
+    function lifecycleWithdrawalWrite(publicSnapshot, publicationId) {
+      if (!publicSnapshot || !publicSnapshot.exists) return null;
+      const projection = requireStoredProjection(
+        publicSnapshot.data() || {}, publicationId
+      );
+      if (projection.status !== 'published') return null;
+      const withdrawn = {
+        ...projection,
+        status: 'withdrawn',
+        moderationStatus: 'clear',
+        updatedAt: projection.updatedAt
+      };
+      if (!publicLibraryCore().validateParent(withdrawn).ok) {
+        throw new Error('lifecycle 철회 projection이 유효하지 않습니다.');
+      }
+      return { ...withdrawn, updatedAt: fieldValue.serverTimestamp() };
+    }
+
     async function moveSetToTrash(setId, actor) {
       const current = actor || {};
       const reference = db.doc('quiz_sets/' + setId);
+      const publicReference = db.doc('published_quiz_sets/' + setId);
       return db.runTransaction(async transaction => {
         const snapshot = await transaction.get(reference);
+        const publicSnapshot = await transaction.get(publicReference);
         const set = quizSetValue(snapshot);
         if (!set || set.ownerUid !== current.uid || !activeSet(set)) {
           throw new Error('소유자만 활성 세트를 휴지통으로 이동할 수 있습니다.');
         }
         requireAuthoritativeCounters(set);
+        const withdrawal = lifecycleWithdrawalWrite(publicSnapshot, setId);
+        if (withdrawal && requireContentRevision(set) !== withdrawal.revision) {
+          throw new Error('원본과 공개 projection revision이 일치하지 않습니다.');
+        }
         transaction.set(reference, {
           trashedAt: fieldValue.serverTimestamp(),
           purgeStartedAt: null,
           lifecycleState: 'trashed',
           contentRevision: fieldValue.serverTimestamp()
         }, { merge: true });
+        if (withdrawal) transaction.set(publicReference, withdrawal);
         return true;
       });
     }
@@ -1956,8 +2027,10 @@
         throw new Error('영구 삭제 방식이 올바르지 않습니다.');
       }
       const reference = db.doc('quiz_sets/' + setId);
+      const publicReference = db.doc('published_quiz_sets/' + setId);
       return db.runTransaction(async transaction => {
         const snapshot = await transaction.get(reference);
+        const publicSnapshot = await transaction.get(publicReference);
         const set = quizSetValue(snapshot);
         if (!set || !set.trashedAt) {
           throw new Error('휴지통에 있는 세트만 영구 삭제할 수 있습니다.');
@@ -1977,10 +2050,15 @@
         if (purgeMode !== 'immediate' && !(owner || admin) || (purgeMode !== 'immediate' && !expired)) {
           throw new Error('30일이 지나기 전에는 영구 삭제할 수 없습니다.');
         }
+        const withdrawal = lifecycleWithdrawalWrite(publicSnapshot, setId);
+        if (withdrawal && requireContentRevision(set) !== withdrawal.revision) {
+          throw new Error('원본과 공개 projection revision이 일치하지 않습니다.');
+        }
         transaction.set(reference, {
           purgeStartedAt: fieldValue.serverTimestamp(),
           lifecycleState: 'purging'
         }, { merge: true });
+        if (withdrawal) transaction.set(publicReference, withdrawal);
         return { started: true };
       });
     }
@@ -2042,6 +2120,18 @@
           if (await purgeOneChild(setId, 'image', document)) deleted += 1;
         }
       }
+      if (deleted < 200) {
+        const publicImageSnapshot = await db.collection(
+          'published_quiz_sets/' + setId + '/images'
+        ).limit(200 - deleted).get({ source: 'server' });
+        storedPublicImages(publicImageSnapshot);
+        const publicImageBatch = db.batch();
+        for (const document of publicImageSnapshot.docs) {
+          publicImageBatch.delete(document.ref);
+          deleted += 1;
+        }
+        if (!publicImageSnapshot.empty) await publicImageBatch.commit();
+      }
       if (deleted > 0) return { done: false, deleted, parentDeleted: false };
 
       // Both child collections were observed empty. The transaction re-reads the
@@ -2051,7 +2141,21 @@
         'quiz_sets/' + setId + '/collaborators'
       ).limit(1).get();
       const imageProbe = await db.collection('images/' + setId + '/q').limit(1).get();
-      if (!collaboratorProbe.empty || !imageProbe.empty) {
+      const publicImageProbe = await db.collection(
+        'published_quiz_sets/' + setId + '/images'
+      ).limit(1).get({ source: 'server' });
+      const publicParentSnapshot = await db.doc(
+        'published_quiz_sets/' + setId
+      ).get({ source: 'server' });
+      if (publicParentSnapshot.exists) {
+        const publicParent = requireStoredProjection(
+          publicParentSnapshot.data() || {}, setId
+        );
+        if (publicParent.status === 'published') {
+          throw new Error('공개 projection이 보이는 동안 원본 parent를 정리할 수 없습니다.');
+        }
+      }
+      if (!collaboratorProbe.empty || !imageProbe.empty || !publicImageProbe.empty) {
         return { done: false, deleted: 0, parentDeleted: false };
       }
       const result = await db.runTransaction(async transaction => {
@@ -3385,6 +3489,185 @@
       };
     }
 
+    function requireLifecycleAllowance(snapshot, ownerUid, expectedRevision, starting) {
+      if (!snapshot || !snapshot.exists) {
+        throw new Error('lifecycle 대상 teacher allowance가 없습니다.');
+      }
+      const allowance = snapshot.data() || {};
+      const email = canonicalTeacherEmail(allowance.emailCanonical);
+      if (allowance.uid !== ownerUid || !email || email !== allowance.emailCanonical ||
+          !['teacher', 'admin'].includes(allowance.role) ||
+          allowanceRevision(allowance) !== expectedRevision) {
+        throw new Error('lifecycle 대상 allowance identity 또는 revision이 변경되었습니다.');
+      }
+      if (starting && (allowance.emailCanonical !== starting.emailCanonical ||
+          allowance.role !== starting.role || allowance.status !== starting.status ||
+          allowance.enabled !== starting.enabled)) {
+        throw new Error('lifecycle 대상 allowance 상태가 작업 중 변경되었습니다.');
+      }
+      return allowance;
+    }
+
+    async function auditOwnedPublications(ownerUid, limit, cursor) {
+      const uid = assertUid(ownerUid);
+      const count = limit == null ? 50 : Number(limit);
+      if (!Number.isSafeInteger(count) || count < 1 || count > 50) {
+        throw new Error('소유 publication 감사 limit은 1~50이어야 합니다.');
+      }
+      if (cursor != null && (!cursor || typeof cursor.id !== 'string' ||
+          typeof cursor.get !== 'function')) {
+        throw new Error('소유 publication 감사 cursor가 유효하지 않습니다.');
+      }
+      let query = db.collection('quiz_sets')
+        .where('ownerUid', '==', uid)
+        .where('lifecycleState', 'in', ['active', 'trashed', 'purging']);
+      if (typeof query.orderBy === 'function') query = query.orderBy('ownerUid', 'asc');
+      if (cursor != null) {
+        if (typeof query.startAfter !== 'function') {
+          throw new Error('소유 publication 감사 cursor paging을 지원하지 않습니다.');
+        }
+        query = query.startAfter(cursor);
+      }
+      const sourceSnapshot = await query.limit(count).get({ source: 'server' });
+      const items = [];
+      let visibleCount = 0;
+      for (const sourceDocument of sourceSnapshot.docs || []) {
+        const publicationId = canonicalPublicationId(sourceDocument.id, 'publicationId');
+        const source = quizSetValue(sourceDocument);
+        if (!source || source.ownerUid !== uid) {
+          throw new Error('소유 publication 감사 source identity가 일치하지 않습니다.');
+        }
+        const publicSnapshot = await db.doc(
+          'published_quiz_sets/' + publicationId
+        ).get({ source: 'server' });
+        if (!publicSnapshot.exists) continue;
+        const projection = requireStoredProjection(
+          publicSnapshot.data() || {}, publicationId
+        );
+        if (projection.status === 'published') {
+          if (requireContentRevision(source) !== projection.revision) {
+            throw new Error('보이는 publication과 source revision이 일치하지 않습니다.');
+          }
+          visibleCount += 1;
+        }
+        items.push({
+          publicationId,
+          status: projection.status,
+          revision: projection.revision
+        });
+      }
+      const last = (sourceSnapshot.docs || []).at(-1);
+      return {
+        items,
+        nextCursor: (sourceSnapshot.docs || []).length === count ? last : null,
+        visibleCount
+      };
+    }
+
+    async function withdrawOwnedPublicationsForLifecycle(
+      ownerUid, expectedAllowanceRevision, reason, actor
+    ) {
+      const uid = assertUid(ownerUid);
+      const expectedRevision = Number(expectedAllowanceRevision);
+      const lifecycleReason = typeof reason === 'string' ? reason.trim() : '';
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+        throw new Error('정확한 lifecycle allowance revision이 필요합니다.');
+      }
+      if (!lifecycleReason || lifecycleReason.length > 200) {
+        throw new Error('lifecycle 철회 사유는 1~200자여야 합니다.');
+      }
+      const operationActor = assertLifecycleOperationCurrent(actor);
+      const allowanceRef = db.doc('teacher_allowances/' + uid);
+      const startingSnapshot = await allowanceRef.get({ source: 'server' });
+      const starting = requireLifecycleAllowance(
+        startingSnapshot, uid, expectedRevision
+      );
+      const actorEmail = canonicalTeacherEmail(operationActor.email);
+      const ownerOperation = operationActor.uid === uid &&
+        actorEmail === starting.emailCanonical;
+      if (ownerOperation) {
+        if (starting.status !== 'active' || starting.enabled !== true ||
+            !['teacher', 'admin'].includes(operationActor.role)) {
+          throw new Error('active publication 소유자만 lifecycle 철회를 요청할 수 있습니다.');
+        }
+      } else {
+        await requireCurrentAdmin(operationActor);
+      }
+
+      const rereadBoundAllowance = async () => {
+        assertLifecycleOperationCurrent(operationActor);
+        const snapshot = await allowanceRef.get({ source: 'server' });
+        return requireLifecycleAllowance(
+          snapshot, uid, expectedRevision, starting
+        );
+      };
+
+      let withdrawnCount = 0;
+      let remainingVisibleCount = 0;
+      for (let pass = 0; pass < 5; pass += 1) {
+        let cursor = null;
+        do {
+          await rereadBoundAllowance();
+          const page = await auditOwnedPublications(uid, 50, cursor);
+          for (const item of page.items) {
+            if (item.status !== 'published') continue;
+            assertLifecycleOperationCurrent(operationActor);
+            const sourceRef = db.doc('quiz_sets/' + item.publicationId);
+            const publicRef = db.doc('published_quiz_sets/' + item.publicationId);
+            const changed = await db.runTransaction(async transaction => {
+              if (!ownerOperation) await requireTransactionAdmin(transaction, operationActor);
+              const allowanceSnapshot = await transaction.get(allowanceRef);
+              const sourceSnapshot = await transaction.get(sourceRef);
+              const publicSnapshot = await transaction.get(publicRef);
+              requireLifecycleAllowance(
+                allowanceSnapshot, uid, expectedRevision, starting
+              );
+              assertLifecycleOperationCurrent(operationActor);
+              const source = quizSetValue(sourceSnapshot);
+              if (!source || source.ownerUid !== uid) {
+                throw new Error('lifecycle 철회 source identity가 변경되었습니다.');
+              }
+              if (ownerOperation && (source.ownerUid !== operationActor.uid ||
+                  canonicalTeacherEmail(source.ownerEmail) !== actorEmail)) {
+                throw new Error('lifecycle 철회 source 소유권이 일치하지 않습니다.');
+              }
+              if (!publicSnapshot.exists) return false;
+              const projection = requireStoredProjection(
+                publicSnapshot.data() || {}, item.publicationId
+              );
+              if (projection.status !== 'published') return false;
+              if (requireContentRevision(source) !== projection.revision) {
+                throw new Error('lifecycle 철회 source/publication revision이 변경되었습니다.');
+              }
+              const withdrawal = lifecycleWithdrawalWrite(
+                publicSnapshot, item.publicationId
+              );
+              transaction.set(publicRef, withdrawal);
+              return true;
+            });
+            if (changed) withdrawnCount += 1;
+          }
+          cursor = page.nextCursor;
+        } while (cursor);
+
+        remainingVisibleCount = 0;
+        cursor = null;
+        do {
+          await rereadBoundAllowance();
+          const audit = await auditOwnedPublications(uid, 50, cursor);
+          remainingVisibleCount += audit.visibleCount;
+          cursor = audit.nextCursor;
+        } while (cursor);
+        if (remainingVisibleCount === 0) {
+          await rereadBoundAllowance();
+          return { withdrawnCount, remainingVisibleCount: 0 };
+        }
+      }
+      throw new Error(
+        '보이는 publication이 계속 생성되어 lifecycle 철회를 재개해야 합니다.'
+      );
+    }
+
     async function getPublishedQuizSet(publicationId) {
       const id = canonicalPublicationId(publicationId, 'publicationId');
       const snapshot = await db.doc('published_quiz_sets/' + id)
@@ -4354,9 +4637,30 @@
       validateAllowanceRole(role);
       if (!['active', 'suspended'].includes(status)) throw new Error('active 또는 suspended 상태만 허용됩니다.');
       if (reason.length > 200) throw new Error('중지 사유는 200자 이하여야 합니다.');
+      assertLifecycleOperationCurrent(actor);
+      const admin = await requireCurrentAdmin(actor);
+      if (admin.uid === uid && (status !== 'active' || role !== 'admin')) {
+        throw new Error('현재 관리자 계정은 자기 역할을 낮추거나 중지할 수 없습니다.');
+      }
       const allowanceRef = db.doc('teacher_allowances/' + uid);
+      if (status === 'suspended') {
+        const initialSnapshot = await allowanceRef.get({ source: 'server' });
+        const initialAllowance = requireLifecycleAllowance(
+          initialSnapshot, uid, expectedRevision
+        );
+        if (initialAllowance.emailCanonical !== email) {
+          throw new Error('teacher allowance email 신원이 일치하지 않습니다.');
+        }
+        if (initialAllowance.status === 'deletion_pending') {
+          throw new Error('deletion_pending 교사는 이 API로 변경할 수 없습니다.');
+        }
+        await withdrawOwnedPublicationsForLifecycle(
+          uid, expectedRevision, 'teacher-suspension', actor
+        );
+        assertLifecycleOperationCurrent(actor);
+      }
       return db.runTransaction(async transaction => {
-        const admin = await requireTransactionAdmin(transaction, actor);
+        const transactionAdmin = await requireTransactionAdmin(transaction, actor);
         await requireTeacherAccessMigrationUnlocked(transaction);
         const allowanceSnapshot = await transaction.get(allowanceRef);
         if (!allowanceSnapshot.exists) throw new Error('teacher allowance 승인 문서가 없습니다.');
@@ -4370,9 +4674,10 @@
         if (currentRevision !== expectedRevision) throw new Error('teacher allowance revision이 변경되었습니다.');
         if (allowance.emailCanonical !== email) throw new Error('teacher allowance email 신원이 일치하지 않습니다.');
         if (allowance.status === 'deletion_pending') throw new Error('deletion_pending 교사는 이 API로 변경할 수 없습니다.');
-        if (admin.uid === uid && (status !== 'active' || role !== 'admin')) {
+        if (transactionAdmin.uid === uid && (status !== 'active' || role !== 'admin')) {
           throw new Error('현재 관리자 계정은 자기 역할을 낮추거나 중지할 수 없습니다.');
         }
+        assertLifecycleOperationCurrent(actor);
         const legacyRef = db.doc('teacher_allowlist/' + email);
         const legacySnapshot = await transaction.get(legacyRef);
         if (!legacySnapshot.exists) throw new Error('legacy allowance 승인 문서가 일치하지 않습니다.');
@@ -4387,10 +4692,10 @@
         next.administrativeHold = status === 'suspended';
         next.revision = currentRevision + 1;
         next.updatedAt = fieldValue.serverTimestamp();
-        next.updatedByUid = admin.uid;
+        next.updatedByUid = transactionAdmin.uid;
         if (status === 'suspended') {
           next.suspendedAt = fieldValue.serverTimestamp();
-          next.suspendedByUid = admin.uid;
+          next.suspendedByUid = transactionAdmin.uid;
           next.suspensionReason = reason;
         } else {
           delete next.suspendedAt;
@@ -4400,7 +4705,7 @@
         transaction.set(allowanceRef, next);
         transaction.set(legacyRef, {
           uid, enabled: next.enabled, role: next.role,
-          updatedAt: fieldValue.serverTimestamp(), updatedByUid: admin.uid
+          updatedAt: fieldValue.serverTimestamp(), updatedByUid: transactionAdmin.uid
         });
         return { ...next };
       });
@@ -4486,6 +4791,8 @@
       listPublishedQuizSets,
       getOwnedPublicationStatus,
       listAdminPublishedQuizSets,
+      auditOwnedPublications,
+      withdrawOwnedPublicationsForLifecycle,
       getPublishedQuizSet,
       copyPublishedQuizSet,
       startSession,
