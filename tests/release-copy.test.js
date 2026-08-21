@@ -13,6 +13,20 @@ test('release docs require Email/Password provider, verification template, reset
   }
 });
 
+test('email-auth release gate requires Password Policy minimum 8 and Require before provider activation', () => {
+  const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
+  const policyIndex = emailAuthDocs.indexOf('Firebase Password Policy');
+  const minimumIndex = emailAuthDocs.indexOf('최소 길이 8');
+  const requireIndex = emailAuthDocs.indexOf('Enforcement \`Require\`');
+  const providerIndex = emailAuthDocs.indexOf('Email/Password 공급자 활성화');
+
+  assert.ok(policyIndex >= 0, 'Password Policy operator gate must be documented');
+  assert.ok(minimumIndex > policyIndex, 'minimum length 8 must be part of the policy gate');
+  assert.ok(requireIndex > minimumIndex, 'Require enforcement must be part of the policy gate');
+  assert.ok(providerIndex > requireIndex, 'provider activation must happen after the policy gate');
+  assert.match(emailAuthDocs, /최소 길이 8[^\n]*Enforcement \`Require\`[^\n]*(확인|검증)[^\n]*(실패|아니면)[^\n]*(중단|활성화하지)/);
+});
+
 test('email-auth release guide keeps the deployment lock through strict/static verify and exact unlock', () => {
   const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
   const deploymentSection = emailAuthDocs.slice(
@@ -20,6 +34,7 @@ test('email-auth release guide keeps the deployment lock through strict/static v
     emailAuthDocs.indexOf('## 3. 운영 전 브라우저 인수')
   );
   const orderedSteps = [
+    'Firebase Password Policy',
     'Node와 Firestore Emulator 검증',
     '호환 head Rules',
     'lock/apply 보고서와 safe gate',
@@ -27,6 +42,7 @@ test('email-auth release guide keeps the deployment lock through strict/static v
     '정적 앱',
     '동일 token/updateTime generation post-deploy verify',
     'exact unlock',
+    'Email/Password 공급자 활성화',
     '브라우저 인수'
   ];
 
@@ -40,6 +56,31 @@ test('email-auth release guide keeps the deployment lock through strict/static v
   assert.match(emailAuthDocs, /`shining-jade\.github\.io`/);
   assert.match(emailAuthDocs, /Firebase Authentication 사용자[\s\S]{0,120}teacher_allowances[\s\S]{0,120}삭제·재생성·중복 생성하지 않는다/);
   assert.match(emailAuthDocs, /provider 충돌[\s\S]{0,120}allowance가 중복 생성되지 않/);
+});
+
+test('HANDOFF preserves the full authoritative email-auth release sequence without an unsafe shortcut', () => {
+  const handoff = read('HANDOFF.md');
+  const emailAuthBlock = handoff.slice(0, handoff.indexOf('> 2026-08-20'));
+  const ordered = [
+    'Firebase Password Policy 최소 길이 8·Enforcement \`Require\`',
+    'Node/Emulator 검증',
+    '호환 head Rules',
+    'access exact lock/apply',
+    'session join lock/recount/gate',
+    'strict UID Rules·static app',
+    '같은 generation post-deploy verify',
+    'exact unlock',
+    'Email/Password 공급자 활성화',
+    '브라우저 인수'
+  ];
+  let cursor = -1;
+  for (const marker of ordered) {
+    const next = emailAuthBlock.indexOf(marker, cursor + 1);
+    assert.ok(next > cursor, `HANDOFF email-auth order missing or unsafe: ${marker}`);
+    cursor = next;
+  }
+  assert.match(emailAuthBlock, /safeToDeployStrictRules: true/);
+  assert.match(emailAuthBlock, /Google·Anonymous 유지/);
 });
 
 test('README routes teacher approval through verified providers and UID allowances, not direct legacy allowlists', () => {

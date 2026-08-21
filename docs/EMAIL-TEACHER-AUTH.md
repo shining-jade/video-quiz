@@ -6,10 +6,11 @@
 
 ## 1. Firebase Authentication 준비
 
-1. Firebase Console → **Authentication → Sign-in method**에서 **Email/Password**를 사용 설정한다.
-2. 이미 사용 중인 **Google**(교사)과 **Anonymous**(학생) 공급자는 끄거나 다시 만들지 않는다. Google 로그인과 익명 학생 입장은 회귀 검증 대상이다.
-3. Authentication → **Settings → Authorized domains**에서 `shining-jade.github.io`가 **승인된 도메인**인지 확인한다. 기존 운영 도메인은 삭제하지 않는다.
-4. Authentication → **Templates**에서 이메일 인증과 비밀번호 재설정 템플릿을 한국어로 설정한다. 링크의 continue/action URL은 승인된 운영 도메인만 사용하고, 테스트 주소나 비밀 정보를 본문에 넣지 않는다.
+1. Firebase Console → **Authentication → Settings → Password policy**에서 정책을 준비한다. **Firebase Password Policy**는 **최소 길이 8**, **Enforcement `Require`**로 저장되었음을 확인한다. 확인에 실패하거나 값이 다르면 배포를 중단하고 Email/Password를 활성화하지 않는다. 클라이언트의 `minlength="8"` 검사는 이 서버 정책을 대신하지 않는다.
+2. **Authentication → Sign-in method**의 Email/Password 설정을 검토하되 아직 활성화 토글을 켜지 않는다. 실제 활성화는 아래 strict UID Rules·배포 검증·exact unlock 뒤의 명시 단계에서만 한다.
+3. 이미 사용 중인 **Google**(교사)과 **Anonymous**(학생) 공급자는 끄거나 다시 만들지 않는다. Google 로그인과 익명 학생 입장은 회귀 검증 대상이다.
+4. Authentication → **Settings → Authorized domains**에서 `shining-jade.github.io`가 **승인된 도메인**인지 확인한다. 기존 운영 도메인은 삭제하지 않는다.
+5. Authentication → **Templates**에서 이메일 인증과 비밀번호 재설정 템플릿을 한국어로 설정한다. 링크의 continue/action URL은 승인된 운영 도메인만 사용하고, 테스트 주소나 비밀 정보를 본문에 넣지 않는다.
 
 권장 한국어 안내는 다음 의미를 포함한다.
 
@@ -31,14 +32,15 @@ git diff --check
 
 두 테스트 suite가 실패 0인지 확인한다. 그 뒤 기존 [`TEACHER-ACCESS-CLASS-PLANNING.md`](./TEACHER-ACCESS-CLASS-PLANNING.md)의 데이터 전환·잠금 gate를 포함해 다음 순서를 지킨다.
 
-1. Firebase Auth Email/Password, 승인된 도메인, 한국어 이메일 인증·비밀번호 재설정 템플릿을 준비한다.
+1. **Firebase Password Policy** 최소 길이 8·Enforcement `Require`, 승인된 도메인, 한국어 이메일 인증·비밀번호 재설정 템플릿을 준비하고 확인한다. 이때 Email/Password 공급자는 아직 비활성 상태로 둔다.
 2. Node와 Firestore Emulator 검증을 통과시킨다.
-3. **호환 head Rules**를 먼저 배포한다. 이 Rules는 migration/lock gate를 진행하는 동안 기존 데이터의 안전한 전환 경로만 열어 둔다.
-4. backup 뒤 access·session counter 잠금을 잡고 apply를 수행한다. 두 **lock/apply 보고서와 safe gate**가 정확한 project, token, updateTime generation 및 `safeToDeployStrictRules: true`를 기록해야 한다.
-5. 두 잠금을 유지한 채 **엄격한 Firestore Rules**와 **정적 앱**을 순서대로 배포한다. strict/static 배포 중에는 unlock하거나 legacy fallback을 다시 열지 않는다.
+3. **호환 head Rules**를 먼저 배포한다. 이 Rules는 migration/lock gate를 진행하는 동안 기존 Google 계정의 안전한 전환 경로만 열어 두며, password provider는 UID allowance 없이 legacy email fallback을 사용할 수 없어야 한다.
+4. backup 뒤 access exact lock/apply와 session join lock/recount/gate를 수행한다. 두 **lock/apply 보고서와 safe gate**가 정확한 project, token, updateTime generation 및 `safeToDeployStrictRules: true`를 기록해야 한다.
+5. 두 잠금을 유지한 채 password provider에 authoritative `teacher_allowances/{uid}` binding만 허용하는 **엄격한 Firestore Rules**와 **정적 앱**을 순서대로 배포한다. strict/static 배포 중에는 unlock하거나 legacy fallback을 다시 열지 않는다.
 6. 잠금을 유지한 채 **동일 token/updateTime generation post-deploy verify**를 수행한다. access와 session counter의 verify 보고서가 배포 전 apply와 같은 token·generation, complete 상태, 안전 판정을 다시 확인하지 못하면 rollback 또는 원인 조사를 하고 unlock하지 않는다.
 7. 두 verify가 안전할 때만 동일 token·generation으로 **exact unlock**을 수행한다.
-8. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
+8. strict UID Rules 배포·검증·exact unlock이 모두 끝난 뒤에만 **Email/Password 공급자 활성화**를 수행한다. 기존 Google·Anonymous는 유지하며, 위 증거 중 하나라도 없으면 활성화하지 않는다.
+9. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
 
 ## 3. 운영 전 브라우저 인수
 

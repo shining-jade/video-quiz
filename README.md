@@ -43,7 +43,7 @@
 
 ### 2) Google·이메일 교사 로그인과 학생 익명 로그인 설정
 
-Firebase Console → **Authentication → Sign-in method**에서 **Google**(교사용), **Email/Password**(교사용), **익명(Anonymous)**(학생용)을 사용 설정합니다. Email/Password를 켤 때 Google이나 Anonymous를 끄지 마세요. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
+Firebase Console에서는 기존 **Google**(교사용)과 **익명(Anonymous)**(학생용)을 유지합니다. **Email/Password**(교사용)는 Firebase Password Policy 최소 길이 8·Enforcement `Require`를 확인하고, 호환 Rules → migration lock/apply → strict UID Rules·정적 앱 → 같은 generation verify → exact unlock을 모두 마친 뒤에만 활성화합니다. 이 순서는 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며 Google이나 Anonymous를 끄지 않습니다. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
 
 교사용 메뉴에서는 Google 로그인 또는 이메일 가입·로그인·비밀번호 재설정을 선택할 수 있습니다. Google과 Email/Password 모두 검증된 provider여야 하며, 미승인·비활성·이메일 미검증 계정은 신청 안내를 봅니다. 사용자가 신청하면 관리자가 승인 UI에서 현재 UID와 canonical 이메일에 결합된 `teacher_allowances`를 생성합니다. 운영자는 legacy email allowlist를 직접 만들거나 수정하지 않습니다. 같은 이메일의 provider 충돌은 계정을 자동 병합하거나 allowance를 복제하지 않고 기존 로그인 방식을 안내합니다. 같은 승인 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다. Console 설정, 한국어 이메일 템플릿, 인수와 롤백은 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며, 비밀번호와 재설정 링크는 운영 기록에 남기지 않습니다.
 
@@ -296,7 +296,8 @@ sessions/{sessionId}                        반 세션 기본 정보
     students/{학생_익명_UID}                 참여 학생
     responses/{학생_익명_UID}                학생 한 명의 공개 답안 상태
     grades/{학생_익명_UID}                   교사 전용 정오·점수
-teacher_allowlist/{검증된_이메일}            비공개 교사 승인과 teacher/admin 역할
+teacher_allowances/{Firebase_UID}            UID·canonical 이메일에 결합된 권위 교사 승인과 teacher/admin 역할
+teacher_allowlist/{검증된_이메일}            이전 기간에만 쓰는 Google 전용 legacy 호환 mirror
 clock/{sampleId}                            서버 시각 보정용 임시 문서
 ```
 
@@ -329,7 +330,7 @@ clock/{sampleId}                            서버 시각 보정용 임시 문�
 | 증상 | 원인과 해결 |
 |---|---|
 | 학생 입장에서 익명 인증 오류가 남 | Authentication → Sign-in method → 익명을 사용 설정하세요. |
-| 교사 메뉴에서 승인되지 않았다고 나옴 | Google 공급자, 이메일 검증 상태, `teacher_allowlist/{이메일}`의 `enabled`와 `role`을 확인하세요. 승인 목록은 웹에서 읽을 수 없는 것이 정상입니다. |
+| 교사 메뉴에서 승인되지 않았다고 나옴 | 지원 provider, 이메일 검증 상태, 현재 Firebase UID 경로의 `teacher_allowances/{uid}`가 같은 canonical 이메일·활성 status·`teacher`/`admin` role인지 확인하세요. password 계정에 legacy email allowlist를 만들어 우회하지 마세요. 승인 문서는 웹에서 직접 읽을 수 없는 것이 정상입니다. |
 | 저장이 안 되고 `permission-denied`가 보임 | 로그인한 교사가 세트 소유자인지, 승인 문서가 활성인지, 이전 보고서가 배포 안전 상태인지와 현재 게시 규칙 버전을 확인하세요. |
 | 영상이 안 나옴 | 학교 네트워크가 유튜브를 차단했을 수 있습니다. 교사 PC에서 유튜브가 열리는지 확인하세요. |
 | 영상이 저절로 재생되지 않음 | 브라우저 정책상 첫 재생은 사람이 눌러야 합니다. 재생 버튼을 한 번 눌러 주세요. |
