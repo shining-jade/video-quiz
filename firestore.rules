@@ -10,12 +10,13 @@ service cloud.firestore {
         request.auth.token.firebase.sign_in_provider == 'anonymous';
     }
 
+    function supportedTeacherProvider() {
+      return request.auth.token.firebase.sign_in_provider in ['google.com', 'password'];
+    }
+
     function verifiedEmail() {
-      return signedIn() &&
-        request.auth.token.email is string &&
-        [request.auth.token.email_verified,
-          request.auth.token.firebase.sign_in_provider] ==
-        [true, 'google.com'];
+      return request.auth != null && request.auth.token.email is string &&
+        request.auth.token.email_verified == true && supportedTeacherProvider();
     }
 
     function legacyAllowancePath() {
@@ -1843,14 +1844,13 @@ service cloud.firestore {
         !('imageMutation' in request.resource.data) &&
         !('trashedAt' in request.resource.data) &&
         !('purgeStartedAt' in request.resource.data);
-      allow update: if (canEditSet(setId) && activeSet(setId) &&
+      allow update: if ((!request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'lifecycleState',
+          'imageCount', 'imageMutation'
+        ])) && canEditSet(setId) && activeSet(setId) &&
         request.resource.data.lifecycleState in ['active', 'trashed', 'purging'] &&
         request.resource.data.ownerUid == resource.data.ownerUid &&
         request.resource.data.ownerEmail == resource.data.ownerEmail &&
-        (!request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'ownerUid', 'ownerEmail', 'trashedAt', 'purgeStartedAt', 'lifecycleState',
-          'imageCount', 'imageMutation'
-        ])) &&
         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['archived']) || ownsSet(setId)) &&
         validCollaboratorCount(setId)) || validSetLifecycleTransition(setId);
       allow delete: if canPurgeSet(setId) &&

@@ -3943,18 +3943,71 @@ rulesTest('비활성화된 다른 admin은 후속 승인 목록 쓰기를 할 �
   }));
 });
 
-rulesTest('승인 문서만으로는 비Google·미검증·비활성 계정에 교사 권한을 주지 않는다', async () => {
+rulesTest('verified password teacher follows the same allowance matrix as Google', async () => {
+  const passwordTeacher = testEnvironment.authenticatedContext('owner-uid', {
+    email: 'owner@school.kr',
+    email_verified: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
+
+  await assertSucceeds(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
+});
+
+rulesTest('unverified password, unsupported providers, missing provider, and mismatched allowance remain denied', async () => {
+  const verifiedOwnerEmail = {
+    email: 'owner@school.kr',
+    email_verified: true
+  };
+  const deniedActors = [
+    ['unverified password', 'owner-uid', {
+      ...verifiedOwnerEmail,
+      email_verified: false,
+      firebase: { sign_in_provider: 'password' }
+    }],
+    ['custom provider', 'owner-uid', {
+      ...verifiedOwnerEmail,
+      firebase: { sign_in_provider: 'custom' }
+    }],
+    ['anonymous provider', 'owner-uid', {
+      ...verifiedOwnerEmail,
+      firebase: { sign_in_provider: 'anonymous' }
+    }],
+    ['phone provider', 'owner-uid', {
+      ...verifiedOwnerEmail,
+      firebase: { sign_in_provider: 'phone' }
+    }],
+    ['missing provider', 'owner-uid', {
+      ...verifiedOwnerEmail,
+      firebase: {}
+    }],
+    ['wrong allowance UID', 'other-teacher-uid', {
+      ...verifiedOwnerEmail,
+      firebase: { sign_in_provider: 'password' }
+    }]
+  ];
+
+  for (const [label, uid, claims] of deniedActors) {
+    const db = testEnvironment.authenticatedContext(uid, claims).firestore();
+    await assertFails(getDoc(doc(db, 'quiz_sets/set1'))).catch(error => {
+      throw new Error(`${label}: ${error.message}`, { cause: error });
+    });
+  }
+});
+
+rulesTest('verified password teacher follows the same legacy migration fallback as Google', async () => {
   await adminWrite('teacher_allowlist/password@school.kr', { enabled: true, role: 'teacher' });
   await adminWrite('teacher_allowlist/unverified@school.kr', { enabled: true, role: 'teacher' });
   await adminWrite('teacher_allowlist/disabled@school.kr', { enabled: false, role: 'admin' });
   await adminWrite('teacher_allowlist/invalid@school.kr', { enabled: true, role: 'owner' });
 
-  const contexts = [
-    testEnvironment.authenticatedContext('password-uid', {
-      email: 'password@school.kr',
-      email_verified: true,
-      firebase: { sign_in_provider: 'password' }
-    }).firestore(),
+  const passwordTeacher = testEnvironment.authenticatedContext('password-uid', {
+    email: 'password@school.kr',
+    email_verified: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
+  await assertSucceeds(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
+
+  const deniedContexts = [
     testEnvironment.authenticatedContext('unverified-uid', {
       email: 'unverified@school.kr',
       email_verified: false,
@@ -3964,7 +4017,7 @@ rulesTest('승인 문서만으로는 비Google·미검증·비활성 계정에 �
     googleContext('invalid-uid', 'invalid@school.kr')
   ];
 
-  for (const db of contexts) {
+  for (const db of deniedContexts) {
     await assertFails(getDoc(doc(db, 'quiz_sets/set1')));
   }
 });
