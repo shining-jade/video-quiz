@@ -3943,14 +3943,31 @@ rulesTest('비활성화된 다른 admin은 후속 승인 목록 쓰기를 할 �
   }));
 });
 
-rulesTest('verified password teacher follows the same allowance matrix as Google', async () => {
+rulesTest('authoritative verified password teacher and admin keep representative list write and admin access', async () => {
   const passwordTeacher = testEnvironment.authenticatedContext('owner-uid', {
     email: 'owner@school.kr',
     email_verified: true,
     firebase: { sign_in_provider: 'password' }
   }).firestore();
+  const passwordAdmin = testEnvironment.authenticatedContext('admin-uid', {
+    email: 'admin@school.kr',
+    email_verified: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
 
   await assertSucceeds(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
+  await assertSucceeds(getDocs(query(
+    collection(passwordTeacher, 'quiz_sets'),
+    where('lifecycleState', '==', 'active')
+  )));
+  await assertSucceeds(updateDoc(doc(passwordTeacher, 'quiz_sets/set1'), {
+    title: 'password owner update'
+  }));
+  await assertSucceeds(getDocs(query(
+    collection(passwordAdmin, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
 });
 
 rulesTest('unverified password, unsupported providers, missing provider, and mismatched allowance remain denied', async () => {
@@ -3994,8 +4011,23 @@ rulesTest('unverified password, unsupported providers, missing provider, and mis
   }
 });
 
-rulesTest('verified password teacher follows the same legacy migration fallback as Google', async () => {
+rulesTest('stored authoritative allowance UID mismatch denies the matching-path password user', async () => {
+  await adminWrite('teacher_allowances/owner-uid', {
+    ...(await adminRead('teacher_allowances/owner-uid')),
+    uid: 'different-stored-uid'
+  });
+  const passwordOwner = testEnvironment.authenticatedContext('owner-uid', {
+    email: 'owner@school.kr',
+    email_verified: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
+
+  await assertFails(getDoc(doc(passwordOwner, 'quiz_sets/set1')));
+});
+
+rulesTest('migration-incomplete legacy teacher and admin fallback is Google-only and denies password', async () => {
   await adminWrite('teacher_allowlist/password@school.kr', { enabled: true, role: 'teacher' });
+  await adminWrite('teacher_allowlist/password-admin@school.kr', { enabled: true, role: 'admin' });
   await adminWrite('teacher_allowlist/unverified@school.kr', { enabled: true, role: 'teacher' });
   await adminWrite('teacher_allowlist/disabled@school.kr', { enabled: false, role: 'admin' });
   await adminWrite('teacher_allowlist/invalid@school.kr', { enabled: true, role: 'owner' });
@@ -4005,7 +4037,17 @@ rulesTest('verified password teacher follows the same legacy migration fallback 
     email_verified: true,
     firebase: { sign_in_provider: 'password' }
   }).firestore();
-  await assertSucceeds(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
+  const passwordAdmin = testEnvironment.authenticatedContext('password-admin-uid', {
+    email: 'password-admin@school.kr',
+    email_verified: true,
+    firebase: { sign_in_provider: 'password' }
+  }).firestore();
+  await assertFails(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
+  await assertFails(getDocs(query(
+    collection(passwordAdmin, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
 
   const deniedContexts = [
     testEnvironment.authenticatedContext('unverified-uid', {

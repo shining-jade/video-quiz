@@ -34,7 +34,8 @@ service cloud.firestore {
     }
 
     function validLegacyTeacherAllowance() {
-      return exists(legacyAllowancePath()) &&
+      return request.auth.token.firebase.sign_in_provider == 'google.com' &&
+        exists(legacyAllowancePath()) &&
         get(legacyAllowancePath()).data.enabled == true &&
         get(legacyAllowancePath()).data.role in ['teacher', 'admin'];
     }
