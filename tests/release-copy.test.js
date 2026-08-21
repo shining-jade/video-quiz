@@ -13,7 +13,7 @@ test('release docs require Email/Password provider, verification template, reset
   }
 });
 
-test('email-auth release guide fixes the compatibility-to-strict safety order and account boundaries', () => {
+test('email-auth release guide keeps the deployment lock through strict/static verify and exact unlock', () => {
   const emailAuthDocs = read('docs/EMAIL-TEACHER-AUTH.md');
   const deploymentSection = emailAuthDocs.slice(
     emailAuthDocs.indexOf('## 2. 자동 검증과 배포 순서'),
@@ -22,9 +22,11 @@ test('email-auth release guide fixes the compatibility-to-strict safety order an
   const orderedSteps = [
     'Node와 Firestore Emulator 검증',
     '호환 head Rules',
-    'migration/lock/apply/verify/unlock gate',
+    'lock/apply 보고서와 safe gate',
     '엄격한 Firestore Rules',
     '정적 앱',
+    '동일 token/updateTime generation post-deploy verify',
+    'exact unlock',
     '브라우저 인수'
   ];
 

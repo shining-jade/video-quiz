@@ -34,9 +34,11 @@ git diff --check
 1. Firebase Auth Email/Password, 승인된 도메인, 한국어 이메일 인증·비밀번호 재설정 템플릿을 준비한다.
 2. Node와 Firestore Emulator 검증을 통과시킨다.
 3. **호환 head Rules**를 먼저 배포한다. 이 Rules는 migration/lock gate를 진행하는 동안 기존 데이터의 안전한 전환 경로만 열어 둔다.
-4. backup → migration/lock/apply/verify/unlock gate를 정확한 project, token, updateTime generation으로 수행한다. access와 session counter의 apply·verify 보고서가 모두 `safeToDeployStrictRules: true`이고, unlock까지 같은 generation을 재확인하지 못하면 다음 단계로 가지 않는다.
-5. **엄격한 Firestore Rules**를 배포한 뒤에만 **정적 앱**을 배포한다.
-6. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
+4. backup 뒤 access·session counter 잠금을 잡고 apply를 수행한다. 두 **lock/apply 보고서와 safe gate**가 정확한 project, token, updateTime generation 및 `safeToDeployStrictRules: true`를 기록해야 한다.
+5. 두 잠금을 유지한 채 **엄격한 Firestore Rules**와 **정적 앱**을 순서대로 배포한다. strict/static 배포 중에는 unlock하거나 legacy fallback을 다시 열지 않는다.
+6. 잠금을 유지한 채 **동일 token/updateTime generation post-deploy verify**를 수행한다. access와 session counter의 verify 보고서가 배포 전 apply와 같은 token·generation, complete 상태, 안전 판정을 다시 확인하지 못하면 rollback 또는 원인 조사를 하고 unlock하지 않는다.
+7. 두 verify가 안전할 때만 동일 token·generation으로 **exact unlock**을 수행한다.
+8. 아래 브라우저 인수를 통과한 뒤에만 운영 전환을 확정한다.
 
 ## 3. 운영 전 브라우저 인수
 
