@@ -1699,6 +1699,7 @@ service cloud.firestore {
       return data.keys().hasAll(keys) && data.keys().hasOnly(keys) &&
         data.data is string && data.data.size() >= 1 && data.data.size() <= 380100 &&
         (data.data.matches('^data:image/.*$') || data.data.matches('^https://.*$')) &&
+        data.schemaVersion == 1 &&
         data.revision == revision && data.buildToken == buildToken &&
         data.buildToken is string && data.buildToken.size() >= 1 &&
         data.buildToken.size() <= 200;

@@ -4997,6 +4997,100 @@ rulesTest('FixRound1 public image list requires the visible parent revision quer
   assert.deepEqual(visible.docs.map(document => document.id), ['v0q0']);
 });
 
+rulesTest('FixRound3 malformed public image schemaVersion cannot bind or unlock finalization', async () => {
+  const image = 'data:image/png;base64,AAAA';
+  const malformedVersions = [2, '1', { version: 1 }];
+  const owner = actorFirestore('owner');
+
+  for (const [index, schemaVersion] of malformedVersions.entries()) {
+    const publicationId = `image-schema-bind-${index}`;
+    await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
+    await adminWrite(`published_quiz_sets/${publicationId}`, publicRulesBuilding(
+      publicationId, {
+        imageCount: 1,
+        buildVideoCount: 1,
+        buildQuestionCount: 1,
+        buildImageCount: 0
+      }
+    ));
+
+    const bind = writeBatch(owner);
+    bind.update(doc(owner, `published_quiz_sets/${publicationId}`), {
+      buildImageCount: 1,
+      buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
+    });
+    bind.set(doc(owner, `published_quiz_sets/${publicationId}/images/v0q0`), {
+      data: image,
+      revision: 'rev-1',
+      schemaVersion,
+      buildToken: 'build-token-1'
+    });
+    await assertFails(bind.commit());
+
+    await assertFails(setDoc(doc(owner, `published_quiz_sets/${publicationId}`), {
+      ...publicRulesProjection(publicationId, { imageCount: 1 }),
+      publishedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+  }
+
+  const validId = 'image-schema-bind-valid';
+  await seedPublicRulesSource(validId, { imageCount: 1 }, { v0q0: image });
+  await adminWrite(`published_quiz_sets/${validId}`, publicRulesBuilding(validId, {
+    imageCount: 1,
+    buildVideoCount: 1,
+    buildQuestionCount: 1,
+    buildImageCount: 0
+  }));
+  const validBind = writeBatch(owner);
+  validBind.update(doc(owner, `published_quiz_sets/${validId}`), {
+    buildImageCount: 1,
+    buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
+  });
+  validBind.set(doc(owner, `published_quiz_sets/${validId}/images/v0q0`), {
+    data: image,
+    revision: 'rev-1',
+    schemaVersion: 1,
+    buildToken: 'build-token-1'
+  });
+  await assertSucceeds(validBind.commit());
+  await assertSucceeds(setDoc(doc(owner, `published_quiz_sets/${validId}`), {
+    ...publicRulesProjection(validId, { imageCount: 1 }),
+    publishedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  }));
+
+  const other = actorFirestore('otherTeacher');
+  await assertSucceeds(getDoc(doc(other,
+    `published_quiz_sets/${validId}/images/v0q0`)));
+  const visible = await assertSucceeds(getDocs(query(
+    collection(other, `published_quiz_sets/${validId}/images`),
+    where('revision', '==', 'rev-1'),
+    where('schemaVersion', '==', 1)
+  )));
+  assert.deepEqual(visible.docs.map(document => document.id), ['v0q0']);
+});
+
+rulesTest('FixRound3 direct image get rejects Admin-seeded malformed schemaVersion', async () => {
+  const image = 'data:image/png;base64,AAAA';
+  const malformedVersions = [2, '1', { version: 1 }];
+  const other = actorFirestore('otherTeacher');
+
+  for (const [index, schemaVersion] of malformedVersions.entries()) {
+    const publicationId = `image-schema-get-${index}`;
+    await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
+    await seedPublishedRulesProjection(publicationId, {}, { v0q0: image });
+    await adminWrite(`published_quiz_sets/${publicationId}/images/v0q0`, {
+      data: image,
+      revision: 'rev-1',
+      schemaVersion,
+      buildToken: 'build-token-1'
+    });
+    await assertFails(getDoc(doc(other,
+      `published_quiz_sets/${publicationId}/images/v0q0`)));
+  }
+});
+
 rulesTest('FixRound1 public image processed counter rejects a standalone parent increment', async () => {
   await seedPublicRulesSource('image-parent-only', { imageCount: 1 }, {
     v0q0: 'data:image/png;base64,AAAA'
