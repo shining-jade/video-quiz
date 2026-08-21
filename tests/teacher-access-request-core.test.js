@@ -13,6 +13,26 @@ const user = {
   providerData: [{ providerId: 'google.com' }]
 };
 
+function passwordUser() {
+  return {
+    uid: 'teacher-password',
+    email: ' Teacher@Example.COM ',
+    displayName: '비밀번호교사',
+    emailVerified: true,
+    isAnonymous: false,
+    providerData: [{ providerId: 'password' }]
+  };
+}
+
+test('only verified non-anonymous Google or password users are teacher identities', () => {
+  assert.equal(core.isVerifiedTeacherUser(user), true);
+  assert.equal(core.isVerifiedTeacherUser(passwordUser()), true);
+  assert.equal(core.isVerifiedTeacherUser({ ...user, isAnonymous: true }), false);
+  assert.equal(core.isVerifiedTeacherUser({ ...user, emailVerified: false }), false);
+  assert.equal(core.isVerifiedTeacherUser({ ...user, providerData: [{ providerId: 'custom' }] }), false);
+  assert.equal(core.isVerifiedTeacherUser(null), false);
+});
+
 function request(overrides = {}) {
   return Object.assign(core.buildRequest(user, {
     organization: '1학년',
@@ -34,6 +54,12 @@ test('verified Google user creates the literal normalized pending request', () =
     organization: '1학년', note: '보건 수업', status: 'pending', revision: 1,
     createdAtMs: 1000, updatedAtMs: 1000
   });
+});
+
+test('verified password user builds the same bounded approval request', () => {
+  const request = core.buildRequest(passwordUser(), { organization: '학교', note: '' }, 10);
+  assert.equal(request.emailCanonical, 'teacher@example.com');
+  assert.equal(request.status, 'pending');
 });
 
 test('buildRequest derives identity and ignores caller privileged fields', () => {
@@ -66,10 +92,10 @@ test('Firebase UID values remain opaque and are stored and compared exactly', ()
   assert.throws(() => core.buildRequest({ ...user, uid: '' }, { organization: '', note: '' }, 1000), /uid/);
 });
 
-test('buildRequest requires a verified Google identity and bounded profile fields', () => {
+test('buildRequest requires a verified supported identity and bounded profile fields', () => {
   expectInvalidBuild({ ...user, isAnonymous: true }, /anonymous|인증/);
   expectInvalidBuild({ ...user, emailVerified: false }, /verified|인증/);
-  expectInvalidBuild({ ...user, providerData: [{ providerId: 'password' }] }, /Google|google/);
+  expectInvalidBuild({ ...user, providerData: [{ providerId: 'custom' }] }, /Google|google|인증/);
   expectInvalidBuild({ ...user, displayName: '' }, /이름|name/);
   expectInvalidBuild({ ...user, displayName: 'x'.repeat(81) }, /이름|name/);
   assert.throws(() => core.buildRequest(user, { organization: 'x'.repeat(121), note: '' }, 1000), /조직|organization/);

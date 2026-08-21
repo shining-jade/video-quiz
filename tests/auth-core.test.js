@@ -75,6 +75,18 @@ test('a non-Google Firebase session token is not a Google sign-in', () => {
   }), false);
 });
 
+function token(providerId) {
+  return { claims: { firebase: { sign_in_provider: providerId } } };
+}
+
+test('Google and password providers are supported but anonymous and custom providers are rejected', () => {
+  assert.equal(core.isSupportedTeacherSignIn(token('google.com')), true);
+  assert.equal(core.isSupportedTeacherSignIn(token('password')), true);
+  assert.equal(core.isSupportedTeacherSignIn(token('anonymous')), false);
+  assert.equal(core.isSupportedTeacherSignIn(token('custom')), false);
+  assert.equal(core.isSupportedTeacherSignIn(null), false);
+});
+
 test('the admin route uses the admin-only access gate', () => {
   const router = extractFunction(readIndex(), 'router');
   assert.match(router, /case 'admin':\s*requireAdmin\(screenAdmin\)/);

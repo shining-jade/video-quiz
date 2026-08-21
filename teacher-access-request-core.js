@@ -23,10 +23,10 @@
     throw new Error(message);
   }
 
-  function isGoogleUser(user) {
+  function isVerifiedTeacherUser(user) {
     return !!user && user.isAnonymous !== true && user.emailVerified === true &&
       Array.isArray(user.providerData) && user.providerData.some(provider =>
-        provider && provider.providerId === 'google.com'
+        provider && ['google.com', 'password'].includes(provider.providerId)
       );
   }
 
@@ -37,7 +37,7 @@
   }
 
   function buildRequest(user, input = {}, nowMs) {
-    if (!isGoogleUser(user)) fail('verified Google 인증 사용자만 신청할 수 있습니다.');
+    if (!isVerifiedTeacherUser(user)) fail('verified 교사 인증 사용자만 신청할 수 있습니다.');
     const uid = user.uid;
     const emailCanonical = canonicalEmail(user.email);
     const displayName = text(user.displayName).trim();
@@ -128,5 +128,5 @@
     return allowance.enabled === true ? 'active' : 'unapproved';
   }
 
-  return { buildRequest, validateRequest, canCancel, nextDecision, teacherStatus };
+  return { isVerifiedTeacherUser, buildRequest, validateRequest, canCancel, nextDecision, teacherStatus };
 });

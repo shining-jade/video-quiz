@@ -8,6 +8,11 @@
     return !!firebaseClaims && firebaseClaims.sign_in_provider === 'google.com';
   }
 
+  function isSupportedTeacherSignIn(tokenResult) {
+    const firebaseClaims = tokenResult && tokenResult.claims && tokenResult.claims.firebase;
+    return !!firebaseClaims && ['google.com', 'password'].includes(firebaseClaims.sign_in_provider);
+  }
+
   function teacherState(user, allowance) {
     if (!user || user.isAnonymous) return { status: 'signed-out', uid: '', email: '', role: '' };
     if (!user.emailVerified) return { status: 'unverified', uid: user.uid, email: user.email || '', role: '' };
@@ -17,5 +22,5 @@
   }
   const isTeacher = state => !!state && (state.role === 'teacher' || state.role === 'admin');
   const isAdmin = state => !!state && state.role === 'admin';
-  return { isGoogleSignIn, teacherState, isTeacher, isAdmin };
+  return { isGoogleSignIn, isSupportedTeacherSignIn, teacherState, isTeacher, isAdmin };
 });
