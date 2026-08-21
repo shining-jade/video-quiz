@@ -6,12 +6,14 @@
 
 - `quiz_sets/{setId}`와 `images/{setId}/q/{key}`는 비공개 원본이다. 공동 편집자는 원본을 편집할 수 있지만 게시·철회·휴지통 이동은 소유자만 한다.
 - `published_quiz_sets/{publicationId}`는 비식별 공개 부모다. 허용 필드는 `publicationId`, `sourceSetId`, `status`, `moderationStatus`, `revision`, `title`, `description`, `authorDisplayName`, `revealMode`, `limitSec`, `revealDelaySec`, `autoPause`, `videoCount`, `questionCount`, `imageCount`, `publishedAt`, `updatedAt`뿐이다. `building` 또는 숨김 tombstone인 `cancelled` 동안에만 `buildToken`, `buildVideoCount`, `buildQuestionCount`, `buildImageCount`, `buildMutation`이 추가된다.
-- `published_quiz_sets/{publicationId}/videos/{videoKey}`는 `videoKey`, `videoId`, `videoUrl`, `startSec`, `endSec`, `revision`, `buildToken`만 가진다.
-- `published_quiz_sets/{publicationId}/questions/{questionKey}`는 `type`, `t`, `text`, `choices`, `answer`, `answers`, `accept`, `imgUp`, `imgUrl`, `explain`, `explainImgUp`, `explainImgUrl`, `limitSec`, `questionKey`, `videoKey`, `revision`, `buildToken`만 가진다. 내부 검토자·학생·소유자 식별 필드는 금지한다.
-- `published_quiz_sets/{publicationId}/images/{imageKey}`는 `data`, `revision`, `buildToken`만 가진다.
+- `published_quiz_sets/{publicationId}/videos/{videoKey}`는 `videoKey`, `videoId`, `videoUrl`, `startSec`, `endSec`, `revision`, `schemaVersion`, `buildToken`만 가진다.
+- `published_quiz_sets/{publicationId}/questions/{questionKey}`는 `type`, `t`, `text`, `choices`, `answer`, `answers`, `accept`, `imgUp`, `imgUrl`, `explain`, `explainImgUp`, `explainImgUrl`, `limitSec`, `questionKey`, `videoKey`, `revision`, `schemaVersion`, `buildToken`만 가진다. 내부 검토자·학생·소유자 식별 필드는 금지한다.
+- `published_quiz_sets/{publicationId}/images/{imageKey}`는 `data`, `revision`, `schemaVersion`, `buildToken`만 가진다.
 - `published_quiz_audits/{publicationId}`는 관리자 moderation 감사 기록이며 일반 교사에게 공개하지 않는다.
 
 공개 projection에는 소유자의 **이메일과 UID 비공개** 원칙을 적용한다. 표시 이름만 허용하며 원본 경로의 개인정보, 공동 편집자, 학생 응답, 정답 검토 메타데이터는 복제하지 않는다.
+
+모든 public child의 현재 `schemaVersion`은 `1`이다. Rules가 허용하는 child collection query는 부모와 같은 `revision` 및 `schemaVersion == 1`을 둘 다 equality 조건으로 사용해야 한다. create/get은 전체 필드 allowlist와 값 형식을 검증한다. marker가 없거나 다른 legacy child는 이 query 결과에서 숨겨지며, 배포 전 auditor가 누락·형식 불일치·unknown field를 발견하면 배포를 중단한다. 이 marker를 검증 없이 backfill하지 않는다.
 
 ## 게시, 복사, moderation
 
@@ -23,7 +25,7 @@
 
 ## 수명주기 fail-closed 계약
 
-교사 중지·탈퇴 대기처럼 allowance를 바꾸는 작업은 먼저 `publication_lifecycle_locks/{ownerUid}`와 고정 전역 문서 `publication_lifecycle_gates/current`를 한 transaction으로 만든다. 한 번에 한 소유자의 수명주기만 진행하며, lock에는 시작 allowance revision/role/status/enabled, operation ID, actor와 사유를 정확히 기록한다. 공개 목록은 전역 gate가 없고 `status == published`인 bounded query만 허용한다. 개별 get/child/copy는 gate가 없는 것에 더해 원본의 명시적 `lifecycleState == active`, 정확한 활성 allowance, 소유자 lock 부재를 모두 확인한다. 따라서 감사 시작과 allowance 변경 사이에도 publication을 새로 만들거나 읽는 visibility gap이 없다.
+교사 중지·탈퇴 대기처럼 allowance를 바꾸는 작업은 먼저 `publication_lifecycle_locks/{ownerUid}`와 고정 전역 문서 `publication_lifecycle_gates/current`를 한 transaction으로 만든다. 한 번에 한 소유자의 수명주기만 진행하며, lock에는 시작 allowance revision/role/status/enabled, operation ID, actor와 사유를 정확히 기록한다. 공개 목록은 전역 gate가 없고 `status == published`인 bounded query만 허용한다. 개별 get/child/copy는 gate가 없는 것에 더해 원본의 명시적 `lifecycleState == active`, 정확한 활성 allowance, 소유자 lock 부재를 모두 확인한다. 전역 gate가 존재하면 대상 소유자와 관계없이 building 생성·child 결합·게시 완료·재게시·공개 복구·독립 복사 시작/진행/완료를 모두 거부한다. 따라서 감사 시작과 allowance 변경 사이에도 publication을 새로 만들거나 읽는 visibility gap이 없다.
 
 최종 allowance 변경은 같은 transaction에서 시작 allowance와 lock/gate identity를 다시 읽고 두 잠금을 함께 소비한다. 실패 복구는 정확히 같은 operation/allowance identity일 때만 기존 잠금을 채택해 재감사하거나 exact release한다. stale, malformed, 다른 actor의 gate는 자동 삭제하지 않고 전체 공개 읽기와 게시를 fail-closed로 유지하며 운영자가 Admin SDK로 원인을 확인한다. 잠금 해제 자체가 실패하면 잠금을 남겨 안전하게 재시도한다.
 
@@ -54,7 +56,7 @@ git diff --check
 pnpm audit:public-library -- --project <exact-project-id> --target-mode production --max-documents <bounded-count> --output <new-report>.json
 ```
 
-보고서가 `complete: true`, `safeToDeployPublicLibrary: true`, `findings: []`가 아니면 배포를 중단한다. 특히 `lifecycleState 누락`, active lifecycle gate/owner lock, PII 필드, orphan child/audit, source revision·allowance 불일치는 모두 실패다. auditor에는 apply 모드가 없다.
+보고서가 `complete: true`, `safeToDeployPublicLibrary: true`, `findings: []`가 아니면 배포를 중단한다. auditor는 `quiz_sets`와 `publication_lifecycle_locks` 전체를 bounded scan하므로 공개 부모가 없는 legacy lifecycle 누락과 orphan/malformed/stale lock도 실패다. active/orphan/malformed/stale gate, child `schemaVersion` 누락·불일치, PII 필드, orphan child/audit, source revision·allowance 불일치도 모두 실패다. `maxDocuments`는 gate와 direct binding get 및 collection query 반환 문서를 포함한 전체 read 예산이다. 완전성을 확인하기 위한 `remaining + 1` probe는 예산 밖으로 실행하지 않고, 정확한 경계에 닿으면 `complete: false`로 실패 폐쇄한다. auditor에는 apply 모드가 없다.
 
 1. 백업과 기존 migration gate를 확인하고 `audit:public-library` production dry-run을 새 durable 출력에 실행한다. legacy `lifecycleState` 누락을 포함해 `safeToDeployPublicLibrary`가 false면 자동 수정하지 말고 중단한다.
 2. `firebase.json`이 가리키는 `firestore.indexes.json`의 `published_quiz_sets(status ASC, updatedAt DESC, __name__ DESC)` composite index를 먼저 배포하고 build 완료를 확인한다. index가 building/error이면 Rules나 앱 배포를 시작하지 않는다.

@@ -22,11 +22,13 @@
     'explain', 'explainImgUp', 'explainImgUrl', 'limitSec'
   ];
   const SETTINGS_KEYS = ['revealMode', 'limitSec', 'revealDelaySec', 'autoPause'];
+  const PUBLIC_CHILD_SCHEMA_VERSION = 1;
   const VIDEO_PART_KEYS = [
-    'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec', 'revision', 'buildToken'
+    'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec',
+    'revision', 'schemaVersion', 'buildToken'
   ];
   const QUESTION_PART_KEYS = QUESTION_KEYS.concat([
-    'questionKey', 'videoKey', 'revision', 'buildToken'
+    'questionKey', 'videoKey', 'revision', 'schemaVersion', 'buildToken'
   ]);
   const STATUSES = new Set(['building', 'cancelled', 'published', 'withdrawn', 'moderated']);
   const MODERATION_STATUSES = new Set(['clear', 'moderated']);
@@ -443,6 +445,9 @@
     if (typeof value.buildToken !== 'string' || !value.buildToken || value.buildToken.length > 200) {
       errors.push(path + '.buildToken is invalid.');
     }
+    if (value.schemaVersion !== PUBLIC_CHILD_SCHEMA_VERSION) {
+      errors.push(path + '.schemaVersion is invalid.');
+    }
   }
 
   function validateVideoPart(value, key) {
@@ -522,6 +527,7 @@
         startSec: video.startSec,
         endSec: video.endSec,
         revision: value.revision,
+        schemaVersion: PUBLIC_CHILD_SCHEMA_VERSION,
         buildToken: token
       };
       video.questions.forEach((question, questionIndex) => {
@@ -532,6 +538,7 @@
           questionKey,
           videoKey,
           revision: value.revision,
+          schemaVersion: PUBLIC_CHILD_SCHEMA_VERSION,
           buildToken: token
         };
       });
@@ -628,6 +635,7 @@
   return {
     PUBLIC_KEYS,
     PUBLIC_PARENT_KEYS,
+    PUBLIC_CHILD_SCHEMA_VERSION,
     buildProjection,
     validateProjection,
     validateParent,

@@ -8,6 +8,7 @@ const path = require('node:path');
 
 function fakeDb(initial) {
   const documents = new Map(Object.entries(initial));
+  const readStats = { total: 0, queryDocuments: 0, directGets: 0 };
   const snapshot = fullPath => ({
     id: fullPath.split('/').at(-1),
     exists: documents.has(fullPath),
@@ -17,7 +18,12 @@ function fakeDb(initial) {
   function query(paths) {
     return {
       limit(count) {
-        return { async get() { return { docs: paths.slice(0, count).map(snapshot) }; } };
+        return { async get() {
+          const docs = paths.slice(0, count).map(snapshot);
+          readStats.total += docs.length;
+          readStats.queryDocuments += docs.length;
+          return { docs };
+        } };
       }
     };
   }
@@ -33,7 +39,12 @@ function fakeDb(initial) {
         return parts.length >= 4 && parts.at(-2) === name;
       }).sort());
     },
-    doc(fullPath) { return { async get() { return snapshot(fullPath); } }; }
+    doc(fullPath) { return { async get() {
+      readStats.total += 1;
+      readStats.directGets += 1;
+      return snapshot(fullPath);
+    } }; },
+    readStats
   };
 }
 
@@ -124,6 +135,125 @@ test('bounded auditor accepts an exact clean graph and fails closed on PII and o
   assert.ok(report.findings.some(item => item.code === 'PUBLIC_PII_KEY'));
   assert.ok(report.findings.some(item => item.code === 'ORPHAN_PUBLIC_CHILD'));
   assert.ok(report.findings.some(item => item.code === 'CHILD_REVISION_MISMATCH'));
+});
+
+test('auditor globally finds legacy sources and orphan malformed stale lifecycle locks', async () => {
+  const { auditPublicLibrary } = require('../public-library-audit.js');
+  const fixture = validFixture();
+  fixture['quiz_sets/legacy-private-only'] = {
+    title: 'legacy', ownerUid: 'legacy-owner', ownerEmail: 'legacy@school.kr'
+  };
+  fixture['publication_lifecycle_locks/orphan-owner'] = {
+    ownerUid: 'orphan-owner', ownerEmailCanonical: 'orphan@school.kr',
+    allowanceRevision: 1, allowanceRole: 'teacher', allowanceStatus: 'active',
+    allowanceEnabled: true, reason: 'teacher-suspension', operationId: 'orphan-op',
+    initiatedByUid: 'admin', initiatedByRole: 'admin', createdAt: new Date(1)
+  };
+  fixture['publication_lifecycle_locks/malformed-owner'] = {
+    ownerUid: 'wrong-document-id', operationId: 'malformed-op'
+  };
+  fixture['quiz_sets/stale-source'] = {
+    ...fixture['quiz_sets/set-1'], ownerUid: 'stale-owner', ownerEmail: 'stale@school.kr'
+  };
+  fixture['teacher_allowances/stale-owner'] = {
+    uid: 'stale-owner', emailCanonical: 'stale@school.kr', revision: 4,
+    role: 'teacher', status: 'active', enabled: true
+  };
+  fixture['publication_lifecycle_locks/stale-owner'] = {
+    ownerUid: 'stale-owner', ownerEmailCanonical: 'stale@school.kr',
+    allowanceRevision: 3, allowanceRole: 'teacher', allowanceStatus: 'active',
+    allowanceEnabled: true, reason: 'teacher-suspension', operationId: 'stale-op',
+    initiatedByUid: 'admin', initiatedByRole: 'admin', createdAt: new Date(1)
+  };
+
+  const report = await auditPublicLibrary({ db: fakeDb(fixture), maxDocuments: 100 });
+  assert.equal(report.safeToDeployPublicLibrary, false);
+  for (const code of [
+    'LEGACY_SOURCE_LIFECYCLE_MISSING',
+    'ORPHAN_LIFECYCLE_LOCK',
+    'LIFECYCLE_LOCK_MALFORMED',
+    'LIFECYCLE_LOCK_STALE'
+  ]) {
+    assert.ok(report.findings.some(item => item.code === code), code);
+  }
+  assert.equal(report.scanned.sources, 3);
+  assert.equal(report.scanned.locks, 3);
+});
+
+test('auditor detects an unpaired owner lock without any published parent', async () => {
+  const { auditPublicLibrary } = require('../public-library-audit.js');
+  const fixture = validFixture();
+  delete fixture['published_quiz_sets/set-1'];
+  delete fixture['published_quiz_sets/set-1/videos/v0'];
+  delete fixture['published_quiz_sets/set-1/questions/v0q0'];
+  fixture['publication_lifecycle_locks/owner'] = {
+    ownerUid: 'owner', ownerEmailCanonical: 'owner@school.kr',
+    allowanceRevision: 0, allowanceRole: 'teacher', allowanceStatus: 'active',
+    allowanceEnabled: true, reason: 'teacher-suspension', operationId: 'unpaired-op',
+    initiatedByUid: 'admin', initiatedByRole: 'admin', createdAt: new Date(1)
+  };
+
+  const report = await auditPublicLibrary({ db: fakeDb(fixture), maxDocuments: 50 });
+  assert.ok(report.findings.some(item =>
+    item.code === 'ORPHAN_LIFECYCLE_LOCK' &&
+    item.path === 'publication_lifecycle_locks/owner'
+  ));
+  assert.equal(report.safeToDeployPublicLibrary, false);
+});
+
+test('auditor classifies malformed orphan and stale fixed lifecycle gates', async () => {
+  const { auditPublicLibrary } = require('../public-library-audit.js');
+  const malformed = validFixture();
+  malformed['publication_lifecycle_gates/current'] = {
+    ownerUid: 'ghost', operationId: 'malformed-gate'
+  };
+  const malformedReport = await auditPublicLibrary({
+    db: fakeDb(malformed), maxDocuments: 50
+  });
+  assert.ok(malformedReport.findings.some(item =>
+    item.code === 'LIFECYCLE_GATE_MALFORMED'
+  ));
+  assert.ok(malformedReport.findings.some(item =>
+    item.code === 'ORPHAN_LIFECYCLE_GATE'
+  ));
+
+  const stale = validFixture();
+  const lock = {
+    ownerUid: 'owner', ownerEmailCanonical: 'owner@school.kr',
+    allowanceRevision: 0, allowanceRole: 'teacher', allowanceStatus: 'active',
+    allowanceEnabled: true, reason: 'teacher-suspension', operationId: 'lock-op',
+    initiatedByUid: 'admin', initiatedByRole: 'admin', createdAt: new Date(1)
+  };
+  stale['publication_lifecycle_locks/owner'] = lock;
+  stale['publication_lifecycle_gates/current'] = { ...lock, operationId: 'stale-gate-op' };
+  const staleReport = await auditPublicLibrary({ db: fakeDb(stale), maxDocuments: 50 });
+  assert.ok(staleReport.findings.some(item => item.code === 'LIFECYCLE_GATE_STALE'));
+});
+
+test('auditor fails deployment for legacy missing and malformed child schema markers', async () => {
+  const { auditPublicLibrary } = require('../public-library-audit.js');
+  const fixture = validFixture();
+  delete fixture['published_quiz_sets/set-1/videos/v0'].schemaVersion;
+  fixture['published_quiz_sets/set-1/questions/v0q0'].schemaVersion = 2;
+
+  const report = await auditPublicLibrary({ db: fakeDb(fixture), maxDocuments: 50 });
+  assert.equal(report.safeToDeployPublicLibrary, false);
+  assert.ok(report.findings.some(item => item.code === 'CHILD_SCHEMA_VERSION_MISSING'));
+  assert.ok(report.findings.some(item => item.code === 'CHILD_SCHEMA_VERSION_MALFORMED'));
+});
+
+test('auditor fails closed without exceeding the exact total document read budget', async () => {
+  const { auditPublicLibrary } = require('../public-library-audit.js');
+  for (const maxDocuments of [1, 2, 3, 5]) {
+    const db = fakeDb(validFixture());
+    const report = await auditPublicLibrary({ db, maxDocuments });
+    assert.equal(report.complete, false);
+    assert.equal(report.safeToDeployPublicLibrary, false);
+    assert.ok(db.readStats.total <= maxDocuments,
+      `read ${db.readStats.total} documents with budget ${maxDocuments}`);
+    assert.equal(report.scanned.reads, db.readStats.total);
+    assert.ok(report.findings.some(item => item.code === 'SCAN_LIMIT_REACHED'));
+  }
 });
 
 test('CLI reserves before Admin init and never overwrites a durable report', async () => {

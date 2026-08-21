@@ -15369,7 +15369,8 @@ test('republish preserves the first publishedAt through a failed hidden build an
       patch: { status: 'withdrawn' }
     }),
     'published_quiz_sets/set-1/images/v0q0': {
-      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'first-build'
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1',
+      schemaVersion: 1, buildToken: 'first-build'
     }
   }, {
     committedServerMillis: 1_000,
@@ -15764,7 +15765,8 @@ test('purge removes bounded public images and refuses parent deletion while an o
       imageCount: 1, patch: { status: 'withdrawn' }
     }),
     'published_quiz_sets/set-1/images/v0q0': {
-      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-token-1'
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1',
+      schemaVersion: 1, buildToken: 'build-token-1'
     }
   });
   const store = createStore(fake);
@@ -16036,10 +16038,10 @@ test('copyPublished reads public projection only and finalizes a strict private 
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
     ...publicLibraryStoredDocuments('set-1', { imageCount: 2 }),
     'published_quiz_sets/set-1/images/v0q0': {
-      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-1'
     },
     'published_quiz_sets/set-1/images/v0q0e': {
-      data: PUBLIC_LIBRARY_IMAGE_B, revision: 'rev-1', buildToken: 'build-1'
+      data: PUBLIC_LIBRARY_IMAGE_B, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-1'
     }
   });
   const store = createStore(fake);
@@ -16111,7 +16113,8 @@ test('copyPublished rejects withdrawal races, moderated rows, partial public ima
       'teacher_allowances/teacher-b': allowance,
       ...publicLibraryStoredDocuments('set-1', { imageCount: 2 }),
       'published_quiz_sets/set-1/images/v0q0': {
-        data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+        data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1',
+        schemaVersion: 1, buildToken: 'build-1'
       }
     });
     await assert.rejects(
@@ -16160,7 +16163,7 @@ test('copyPublished retries safely after an ambiguous final commit without dupli
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
     ...publicLibraryStoredDocuments('set-1', { imageCount: 1 }),
     'published_quiz_sets/set-1/images/v0q0': {
-      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-1'
     }
   }, {
     failTransactionAfterCommitAt: 3,
@@ -16188,7 +16191,7 @@ test('copyPublished resumes a hidden copying destination after an ambiguous imag
     'teacher_allowances/teacher-b': publicLibraryAllowance('teacher-b', 'teacher-b@school.kr'),
     ...publicLibraryStoredDocuments('set-1', { imageCount: 1 }),
     'published_quiz_sets/set-1/images/v0q0': {
-      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-1'
     }
   }, {
     failTransactionAfterCommitAt: 2,
@@ -16224,7 +16227,7 @@ test('copyPublished preflight rejects more than 500 writes before destination tr
   };
   for (let index = 0; index < 497; index += 1) {
     initial['published_quiz_sets/set-1/images/v0q' + index] = {
-      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', buildToken: 'build-1'
+      data: PUBLIC_LIBRARY_IMAGE_A, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-1'
     };
   }
   const fake = makeFirestoreFake(initial, { maxRequestWrites: 500 });

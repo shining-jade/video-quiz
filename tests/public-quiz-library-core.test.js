@@ -68,13 +68,17 @@ test('flat storage splits exact video and question children and reassembles only
   const value = projection();
   const flat = Core.flattenProjection(value, 'build-token-1');
 
+  assert.equal(Core.PUBLIC_CHILD_SCHEMA_VERSION, 1);
   assert.equal('videos' in flat.parent, false);
   assert.equal('settings' in flat.parent, false);
   assert.deepEqual(Object.keys(flat.videos), ['v0']);
   assert.deepEqual(Object.keys(flat.questions), ['v0q0']);
   assert.deepEqual(Object.keys(flat.videos.v0).sort(), [
-    'buildToken', 'endSec', 'revision', 'startSec', 'videoId', 'videoKey', 'videoUrl'
+    'buildToken', 'endSec', 'revision', 'schemaVersion', 'startSec',
+    'videoId', 'videoKey', 'videoUrl'
   ]);
+  assert.equal(flat.videos.v0.schemaVersion, 1);
+  assert.equal(flat.questions.v0q0.schemaVersion, 1);
   assert.equal(flat.questions.v0q0.reviewerEmail, undefined);
   assert.equal(flat.questions.v0q0.studentResponses, undefined);
   assert.equal(flat.questions.v0q0.questionKey, 'v0q0');

@@ -563,6 +563,7 @@ async function seedPublishedRulesProjection(publicationId = 'library-set', patch
     await adminWrite(`published_quiz_sets/${publicationId}/images/${key}`, {
       data,
       revision: projection.revision,
+      schemaVersion: 1,
       buildToken: 'build-token-1'
     });
   }
@@ -4412,10 +4413,11 @@ rulesTest('published projection list requires exact visible status order and bou
   }
 });
 
-rulesTest('publication lifecycle gate deterministically closes list get children and races', async () => {
+rulesTest('FixRound2 publication lifecycle gate deterministically closes list get children and races', async () => {
   const publicationId = 'gate-interleave';
-  await seedPublicRulesSource(publicationId);
-  await seedPublishedRulesProjection(publicationId);
+  const image = 'data:image/png;base64,AAAA';
+  await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
+  await seedPublishedRulesProjection(publicationId, {}, { v0q0: image });
   const admin = actorFirestore('admin');
   const other = actorFirestore('otherTeacher');
   const owner = actorFirestore('owner');
@@ -4425,8 +4427,23 @@ rulesTest('publication lifecycle gate deterministically closes list get children
     orderBy('updatedAt', 'desc'),
     queryLimit(50)
   ));
+  const visibleChildren = db => [
+    ['videos', 'v0'], ['questions', 'v0q0'], ['images', 'v0q0']
+  ].map(([name, key]) => ({
+    get: () => getDoc(doc(db,
+      `published_quiz_sets/${publicationId}/${name}/${key}`)),
+    list: () => getDocs(query(
+      collection(db, `published_quiz_sets/${publicationId}/${name}`),
+      where('revision', '==', 'rev-1'),
+      where('schemaVersion', '==', 1)
+    ))
+  }));
   await assertSucceeds(publicQuery(other));
   await assertSucceeds(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
+  for (const child of visibleChildren(other)) {
+    await assertSucceeds(child.get());
+    await assertSucceeds(child.list());
+  }
 
   const lock = {
     ownerUid: actors.owner.uid,
@@ -4450,6 +4467,10 @@ rulesTest('publication lifecycle gate deterministically closes list get children
   await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
   await assertFails(getDoc(doc(other,
     `published_quiz_sets/${publicationId}/questions/v0q0`)));
+  for (const child of visibleChildren(other)) {
+    await assertFails(child.get());
+    await assertFails(child.list());
+  }
   await assert.rejects(emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner));
   await assertFails(setDoc(doc(other, 'publication_lifecycle_gates/current'), {
     ...lock, operationId: 'forged', createdAt: serverTimestamp()
@@ -4463,10 +4484,175 @@ rulesTest('publication lifecycle gate deterministically closes list get children
 
   await adminWrite('publication_lifecycle_gates/current', {
     ownerUid: actors.owner.uid,
+    ownerEmailCanonical: actors.owner.email,
+    allowanceRevision: 999,
+    allowanceRole: 'teacher',
+    allowanceStatus: 'active',
+    allowanceEnabled: true,
+    reason: 'teacher-suspension',
+    operationId: 'well-shaped-stale-gate',
+    initiatedByUid: actors.admin.uid,
+    initiatedByRole: 'admin',
+    createdAt: Timestamp.fromMillis(1)
+  });
+  await assertFails(publicQuery(other));
+  for (const child of visibleChildren(other)) {
+    await assertFails(child.get());
+    await assertFails(child.list());
+  }
+  await adminWrite('publication_lifecycle_gates/current', undefined);
+
+  await adminWrite('publication_lifecycle_gates/current', {
+    ownerUid: actors.owner.uid,
     operationId: 'malformed-stale-gate'
   });
   await assertFails(publicQuery(other));
+  for (const child of visibleChildren(other)) {
+    await assertFails(child.get());
+    await assertFails(child.list());
+  }
   await assertFails(deleteDoc(doc(admin, 'publication_lifecycle_gates/current')));
+});
+
+rulesTest('FixRound2 legacy malformed children stay outside the schema-bound collection query', async () => {
+  const publicationId = 'child-list-schema';
+  const image = 'data:image/png;base64,AAAA';
+  await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
+  await seedPublishedRulesProjection(publicationId, {}, { v0q0: image });
+  const other = actorFirestore('otherTeacher');
+
+  for (const [name, key] of [
+    ['videos', 'v0'], ['questions', 'v0q0'], ['images', 'v0q0']
+  ]) {
+    const path = `published_quiz_sets/${publicationId}/${name}/${key}`;
+    const malformed = { ...(await adminRead(path)), reviewerEmail: 'private@school.kr' };
+    delete malformed.schemaVersion;
+    await adminWrite(path, malformed);
+    await assertFails(getDoc(doc(other, path)));
+    const hidden = await assertSucceeds(getDocs(query(
+      collection(other, `published_quiz_sets/${publicationId}/${name}`),
+      where('revision', '==', 'rev-1'),
+      where('schemaVersion', '==', 1)
+    )));
+    assert.equal(hidden.empty, true);
+  }
+});
+
+rulesTest('FixRound2 global lifecycle gate blocks unrelated publication builds and public copy starts', async () => {
+  const other = actorFirestore('otherTeacher');
+  const sourceId = 'global-gate-source';
+  const buildId = 'global-gate-build';
+  const progressId = 'global-gate-progress';
+  const finalId = 'global-gate-final';
+  const replaceId = 'global-gate-replace';
+  const restoreId = 'global-gate-restore';
+  await seedPublicRulesSource(sourceId);
+  await seedPublishedRulesProjection(sourceId);
+  await seedPublicRulesSource(buildId, {
+    ownerUid: actors.otherTeacher.uid,
+    ownerEmail: actors.otherTeacher.email
+  });
+  await seedPublicRulesSource(finalId, {
+    ownerUid: actors.otherTeacher.uid,
+    ownerEmail: actors.otherTeacher.email
+  });
+  await adminWrite(`published_quiz_sets/${finalId}`, publicRulesBuilding(finalId, {
+    authorDisplayName: '다른 교사',
+    buildVideoCount: 1,
+    buildQuestionCount: 1
+  }));
+  await seedPublicRulesSource(progressId, {
+    ownerUid: actors.otherTeacher.uid,
+    ownerEmail: actors.otherTeacher.email
+  });
+  await adminWrite(`published_quiz_sets/${progressId}`, publicRulesBuilding(progressId, {
+    authorDisplayName: '다른 교사'
+  }));
+  await seedPublicRulesSource(replaceId, {
+    ownerUid: actors.otherTeacher.uid,
+    ownerEmail: actors.otherTeacher.email
+  });
+  await seedPublishedRulesProjection(replaceId);
+  await seedPublicRulesSource(restoreId);
+  await seedPublishedRulesProjection(restoreId, {
+    status: 'moderated', moderationStatus: 'moderated'
+  });
+  await adminWrite(`published_quiz_audits/${restoreId}`, {
+    publicationId: restoreId, revision: 'rev-1', status: 'moderated',
+    moderatedByUid: actors.admin.uid, moderationReason: 'gate restore check',
+    moderatedAt: Timestamp.fromMillis(1_000)
+  });
+  await assertSucceeds(setDoc(doc(other, 'quiz_sets/global-gate-copy-progress'),
+    publicCopyStart(sourceId)));
+  await adminWrite('publication_lifecycle_gates/current', {
+    ownerUid: 'orphan-owner',
+    operationId: 'orphan-malformed-global-gate'
+  });
+
+  await assertFails(setDoc(doc(other, `published_quiz_sets/${buildId}`), {
+    ...publicRulesBuilding(buildId, { authorDisplayName: '다른 교사' }),
+    updatedAt: serverTimestamp()
+  }));
+  await assertFails(setDoc(doc(other, 'quiz_sets/global-gate-copy'),
+    publicCopyStart(sourceId)));
+  const buildStep = writeBatch(other);
+  buildStep.update(doc(other, `published_quiz_sets/${progressId}`), {
+    buildVideoCount: 1,
+    buildMutation: { collection: 'videos', key: 'v0', action: 'bind' }
+  });
+  buildStep.set(doc(other, `published_quiz_sets/${progressId}/videos/v0`),
+    publicRulesFlat(progressId).videos.v0);
+  await assertFails(buildStep.commit());
+  await assertFails(setDoc(doc(other, `published_quiz_sets/${finalId}`), {
+    ...publicRulesProjection(finalId, { authorDisplayName: '다른 교사' }),
+    publishedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  }));
+  await assertFails(setDoc(doc(other, `published_quiz_sets/${replaceId}`), {
+    ...publicRulesBuilding(replaceId, { authorDisplayName: '다른 교사' }),
+    publishedAt: Timestamp.fromMillis(900),
+    updatedAt: serverTimestamp()
+  }));
+  await assertFails(updateDoc(doc(other, 'quiz_sets/global-gate-copy-progress'), {
+    lifecycleState: 'active', copyStatus: deleteField(),
+    updatedAt: serverTimestamp(), contentRevision: serverTimestamp()
+  }));
+  await assert.rejects(emulatorStore(actorFirestore('admin')).adminRestorePublishedQuiz(
+    restoreId, 'rev-1', requestAdminIdentity
+  ));
+
+  await adminWrite('publication_lifecycle_gates/current', undefined);
+  await assertSucceeds(setDoc(doc(other, `published_quiz_sets/${buildId}`), {
+    ...publicRulesBuilding(buildId, { authorDisplayName: '다른 교사' }),
+    updatedAt: serverTimestamp()
+  }));
+  await assertSucceeds(setDoc(doc(other, 'quiz_sets/global-gate-copy'),
+    publicCopyStart(sourceId)));
+  const resumedBuildStep = writeBatch(other);
+  resumedBuildStep.update(doc(other, `published_quiz_sets/${progressId}`), {
+    buildVideoCount: 1,
+    buildMutation: { collection: 'videos', key: 'v0', action: 'bind' }
+  });
+  resumedBuildStep.set(doc(other, `published_quiz_sets/${progressId}/videos/v0`),
+    publicRulesFlat(progressId).videos.v0);
+  await assertSucceeds(resumedBuildStep.commit());
+  await assertSucceeds(setDoc(doc(other, `published_quiz_sets/${finalId}`), {
+    ...publicRulesProjection(finalId, { authorDisplayName: '다른 교사' }),
+    publishedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  }));
+  await assertSucceeds(setDoc(doc(other, `published_quiz_sets/${replaceId}`), {
+    ...publicRulesBuilding(replaceId, { authorDisplayName: '다른 교사' }),
+    publishedAt: Timestamp.fromMillis(900),
+    updatedAt: serverTimestamp()
+  }));
+  await assertSucceeds(updateDoc(doc(other, 'quiz_sets/global-gate-copy-progress'), {
+    lifecycleState: 'active', copyStatus: deleteField(),
+    updatedAt: serverTimestamp(), contentRevision: serverTimestamp()
+  }));
+  await assert.doesNotReject(emulatorStore(actorFirestore('admin')).adminRestorePublishedQuiz(
+    restoreId, 'rev-1', requestAdminIdentity
+  ));
 });
 
 rulesTest('legacy owner audit includes missing lifecycleState but public visibility stays closed', async () => {
@@ -4752,14 +4938,16 @@ rulesTest('published projection public image reads require a visible exact revis
   const other = actorFirestore('otherTeacher');
   const currentImages = () => getDocs(query(
     collection(other, 'published_quiz_sets/image-public/images'),
-    where('revision', '==', 'rev-1')
+    where('revision', '==', 'rev-1'),
+    where('schemaVersion', '==', 1)
   ));
   await assertSucceeds(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
   await assertFails(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
   await assertSucceeds(currentImages());
 
   await adminWrite('published_quiz_sets/image-public/images/v0q0', {
-    data: 'data:image/png;base64,AAAA', revision: 'stale', buildToken: 'build-token-1'
+    data: 'data:image/png;base64,AAAA', revision: 'stale',
+    schemaVersion: 1, buildToken: 'build-token-1'
   });
   await assertFails(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
   await assertSucceeds(currentImages());
@@ -4768,12 +4956,14 @@ rulesTest('published projection public image reads require a visible exact revis
     imageCount: 1, buildImageCount: 1
   }));
   await adminWrite('published_quiz_sets/image-building/images/v0q0', {
-    data: 'data:image/png;base64,AAAA', revision: 'rev-1', buildToken: 'build-token-1'
+    data: 'data:image/png;base64,AAAA', revision: 'rev-1',
+    schemaVersion: 1, buildToken: 'build-token-1'
   });
   await assertFails(getDoc(doc(other, 'published_quiz_sets/image-building/images/v0q0')));
   await assertFails(setDoc(doc(actorFirestore('owner'),
     'published_quiz_sets/image-public/images/standalone'), {
-    data: 'data:image/png;base64,AAAA', revision: 'rev-1', buildToken: 'build-token-1'
+    data: 'data:image/png;base64,AAAA', revision: 'rev-1',
+    schemaVersion: 1, buildToken: 'build-token-1'
   }));
 });
 
@@ -4785,15 +4975,24 @@ rulesTest('FixRound1 public image list requires the visible parent revision quer
     v0q0: 'data:image/png;base64,AAAA'
   });
   await adminWrite('published_quiz_sets/image-list-revision/images/v0q1', {
-    data: 'data:image/png;base64,STALE', revision: 'rev-stale', buildToken: 'old-build'
+    data: 'data:image/png;base64,STALE', revision: 'rev-stale',
+    schemaVersion: 1, buildToken: 'old-build'
   });
   const other = actorFirestore('otherTeacher');
   const images = collection(other, 'published_quiz_sets/image-list-revision/images');
 
   await assertFails(getDocs(images));
+  await assertFails(getDocs(query(images, where('revision', '==', 'rev-1'))));
+  await assertFails(getDocs(query(images, where('schemaVersion', '==', 1))));
+  await assertFails(getDocs(query(
+    images,
+    where('revision', '==', 'rev-1'),
+    where('schemaVersion', '==', 2)
+  )));
   const visible = await assertSucceeds(getDocs(query(
     images,
-    where('revision', '==', 'rev-1')
+    where('revision', '==', 'rev-1'),
+    where('schemaVersion', '==', 1)
   )));
   assert.deepEqual(visible.docs.map(document => document.id), ['v0q0']);
 });
@@ -4829,7 +5028,7 @@ rulesTest('FixRound1 one public image parent increment cannot bind two child doc
   });
   for (const [key, data] of Object.entries(images)) {
     batch.set(doc(owner, `published_quiz_sets/image-double-child/images/${key}`), {
-      data, revision: 'rev-1', buildToken: 'build-token-1'
+      data, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-token-1'
     });
   }
   await assertFails(batch.commit());
@@ -4843,11 +5042,13 @@ rulesTest('FixRound1 public image replacement must consume one exact processed m
     'image-replacement', { imageCount: 1, buildImageCount: 0 }
   ));
   await adminWrite('published_quiz_sets/image-replacement/images/v0q0', {
-    data: 'data:image/png;base64,OLD', revision: 'old-revision', buildToken: 'old-build'
+    data: 'data:image/png;base64,OLD', revision: 'old-revision',
+    schemaVersion: 1, buildToken: 'old-build'
   });
   await assertFails(updateDoc(doc(actorFirestore('owner'),
     'published_quiz_sets/image-replacement/images/v0q0'), {
-    data: 'data:image/png;base64,NEW', revision: 'rev-1', buildToken: 'build-token-1'
+    data: 'data:image/png;base64,NEW', revision: 'rev-1',
+    schemaVersion: 1, buildToken: 'build-token-1'
   }));
 });
 
@@ -4867,7 +5068,7 @@ rulesTest('FixRound1 a public image cannot be rebound while the building parent 
     buildQuestionCount: deleteField(), buildImageCount: deleteField()
   });
   batch.set(doc(owner, 'published_quiz_sets/image-instant-finalize/images/v0q0'), {
-    data: image, revision: 'rev-1', buildToken: 'build-token-1'
+    data: image, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-token-1'
   });
   await assertFails(batch.commit());
 });
@@ -4916,7 +5117,7 @@ rulesTest('FixRound1 building create and image bind use commit-state source revi
     buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
   });
   imageBatch.set(doc(owner, 'published_quiz_sets/image-bind-cas/images/v0q0'), {
-    data: image, revision: 'rev-1', buildToken: 'build-token-1'
+    data: image, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-token-1'
   });
   await assertFails(imageBatch.commit());
 });

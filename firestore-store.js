@@ -2834,7 +2834,9 @@
     async function publicRevisionDocuments(publicationId, collectionName, revision) {
       const snapshot = await db.collection(
         'published_quiz_sets/' + publicationId + '/' + collectionName
-      ).where('revision', '==', revision).get({ source: 'server' });
+      ).where('revision', '==', revision)
+        .where('schemaVersion', '==', publicLibraryCore().PUBLIC_CHILD_SCHEMA_VERSION)
+        .get({ source: 'server' });
       return Object.fromEntries((snapshot.docs || []).map(document => [
         document.id, document.data() || {}
       ]));
@@ -3005,10 +3007,13 @@
         const key = document.id;
         const data = document.data() || {};
         const keys = Object.keys(data);
-        if (imageKey(key) !== key || keys.length !== 3 ||
-            !keys.every(name => ['data', 'revision', 'buildToken'].includes(name)) ||
+        if (imageKey(key) !== key || keys.length !== 4 ||
+            !keys.every(name => [
+              'data', 'revision', 'schemaVersion', 'buildToken'
+            ].includes(name)) ||
             !allowedPublicImageData(data.data) ||
             typeof data.revision !== 'string' || !data.revision ||
+            data.schemaVersion !== publicLibraryCore().PUBLIC_CHILD_SCHEMA_VERSION ||
             typeof data.buildToken !== 'string' || !data.buildToken) {
           throw new Error('공개 이미지 projection binding이 유효하지 않습니다.');
         }
@@ -3190,7 +3195,11 @@
         })),
         ...Object.entries(privateImages).map(([key, data]) => ({
           path: 'published_quiz_sets/' + publicationId + '/images/' + key,
-          value: { data, revision, buildToken }
+          value: {
+            data, revision,
+            schemaVersion: publicLibraryCore().PUBLIC_CHILD_SCHEMA_VERSION,
+            buildToken
+          }
         }))
       ]));
 
@@ -3300,7 +3309,11 @@
       }
       for (const [key, data] of Object.entries(privateImages)) {
         await bindPublicChild(
-          'images', key, { data, revision, buildToken },
+          'images', key, {
+            data, revision,
+            schemaVersion: publicLibraryCore().PUBLIC_CHILD_SCHEMA_VERSION,
+            buildToken
+          },
           'buildImageCount', flat.parent.imageCount
         );
       }

@@ -1244,6 +1244,7 @@ service cloud.firestore {
 
     function validPublicPartBinding(data, revision, buildToken) {
       return data.revision == revision && data.buildToken == buildToken &&
+        data.schemaVersion == 1 &&
         data.revision is string && data.revision.size() >= 1 && data.revision.size() <= 200 &&
         data.buildToken is string && data.buildToken.size() >= 1 &&
         data.buildToken.size() <= 200;
@@ -1252,10 +1253,12 @@ service cloud.firestore {
     function validPublicVideoPart(data, key, revision, buildToken) {
       return data is map &&
         data.keys().hasAll([
-          'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec', 'revision', 'buildToken'
+          'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec',
+          'revision', 'schemaVersion', 'buildToken'
         ]) &&
         data.keys().hasOnly([
-          'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec', 'revision', 'buildToken'
+          'videoKey', 'videoId', 'videoUrl', 'startSec', 'endSec',
+          'revision', 'schemaVersion', 'buildToken'
         ]) &&
         key.matches('^v(0|[1-9][0-9]*)$') && data.videoKey == key &&
         data.videoId is string && data.videoId.matches('^[A-Za-z0-9_-]{11}$') &&
@@ -1270,12 +1273,12 @@ service cloud.firestore {
       let allowed = [
         'type', 't', 'text', 'choices', 'answer', 'answers', 'accept',
         'imgUp', 'imgUrl', 'explain', 'explainImgUp', 'explainImgUrl', 'limitSec',
-        'questionKey', 'videoKey', 'revision', 'buildToken'
+        'questionKey', 'videoKey', 'revision', 'schemaVersion', 'buildToken'
       ];
       return data is map &&
         data.keys().hasAll([
           'type', 't', 'text', 'choices', 'answer',
-          'questionKey', 'videoKey', 'revision', 'buildToken'
+          'questionKey', 'videoKey', 'revision', 'schemaVersion', 'buildToken'
         ]) && data.keys().hasOnly(allowed) &&
         key.matches('^v(0|[1-9][0-9]*)q(0|[1-9][0-9]*)$') &&
         data.videoKey.matches('^v(0|[1-9][0-9]*)$') &&
@@ -1322,7 +1325,8 @@ service cloud.firestore {
 
     function validBuildingCreate(setId) {
       let after = request.resource.data;
-      return validPublicBuildingShape(after, setId) && validOwnerProjectionAfter(after, setId) &&
+      return publicLifecycleGateOpen() &&
+        validPublicBuildingShape(after, setId) && validOwnerProjectionAfter(after, setId) &&
         after.publishedAt == null && after.updatedAt == request.time &&
         after.buildVideoCount == 0 && after.buildQuestionCount == 0 &&
         after.buildImageCount == 0 && !('buildMutation' in after);
@@ -1331,7 +1335,8 @@ service cloud.firestore {
     function validBuildingReplace(setId) {
       let before = resource.data;
       let after = request.resource.data;
-      return before.status in ['published', 'withdrawn', 'cancelled'] &&
+      return publicLifecycleGateOpen() &&
+        before.status in ['published', 'withdrawn', 'cancelled'] &&
         before.moderationStatus == 'clear' &&
         validPublicBuildingShape(after, setId) && validOwnerProjectionAfter(after, setId) &&
         after.publishedAt == before.publishedAt &&
@@ -1347,7 +1352,8 @@ service cloud.firestore {
       let videoPath = publicationVideoPath(setId, mutation.key);
       let questionPath = publicationQuestionPath(setId, mutation.key);
       let imagePath = publicationImagePath(setId, mutation.key);
-      return before.status == 'building' && before.moderationStatus == 'clear' &&
+      return publicLifecycleGateOpen() &&
+        before.status == 'building' && before.moderationStatus == 'clear' &&
         validPublicBuildingStepShape(after, setId) &&
         validOwnerPublicationLifecycleAfter(after, setId) &&
         ((validBuildMutation(mutation, 'videos', mutation.key) &&
@@ -1374,7 +1380,8 @@ service cloud.firestore {
     function validPublicationFinalization(setId) {
       let before = resource.data;
       let after = request.resource.data;
-      return before.status == 'building' && before.moderationStatus == 'clear' &&
+      return publicLifecycleGateOpen() &&
+        before.status == 'building' && before.moderationStatus == 'clear' &&
         before.buildToken is string && before.buildImageCount is int &&
         validPublicParentShape(after, setId) && validOwnerProjectionAfter(after, setId) &&
         publicContentUnchanged(before, after) &&
@@ -1525,7 +1532,8 @@ service cloud.firestore {
       let after = getAfter(parentPath).data;
       let auditBefore = exists(auditPath) ? get(auditPath).data : {};
       let audit = getAfter(auditPath).data;
-      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+      return publicLifecycleGateOpen() &&
+        isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
         existsAfter(auditPath) &&
         (!exists(auditPath)
           ? true
@@ -1568,7 +1576,8 @@ service cloud.firestore {
       let after = getAfter(parentPath).data;
       let auditBefore = get(auditPath).data;
       let auditAfter = getAfter(auditPath).data;
-      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+      return publicLifecycleGateOpen() &&
+        isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
         exists(auditPath) && existsAfter(auditPath) &&
         after.keys().hasAll(publicParentKeys()) && after.keys().hasOnly(publicParentKeys()) &&
         before.status == 'moderated' && before.moderationStatus == 'moderated' &&
@@ -1674,7 +1683,8 @@ service cloud.firestore {
       let parentPath = publicationPath(setId);
       let before = get(parentPath).data;
       let after = getAfter(parentPath).data;
-      return isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
+      return publicLifecycleGateOpen() &&
+        isAdmin() && exists(parentPath) && existsAfter(parentPath) &&
         before.status == 'moderated' && before.moderationStatus == 'moderated' &&
         after.status == 'published' && after.moderationStatus == 'clear' &&
         after.revision == before.revision &&
@@ -1685,7 +1695,7 @@ service cloud.firestore {
     }
 
     function validPublicImageData(data, revision, buildToken) {
-      let keys = ['data', 'revision', 'buildToken'];
+      let keys = ['data', 'revision', 'schemaVersion', 'buildToken'];
       return data.keys().hasAll(keys) && data.keys().hasOnly(keys) &&
         data.data is string && data.data.size() >= 1 && data.data.size() <= 380100 &&
         (data.data.matches('^data:image/.*$') || data.data.matches('^https://.*$')) &&
@@ -1701,7 +1711,8 @@ service cloud.firestore {
     function validPublicBindParent(setId, key, collectionName, countField) {
       let parentBefore = get(publicationPath(setId)).data;
       let parentAfter = getAfter(publicationPath(setId)).data;
-      return parentBefore.status == 'building' && parentBefore.moderationStatus == 'clear' &&
+      return publicLifecycleGateOpen() &&
+        parentBefore.status == 'building' && parentBefore.moderationStatus == 'clear' &&
         parentAfter.status == 'building' && parentAfter.moderationStatus == 'clear' &&
         parentAfter.revision == parentBefore.revision &&
         parentAfter.buildToken == parentBefore.buildToken &&
@@ -1811,14 +1822,15 @@ service cloud.firestore {
           validPublicImageData(data, data.revision, data.buildToken);
     }
 
-    function validPublicImageList(setId, data) {
+    function validPublicImageList(setId, key, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
       return !exists(path)
         ? canPurgeSet(setId)
         : parent.get('status', '') == 'published'
-          ? data.revision == parent.revision && isApprovedTeacher() &&
-            validPublicParentShape(parent, setId)
+          ? isApprovedTeacher() && parent.revision is string &&
+            visiblePublicationSourceIsActive(setId) &&
+            data.revision == parent.revision && data.schemaVersion == 1
           : ownerMayReadHiddenPublication(setId) ||
             lifecycleManagerMayReadHiddenPublication(setId);
     }
@@ -1840,13 +1852,16 @@ service cloud.firestore {
           validPublicVideoPart(data, key, data.revision, data.buildToken);
     }
 
-    function validPublicVideoList(setId, data) {
+    function validPublicVideoList(setId, key, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
-      return exists(path) && data.revision == parent.revision &&
+      return exists(path) &&
         (parent.get('status', '') == 'published'
-          ? isApprovedTeacher() && validPublicParentShape(parent, setId)
-          : ownerMayReadHiddenPublication(setId));
+          ? isApprovedTeacher() && parent.revision is string &&
+            visiblePublicationSourceIsActive(setId) &&
+            data.revision == parent.revision && data.schemaVersion == 1
+          : ownerMayReadHiddenPublication(setId) &&
+            data.revision == parent.revision && data.schemaVersion == 1);
     }
 
     function validPublicQuestionGet(setId, key, data) {
@@ -1859,13 +1874,16 @@ service cloud.firestore {
           validPublicQuestionPart(data, key, data.revision, data.buildToken);
     }
 
-    function validPublicQuestionList(setId, data) {
+    function validPublicQuestionList(setId, key, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
-      return exists(path) && data.revision == parent.revision &&
+      return exists(path) &&
         (parent.get('status', '') == 'published'
-          ? isApprovedTeacher() && validPublicParentShape(parent, setId)
-          : ownerMayReadHiddenPublication(setId));
+          ? isApprovedTeacher() && parent.revision is string &&
+            visiblePublicationSourceIsActive(setId) &&
+            data.revision == parent.revision && data.schemaVersion == 1
+          : ownerMayReadHiddenPublication(setId) &&
+            data.revision == parent.revision && data.schemaVersion == 1);
     }
 
     function publicCopyBaseKeys() {
@@ -1912,7 +1930,7 @@ service cloud.firestore {
     function validPublishedCopySource(publicationId) {
       let path = publicationPath(publicationId);
       let publication = getAfter(path).data;
-      return existsAfter(path) &&
+      return publicLifecycleGateOpen() && existsAfter(path) &&
         publication.keys().hasAll(publicParentKeys()) &&
         publication.keys().hasOnly(publicParentKeys()) &&
         publication.publicationId == publicationId && publication.sourceSetId == publicationId &&
@@ -1926,7 +1944,8 @@ service cloud.firestore {
     function validPublishedCopySourceStillActive(data) {
       let path = publicationPath(data.publicationId);
       let publication = getAfter(path).data;
-      return existsAfter(path) && publication.publicationId == data.publicationId &&
+      return publicLifecycleGateOpen() && existsAfter(path) &&
+        publication.publicationId == data.publicationId &&
         publication.sourceSetId == data.publicationId &&
         publication.status == 'published' && publication.moderationStatus == 'clear' &&
         publication.revision == data.sourcePublicationRevision &&
@@ -3088,7 +3107,7 @@ service cloud.firestore {
 
       match /videos/{key} {
         allow get: if validPublicVideoGet(setId, key, resource.data);
-        allow list: if validPublicVideoList(setId, resource.data);
+        allow list: if validPublicVideoList(setId, key, resource.data);
         allow create, update: if validPublicVideoBind(setId, key);
         allow delete: if false;
         allow read, write: if false;
@@ -3096,7 +3115,7 @@ service cloud.firestore {
 
       match /questions/{key} {
         allow get: if validPublicQuestionGet(setId, key, resource.data);
-        allow list: if validPublicQuestionList(setId, resource.data);
+        allow list: if validPublicQuestionList(setId, key, resource.data);
         allow create, update: if validPublicQuestionBind(setId, key);
         allow delete: if false;
         allow read, write: if false;
@@ -3104,7 +3123,7 @@ service cloud.firestore {
 
       match /images/{key} {
         allow get: if validPublicImageGet(setId, key, resource.data);
-        allow list: if validPublicImageList(setId, resource.data);
+        allow list: if validPublicImageList(setId, key, resource.data);
         allow create, update: if validPublicImageBind(setId, key);
         allow delete: if validPublicImagePurgeDelete(setId, key);
         allow read, write: if false;
