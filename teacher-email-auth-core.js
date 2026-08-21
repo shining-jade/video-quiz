@@ -46,7 +46,7 @@
   }
 
   function safeAuthMessage(operation, error) {
-    if (operation === 'reset' && (!error || error.code === 'auth/user-not-found')) {
+    if (operation === 'reset') {
       return RESET_SENT_MESSAGE;
     }
 

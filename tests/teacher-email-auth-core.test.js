@@ -18,7 +18,9 @@ test('login canonicalizes email and requires an 8 character password', () => {
 });
 
 test('password reset never discloses whether an account exists', () => {
+  assert.equal(Core.RESET_SENT_MESSAGE, '입력한 이메일을 확인해 주세요.');
   assert.equal(Core.safeAuthMessage('reset', { code: 'auth/user-not-found' }), Core.RESET_SENT_MESSAGE);
+  assert.equal(Core.safeAuthMessage('reset', { code: 'auth/email-already-in-use' }), Core.RESET_SENT_MESSAGE);
   assert.equal(Core.safeAuthMessage('reset', null), Core.RESET_SENT_MESSAGE);
 });
 
