@@ -35,6 +35,47 @@ const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
 const rulesTest = emulatorAvailable ? test : test.skip;
 let testEnvironment;
 
+function rulesFunctionBody(source, name) {
+  const marker = `function ${name}(`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing Rules function ${name}`);
+  const open = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  assert.fail(`unterminated Rules function ${name}`);
+}
+
+test('public Rules consolidation interface dispatches parent keys and shares child binding', () => {
+  const source = readFileSync('firestore.rules', 'utf8');
+  const dispatcher = rulesFunctionBody(source, 'validPublicParentUpdate');
+  assert.match(dispatcher, /let changed = after\.diff\(before\)\.affectedKeys\(\);/);
+  assert.match(dispatcher, /changed\.hasOnly\(/);
+  for (const status of ['building', 'published', 'withdrawn', 'cancelled', 'moderated']) {
+    assert.match(dispatcher, new RegExp(`before\\.status\\s*==\\s*'${status}'`));
+  }
+  assert.match(source,
+    /function validVisiblePublicChild\(setId, data, expectedSchemaVersion\)/);
+  assert.match(source,
+    /function validPublicChildList\(setId, data, collectionName\)/);
+  assert.match(source,
+    /function validPublicChildBind\(setId, key, collectionName, countField\)/);
+  assert.doesNotMatch(source,
+    /function (?:visiblePublic(?:Video|Question|Image)|validPublic(?:Video|Question|Image)(?:List|Bind))\(/);
+  for (const collectionName of ['videos', 'questions', 'images']) {
+    const leafName = collectionName === 'videos'
+      ? 'validPublicVideoGet'
+      : collectionName === 'questions' ? 'validPublicQuestionGet' : 'validPublicImageGet';
+    assert.match(rulesFunctionBody(source, leafName), /validVisiblePublicChild\(setId, data, 1\)/);
+    assert.match(source, new RegExp(
+      `allow list: if validPublicChildList\\(setId, resource\\.data, '${collectionName}'\\);`
+    ));
+  }
+});
+
 setLogLevel('silent');
 
 function googleContext(uid, email) {
@@ -4881,6 +4922,222 @@ rulesTest('owner reads only own moderated parent while admin lists the exact bou
     orderBy('updatedAt', 'desc'),
     queryLimit(51)
   )));
+});
+
+rulesTest('public transition equivalence matrix keeps exact commits and rejects near misses', async t => {
+  const owner = actorFirestore('owner');
+  const other = actorFirestore('otherTeacher');
+  const admin = actorFirestore('admin');
+
+  await t.test('building to published dispatch binds status revision token count owner allowance source and gate', async () => {
+    const originalAllowance = await adminRead('teacher_allowances/owner-uid');
+    async function attempt(suffix, options = {}) {
+      const publicationId = `dispatch-finalize-${suffix}`;
+      await seedPublicRulesSource(publicationId, options.sourcePatch || {});
+      await adminWrite(`published_quiz_sets/${publicationId}`, publicRulesBuilding(
+        publicationId,
+        { buildVideoCount: 1, buildQuestionCount: 1, ...(options.buildingPatch || {}) }
+      ));
+      if (options.allowancePatch) {
+        await adminWrite('teacher_allowances/owner-uid', {
+          ...originalAllowance, ...options.allowancePatch
+        });
+      }
+      if (options.gate) {
+        await adminWrite('publication_lifecycle_gates/current', {
+          ownerUid: 'blocked-owner', operationId: `gate-${suffix}`
+        });
+      }
+      const db = options.actor === 'other' ? other : owner;
+      const request = setDoc(doc(db, `published_quiz_sets/${publicationId}`), {
+        ...publicRulesProjection(publicationId, options.projectionPatch || {}),
+        publishedAt: serverTimestamp(), updatedAt: serverTimestamp()
+      });
+      await expectPermission(Boolean(options.allowed), request);
+      if (options.gate) await adminWrite('publication_lifecycle_gates/current', undefined);
+      if (options.allowancePatch) {
+        await adminWrite('teacher_allowances/owner-uid', originalAllowance);
+      }
+    }
+
+    await attempt('exact', { allowed: true });
+    await attempt('wrong-status', { projectionPatch: { status: 'withdrawn' } });
+    await attempt('wrong-revision', { projectionPatch: { revision: 'rev-forged' } });
+    await attempt('wrong-token', { buildingPatch: { buildToken: 7 } });
+    await attempt('wrong-count', { buildingPatch: { buildQuestionCount: 0 } });
+    await attempt('wrong-owner', { actor: 'other' });
+    await attempt('inactive-allowance', {
+      allowancePatch: { status: 'suspended', enabled: false }
+    });
+    await attempt('trashed-source', {
+      sourcePatch: { lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1) }
+    });
+    await attempt('closed-gate', { gate: true });
+  });
+
+  await t.test('withdraw cancel and moderated restore require their exact status and side writes', async () => {
+    await seedPublicRulesSource('dispatch-withdraw');
+    await seedPublishedRulesProjection('dispatch-withdraw');
+    await assertSucceeds(updateDoc(doc(owner, 'published_quiz_sets/dispatch-withdraw'), {
+      status: 'withdrawn', updatedAt: serverTimestamp()
+    }));
+
+    await seedPublicRulesSource('dispatch-withdraw-revision');
+    await seedPublishedRulesProjection('dispatch-withdraw-revision');
+    await assertFails(updateDoc(doc(owner,
+      'published_quiz_sets/dispatch-withdraw-revision'), {
+      status: 'withdrawn', revision: 'rev-forged', updatedAt: serverTimestamp()
+    }));
+
+    await seedPublicRulesSource('dispatch-cancel');
+    await adminWrite('published_quiz_sets/dispatch-cancel',
+      publicRulesBuilding('dispatch-cancel'));
+    await emulatorStore(owner).moveSetToTrash('dispatch-cancel', publicRulesOwner);
+    assert.equal((await adminRead('published_quiz_sets/dispatch-cancel')).status, 'cancelled');
+
+    await seedPublicRulesSource('dispatch-cancel-unpaired');
+    await adminWrite('published_quiz_sets/dispatch-cancel-unpaired',
+      publicRulesBuilding('dispatch-cancel-unpaired'));
+    await assertFails(updateDoc(doc(owner,
+      'published_quiz_sets/dispatch-cancel-unpaired'), {
+      status: 'cancelled', updatedAt: serverTimestamp()
+    }));
+
+    for (const suffix of ['exact', 'missing-audit']) {
+      const publicationId = `dispatch-restore-${suffix}`;
+      await seedPublicRulesSource(publicationId);
+      await seedPublishedRulesProjection(publicationId, {
+        status: 'moderated', moderationStatus: 'moderated'
+      });
+      await adminWrite(`published_quiz_audits/${publicationId}`, {
+        publicationId, revision: 'rev-1', status: 'moderated',
+        moderatedByUid: actors.admin.uid, moderationReason: 'equivalence hold',
+        moderatedAt: Timestamp.fromMillis(1_000)
+      });
+      if (suffix === 'exact') {
+        await assert.doesNotReject(emulatorStore(admin).adminRestorePublishedQuiz(
+          publicationId, 'rev-1', requestAdminIdentity
+        ));
+      } else {
+        await assertFails(updateDoc(doc(admin, `published_quiz_sets/${publicationId}`), {
+          status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
+        }));
+      }
+    }
+  });
+
+  await t.test('video question and image bind replace and purge keep exact child markers', async () => {
+    async function bind(suffix, collectionName, key, childPatch = {}, options = {}) {
+      const publicationId = `dispatch-bind-${suffix}`;
+      const imageData = 'data:image/png;base64,AAAA';
+      await seedPublicRulesSource(publicationId,
+        collectionName === 'images' ? { imageCount: 1 } : {},
+        collectionName === 'images' ? { [key]: imageData } : {});
+      await adminWrite(`published_quiz_sets/${publicationId}`,
+        publicRulesBuilding(publicationId, collectionName === 'images' ? { imageCount: 1 } : {}));
+      const countField = {
+        videos: 'buildVideoCount', questions: 'buildQuestionCount', images: 'buildImageCount'
+      }[collectionName];
+      const child = collectionName === 'images'
+        ? { data: imageData, revision: 'rev-1', schemaVersion: 1, buildToken: 'build-token-1' }
+        : publicRulesFlat(publicationId)[collectionName][key];
+      if (options.existing) {
+        await adminWrite(`published_quiz_sets/${publicationId}/${collectionName}/${key}`, {
+          ...child, buildToken: options.existing
+        });
+      }
+      if (options.gate) {
+        await adminWrite('publication_lifecycle_gates/current', {
+          ownerUid: 'blocked-owner', operationId: `bind-gate-${suffix}`
+        });
+      }
+      const db = options.actor === 'other' ? other : owner;
+      const batch = writeBatch(db);
+      batch.update(doc(db, `published_quiz_sets/${publicationId}`), {
+        [countField]: options.count === undefined ? 1 : options.count,
+        buildMutation: {
+          collection: collectionName,
+          key: options.mutationKey || key,
+          action: 'bind'
+        }
+      });
+      batch.set(doc(db, `published_quiz_sets/${publicationId}/${collectionName}/${key}`), {
+        ...child, ...childPatch
+      });
+      await expectPermission(Boolean(options.allowed), batch.commit());
+      if (options.gate) await adminWrite('publication_lifecycle_gates/current', undefined);
+    }
+
+    await bind('video-exact', 'videos', 'v0', {}, { allowed: true });
+    await bind('question-exact', 'questions', 'v0q0', {}, { allowed: true });
+    await bind('image-exact', 'images', 'v0q0', {}, { allowed: true });
+    await bind('wrong-revision', 'videos', 'v0', { revision: 'rev-forged' });
+    await bind('wrong-token', 'questions', 'v0q0', { buildToken: 'wrong-build' });
+    await bind('wrong-schema', 'images', 'v0q0', { schemaVersion: 2 });
+    await bind('wrong-count', 'videos', 'v0', {}, { count: 2 });
+    await bind('wrong-marker', 'questions', 'v0q0', {}, { mutationKey: 'v0q1' });
+    await bind('wrong-owner', 'videos', 'v0', {}, { actor: 'other' });
+    await bind('closed-gate', 'images', 'v0q0', {}, { gate: true });
+    await bind('replace-exact', 'videos', 'v0', {}, {
+      existing: 'old-build-token', allowed: true
+    });
+    await bind('replace-replay', 'videos', 'v0', {}, { existing: 'build-token-1' });
+
+    const purgeId = 'dispatch-public-image-purge';
+    const image = 'data:image/png;base64,AAAA';
+    await seedPublicRulesSource(purgeId, {
+      lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1), imageCount: 0
+    });
+    await seedPublishedRulesProjection(purgeId, {
+      status: 'withdrawn', imageCount: 1
+    }, { v0q0: image });
+    await assertFails(deleteDoc(doc(owner,
+      `published_quiz_sets/${purgeId}/images/v0q0`)));
+    await emulatorStore(owner).beginSetPurge(purgeId, 'immediate', publicRulesOwner);
+    await assertSucceeds(deleteDoc(doc(owner,
+      `published_quiz_sets/${purgeId}/images/v0q0`)));
+  });
+
+  await t.test('public copy build and finalize preserve provenance counters owner source and gate', async () => {
+    await seedPublicRulesSource('dispatch-copy-source');
+    await seedPublishedRulesProjection('dispatch-copy-source');
+    await assert.doesNotReject(emulatorStore(other).copyPublishedQuizSet(
+      'dispatch-copy-source', 'dispatch-copy-exact', {
+        ...actors.otherTeacher, displayName: '다른 교사', role: 'teacher'
+      }
+    ));
+    await assertFails(setDoc(doc(other, 'quiz_sets/dispatch-copy-revision'),
+      publicCopyStart('dispatch-copy-source', actors.otherTeacher, {
+        sourcePublicationRevision: 'rev-forged'
+      })));
+    await assertFails(setDoc(doc(other, 'quiz_sets/dispatch-copy-count'),
+      publicCopyStart('dispatch-copy-source', actors.otherTeacher, { imageCount: 1 })));
+    await assertFails(setDoc(doc(other, 'quiz_sets/dispatch-copy-owner'),
+      publicCopyStart('dispatch-copy-source', actors.owner)));
+
+    await assertSucceeds(setDoc(doc(other, 'quiz_sets/dispatch-copy-finalize'),
+      publicCopyStart('dispatch-copy-source')));
+    await assertSucceeds(updateDoc(doc(other, 'quiz_sets/dispatch-copy-finalize'), {
+      lifecycleState: 'active', copyStatus: deleteField(),
+      updatedAt: serverTimestamp(), contentRevision: serverTimestamp()
+    }));
+    await assertSucceeds(setDoc(doc(other, 'quiz_sets/dispatch-copy-gated'),
+      publicCopyStart('dispatch-copy-source')));
+    await adminWrite('publication_lifecycle_gates/current', {
+      ownerUid: 'blocked-owner', operationId: 'copy-finalize-gate'
+    });
+    await assertFails(updateDoc(doc(other, 'quiz_sets/dispatch-copy-gated'), {
+      lifecycleState: 'active', copyStatus: deleteField(),
+      updatedAt: serverTimestamp(), contentRevision: serverTimestamp()
+    }));
+    await adminWrite('publication_lifecycle_gates/current', undefined);
+
+    await adminWrite('quiz_sets/dispatch-copy-source', publicRulesSource({
+      lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1)
+    }));
+    await assertFails(setDoc(doc(other, 'quiz_sets/dispatch-copy-trashed'),
+      publicCopyStart('dispatch-copy-source')));
+  });
 });
 
 rulesTest('published projection owner protocol admits actual building image finalize republish and safety withdrawal shapes', async () => {
