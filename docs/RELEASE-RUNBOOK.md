@@ -1,6 +1,6 @@
 # 통합 운영 릴리스 런북
 
-이 문서만 production 릴리스 **전체 순서의 authoritative source**다. 기능별 문서는 데이터 계약과 개별 CLI 인자만 설명하며 별도 배포 순서를 정의하지 않는다. 이 문서는 실행 승인서가 아니고, 구현 작업 중 production migration, deploy, push, provider 변경, 실제 계정 또는 브라우저 작업은 수행하지 않았다.
+이 문서만 production 릴리스 **전체 순서의 authoritative source**다. 기능별 문서는 데이터 계약과 개별 CLI 인자만 설명하며 별도 배포 순서를 정의하지 않는다. 이 문서 자체는 실행 완료 증거가 아니며, restricted manifest와 각 non-overwriting durable report의 exact readback만 완료 여부를 증명한다.
 
 ## 중단 원칙
 
@@ -16,7 +16,23 @@
 
 ### R0 — 변경 창과 로컬 증거 고정
 
-Password Policy 최소 길이 8·Enforcement `Require`, authorized domain, 이메일 인증/비밀번호 재설정 템플릿을 확인하되 Email/Password provider는 끈 상태로 둔다. backup과 rollback Rules/app를 기록하고 `pnpm test`, `pnpm test:rules`, syntax/JSON 검증, `git diff --check`를 먼저 통과시킨다.
+Password Policy 최소 길이 8·Enforcement `Require`, authorized domain, 이메일 인증/비밀번호 재설정 템플릿을 확인하되 Email/Password provider는 끈 상태로 둔다. backup과 rollback Rules/app를 기록하고 아래 로컬 검증을 순서대로 통과시킨다.
+
+```powershell
+pnpm test
+pnpm test:rules
+node --check rules-source-metrics.js
+node --check scripts/test-production-rules-source.js
+git diff --check
+```
+
+그 다음, 어떤 production mutation보다 먼저 exact production Rules source를 공식 `projects.test` API로 읽기 전용 검증한다.
+
+```powershell
+pnpm test:rules:production-source -- --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r16-production-rules-probe.json
+```
+
+`r16-production-rules-probe.json`은 새 restricted output 경로여야 하며 `.reserved`와 JSON을 모두 보존하고 기존 파일을 덮어쓰지(overwrite) 않는다. 이 probe는 `rulesets.create` 또는 release update를 절대로 호출하지 않는다. source budget 초과 또는 실패면 즉시 중단한다. Rules API HTTP 5xx이면 즉시 중단한다. `issueCounts.error`가 ERROR 0이 아니면 즉시 중단한다. `issueCounts.unknown`이 0이 아니거나 `status: "complete"`, `safeToCreateRuleset: true`가 아니거나 없으면 즉시 중단한다. report의 SHA-256과 metrics를 manifest의 exact `firestore.rules` bytes와 다시 대조한다.
 
 ### R1 — exact write-quiescence 시작
 
@@ -54,11 +70,13 @@ session counter dry-run 뒤 별도 token으로 join lock/apply를 실행한다. 
 
 ### R9 — release manifest 봉인
 
-R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 token/generation, index 완료 증거, tested `firestore.rules` hash와 static app commit을 한 manifest에 기록한다. 기록 뒤 quiescence 또는 gate generation이 변하면 R2부터 새 보고서로 다시 시작한다.
+R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 token/generation, index 완료 증거, R0 compiler probe 경로·source SHA-256·metrics·issue count, tested `firestore.rules` hash와 static app commit을 한 manifest에 기록한다. rollback Rules는 `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 고정한다. 기록 뒤 quiescence 또는 gate generation이 변하거나 probe hash와 배포 입력이 다르면 R2부터 새 보고서로 다시 시작한다.
 
 ### R10 — strict Firestore Rules 배포
 
-manifest에 기록한 **strict Rules release를 한 번 배포**하고 적용된 Rules hash/release time을 재확인한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다.
+모든 R0~R9 gate가 clean일 때만 공식 Rules API의 `projects/video-quiz-65798/rulesets.create`를 한 번 호출한다. request의 `source.files`에는 probe와 SHA-256이 동일한 `firestore.rules` 한 파일의 exact bytes만 넣고, 응답의 immutable `projects/video-quiz-65798/rulesets/<RULESET_ID>` 이름을 기록한다. create가 성공하기 전에는 release를 바꾸지 않는다.
+
+create 성공 뒤에만 `projects/video-quiz-65798/releases/cloud.firestore`의 `rulesetName`을 새 immutable ruleset으로 update한다. 곧바로 같은 release를 GET하고 `rulesetName`이 방금 생성한 exact ruleset name과 byte-for-byte 같아야 한다. mismatch, missing readback, source hash mismatch, API non-2xx/5xx가 하나라도 있으면 provider를 켜지 않고 recorded rollback ruleset으로 release를 복원한 뒤 exact GET readback을 요구한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다.
 
 ### R11 — static app 배포
 
@@ -74,12 +92,12 @@ R12가 모두 안전할 때만 session operational lock, teacher access operatio
 
 ### R14 — Email/Password provider gate
 
-Password Policy·domain·template를 다시 확인하고, R10~R13 증거가 모두 같은 manifest에 있을 때만 Email/Password provider를 활성화한다. Google과 Anonymous provider는 유지한다. provider 활성화는 allowance를 만들거나 계정을 자동 병합하지 않는다.
+Password Policy·domain·template를 다시 확인하고, R10의 새 Rules exact readback과 R12~R13 증거가 모두 같은 manifest에 있을 때도 provider는 아직 OFF로 유지한다. 먼저 기존 Google admin, 기존 Google teacher, anonymous student의 로그인·권한·수업 join/end smoke를 수행하고 console error 0을 확인한다. 이 existing-flow smoke가 모두 통과한 뒤에만 Email/Password provider를 활성화한다. Google과 Anonymous provider는 유지한다. provider 활성화는 allowance를 만들거나 계정을 자동 병합하지 않는다. 자동화할 수 없는 Firebase Console owner 조작, 실제 inbox 클릭, 또는 admin approval이 필요하면 추정하지 말고 그 지점에서 `NEEDS_CONTEXT`로 중단한다.
 
 ### R15 — controlled smoke와 quiescence 종료
 
-일반 트래픽을 열기 전에 지정된 Google admin, 기존 Google teacher, 새 verified Email/Password teacher와 익명 학생만 허용하는 controlled smoke를 수행한다. 승인 신청/승인, provider collision 안내, 공개 author 비식별 표시, 게시/복사/철회/moderation, 기존 수업 join/end와 console error 0을 확인한다. 성공 증거를 기록한 뒤에만 일반 client 접근과 trusted writers를 연다.
+일반 트래픽을 열기 전에 R14에서 통과한 기존 흐름에 이어 Email/Password `signup` → 한국어 verification email 실제 수신·클릭 → verified teacher request → admin approval → login → password reset → public-library copy 순서의 controlled smoke를 수행한다. private source 문서·이메일·UID가 public projection, copy, console, 일반 stdout에 노출되지 않고 console error가 0이어야 한다. provider collision 안내, 공개 author 비식별 표시, 게시/복사/철회/moderation도 확인한다. 성공 증거를 기록한 뒤에만 일반 client 접근과 trusted writers를 연다. recorded rollback ruleset은 이 provider smoke 완료까지 보존하며, 모든 smoke 완료 뒤에도 manifest의 rollback history에서 삭제하지 않는다.
 
 ## 롤백
 
-실패 시 일반 traffic과 trusted writer를 계속 차단하고 provider를 새로 켰다면 먼저 다시 끈다. 데이터, Auth 사용자, allowance, 이미 withdrawn인 publication, 독립 사본은 삭제하거나 역변환하지 않는다. 기록한 직전 호환 **Rules를 먼저 복원**하고 적용을 확인한 뒤 직전 static app commit을 복원한다. 즉 롤백도 Rules before static app 순서를 유지한다. migration/completion gate는 blind delete하지 않고 exact report identity로 재감사한다. rollback smoke까지 통과한 뒤에만 quiescence를 종료한다.
+실패 시 일반 traffic과 trusted writer를 계속 차단하고 provider를 새로 켰다면 먼저 다시 끈다. `projects/video-quiz-65798/releases/cloud.firestore`를 recorded rollback ruleset `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 update하고 GET의 exact `rulesetName` readback을 확인한다. 데이터, Auth 사용자, allowance, 이미 withdrawn인 publication, 독립 사본은 삭제하거나 역변환하지 않는다. 기록한 직전 호환 **Rules를 먼저 복원**하고 적용을 확인한 뒤 직전 static app commit을 복원한다. 즉 롤백도 Rules before static app 순서를 유지한다. migration/completion gate는 blind delete하지 않고 exact report identity로 재감사한다. rollback smoke까지 통과한 뒤에만 quiescence를 종료한다.

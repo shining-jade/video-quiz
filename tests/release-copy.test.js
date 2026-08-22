@@ -60,6 +60,46 @@ test('one authoritative runbook composes every gate under quiescence and Rules-b
   assert.match(emailAuthDocs, /provider 충돌[\s\S]{0,120}allowance가 중복 생성되지 않/);
 });
 
+test('release runbook probes the exact production Rules source after local verification and before ruleset creation', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const localTestIndex = runbook.indexOf('pnpm test');
+  const emulatorRulesIndex = runbook.indexOf('pnpm test:rules', localTestIndex);
+  const productionProbeIndex = runbook.indexOf(
+    'pnpm test:rules:production-source -- --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r16-production-rules-probe.json',
+    emulatorRulesIndex
+  );
+  const rulesetCreateIndex = runbook.indexOf('rulesets.create', productionProbeIndex);
+
+  assert.ok(localTestIndex >= 0, 'local Node verification must be documented');
+  assert.ok(emulatorRulesIndex > localTestIndex, 'Firestore Emulator verification must follow local tests');
+  assert.ok(productionProbeIndex > emulatorRulesIndex, 'official production-source probe must follow local verification');
+  assert.ok(rulesetCreateIndex > productionProbeIndex, 'rulesets.create must follow the read-only production-source probe');
+  assert.match(runbook, /r16-production-rules-probe\.json[^\n]*(새|신규)[^\n]*(경로|output)[^\n]*(덮어쓰지|overwrite)/i);
+});
+
+test('release runbook stops before mutation on source budget, Rules API, or compiler ERROR failures', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+
+  assert.match(runbook, /source budget[^\n]*(초과|실패)[^\n]*(즉시 )?중단/i);
+  assert.match(runbook, /HTTP 5xx[^\n]*(즉시 )?중단/i);
+  assert.match(runbook, /ERROR[^\n]*(0|zero)[^\n]*(아니|실패)[^\n]*(즉시 )?중단/i);
+  assert.match(runbook, /safeToCreateRuleset[^\n]*true[^\n]*(아니|없)[^\n]*(즉시 )?중단/);
+});
+
+test('release runbook retains the exact rollback ruleset through existing-flow and provider smoke completion', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const rollbackRuleset = 'projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4';
+  const rulesetIndex = runbook.indexOf(rollbackRuleset);
+  const existingSmokeIndex = runbook.indexOf('Google admin', rulesetIndex);
+  const providerSmokeIndex = runbook.indexOf('signup', existingSmokeIndex);
+  const retentionIndex = runbook.indexOf('smoke 완료까지 보존', providerSmokeIndex);
+
+  assert.ok(rulesetIndex >= 0, 'the exact prior ruleset must be recorded');
+  assert.ok(existingSmokeIndex > rulesetIndex, 'existing Google/admin smoke must follow rollback capture');
+  assert.ok(providerSmokeIndex > existingSmokeIndex, 'Email/Password smoke must follow existing-flow smoke');
+  assert.ok(retentionIndex > providerSmokeIndex, 'rollback ruleset retention must cover all smoke completion');
+});
+
 test('HANDOFF preserves the full authoritative email-auth release sequence without an unsafe shortcut', () => {
   const handoff = read('HANDOFF.md');
   const emailAuthBlock = handoff.slice(0, handoff.indexOf('> OX'));
