@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "test": "set \"SKIP_RULES_SOURCE_BUDGET=1\" && node --test tests/*.test.js",
+    "test": "node scripts/run-default-tests.js",
     "test:rules": "firebase emulators:exec --only firestore --project demo-video-quiz \"node --test --test-concurrency=1 tests/firestore-rules.test.js tests/legacy-migration-admin-emulator.test.js tests/public-library-audit-admin-emulator.test.js\"",
     "test:rules:production-source": "node scripts/test-production-rules-source.js",
     "migrate:legacy": "node scripts/migrate-legacy-ownership.js",

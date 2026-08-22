@@ -7,9 +7,7 @@ const path = require('node:path');
 
 const { measureRulesSource } = require('../rules-source-metrics.js');
 
-const sourceBudgetTest = process.env.SKIP_RULES_SOURCE_BUDGET === '1' ? test.skip : test;
-
-sourceBudgetTest('Firestore Rules source stays within the released compiler budget', async t => {
+test('Firestore Rules source stays within the released compiler budget', async t => {
   const source = fs.readFileSync(path.resolve(__dirname, '../firestore.rules'), 'utf8');
   const metrics = measureRulesSource(source);
 

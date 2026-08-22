@@ -39,6 +39,27 @@ test('Rules source metrics use UTF-8 bytes, physical lines, and declared functio
   assert.throws(() => measureRulesSource(Buffer.from('rules')), /string/);
 });
 
+test('Rules source metrics ignore function-like text in comments and quoted strings', () => {
+  const source = [
+    '// function lineComment() { return true; }',
+    '/* function blockComment() { return true; } */',
+    'let doubleQuoted = "function doubleQuoted() { return true; }";',
+    "let singleQuoted = 'function singleQuoted() { return true; }';",
+    'function declared() { return false; }'
+  ].join('\n');
+
+  assert.equal(measureRulesSource(source).functions, 1);
+});
+
+test('default Node test runner omits only the interim Rules source budget gate', () => {
+  const { defaultTestFiles } = require('../scripts/run-default-tests.js');
+  const files = defaultTestFiles(path.resolve(__dirname));
+  const names = files.map(file => path.basename(file));
+
+  assert.equal(names.includes('rules-source-budget.test.js'), false);
+  assert.equal(names.includes('production-rules-source.test.js'), true);
+});
+
 test('production compiler probe requires an exact production target and refuses emulators', async () => {
   assert.throws(() => cli.parseArguments([
     '--project', 'video-quiz-65798', '--target-mode', 'emulator', '--output', 'probe.json'
