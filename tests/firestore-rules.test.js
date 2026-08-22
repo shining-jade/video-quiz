@@ -1223,7 +1223,7 @@ rulesTest('teacher-access: admin approval lifecycle alone may suspend and restor
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
 
   await adminWrite('teacher_allowances/owner-uid', undefined);
-  await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
 });
 
 rulesTest('teacher-access: exact UID email revision admin mutation changes authoritative role atomically', async () => {
@@ -1261,28 +1261,51 @@ rulesTest('teacher-access: active migration lock blocks both legacy and UID allo
   }));
 });
 
-rulesTest('teacher-access: completed exact gate permanently disables fallback and legacy-only writes after unlock', async () => {
+rulesTest('teacher-access: legacy-only access and standalone mirror writes stay closed for every gate state', async () => {
   const legacyUid = 'legacy-only-uid';
   const legacyEmail = 'legacy-only@school.kr';
   await adminWrite(`teacher_allowlist/${legacyEmail}`, { enabled: true, role: 'teacher' });
+  await adminWrite('teacher_allowlist/legacy-admin@school.kr', { enabled: true, role: 'admin' });
   await adminWrite('quiz_sets/legacy-only-set', {
     ownerUid: legacyUid, ownerEmail: legacyEmail, lifecycleState: 'active',
     collaboratorCount: 0, imageCount: 0
   });
   const legacy = googleContext(legacyUid, legacyEmail);
-  await assertSucceeds(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
+  const legacyAdmin = googleContext('legacy-admin-uid', 'legacy-admin@school.kr');
   const admin = actorFirestore('admin');
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/precomplete@school.kr'), {
-    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-  await adminWrite('migration_gates/teacher_access_status', {
+  const gatePath = 'migration_gates/teacher_access_status';
+  const completeGate = {
     locked: false, lockToken: 'completed-token', projectId, targetMode: 'emulator',
     lockedAt: Timestamp.fromMillis(1), lockedByUid: 'admin-uid',
     status: 'complete', strictReady: true, migrationGeneration: '7:0',
     completedAt: Timestamp.fromMillis(2), completedByUid: 'admin-uid',
     unlockedAt: Timestamp.fromMillis(3), unlockedByUid: 'admin-uid'
-  });
-  await assertFails(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
+  };
+  const gateStates = [
+    undefined,
+    { status: 'complete' },
+    { ...completeGate, status: 'running', strictReady: false },
+    completeGate
+  ];
+  for (const gate of gateStates) {
+    await adminWrite(gatePath, gate);
+    await assertFails(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
+    await assertFails(getDocs(query(
+      collection(legacyAdmin, 'teacher_access_requests'),
+      where('status', '==', 'pending'), queryLimit(50)
+    )));
+    await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'quiz_sets/set1')));
+  }
+
+  await adminWrite(gatePath, undefined);
+  await assertFails(setDoc(doc(admin, gatePath), completeGate));
+  await adminWrite(gatePath, completeGate);
+  await assertFails(updateDoc(doc(admin, gatePath), { migrationGeneration: '8:0' }));
+  await assertFails(deleteDoc(doc(admin, gatePath)));
+
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/precomplete@school.kr'), {
+    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
+  }));
   await assertFails(updateDoc(doc(admin, 'teacher_allowlist/owner@school.kr'), {
     enabled: false, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
   }));
@@ -1770,7 +1793,7 @@ rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code
   });
 });
 
-rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동안 열고 완료 뒤 strict로 닫는다', async t => {
+rulesTest('session counter migration은 legacy client fallback 없이 영구 strict다', async t => {
   const gatePath = 'migration_gates/session_counters';
   const gateTime = Timestamp.fromMillis(10_000);
   const completeGate = {
@@ -1798,69 +1821,61 @@ rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동
     });
   };
 
-  await t.test('gate 전 legacy heartbeat와 safe end는 actual 없이 가능하고 신규 join은 거부된다', async () => {
+  await t.test('missing gate에서도 legacy heartbeat와 safe end를 거부한다', async () => {
     await resetFirestore();
     await seedLegacy('legacy-live', 'LEGA12');
     const ownerStore = emulatorStore(actorFirestore('owner'));
 
-    assert.equal(await ownerStore.renewSessionActivationLease(
+    await assert.rejects(ownerStore.renewSessionActivationLease(
       'legacy-live', 'LEGA12', actors.owner.uid, 'legacy-live-allocation-token'
-    ), true);
+    ));
     await assertFails(setDoc(doc(actorFirestore('anonymous'),
       'sessions/legacy-live/students/new-student-uid'), {
       uid: 'new-student-uid', grade: 1, klass: 1, num: 1, name: '신규 학생'
     }));
-    await ownerStore.endSession('legacy-live');
-
-    const ended = (await getDoc(doc(actorFirestore('owner'), 'sessions/legacy-live'))).data();
-    assert.equal(ended.status, 'ended');
-    assert.equal(ended.actualParticipants, undefined);
-    assert.equal((await getDoc(doc(actorFirestore('owner'),
-      'sessions/legacy-live/meta/live'))).data().status, 'ended');
+    await assert.rejects(ownerStore.endSession('legacy-live'));
   });
 
-  await t.test('gate 전 legacy allocating recovery는 안전 정리할 수 있다', async () => {
+  await t.test('missing gate에서도 legacy allocating recovery를 거부한다', async () => {
     await resetFirestore();
     await seedLegacy('legacy-allocating', 'LEGA13', 'allocating');
     const ownerStore = emulatorStore(actorFirestore('owner'));
-    const result = await ownerStore.recoverPendingSessionAllocation({
+    await assert.rejects(ownerStore.recoverPendingSessionAllocation({
       sessionId: 'legacy-allocating', code: 'LEGA13', ownerUid: actors.owner.uid,
       ownerEmail: actors.owner.email, token: 'legacy-allocating-allocation-token'
-    });
-
-    assert.deepEqual(result, { complete: true, cleaned: true });
+    }), /정리.*실패/);
     assert.equal((await getDoc(doc(actorFirestore('owner'),
-      'sessions/legacy-allocating'))).exists(), false);
-
-    await seedLegacy('legacy-stale-live', 'LEGA16');
-    const stale = await adminRead('sessions/legacy-stale-live');
-    await adminWrite('sessions/legacy-stale-live', {
-      ...stale, activationLeaseUntil: Timestamp.fromMillis(Date.now() - 1_000)
-    });
-    assert.deepEqual(await ownerStore.recoverPendingSessionAllocation({
-      sessionId: 'legacy-stale-live', code: 'LEGA16', ownerUid: actors.owner.uid,
-      ownerEmail: actors.owner.email, token: 'legacy-stale-live-allocation-token'
-    }), { complete: true, cleaned: true });
-    assert.equal((await getDoc(doc(actorFirestore('owner'),
-      'sessions/legacy-stale-live'))).exists(), false);
+      'sessions/legacy-allocating'))).exists(), true);
   });
 
-  await t.test('gate는 client write를 거부하고 exact preflight shape가 아니면 아직 완료로 취급하지 않는다', async () => {
+  await t.test('malformed와 incomplete gate에서도 legacy transition을 거부한다', async () => {
+    const gates = [
+      { complete: true },
+      { ...completeGate, preflightNonEndedLegacyCount: 1 }
+    ];
+    for (const [index, gate] of gates.entries()) {
+      await resetFirestore();
+      await adminWrite(gatePath, gate);
+      await seedLegacy(`legacy-bad-gate-${index}`, `LEGA${14 + index}`);
+      const ownerStore = emulatorStore(actorFirestore('owner'));
+      await assert.rejects(ownerStore.renewSessionActivationLease(
+        `legacy-bad-gate-${index}`, `LEGA${14 + index}`, actors.owner.uid,
+        `legacy-bad-gate-${index}-allocation-token`
+      ));
+      await assert.rejects(ownerStore.endSession(`legacy-bad-gate-${index}`));
+    }
+  });
+
+  await t.test('gate client writes는 모두 거부하고 counted session 경로는 유지된다', async () => {
     await resetFirestore();
     for (const actorName of ['owner', 'admin']) {
       await assertFails(setDoc(doc(actorFirestore(actorName), gatePath), completeGate));
     }
-    await adminWrite(gatePath, { ...completeGate, preflightNonEndedLegacyCount: 1 });
-    await seedLegacy('legacy-malformed-gate', 'LEGA14');
-    assert.equal(await emulatorStore(actorFirestore('owner')).renewSessionActivationLease(
-      'legacy-malformed-gate', 'LEGA14', actors.owner.uid,
-      'legacy-malformed-gate-allocation-token'
-    ), true);
-  });
-
-  await t.test('gate 완료 뒤 missing counter 경로는 거부하고 migrated session 경로는 유지된다', async () => {
-    await resetFirestore();
     await adminWrite(gatePath, completeGate);
+    await assertFails(updateDoc(doc(actorFirestore('admin'), gatePath), {
+      preflightNonEndedLegacyCount: 1
+    }));
+    await assertFails(deleteDoc(doc(actorFirestore('admin'), gatePath)));
     await seedLegacy('legacy-after-gate', 'LEGA15');
     const ownerStore = emulatorStore(actorFirestore('owner'));
     await assert.rejects(ownerStore.renewSessionActivationLease(
@@ -3490,18 +3505,18 @@ rulesTest('역할별 create/update/delete 권한 매트릭스를 지킨다', asy
   }
 });
 
-rulesTest('승인 목록은 admin만 읽고 쓰며 다른 클라이언트에는 비공개다', async () => {
+rulesTest('legacy 승인 목록은 admin만 읽고 standalone client write는 모두 거부한다', async () => {
   for (const actorName of actorNames) {
     await resetFirestore();
     const db = actorFirestore(actorName);
-    const allowed = actorName === 'admin';
-    await expectPermission(allowed, getDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
-    await expectPermission(allowed, getDocs(collection(db, 'teacher_allowlist')));
+    const readable = actorName === 'admin';
+    await expectPermission(readable, getDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
+    await expectPermission(readable, getDocs(collection(db, 'teacher_allowlist')));
     const createRequest = setDoc(doc(db, `teacher_allowlist/new-${actorName}@school.kr`), {
       enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: actors[actorName].uid
     });
-    await expectPermission(allowed, createRequest);
-    await expectPermission(allowed, updateDoc(doc(db, 'teacher_allowlist/owner@school.kr'), {
+    await assertFails(createRequest);
+    await assertFails(updateDoc(doc(db, 'teacher_allowlist/owner@school.kr'), {
       enabled: false, updatedAt: serverTimestamp(), updatedByUid: actors[actorName].uid
     }));
     await assertFails(deleteDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
@@ -3592,7 +3607,7 @@ rulesTest('purging child reads let the real store finish owner/admin purge and d
   await assertFails(getDocs(collection(other, 'images/denied-purge-store/q')));
 });
 
-rulesTest('counter migration gate is admin-only, stale-safe, and blocks child writes without blocking reads', async () => {
+rulesTest('counter migration gate is client-write-denied and blocks child writes without blocking reads', async () => {
   await resetFirestore();
   const admin = actorFirestore('admin');
   const owner = actorFirestore('owner');
@@ -3610,7 +3625,11 @@ rulesTest('counter migration gate is admin-only, stale-safe, and blocks child wr
   await assertFails(setDoc(doc(other, gatePath), {
     ...lockedGate, lockedByUid: actors.otherTeacher.uid
   }));
-  await assertSucceeds(setDoc(doc(admin, gatePath), lockedGate));
+  await assertFails(setDoc(doc(admin, gatePath), lockedGate));
+  await adminWrite(gatePath, {
+    ...lockedGate,
+    lockedAt: Timestamp.fromMillis(1)
+  });
   await assertFails(getDoc(doc(owner, gatePath)));
 
   const imageUpdate = writeBatch(owner);
@@ -3665,8 +3684,8 @@ rulesTest('counter migration gate is admin-only, stale-safe, and blocks child wr
     unlockedByUid: actors.otherTeacher.uid
   }));
 
-  const currentGate = (await getDoc(doc(admin, gatePath))).data();
-  await assertSucceeds(setDoc(doc(admin, gatePath), {
+  const currentGate = await adminRead(gatePath);
+  await assertFails(setDoc(doc(admin, gatePath), {
     locked: false,
     lockId: currentGate.lockId,
     projectId: currentGate.projectId,
@@ -3676,6 +3695,17 @@ rulesTest('counter migration gate is admin-only, stale-safe, and blocks child wr
     unlockedAt: serverTimestamp(),
     unlockedByUid: actors.admin.uid
   }));
+  await assertFails(deleteDoc(doc(admin, gatePath)));
+  await adminWrite(gatePath, {
+    locked: false,
+    lockId: currentGate.lockId,
+    projectId: currentGate.projectId,
+    targetMode: currentGate.targetMode,
+    lockedAt: currentGate.lockedAt,
+    lockedByUid: currentGate.lockedByUid,
+    unlockedAt: Timestamp.fromMillis(2),
+    unlockedByUid: actors.admin.uid
+  });
 
   const afterUnlock = writeBatch(owner);
   afterUnlock.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
@@ -3724,14 +3754,14 @@ rulesTest('missing or locked gate fails closed for counters and stale-zero paren
   await assertFails(malformedAdd.commit());
   await adminWrite(gatePath, undefined);
 
-  await assertSucceeds(setDoc(doc(admin, gatePath), {
+  await adminWrite(gatePath, {
     locked: true,
     lockId: 'round6-gate',
     projectId,
     targetMode: 'emulator',
-    lockedAt: serverTimestamp(),
+    lockedAt: Timestamp.fromMillis(1),
     lockedByUid: actors.admin.uid
-  }));
+  });
   await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
   await assertFails(updateDoc(doc(owner, 'quiz_sets/staged-trash'), {
     lifecycleState: 'purging', purgeStartedAt: serverTimestamp()
@@ -3742,13 +3772,13 @@ rulesTest('missing or locked gate fails closed for counters and stale-zero paren
     lifecycleState: 'purging', trashedAt: Timestamp.fromMillis(1),
     purgeStartedAt: Timestamp.fromMillis(2), collaboratorCount: 0, imageCount: 1
   });
-  const lockedGate = (await getDoc(doc(admin, gatePath))).data();
-  await assertSucceeds(setDoc(doc(admin, gatePath), {
+  const lockedGate = await adminRead(gatePath);
+  await adminWrite(gatePath, {
     ...lockedGate,
     locked: false,
-    unlockedAt: serverTimestamp(),
+    unlockedAt: Timestamp.fromMillis(2),
     unlockedByUid: actors.admin.uid
-  }));
+  });
   await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
 
   const ownerStore = emulatorStore(owner);
@@ -3915,7 +3945,7 @@ rulesTest('counter-ready active image add/delete requires one exact parent mutat
   await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), { imageCount: 2 }));
 });
 
-rulesTest('strict counters reject malformed create, legacy promotion, underflow and purge transitions', async () => {
+rulesTest('strict counters and lifecycle reject malformed create, legacy promotion, underflow and purge transitions', async () => {
   await resetFirestore();
   const owner = actorFirestore('owner');
   const base = {
@@ -3954,6 +3984,29 @@ rulesTest('strict counters reject malformed create, legacy promotion, underflow 
   await assertFails(missingAdd.commit());
   await assertFails(updateDoc(doc(owner, 'quiz_sets/legacy-missing'), {
     trashedAt: serverTimestamp(), lifecycleState: 'trashed', contentRevision: serverTimestamp()
+  }));
+
+  await adminWrite('quiz_sets/legacy-lifecycle', {
+    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
+    collaboratorCount: 0, imageCount: 0, title: 'legacy lifecycle'
+  });
+  const lifecyclePromotion = writeBatch(owner);
+  lifecyclePromotion.set(doc(owner, 'quiz_sets/legacy-lifecycle'), {
+    lifecycleState: 'active', imageCount: 1,
+    imageMutation: { key: 'q', action: 'add' },
+    contentRevision: serverTimestamp()
+  }, { merge: true });
+  lifecyclePromotion.set(doc(owner, 'images/legacy-lifecycle/q/q'), { data: 'image' });
+  await assertFails(lifecyclePromotion.commit());
+  await assertFails(updateDoc(doc(owner, 'quiz_sets/legacy-lifecycle'), {
+    lifecycleState: 'trashed', trashedAt: serverTimestamp(),
+    purgeStartedAt: null, contentRevision: serverTimestamp()
+  }));
+  await assertFails(setDoc(doc(owner, 'sessions/legacy-lifecycle'), {
+    setId: 'legacy-lifecycle', teacherUid: actors.owner.uid,
+    teacherEmail: actors.owner.email, status: 'live',
+    registeredStudentCount: 0, studentCountRevision: 0,
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
   }));
 
   await adminWrite('quiz_sets/negative-active', {
@@ -5481,18 +5534,18 @@ rulesTest('published projection copy uses exact provenance count-zero increments
     publicCopyStart('copy-source', studentOwner)));
 });
 
-rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고 자기 admin은 보호한다', async () => {
+rulesTest('admin은 legacy 승인 목록을 읽지만 standalone mirror write는 하지 못한다', async () => {
   await resetFirestore();
   const admin = actorFirestore('admin');
   await assertSucceeds(getDoc(doc(admin, 'teacher_allowlist/admin@school.kr')));
   await assertSucceeds(getDocs(collection(admin, 'teacher_allowlist')));
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
     enabled: true,
     role: 'teacher',
     updatedAt: serverTimestamp(),
     updatedByUid: 'admin-uid'
   }));
-  await assertSucceeds(updateDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
+  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/owner@school.kr'), {
     enabled: false,
     updatedAt: serverTimestamp(),
     updatedByUid: 'admin-uid'
@@ -5532,34 +5585,23 @@ rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고
   }));
 });
 
-rulesTest('승인 문서 ID는 소문자 canonical 이메일 경로만 허용한다', async () => {
+rulesTest('canonical 이메일 경로도 standalone legacy mirror create를 허용하지 않는다', async () => {
   await resetFirestore();
   const admin = actorFirestore('admin');
   const audited = { enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid' };
   await assertFails(setDoc(doc(admin, 'teacher_allowlist/Mixed@School.KR'), audited));
   await assertFails(setDoc(doc(admin, 'teacher_allowlist/not-an-email'), audited));
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/canonical@school.kr'), audited));
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/canonical@school.kr'), audited));
 });
 
-rulesTest('비활성화된 다른 admin은 후속 승인 목록 쓰기를 할 수 없다', async () => {
+rulesTest('authoritative admin도 legacy admin mirror를 standalone 변경할 수 없다', async () => {
   await resetFirestore();
   const admin = actorFirestore('admin');
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
+  await assertFails(setDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
     enabled: true, role: 'admin', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
   }));
-  await assertSucceeds(updateDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
+  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/admin@school.kr'), {
     enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-  const disabledAdmin = testEnvironment.authenticatedContext('other-admin-uid', {
-    email: 'other-admin@school.kr',
-    email_verified: true,
-    firebase: { sign_in_provider: 'google.com' }
-  }).firestore();
-  await assertFails(setDoc(doc(disabledAdmin, 'teacher_allowlist/blocked-after-disable@school.kr'), {
-    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'other-admin-uid'
-  }));
-  await assertFails(updateDoc(doc(disabledAdmin, 'teacher_allowlist/owner@school.kr'), {
-    enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'other-admin-uid'
   }));
 });
 
@@ -5646,7 +5688,7 @@ rulesTest('stored authoritative allowance UID mismatch denies the matching-path 
   await assertFails(getDoc(doc(passwordOwner, 'quiz_sets/set1')));
 });
 
-rulesTest('migration-incomplete legacy teacher and admin fallback is Google-only and denies password', async () => {
+rulesTest('legacy-only teacher and admin stay denied for Google and password providers', async () => {
   await adminWrite('teacher_allowlist/password@school.kr', { enabled: true, role: 'teacher' });
   await adminWrite('teacher_allowlist/password-admin@school.kr', { enabled: true, role: 'admin' });
   await adminWrite('teacher_allowlist/unverified@school.kr', { enabled: true, role: 'teacher' });
@@ -5666,6 +5708,15 @@ rulesTest('migration-incomplete legacy teacher and admin fallback is Google-only
   await assertFails(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
   await assertFails(getDocs(query(
     collection(passwordAdmin, 'teacher_access_requests'),
+    where('status', '==', 'pending'),
+    queryLimit(50)
+  )));
+  await assertFails(getDoc(doc(
+    googleContext('password-uid', 'password@school.kr'), 'quiz_sets/set1'
+  )));
+  await assertFails(getDocs(query(
+    collection(googleContext('password-admin-uid', 'password-admin@school.kr'),
+      'teacher_access_requests'),
     where('status', '==', 'pending'),
     queryLimit(50)
   )));

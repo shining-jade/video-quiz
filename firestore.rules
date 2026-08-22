@@ -19,10 +19,6 @@ service cloud.firestore {
         request.auth.token.email_verified == true && supportedTeacherProvider();
     }
 
-    function legacyAllowancePath() {
-      return /databases/$(database)/documents/teacher_allowlist/$(request.auth.token.email);
-    }
-
     function teacherAllowancePath() {
       return /databases/$(database)/documents/teacher_allowances/$(request.auth.uid);
     }
@@ -33,18 +29,9 @@ service cloud.firestore {
         data.role in ['teacher', 'admin'];
     }
 
-    function validLegacyTeacherAllowance() {
-      return request.auth.token.firebase.sign_in_provider == 'google.com' &&
-        exists(legacyAllowancePath()) &&
-        get(legacyAllowancePath()).data.enabled == true &&
-        get(legacyAllowancePath()).data.role in ['teacher', 'admin'];
-    }
-
     function isApprovedTeacher() {
-      let currentExists = exists(teacherAllowancePath());
-      return verifiedEmail() && (currentExists
-        ? validActiveTeacherAllowance(get(teacherAllowancePath()).data)
-        : !teacherAccessMigrationComplete() && validLegacyTeacherAllowance());
+      return verifiedEmail() && exists(teacherAllowancePath()) &&
+        validActiveTeacherAllowance(get(teacherAllowancePath()).data);
     }
 
     function isDeletionPendingTeacher() {
@@ -73,14 +60,9 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      let currentExists = exists(teacherAllowancePath());
-      let approved = currentExists
-        ? validActiveTeacherAllowance(get(teacherAllowancePath()).data)
-        : !teacherAccessMigrationComplete() && validLegacyTeacherAllowance();
-      return verifiedEmail() && approved &&
-        (currentExists
-          ? get(teacherAllowancePath()).data.role
-          : get(legacyAllowancePath()).data.role) == 'admin';
+      return verifiedEmail() && exists(teacherAllowancePath()) &&
+        validActiveTeacherAllowance(get(teacherAllowancePath()).data) &&
+        get(teacherAllowancePath()).data.role == 'admin';
     }
 
     function canonicalAllowanceId(email) {
@@ -92,22 +74,6 @@ service cloud.firestore {
         label.size() >= 1 && label.size() <= 80 &&
         !label.matches('^([^ @]+@[^ @]+|[A-Za-z0-9_-]{20,128})$') &&
         !(label in [email, uid]);
-    }
-
-    function validAllowanceDocument(email) {
-      return request.resource.data.keys().hasOnly([
-          'enabled', 'role', 'updatedAt', 'updatedByUid'
-        ]) &&
-        request.resource.data.enabled is bool &&
-        request.resource.data.role in ['teacher', 'admin'] &&
-        request.resource.data.updatedAt is timestamp &&
-        request.resource.data.updatedByUid == request.auth.uid;
-    }
-
-    function protectsCurrentAdmin(email) {
-      return email == request.auth.token.email &&
-        resource.data.get('role', null) == 'admin' &&
-        (!request.resource.data.enabled || request.resource.data.role != 'admin');
     }
 
     function isPositiveSafeRevision(value) {
@@ -133,7 +99,8 @@ service cloud.firestore {
     function validPendingTeacherRequest(uid) {
       let data = request.resource.data;
       return isOwnTeacherRequest(uid) &&
-        !exists(teacherAllowancePath()) && !exists(legacyAllowancePath()) &&
+        !exists(teacherAllowancePath()) &&
+        !exists(/databases/$(database)/documents/teacher_allowlist/$(request.auth.token.email)) &&
         data.keys().hasOnly([
           'uid', 'emailCanonical', 'displayName', 'organization', 'note',
           'status', 'revision', 'createdAt', 'updatedAt'
@@ -169,7 +136,8 @@ service cloud.firestore {
       let before = resource.data;
       let after = request.resource.data;
       return isOwnTeacherRequest(uid) &&
-        !exists(teacherAllowancePath()) && !exists(legacyAllowancePath()) &&
+        !exists(teacherAllowancePath()) &&
+        !exists(/databases/$(database)/documents/teacher_allowlist/$(request.auth.token.email)) &&
         before.status in ['cancelled', 'rejected'] && after.status == 'pending' &&
         validTeacherRequestProfile(before, uid) && validTeacherRequestProfile(after, uid) &&
         before.emailCanonical == request.auth.token.email &&
@@ -475,15 +443,6 @@ service cloud.firestore {
       return !exists(path) || get(path).data.get('locked', false) == false;
     }
 
-    function teacherAccessMigrationComplete() {
-      let path = /databases/$(database)/documents/migration_gates/teacher_access_status;
-      let data = exists(path) ? get(path).data : {};
-      return exists(path) && data.get('status', '') == 'complete' &&
-        data.get('strictReady', false) == true &&
-        data.get('migrationGeneration', '') is string &&
-        data.get('migrationGeneration', '').size() > 0;
-    }
-
     function validAdminSyncedLegacyAllowance(email, enabled, role) {
       let path = /databases/$(database)/documents/teacher_allowlist/$(email);
       return existsAfter(path) &&
@@ -545,35 +504,6 @@ service cloud.firestore {
       return exists(path) && validStoredCounterGateUnlocked(get(path).data);
     }
 
-    function validStoredSessionCounterGate(data) {
-      return data.keys().hasAll([
-          'complete', 'projectId', 'environment', 'rulesVersion',
-          'preflightNonEndedLegacyCount', 'verifiedAt', 'updatedAt', 'completedByUid'
-        ]) &&
-        data.keys().hasOnly([
-          'complete', 'projectId', 'environment', 'rulesVersion',
-          'preflightNonEndedLegacyCount', 'verifiedAt', 'updatedAt', 'completedByUid'
-        ]) &&
-        data.complete == true &&
-        data.projectId is string && data.projectId.size() > 0 && data.projectId.size() <= 120 &&
-        data.environment in ['production', 'emulator'] &&
-        data.rulesVersion == 'session-counters-v1' &&
-        data.preflightNonEndedLegacyCount == 0 &&
-        data.verifiedAt is timestamp && data.updatedAt is timestamp &&
-        data.updatedAt == data.verifiedAt &&
-        data.completedByUid is string && data.completedByUid.size() > 0 &&
-        data.completedByUid.size() <= 128;
-    }
-
-    function sessionCounterMigrationComplete() {
-      let path = /databases/$(database)/documents/migration_gates/session_counters;
-      return exists(path) && validStoredSessionCounterGate(get(path).data);
-    }
-
-    function legacySessionCounterCompatibilityOpen() {
-      return !sessionCounterMigrationComplete();
-    }
-
     function sessionCounterMigrationUnlocked() {
       let path = /databases/$(database)/documents/migration_gates/session_counter_migration;
       return !exists(path) || get(path).data.get('locked', true) == false;
@@ -598,45 +528,6 @@ service cloud.firestore {
         data.unlockedByUid.size() > 0;
     }
 
-    function validCounterGateLock() {
-      return request.resource.data.keys().hasAll([
-          'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid'
-        ]) &&
-        request.resource.data.keys().hasOnly([
-          'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid'
-        ]) &&
-        request.resource.data.locked == true &&
-        request.resource.data.lockId is string && request.resource.data.lockId.size() > 0 &&
-        request.resource.data.lockId.size() <= 120 &&
-        request.resource.data.projectId is string && request.resource.data.projectId.size() > 0 &&
-        request.resource.data.projectId.size() <= 120 &&
-        request.resource.data.targetMode in ['production', 'emulator'] &&
-        request.resource.data.lockedAt is timestamp &&
-        request.resource.data.lockedAt == request.time &&
-        request.resource.data.lockedByUid == request.auth.uid;
-    }
-
-    function validCounterGateUnlock() {
-      return resource.data.get('locked', false) == true &&
-        request.resource.data.keys().hasAll([
-          'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid',
-          'unlockedAt', 'unlockedByUid'
-        ]) &&
-        request.resource.data.keys().hasOnly([
-          'locked', 'lockId', 'projectId', 'targetMode', 'lockedAt', 'lockedByUid',
-          'unlockedAt', 'unlockedByUid'
-        ]) &&
-        request.resource.data.locked == false &&
-        request.resource.data.lockId == resource.data.lockId &&
-        request.resource.data.projectId == resource.data.projectId &&
-        request.resource.data.targetMode == resource.data.targetMode &&
-        request.resource.data.lockedAt == resource.data.lockedAt &&
-        request.resource.data.lockedByUid == resource.data.lockedByUid &&
-        request.resource.data.unlockedAt is timestamp &&
-        request.resource.data.unlockedAt == request.time &&
-        request.resource.data.unlockedByUid == request.auth.uid;
-    }
-
     function ownsSet(setId) {
       return isApprovedTeacher() &&
         exists(/databases/$(database)/documents/quiz_sets/$(setId)) &&
@@ -649,8 +540,7 @@ service cloud.firestore {
           get(/databases/$(database)/documents/quiz_sets/$(setId)).data.trashedAt == null) &&
         (!('purgeStartedAt' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data) ||
           get(/databases/$(database)/documents/quiz_sets/$(setId)).data.purgeStartedAt == null) &&
-        (!('lifecycleState' in get(/databases/$(database)/documents/quiz_sets/$(setId)).data) ||
-          get(/databases/$(database)/documents/quiz_sets/$(setId)).data.lifecycleState == 'active');
+        get(/databases/$(database)/documents/quiz_sets/$(setId)).data.get('lifecycleState', '') == 'active';
     }
 
     function collaboratorPath(setId) {
@@ -730,8 +620,8 @@ service cloud.firestore {
         validAuthoritativeCounters(before) && validAuthoritativeCounters(after) &&
         changed.hasOnly(['trashedAt', 'purgeStartedAt', 'lifecycleState', 'contentRevision',
           'collaboratorCount', 'collaboratorMutation', 'imageCount', 'imageMutation']) &&
-        ((before.get('lifecycleState', 'active') == 'active' &&
-            after.get('lifecycleState', 'active') == 'active' &&
+        ((before.get('lifecycleState', '') == 'active' &&
+            after.get('lifecycleState', '') == 'active' &&
             after.get('trashedAt', null) == before.get('trashedAt', null) &&
             after.get('purgeStartedAt', null) == before.get('purgeStartedAt', null) &&
             after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
@@ -741,8 +631,8 @@ service cloud.firestore {
             existsAfter(imageTarget) &&
             after.get('imageCount', -1) == before.get('imageCount', -1) + 1 &&
             canEditSetAfter(setId)) ||
-          (before.get('lifecycleState', 'active') == 'active' &&
-            after.get('lifecycleState', 'active') == 'active' &&
+          (before.get('lifecycleState', '') == 'active' &&
+            after.get('lifecycleState', '') == 'active' &&
             after.get('trashedAt', null) == before.get('trashedAt', null) &&
             after.get('purgeStartedAt', null) == before.get('purgeStartedAt', null) &&
             after.get('collaboratorCount', -1) == before.get('collaboratorCount', -1) &&
@@ -752,7 +642,7 @@ service cloud.firestore {
             !existsAfter(imageTarget) &&
             after.get('imageCount', -1) == before.get('imageCount', -1) - 1 &&
             canEditSetAfter(setId)) ||
-          (before.get('lifecycleState', 'active') == 'active' &&
+          (before.get('lifecycleState', '') == 'active' &&
             after.get('lifecycleState', '') == 'trashed' &&
             after.get('trashedAt', null) is timestamp && after.trashedAt == request.time &&
             after.get('purgeStartedAt', null) == null &&
@@ -864,7 +754,7 @@ service cloud.firestore {
       return existsAfter(setPath) &&
         (!('trashedAt' in getAfter(setPath).data) || getAfter(setPath).data.trashedAt == null) &&
         (!('purgeStartedAt' in getAfter(setPath).data) || getAfter(setPath).data.purgeStartedAt == null) &&
-        (!('lifecycleState' in getAfter(setPath).data) || getAfter(setPath).data.lifecycleState == 'active');
+        getAfter(setPath).data.get('lifecycleState', '') == 'active';
     }
 
     function isSetCollaboratorAfter(setId) {
@@ -2077,7 +1967,7 @@ service cloud.firestore {
             ? true
             : isAdmin()
               ? true
-              : source.get('lifecycleState', 'active') == 'active' &&
+              : source.get('lifecycleState', '') == 'active' &&
                 exists(collaboratorPath(setId)) &&
                 validStoredCollaboratorData(
                   get(collaboratorPath(setId)).data,
@@ -2453,12 +2343,8 @@ service cloud.firestore {
       return exists(sessionPath) &&
         existsAfter(sessionPath) &&
         sessionAfter.get('status', null) == 'ended' &&
-        (sessionHasCounterFields(sessionAfter)
-          ? validSessionCounter(sessionAfter) &&
-            sessionAfter.actualParticipants == sessionAfter.registeredStudentCount
-          : legacySessionCounterCompatibilityOpen() &&
-            legacySessionWithoutCounters(sessionAfter) &&
-            !('actualParticipants' in sessionAfter)) &&
+        sessionHasCounterFields(sessionAfter) && validSessionCounter(sessionAfter) &&
+        sessionAfter.actualParticipants == sessionAfter.registeredStudentCount &&
         validEndedLiveData(request.resource.data);
     }
 
@@ -2528,13 +2414,6 @@ service cloud.firestore {
       return data.keys().hasAll(['registeredStudentCount', 'studentCountRevision']);
     }
 
-    function legacySessionWithoutCounters(data) {
-      return !('registeredStudentCount' in data) &&
-        !('studentCountRevision' in data) && !('lastStudentUid' in data) &&
-        !('actualParticipants' in data) &&
-        !('classPlanId' in data) && !('classPlanRevision' in data);
-    }
-
     function validSessionCreateCounter() {
       return request.resource.data.registeredStudentCount == 0 &&
         request.resource.data.studentCountRevision == 0 &&
@@ -2593,46 +2472,23 @@ service cloud.firestore {
         existsAfter(livePath) && validEndedLiveData(getAfter(livePath).data);
     }
 
-    function validLegacySessionEnd(sessionId) {
-      let livePath = /databases/$(database)/documents/sessions/$(sessionId)/meta/live;
-      return resource.data.status in ['active', 'live'] &&
-        request.resource.data.status == 'ended' &&
-        request.resource.data.endedAt == request.time &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'status', 'endedAt'
-        ]) && existsAfter(livePath) && validEndedLiveData(getAfter(livePath).data);
-    }
-
-    function validLegacySessionTransition(sessionId) {
-      return legacySessionCounterCompatibilityOpen() &&
-        legacySessionWithoutCounters(resource.data) &&
-        legacySessionWithoutCounters(request.resource.data) &&
-        (validSessionActivation() || validSessionHeartbeat() ||
-          validSessionAbortTransition() || validLegacySessionEnd(sessionId));
-    }
-
     function validOwnedSessionUpdate(sessionId) {
-      return ownsSession(sessionId) &&
-        (sessionHasCounterFields(resource.data)
-          ? sessionHasCounterFields(request.resource.data) &&
-            validSessionCounter(resource.data) && validSessionCounter(request.resource.data) && (
-              validSessionActivation() || validSessionHeartbeat() ||
-              validSessionAbortTransition() || validSessionEnd(sessionId) ||
-              validSessionEndRepair(sessionId) || validSessionPlanAttach(sessionId) ||
-              validSessionPlanFinish(sessionId)
-            )
-          : validLegacySessionTransition(sessionId));
+      return ownsSession(sessionId) && sessionHasCounterFields(resource.data) &&
+        sessionHasCounterFields(request.resource.data) &&
+        validSessionCounter(resource.data) && validSessionCounter(request.resource.data) && (
+          validSessionActivation() || validSessionHeartbeat() ||
+          validSessionAbortTransition() || validSessionEnd(sessionId) ||
+          validSessionEndRepair(sessionId) || validSessionPlanAttach(sessionId) ||
+          validSessionPlanFinish(sessionId)
+        );
     }
 
     function validDeletionPendingSessionEnd(sessionId) {
       return ownsSessionForSafeDeletionEnd(sessionId) &&
-        (sessionHasCounterFields(resource.data)
-          ? sessionHasCounterFields(request.resource.data) &&
-            validSessionCounter(resource.data) && validSessionCounter(request.resource.data) &&
-            (validSessionEnd(sessionId) || validSessionEndRepair(sessionId) ||
-              validSessionPlanFinish(sessionId))
-          : validLegacySessionTransition(sessionId) &&
-            request.resource.data.status == 'ended');
+        sessionHasCounterFields(resource.data) && sessionHasCounterFields(request.resource.data) &&
+        validSessionCounter(resource.data) && validSessionCounter(request.resource.data) &&
+        (validSessionEnd(sessionId) || validSessionEndRepair(sessionId) ||
+          validSessionPlanFinish(sessionId));
     }
 
     function validDeletionPendingSessionAbort(sessionId) {
@@ -3006,14 +2862,9 @@ service cloud.firestore {
 
     match /teacher_allowlist/{email} {
       allow get, list: if isAdmin();
-      allow create: if canonicalAllowanceId(email) &&
-        (validAuthoritativeLegacyMirror(email) ||
-          (!teacherAccessMigrationComplete() && teacherAccessMigrationUnlocked() && isAdmin() &&
-            validAllowanceDocument(email)));
+      allow create: if canonicalAllowanceId(email) && validAuthoritativeLegacyMirror(email);
       allow update: if validOwnTeacherDeletionLegacyAllowance(email) ||
-        validAuthoritativeLegacyMirror(email) ||
-        (!teacherAccessMigrationComplete() && teacherAccessMigrationUnlocked() && isAdmin() &&
-          canonicalAllowanceId(email) && validAllowanceDocument(email) && !protectsCurrentAdmin(email));
+        validAuthoritativeLegacyMirror(email);
       allow delete: if false;
       allow read, write: if false;
     }
@@ -3021,12 +2872,7 @@ service cloud.firestore {
     match /migration_gates/set_counters {
       allow get: if isAdmin();
       allow list: if false;
-      allow create: if isAdmin() && validCounterGateLock();
-      allow update: if isAdmin() &&
-        ((resource.data.get('locked', false) == false && validCounterGateLock() &&
-            request.resource.data.lockId != resource.data.get('lockId', '')) ||
-          validCounterGateUnlock());
-      allow delete: if false;
+      allow create, update, delete: if false;
       allow read, write: if false;
     }
 
@@ -3303,10 +3149,7 @@ service cloud.firestore {
       allow delete: if !('classPlanId' in resource.data) &&
         !('classPlanRevision' in resource.data) &&
         (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted' &&
-          (sessionHasCounterFields(resource.data)
-            ? validSessionCounter(resource.data)
-            : legacySessionCounterCompatibilityOpen() &&
-              legacySessionWithoutCounters(resource.data))));
+          sessionHasCounterFields(resource.data) && validSessionCounter(resource.data)));
       allow read, write: if false;
 
       match /meta/allocation {
