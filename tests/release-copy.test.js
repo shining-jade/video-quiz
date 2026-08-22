@@ -498,7 +498,10 @@ test('teacher access guide only owns access/session CLI verify and unlock contra
   assert.match(guide, /--unlock.*--expected-generation <COUNTER_LOCK_GENERATION>/);
   assert.match(guide, /access unlock[^\n]*legacy fallback[^\n]*(허용되지|되살리지)/i);
   assert.match(guide, /status: "complete"[^\n]*strictReady: true[^\n]*migrationGeneration/);
-  assert.match(rules, /allow create: if sessionCounterMigrationUnlocked\(\)[\s\S]{0,100}?anonymousStudent\(\)/);
+  assert.match(
+    rules,
+    /match\s+\/students\/\{studentId\}\s*\{[\s\S]*?allow\s+create\s*:\s*if\s+sessionCounterMigrationUnlocked\(\)\s*&&\s*anonymousStudent\(\)/
+  );
 });
 
 test('공동 편집과 휴지통 공개 문구는 무료 정리의 한계와 보존 범위를 설명한다', () => {

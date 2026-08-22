@@ -8,7 +8,7 @@ const path = require('node:path');
 const { measureRulesSource } = require('../rules-source-metrics.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
-const SOURCE_BUDGET = Object.freeze({ bytes: 150000, lines: 3000, functions: 210 });
+const SOURCE_BUDGET = Object.freeze({ bytes: 130000, lines: 2700, functions: 190 });
 
 function parseArguments(argv) {
   const options = { projectId: '', targetMode: '', outputPath: '' };

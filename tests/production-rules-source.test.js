@@ -112,6 +112,11 @@ test('production compiler probe posts only the supplied Rules source and keeps i
 });
 
 test('production compiler probe keeps ERROR diagnostics and source-budget violations fail closed', async () => {
+  assert.equal(cli.sourceMeetsBudget({ bytes: 130000, lines: 2700, functions: 190 }), true);
+  assert.equal(cli.sourceMeetsBudget({ bytes: 130001, lines: 2700, functions: 190 }), false);
+  assert.equal(cli.sourceMeetsBudget({ bytes: 130000, lines: 2701, functions: 190 }), false);
+  assert.equal(cli.sourceMeetsBudget({ bytes: 130000, lines: 2700, functions: 191 }), false);
+
   const output = temporaryOutput('diagnostics.json');
   const report = await cli.main([
     '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
@@ -130,7 +135,7 @@ test('production compiler probe keeps ERROR diagnostics and source-budget violat
   const oversize = await cli.main([
     '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', oversizeOutput
   ], dependencies({
-    readRulesSource: () => 'x'.repeat(150001),
+    readRulesSource: () => 'x'.repeat(130001),
     postJson: async () => ({ statusCode: 200, body: { issues: [] } })
   }));
   assert.equal(oversize.status, 'unsafe');

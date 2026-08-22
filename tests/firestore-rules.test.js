@@ -52,26 +52,29 @@ function rulesFunctionBody(source, name) {
 test('public Rules consolidation interface dispatches parent keys and shares child binding', () => {
   const source = readFileSync('firestore.rules', 'utf8');
   const dispatcher = rulesFunctionBody(source, 'validPublicParentUpdate');
-  assert.match(dispatcher, /let changed = after\.diff\(before\)\.affectedKeys\(\);/);
+  assert.match(dispatcher,
+    /let\s+changed\s*=\s*after\.diff\(before\)\.affectedKeys\(\);/);
   assert.match(dispatcher, /changed\.hasOnly\(/);
   for (const status of ['building', 'published', 'withdrawn', 'cancelled', 'moderated']) {
     assert.match(dispatcher, new RegExp(`before\\.status\\s*==\\s*'${status}'`));
   }
   assert.match(source,
-    /function validVisiblePublicChild\(setId, data, expectedSchemaVersion\)/);
+    /function\s+validVisiblePublicChild\(setId\s*,\s*data\s*,\s*expectedSchemaVersion\)/);
   assert.match(source,
-    /function validPublicChildList\(setId, data, collectionName\)/);
+    /function\s+validPublicChildList\(setId\s*,\s*data\s*,\s*collectionName\)/);
   assert.match(source,
-    /function validPublicChildBind\(setId, key, collectionName, countField\)/);
+    /function\s+validPublicChildBind\(setId\s*,\s*key\s*,\s*collectionName\s*,\s*countField\)/);
   assert.doesNotMatch(source,
     /function (?:visiblePublic(?:Video|Question|Image)|validPublic(?:Video|Question|Image)(?:List|Bind))\(/);
   for (const collectionName of ['videos', 'questions', 'images']) {
     const leafName = collectionName === 'videos'
       ? 'validPublicVideoGet'
       : collectionName === 'questions' ? 'validPublicQuestionGet' : 'validPublicImageGet';
-    assert.match(rulesFunctionBody(source, leafName), /validVisiblePublicChild\(setId, data, 1\)/);
+    assert.match(rulesFunctionBody(source, leafName),
+      /validVisiblePublicChild\(setId\s*,\s*data\s*,\s*1\)/);
     assert.match(source, new RegExp(
-      `allow list: if validPublicChildList\\(setId, resource\\.data, '${collectionName}'\\);`
+      `allow\\s+list\\s*:\\s*if\\s+validPublicChildList\\(setId\\s*,\\s*` +
+      `resource\\.data\\s*,\\s*'${collectionName}'\\);`
     ));
   }
 });
