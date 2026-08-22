@@ -29,10 +29,10 @@ git diff --check
 그 다음, 어떤 production mutation보다 먼저 exact production Rules source를 공식 `projects.test` API로 읽기 전용 검증한다.
 
 ```powershell
-pnpm test:rules:production-source -- --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r16-production-rules-probe.json
+pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r17-production-rules-probe.json
 ```
 
-`r16-production-rules-probe.json`은 새 restricted output 경로여야 하며 `.reserved`와 JSON을 모두 보존하고 기존 파일을 덮어쓰지(overwrite) 않는다. 이 probe는 `rulesets.create` 또는 release update를 절대로 호출하지 않는다. source budget 초과 또는 실패면 즉시 중단한다. Rules API HTTP 5xx이면 즉시 중단한다. `issueCounts.error`가 ERROR 0이 아니면 즉시 중단한다. `issueCounts.unknown`이 0이 아니거나 `status: "complete"`, `safeToCreateRuleset: true`가 아니거나 없으면 즉시 중단한다. report의 SHA-256과 metrics를 manifest의 exact `firestore.rules` bytes와 다시 대조한다.
+`r17-production-rules-probe.json`은 새 restricted output 경로여야 하며 `.reserved`와 JSON을 모두 보존하고 기존 파일을 덮어쓰지(overwrite) 않는다. 이 probe는 `rulesets.create` 또는 release update를 절대로 호출하지 않는다. source budget 초과 또는 실패면 즉시 중단한다. Rules API HTTP 5xx이면 즉시 중단한다. `issueCounts.error`가 ERROR 0이 아니면 즉시 중단한다. `issueCounts.unknown`이 0이 아니거나 `status: "complete"`, `safeToCreateRuleset: true`가 아니거나 없으면 즉시 중단한다. report의 SHA-256과 metrics를 manifest의 exact `firestore.rules` bytes와 다시 대조한다.
 
 ### R1 — exact write-quiescence 시작
 

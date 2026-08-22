@@ -65,7 +65,7 @@ test('release runbook probes the exact production Rules source after local verif
   const localTestIndex = runbook.indexOf('pnpm test');
   const emulatorRulesIndex = runbook.indexOf('pnpm test:rules', localTestIndex);
   const productionProbeIndex = runbook.indexOf(
-    'pnpm test:rules:production-source -- --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r16-production-rules-probe.json',
+    'pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r17-production-rules-probe.json',
     emulatorRulesIndex
   );
   const rulesetCreateIndex = runbook.indexOf('rulesets.create', productionProbeIndex);
@@ -74,7 +74,8 @@ test('release runbook probes the exact production Rules source after local verif
   assert.ok(emulatorRulesIndex > localTestIndex, 'Firestore Emulator verification must follow local tests');
   assert.ok(productionProbeIndex > emulatorRulesIndex, 'official production-source probe must follow local verification');
   assert.ok(rulesetCreateIndex > productionProbeIndex, 'rulesets.create must follow the read-only production-source probe');
-  assert.match(runbook, /r16-production-rules-probe\.json[^\n]*(새|신규)[^\n]*(경로|output)[^\n]*(덮어쓰지|overwrite)/i);
+  assert.match(runbook, /r17-production-rules-probe\.json[^\n]*(새|신규)[^\n]*(경로|output)[^\n]*(덮어쓰지|overwrite)/i);
+  assert.doesNotMatch(runbook, /pnpm test:rules:production-source -- --project/);
 });
 
 test('release runbook stops before mutation on source budget, Rules API, or compiler ERROR failures', () => {
