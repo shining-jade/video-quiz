@@ -150,6 +150,34 @@ test('Rules API diagnosis accounts for the full 2,500-ruleset quota with GET onl
   assert.equal(transport.calls.every(call => call.method === 'GET'), true);
 });
 
+test('Rules API diagnosis persists allowlisted read failures without raw private content', async () => {
+  const secret = 'teacher@example.com uid_abc123 private rules source';
+  const output = temporaryOutput('safe-failure.json');
+  const report = await cli.main([
+    '--project', PROJECT, '--target-mode', 'production', '--output', output
+  ], {
+    environment: {},
+    reserveReport,
+    acquireAccessToken: async () => 'private-token',
+    getJson: async ({ method }) => {
+      assert.equal(method, 'GET');
+      return {
+        statusCode: 503,
+        rawBody: '<html>' + secret + '</html>',
+        body: { error: { code: 503, status: 'UNAVAILABLE', message: secret } }
+      };
+    },
+    writeLine() {}
+  });
+
+  assert.equal(report.status, 'failed');
+  assert.equal(report.release.failure.apiStatus, 'UNAVAILABLE');
+  assert.equal(report.release.failure.apiMessageCategory, 'API_MESSAGE_OMITTED');
+  const persisted = fs.readFileSync(output, 'utf8');
+  assert.equal(persisted.includes(secret), false);
+  assert.equal(persisted.includes('private-token'), false);
+});
+
 function sha256(value) {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }

@@ -46,7 +46,12 @@ async function listRulesets({ getJson, apiRoot, projectId, accessToken }) {
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const url = apiRoot + 'projects/' + projectId + '/rulesets?pageSize=' + PAGE_SIZE +
       (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
-    const response = await getJson({ url, accessToken, method: 'GET' });
+    let response;
+    try {
+      response = await getJson({ url, accessToken, method: 'GET' });
+    } catch (_) {
+      return { readable: false, rulesets, response: null, transportFailed: true };
+    }
     if (!httpSuccess(response)) return { readable: false, rulesets, response };
     const page_ = Array.isArray(response.body.rulesets) ? response.body.rulesets : [];
     for (const ruleset of page_) {
@@ -80,7 +85,12 @@ function selectCandidates(rulesets, { knownRulesetNames, createdAfter }) {
 }
 
 async function sourceMatches({ getJson, apiRoot, accessToken, rulesetName, expectedSha256 }) {
-  const response = await getJson({ url: apiRoot + rulesetName, accessToken, method: 'GET' });
+  let response;
+  try {
+    response = await getJson({ url: apiRoot + rulesetName, accessToken, method: 'GET' });
+  } catch (_) {
+    return { readable: false, matches: false, transportFailed: true };
+  }
   if (!httpSuccess(response)) return { readable: false, matches: false };
   const files = response.body && response.body.source && response.body.source.files;
   if (!Array.isArray(files) || files.length !== 1) return { readable: true, matches: false };
@@ -137,13 +147,13 @@ async function reconcileCreate({
     if (inspection.matches) result.matchingRulesetNames.push(candidate.name);
   }
 
+  if (result.unreadableCount > 0) {
+    result.note = 'some candidate rulesets were unreadable, so the create outcome is undetermined';
+    return result;
+  }
   if (result.matchingRulesetNames.length > 0) {
     result.writeLanded = true;
     result.note = 'the intended source is already persisted; do not retry the create';
-    return result;
-  }
-  if (result.unreadableCount > 0) {
-    result.note = 'some candidate rulesets were unreadable, so the create outcome is undetermined';
     return result;
   }
   result.writeLanded = false;

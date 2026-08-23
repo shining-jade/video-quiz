@@ -39,9 +39,14 @@ test('Rules API failure detail keeps the code, status, message, and details', ()
   assert.equal(failure.httpStatus, 503);
   assert.equal(failure.apiCode, 503);
   assert.equal(failure.apiStatus, 'UNAVAILABLE');
-  assert.equal(failure.apiMessage, 'The service is currently unavailable.');
+  assert.equal(failure.apiMessage, '');
+  assert.equal(failure.apiMessageCategory, 'API_MESSAGE_OMITTED');
   assert.deepEqual(failure.apiDetails, [
-    'type.googleapis.com/google.rpc.ErrorInfo SERVICE_UNAVAILABLE firebaserules.googleapis.com'
+    {
+      type: 'ERROR_INFO',
+      reason: 'SERVICE_UNAVAILABLE',
+      domain: 'firebaserules.googleapis.com'
+    }
   ]);
   assert.equal(failure.transportError, '');
 });
@@ -59,20 +64,21 @@ test('Rules API failure detail separates a quota refusal from a server-side stal
   }, null);
 
   assert.equal(quota.apiStatus, 'RESOURCE_EXHAUSTED');
-  assert.match(quota.apiMessage, /too many rulesets/);
+  assert.equal(quota.apiMessageCategory, 'API_MESSAGE_OMITTED');
   assert.notEqual(quota.apiStatus, 'UNAVAILABLE');
 });
 
 test('Rules API failure detail records transport errors and non-JSON bodies', () => {
   const transport = describeRulesApiFailure(null, new Error('socket hang up'));
   assert.equal(transport.httpStatus, 0);
-  assert.equal(transport.transportError, 'socket hang up');
+  assert.equal(transport.transportError, 'TRANSPORT_FAILURE');
 
   const html = describeRulesApiFailure({
     statusCode: 503, body: null, rawBody: '<html><title>503 Service Unavailable</title></html>'
   }, null);
   assert.equal(html.httpStatus, 503);
-  assert.match(html.rawBody, /503 Service Unavailable/);
+  assert.equal(html.rawBody, '');
+  assert.equal(html.rawBodyCategory, 'NON_JSON_BODY_OMITTED');
 });
 
 test('Rules API failure detail never discloses a bearer token and stays bounded', () => {
@@ -80,12 +86,61 @@ test('Rules API failure detail never discloses a bearer token and stays bounded'
     new Error('request failed with authorization Bearer ya29.a0AfB_secret-token-value'));
 
   assert.equal(leaky.transportError.includes('ya29.a0AfB_secret-token-value'), false);
-  assert.match(leaky.transportError, /\[redacted\]/);
+  assert.equal(leaky.transportError, 'TRANSPORT_FAILURE');
 
   const huge = describeRulesApiFailure({
     statusCode: 500, body: { error: { message: 'x'.repeat(MAX_MESSAGE + 500) } }
   }, null);
-  assert.equal(huge.apiMessage.length, MAX_MESSAGE);
+  assert.equal(huge.apiMessage, '');
+  assert.equal(huge.apiMessageCategory, 'API_MESSAGE_OMITTED');
+});
+
+test('failure reports persist only allowlisted diagnostics, never raw failure content', async () => {
+  const secret = 'teacher@example.com uid_abc123 rules_version = \'2\'; private source';
+  const failure = describeRulesApiFailure({
+    statusCode: 503,
+    rawBody: '<html>' + secret + '</html>',
+    body: {
+      error: {
+        code: 503,
+        status: 'UNAVAILABLE',
+        message: secret,
+        details: [{
+          '@type': 'type.googleapis.com/private.' + secret,
+          reason: secret,
+          domain: secret,
+          nested: secret
+        }]
+      }
+    }
+  }, new Error(secret));
+
+  const serializedFailure = JSON.stringify(failure);
+  assert.equal(serializedFailure.includes(secret), false);
+  assert.equal(failure.httpStatus, 503);
+  assert.equal(failure.apiCode, 503);
+  assert.equal(failure.apiStatus, 'UNAVAILABLE');
+  assert.equal(failure.rawBody, '');
+  assert.equal(failure.transportError, 'TRANSPORT_FAILURE');
+
+  const output = temporaryOutput('safe-persisted-failure.json');
+  await probe.main([
+    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
+  ], {
+    environment: {},
+    readRulesSource: () => SMALL_SOURCE,
+    reserveReport,
+    acquireAccessToken: async () => 'adc-token-must-not-escape',
+    postJson: async () => ({
+      statusCode: 503,
+      body: { error: { code: 503, status: 'UNAVAILABLE', message: secret } }
+    }),
+    writeLine() {}
+  });
+
+  const persisted = fs.readFileSync(output, 'utf8');
+  assert.equal(persisted.includes(secret), false);
+  assert.equal(persisted.includes('adc-token-must-not-escape'), false);
 });
 
 test('failure line renders every field the 503 triage needs', () => {
@@ -95,7 +150,7 @@ test('failure line renders every field the 503 triage needs', () => {
 
   assert.match(line, /httpStatus=503/);
   assert.match(line, /apiStatus=UNAVAILABLE/);
-  assert.match(line, /apiMessage="deadline"/);
+  assert.match(line, /apiMessageCategory=API_MESSAGE_OMITTED/);
 });
 
 test('compiler probe now records why a non-2xx response failed', async () => {
@@ -118,10 +173,12 @@ test('compiler probe now records why a non-2xx response failed', async () => {
   assert.equal(report.safeToCreateRuleset, false);
   assert.equal(report.failure.httpStatus, 503);
   assert.equal(report.failure.apiStatus, 'UNAVAILABLE');
-  assert.equal(report.failure.apiMessage, 'deadline exceeded');
+  assert.equal(report.failure.apiMessage, '');
+  assert.equal(report.failure.apiMessageCategory, 'API_MESSAGE_OMITTED');
 
   const persisted = JSON.parse(fs.readFileSync(output, 'utf8'));
-  assert.equal(persisted.failure.apiMessage, 'deadline exceeded');
+  assert.equal(persisted.failure.apiMessage, '');
+  assert.equal(persisted.failure.apiMessageCategory, 'API_MESSAGE_OMITTED');
   assert.equal(JSON.stringify(persisted).includes('adc-token-must-not-escape'), false);
 });
 

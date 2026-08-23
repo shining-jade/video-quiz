@@ -174,6 +174,68 @@ test('an unreadable candidate leaves the outcome undetermined rather than negati
   assert.match(result.note, /undetermined/);
 });
 
+test('a readable match plus any unreadable candidate remains undetermined', async () => {
+  const matched = rulesetName('matched');
+  const unreadable = rulesetName('unreadable');
+  const server = serve([
+    { name: matched, createTime: '2026-08-22T23:40:00Z' },
+    { name: unreadable, createTime: '2026-08-22T23:39:00Z' }
+  ], {
+    sources: { [matched]: INTENDED },
+    failures: { [unreadable]: { statusCode: 503, body: null } }
+  });
+
+  const result = await reconcile.reconcileCreate({
+    getJson: server.getJson,
+    apiRoot: API_ROOT,
+    projectId: PROJECT,
+    accessToken: 'token',
+    expectedSha256: INTENDED_SHA,
+    knownRulesetNames: []
+  });
+
+  assert.equal(result.writeLanded, null);
+  assert.deepEqual(result.matchingRulesetNames, [matched]);
+  assert.equal(result.unreadableCount, 1);
+  assert.match(result.note, /undetermined/);
+});
+
+test('a listing transport exception leaves the outcome undetermined', async () => {
+  const result = await reconcile.reconcileCreate({
+    getJson: async () => { throw new Error('network diagnostic must not escape'); },
+    apiRoot: API_ROOT,
+    projectId: PROJECT,
+    accessToken: 'token',
+    expectedSha256: INTENDED_SHA,
+    knownRulesetNames: []
+  });
+
+  assert.equal(result.writeLanded, null);
+  assert.equal(result.listReadable, false);
+  assert.match(result.note, /undetermined/);
+});
+
+test('a candidate transport exception leaves the outcome undetermined', async () => {
+  const candidate = rulesetName('throws');
+  const result = await reconcile.reconcileCreate({
+    getJson: async ({ url }) => {
+      if (url.includes('/rulesets?')) {
+        return { statusCode: 200, body: { rulesets: [{ name: candidate }] } };
+      }
+      throw new Error('source read diagnostic must not escape');
+    },
+    apiRoot: API_ROOT,
+    projectId: PROJECT,
+    accessToken: 'token',
+    expectedSha256: INTENDED_SHA,
+    knownRulesetNames: []
+  });
+
+  assert.equal(result.writeLanded, null);
+  assert.equal(result.unreadableCount, 1);
+  assert.match(result.note, /undetermined/);
+});
+
 test('reconciliation refuses to guess without an exact expected source hash', async () => {
   const server = serve([]);
   const result = await reconcile.reconcileCreate({
