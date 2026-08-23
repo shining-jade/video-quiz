@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -180,6 +182,7 @@ async function invoke(t, options = {}) {
     },
     async getJson(request) {
       calls.push({ ...request });
+      if (options.getJson) return options.getJson(request);
       if (request.url === adopt.API_ROOT + TARGET) {
         return options.target || targetResponse();
       }
@@ -192,8 +195,14 @@ async function invoke(t, options = {}) {
     async patchJson(request) {
       calls.push({ ...request });
       patchCallCount += 1;
+      if (options.patchJson) return options.patchJson(request, patchCallCount);
       if ((options.neverSettlePatchNumbers || []).includes(patchCallCount)) {
-        return new Promise(() => {});
+        return new Promise((resolve, reject) => {
+          assert.ok(request.signal, 'injected transport requires an AbortSignal');
+          const rejectAbort = () => reject(request.signal.reason);
+          if (request.signal.aborted) rejectAbort();
+          else request.signal.addEventListener('abort', rejectAbort, { once: true });
+        });
       }
       assert.ok(patches.length > 0, 'unexpected release PATCH');
       return patches.shift();
@@ -530,6 +539,122 @@ test('a never-settling target PATCH times out and restores exact rollback readba
   assert.equal(execution.result.failure.transportError, 'ETIMEDOUT');
   assert.equal(execution.result.rollbackReadbackExact, true);
   assert.equal(execution.calls.filter(call => call.method === 'PATCH').length, 2);
+});
+
+test('target PATCH timeout cancels late apply before rollback and remains rolled back', async t => {
+  let liveRuleset = QUIESCENCE;
+  const events = [];
+  const execution = await invoke(t, {
+    requestTimeoutMs: 10,
+    getJson(request) {
+      if (request.url === adopt.API_ROOT + TARGET) return targetResponse();
+      assert.equal(request.url, adopt.API_ROOT + RELEASE);
+      events.push('release-readback:' + liveRuleset);
+      return releaseResponse(liveRuleset);
+    },
+    patchJson(request, patchNumber) {
+      if (patchNumber === 1) {
+        events.push('target-started');
+        return new Promise((resolve, reject) => {
+          const lateApply = setTimeout(() => {
+            liveRuleset = TARGET;
+            events.push('target-applied-late');
+            resolve({ statusCode: 200, body: { name: RELEASE, rulesetName: TARGET } });
+          }, 40);
+          if (!request.signal) return;
+          request.signal.addEventListener('abort', () => {
+            events.push('target-abort-received');
+            clearTimeout(lateApply);
+            setTimeout(() => {
+              events.push('target-transport-closed');
+              reject(request.signal.reason);
+            }, 5);
+          }, { once: true });
+        });
+      }
+      events.push('rollback-started');
+      liveRuleset = ROLLBACK;
+      return { statusCode: 200, body: { name: RELEASE, rulesetName: ROLLBACK } };
+    }
+  });
+
+  assert.equal(execution.result.status, 'failed-rolled-back');
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(liveRuleset, ROLLBACK);
+  assert.equal(events.includes('target-applied-late'), false);
+  assert.equal(releaseResponse(liveRuleset).body.rulesetName, ROLLBACK);
+  assert.ok(events.indexOf('target-abort-received') < events.indexOf('target-transport-closed'));
+  assert.ok(events.indexOf('target-transport-closed') < events.indexOf('rollback-started'));
+});
+
+test('request transport settles abort only after the HTTPS request closes', async t => {
+  const originalRequest = https.request;
+  const events = [];
+  const fakeRequest = new EventEmitter();
+  const fakeResponse = new EventEmitter();
+  fakeResponse.statusCode = 200;
+  fakeRequest.setTimeout = () => {
+    events.push('independent-request-timeout');
+    return fakeRequest;
+  };
+  fakeResponse.setTimeout = () => {
+    events.push('independent-response-timeout');
+    return fakeResponse;
+  };
+  fakeRequest.destroy = error => {
+    events.push('request-destroyed:' + error.code);
+    fakeRequest.emit('error', error);
+  };
+  https.request = (options, respond) => {
+    fakeRequest.end = () => {
+      events.push('request-ended');
+      respond(fakeResponse);
+    };
+    return fakeRequest;
+  };
+  t.after(() => { https.request = originalRequest; });
+
+  const controller = new AbortController();
+  const timeout = Object.assign(new Error('deadline'), { code: 'ETIMEDOUT' });
+  let settlement = 'pending';
+  const requested = adopt.requestJson({
+    method: 'PATCH',
+    url: adopt.API_ROOT + RELEASE,
+    accessToken: 'test-token',
+    payload: { release: { rulesetName: TARGET } },
+    signal: controller.signal
+  }).then(
+    () => { settlement = 'resolved'; },
+    error => { settlement = error; }
+  );
+
+  controller.abort(timeout);
+  assert.deepEqual(events, ['request-ended', 'request-destroyed:ETIMEDOUT']);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settlement, 'pending');
+  fakeRequest.emit('close');
+  await requested;
+  assert.equal(settlement, timeout);
+  assert.equal(settlement.mutationOutcomeUnknown, true);
+});
+
+test('an ambiguous production PATCH transport stops without rollback claims', async t => {
+  let patchCalls = 0;
+  const uncertain = Object.assign(new Error('closed after transmit'), {
+    code: 'ETIMEDOUT', mutationOutcomeUnknown: true
+  });
+  const execution = await invoke(t, {
+    patchJson() {
+      patchCalls += 1;
+      throw uncertain;
+    }
+  });
+
+  assert.equal(execution.result.status, 'mutation-outcome-unknown');
+  assert.equal(execution.result.mutationOutcomeUnknown, true);
+  assert.equal(execution.result.rollbackAttempted, false);
+  assert.equal(execution.result.rollbackReadbackExact, false);
+  assert.equal(patchCalls, 1);
 });
 
 test('a never-settling rollback PATCH times out and still performs rollback readback', async t => {

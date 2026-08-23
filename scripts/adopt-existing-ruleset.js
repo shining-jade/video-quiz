@@ -178,14 +178,29 @@ function withTimeout(start, timeoutMs) {
   });
 }
 
-function runtimeRequest(runtime, dependency, request) {
-  return withTimeout(() => runtime[dependency](request), runtime.requestTimeoutMs);
+async function runtimeRequest(runtime, dependency, request) {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(timeoutError()),
+    timeoutMilliseconds(runtime.requestTimeoutMs)
+  );
+  try {
+    const response = await runtime[dependency]({ ...request, signal: controller.signal });
+    if (controller.signal.aborted) throw controller.signal.reason || timeoutError();
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function requestJson({ method, url, accessToken, payload, timeoutMs }) {
+function requestJson({ method, url, accessToken, payload, signal }) {
   if (!['GET', 'PATCH'].includes(method)) {
     return Promise.reject(new Error('Existing Ruleset adoption permits GET and PATCH only.'));
   }
+  if (!signal || typeof signal.addEventListener !== 'function') {
+    return Promise.reject(new Error('Rules API transport requires an AbortSignal.'));
+  }
+  if (signal.aborted) return Promise.reject(signal.reason || timeoutError());
   return new Promise((resolve, reject) => {
     const endpoint = new URL(url);
     const encoded = payload == null ? null : JSON.stringify(payload);
@@ -194,6 +209,14 @@ function requestJson({ method, url, accessToken, payload, timeoutMs }) {
       headers['content-type'] = 'application/json';
       headers['content-length'] = Buffer.byteLength(encoded, 'utf8');
     }
+    let settled = false;
+    let pendingError = null;
+    const settle = (complete, value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', abortRequest);
+      complete(value);
+    };
     const request = https.request({
       protocol: endpoint.protocol,
       hostname: endpoint.hostname,
@@ -202,25 +225,42 @@ function requestJson({ method, url, accessToken, payload, timeoutMs }) {
       headers
     }, response => {
       const chunks = [];
-      response.setTimeout(timeoutMilliseconds(timeoutMs), () => response.destroy(timeoutError()));
       response.on('data', chunk => chunks.push(chunk));
-      response.on('error', reject);
+      response.on('error', error => {
+        if (settled) return;
+        if (!pendingError) pendingError = error;
+        request.destroy(pendingError);
+      });
       response.on('end', () => {
+        if (settled || pendingError) return;
         const statusCode = response.statusCode || 0;
         const text = Buffer.concat(chunks).toString('utf8');
         try {
-          resolve({ statusCode, body: text ? JSON.parse(text) : {} });
+          settle(resolve, { statusCode, body: text ? JSON.parse(text) : {} });
         } catch (error) {
           if (statusCode < 200 || statusCode >= 300) {
-            resolve({ statusCode, body: null, rawBody: text });
+            settle(resolve, { statusCode, body: null, rawBody: text });
             return;
           }
-          reject(new Error('Rules API returned invalid JSON.', { cause: error }));
+          settle(reject, new Error('Rules API returned invalid JSON.', { cause: error }));
         }
       });
     });
-    request.setTimeout(timeoutMilliseconds(timeoutMs), () => request.destroy(timeoutError()));
-    request.on('error', reject);
+    function abortRequest() {
+      if (settled) return;
+      pendingError = signal.reason || timeoutError();
+      request.destroy(pendingError);
+    }
+    request.on('error', error => {
+      if (!pendingError) pendingError = error;
+    });
+    request.on('close', () => {
+      if (pendingError) {
+        if (method === 'PATCH') pendingError.mutationOutcomeUnknown = true;
+        settle(reject, pendingError);
+      }
+    });
+    signal.addEventListener('abort', abortRequest, { once: true });
     request.end(encoded == null ? undefined : encoded);
   });
 }
@@ -443,6 +483,7 @@ async function main(argv, dependencies) {
     createAttempted: false,
     releasePatchAttempted: false,
     rollbackAttempted: false,
+    mutationOutcomeUnknown: false,
     providerStillOff: true,
     safeForExistingFlowSmoke: false,
     phase: 'reserved-before-manifest-validation',
@@ -603,12 +644,17 @@ async function main(argv, dependencies) {
     ].join(' '));
     return report;
   } catch (error) {
+    const mutationOutcomeUnknown = Boolean(
+      error && error.transportError && error.transportError.mutationOutcomeUnknown
+    );
     const failure = describeRulesApiFailure(
       error && error.response, error && error.transportError ||
         (error && !error.failureCode ? error : null)
     );
     let rollback = null;
-    if (releasePatchAttempted) rollback = await rollbackRelease(runtime, accessToken);
+    if (releasePatchAttempted && !mutationOutcomeUnknown) {
+      rollback = await rollbackRelease(runtime, accessToken);
+    }
     const report = {
       ...placeholder,
       sourceCommit: manifest ? manifest.task4.headCommit : null,
@@ -626,14 +672,19 @@ async function main(argv, dependencies) {
       releaseReadbackRulesetName: '',
       releaseReadbackExact: false,
       rollbackAttempted: Boolean(rollback),
+      mutationOutcomeUnknown,
       rollbackPatchHttpStatus: rollback ? rollback.patchHttpStatus : 0,
       rollbackReadbackHttpStatus: rollback ? rollback.readbackHttpStatus : 0,
       rollbackReadbackExact: rollback ? rollback.readbackExact : false,
-      failureCode: error && error.failureCode || 'local-adoption-gate-failed',
+      failureCode: mutationOutcomeUnknown
+        ? 'target-release-patch-mutation-outcome-unknown'
+        : error && error.failureCode || 'local-adoption-gate-failed',
       failure,
       rollbackFailure: rollback && !rollback.exact ? rollback.failure : null,
       phase,
-      status: rollback && rollback.exact ? 'failed-rolled-back' : 'failed',
+      status: mutationOutcomeUnknown
+        ? 'mutation-outcome-unknown'
+        : rollback && rollback.exact ? 'failed-rolled-back' : 'failed',
       safeForExistingFlowSmoke: false
     };
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
