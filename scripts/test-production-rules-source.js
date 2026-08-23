@@ -9,6 +9,7 @@ const { measureRulesSource } = require('../rules-source-metrics.js');
 const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
+const PROJECT_ID = 'video-quiz-65798';
 const SOURCE_BUDGET = Object.freeze({ bytes: 130000, lines: 2700, functions: 190 });
 
 function parseArguments(argv) {
@@ -27,8 +28,8 @@ function parseArguments(argv) {
     options[field] = argv[index + 1];
     index += 1;
   }
-  if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(options.projectId)) {
-    throw new Error('--project must be an exact Google Cloud project ID.');
+  if (options.projectId !== PROJECT_ID) {
+    throw new Error('--project must name the fixed production project.');
   }
   if (options.targetMode !== 'production') {
     throw new Error('--target-mode production is required.');
@@ -130,6 +131,7 @@ function postJson({ url, accessToken, payload }) {
 function reportFor({ projectId, source, metrics, issueCounts, status, safeToCreateRuleset }) {
   return {
     projectId,
+    targetMode: 'production',
     sourceSha256: sourceSha256(source),
     metrics,
     issueCounts,
@@ -245,6 +247,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  PROJECT_ID,
   SOURCE_BUDGET,
   acquireAccessToken,
   countIssues,

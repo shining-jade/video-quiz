@@ -14,6 +14,8 @@ const { reconcileCreate } = require('../rules-ruleset-reconcile.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 const API_ROOT = 'https://firebaserules.googleapis.com/v1/';
+const PROJECT_ID = 'video-quiz-65798';
+const REQUEST_TIMEOUT_MS = 30_000;
 // Documented Cloud Firestore limit: a project keeps at most 2500 rulesets.
 const RULESET_LIMIT = 2500;
 const PAGE_SIZE = 100;
@@ -36,8 +38,8 @@ function parseArguments(argv) {
     options[field] = argv[index + 1];
     index += 1;
   }
-  if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(options.projectId)) {
-    throw new Error('--project must be an exact Google Cloud project ID.');
+  if (options.projectId !== PROJECT_ID) {
+    throw new Error('--project must name the fixed production project.');
   }
   if (options.targetMode !== 'production') {
     throw new Error('--target-mode production is required.');
@@ -59,12 +61,55 @@ function validateProductionEnvironment(environment = process.env) {
   }
 }
 
-function getJson({ url, accessToken, method }) {
+function timeoutMilliseconds(value) {
+  return Number.isInteger(value) && value > 0 && value <= 120_000
+    ? value : REQUEST_TIMEOUT_MS;
+}
+
+function timeoutError() {
+  const error = new Error('Rules API diagnosis GET timed out.');
+  error.code = 'ETIMEDOUT';
+  return error;
+}
+
+function boundedGetJson(runtime, request) {
+  const controller = new AbortController();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (complete, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      complete(value);
+    };
+    const timer = setTimeout(() => {
+      const error = timeoutError();
+      controller.abort(error);
+      settle(reject, error);
+    }, timeoutMilliseconds(runtime.requestTimeoutMs));
+    Promise.resolve().then(() => runtime.getJson({
+      ...request, method: 'GET', signal: controller.signal
+    })).then(
+      response => settle(resolve, response),
+      error => settle(reject, error)
+    );
+  });
+}
+
+function getJson({ url, accessToken, method, signal }) {
   if (method !== 'GET') {
     return Promise.reject(new Error('Rules API diagnosis supports GET requests only.'));
   }
+  if (signal && signal.aborted) return Promise.reject(signal.reason || timeoutError());
   return new Promise((resolve, reject) => {
     const endpoint = new URL(url);
+    let settled = false;
+    const settle = (complete, value) => {
+      if (settled) return;
+      settled = true;
+      if (signal) signal.removeEventListener('abort', abortRequest);
+      complete(value);
+    };
     const request = https.request({
       protocol: endpoint.protocol,
       hostname: endpoint.hostname,
@@ -74,22 +119,35 @@ function getJson({ url, accessToken, method }) {
     }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
-      response.on('error', reject);
+      response.on('error', error => {
+        if (!request.destroyed) request.destroy(error);
+        settle(reject, error);
+      });
+      response.on('close', () => {
+        if (!settled) settle(reject, Object.assign(
+          new Error('Rules API diagnosis response closed before completion.'),
+          { code: 'ECONNRESET' }
+        ));
+      });
       response.on('end', () => {
         const status = response.statusCode || 0;
         const text = Buffer.concat(chunks).toString('utf8');
         try {
-          resolve({ statusCode: status, body: text ? JSON.parse(text) : {} });
+          settle(resolve, { statusCode: status, body: text ? JSON.parse(text) : {} });
         } catch (error) {
           if (status < 200 || status >= 300) {
-            resolve({ statusCode: status, body: null, rawBody: text });
+            settle(resolve, { statusCode: status, body: null, rawBody: text });
             return;
           }
-          reject(new Error('Rules API returned invalid JSON.', { cause: error }));
+          settle(reject, new Error('Rules API returned invalid JSON.', { cause: error }));
         }
       });
     });
-    request.on('error', reject);
+    function abortRequest() {
+      if (!settled) request.destroy(signal.reason || timeoutError());
+    }
+    request.on('error', error => settle(reject, error));
+    if (signal) signal.addEventListener('abort', abortRequest, { once: true });
     request.end();
   });
 }
@@ -172,6 +230,14 @@ function verdictFor(inventory) {
   return 'ruleset-quota-has-headroom';
 }
 
+function exactReconciliation(reconciliation) {
+  return Boolean(reconciliation) && reconciliation.checked === true &&
+    reconciliation.writeLanded === true && reconciliation.listReadable === true &&
+    reconciliation.unreadableCount === 0 &&
+    Array.isArray(reconciliation.matchingRulesetNames) &&
+    reconciliation.matchingRulesetNames.length === 1;
+}
+
 function productionDependencies() {
   return {
     environment: process.env,
@@ -203,19 +269,25 @@ async function main(argv, dependencies) {
   let report;
   try {
     const accessToken = await runtime.acquireAccessToken();
-    const release = await readRelease(runtime, options.projectId, accessToken);
-    const inventory = await inventoryRulesets(runtime, options.projectId, accessToken);
+    const boundedRuntime = {
+      ...runtime,
+      getJson(request) { return boundedGetJson(runtime, request); }
+    };
+    const release = await readRelease(boundedRuntime, options.projectId, accessToken);
+    const inventory = await inventoryRulesets(boundedRuntime, options.projectId, accessToken);
     // With --expect-sha, answer the question a failed create leaves open:
     // is that exact source already persisted as a ruleset?
     const reconciliation = options.expectSha256
       ? await reconcileCreate({
-        getJson: runtime.getJson,
+        getJson: boundedRuntime.getJson,
         apiRoot: API_ROOT,
         projectId: options.projectId,
         accessToken,
         expectedSha256: options.expectSha256
       })
       : null;
+    const readbackComplete = release.readable && inventory.listReadable && !inventory.truncated;
+    const reconciliationComplete = !options.expectSha256 || exactReconciliation(reconciliation);
     report = {
       ...placeholder,
       expectSha256: options.expectSha256 || null,
@@ -225,7 +297,8 @@ async function main(argv, dependencies) {
       rulesetLimit: RULESET_LIMIT,
       remainingSlots: inventory.listReadable && !inventory.truncated
         ? Math.max(0, RULESET_LIMIT - inventory.counted) : null,
-      status: release.readable && inventory.listReadable ? 'complete' : 'failed',
+      status: !readbackComplete ? 'failed'
+        : reconciliationComplete ? 'complete' : 'indeterminate',
       verdict: verdictFor(inventory)
     };
   } catch (error) {
@@ -266,7 +339,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  API_ROOT, MAX_PAGES, PAGE_SIZE, RULESET_LIMIT,
-  acquireAccessToken, getJson, inventoryRulesets, main, parseArguments,
+  API_ROOT, MAX_PAGES, PAGE_SIZE, PROJECT_ID, REQUEST_TIMEOUT_MS, RULESET_LIMIT,
+  acquireAccessToken, boundedGetJson, exactReconciliation, getJson, inventoryRulesets, main, parseArguments,
   productionDependencies, readRelease, validateProductionEnvironment, verdictFor
 };

@@ -17,6 +17,10 @@ database.rules.BACKUP.json
 # Superpowers 설계 목업 및 검토용 임시 작업공간
 .superpowers/
 
+# 운영 증거와 incident helper는 로컬 restricted 자료이며 stage하지 않는다.
+.release-artifacts/
+.release-maintenance/
+
 # 로컬 Node/Firebase Emulator 생성물
 node_modules/
 firestore-debug.log

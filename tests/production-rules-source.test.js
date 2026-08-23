@@ -51,12 +51,12 @@ test('Rules source metrics ignore function-like text in comments and quoted stri
   assert.equal(measureRulesSource(source).functions, 1);
 });
 
-test('default Node test runner omits only the interim Rules source budget gate', () => {
+test('default Node test runner includes the final Rules source budget gate', () => {
   const { defaultTestFiles } = require('../scripts/run-default-tests.js');
   const files = defaultTestFiles(path.resolve(__dirname));
   const names = files.map(file => path.basename(file));
 
-  assert.equal(names.includes('rules-source-budget.test.js'), false);
+  assert.equal(names.includes('rules-source-budget.test.js'), true);
   assert.equal(names.includes('production-rules-source.test.js'), true);
 });
 
@@ -67,6 +67,9 @@ test('production compiler probe requires an exact production target and refuses 
   assert.throws(() => cli.parseArguments([
     '--project', 'bad project', '--target-mode', 'production', '--output', 'probe.json'
   ]), /project/);
+  assert.throws(() => cli.parseArguments([
+    '--project', 'other-valid-project', '--target-mode', 'production', '--output', 'probe.json'
+  ]), /fixed production project/);
   assert.throws(() => cli.parseArguments([
     '--project', 'video-quiz-65798', '--target-mode', 'production'
   ]), /output/);
@@ -104,8 +107,10 @@ test('production compiler probe posts only the supplied Rules source and keeps i
   assert.equal(report.safeToCreateRuleset, true);
   assert.equal(report.status, 'complete');
   assert.deepEqual(Object.keys(report).sort(), [
-    'issueCounts', 'metrics', 'projectId', 'safeToCreateRuleset', 'sourceSha256', 'status'
+    'issueCounts', 'metrics', 'projectId', 'safeToCreateRuleset', 'sourceSha256', 'status',
+    'targetMode'
   ]);
+  assert.equal(report.targetMode, 'production');
   const disclosed = JSON.stringify(report) + '\n' + lines.join('\n');
   assert.equal(disclosed.includes('adc-token-must-not-escape'), false);
   assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).safeToCreateRuleset, true);

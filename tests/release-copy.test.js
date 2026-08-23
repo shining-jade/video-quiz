@@ -64,18 +64,79 @@ test('release runbook probes the exact production Rules source after local verif
   const runbook = read('docs/RELEASE-RUNBOOK.md');
   const localTestIndex = runbook.indexOf('pnpm test');
   const emulatorRulesIndex = runbook.indexOf('pnpm test:rules', localTestIndex);
+  const adoptSyntaxIndex = runbook.indexOf('node --check scripts/adopt-existing-ruleset.js', emulatorRulesIndex);
   const productionProbeIndex = runbook.indexOf(
-    'pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r17-production-rules-probe.json',
+    'pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-23/r23-production-rules-probe.json',
     emulatorRulesIndex
   );
+  const diagnosisIndex = runbook.indexOf(
+    'pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production',
+    productionProbeIndex
+  );
+  const r1Index = runbook.indexOf('### R1 — exact write-quiescence', diagnosisIndex);
   const rulesetCreateIndex = runbook.indexOf('rulesets.create', productionProbeIndex);
 
   assert.ok(localTestIndex >= 0, 'local Node verification must be documented');
   assert.ok(emulatorRulesIndex > localTestIndex, 'Firestore Emulator verification must follow local tests');
+  assert.ok(adoptSyntaxIndex > emulatorRulesIndex, 'adoption helper syntax must be an R0 gate');
   assert.ok(productionProbeIndex > emulatorRulesIndex, 'official production-source probe must follow local verification');
+  assert.ok(diagnosisIndex > productionProbeIndex, 'GET-only diagnosis must follow the fresh compiler probe');
+  assert.ok(r1Index > diagnosisIndex, 'GET-only R23 diagnosis must complete before R1');
   assert.ok(rulesetCreateIndex > productionProbeIndex, 'rulesets.create must follow the read-only production-source probe');
-  assert.match(runbook, /r17-production-rules-probe\.json[^\n]*(새|신규)[^\n]*(경로|output)[^\n]*(덮어쓰지|overwrite)/i);
+  assert.match(runbook, /r23-production-rules-probe\.json[^\n]*(새|신규)[^\n]*(경로|output)[^\n]*(덮어쓰지|overwrite)/i);
+  assert.doesNotMatch(runbook, /r17-production-rules-probe|2026-08-22\/r17/i);
   assert.doesNotMatch(runbook, /pnpm test:rules:production-source -- --project/);
+});
+
+test('R23 manifest binds exact fresh evidence, live release identity, and honest adoption readiness', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  for (const marker of [
+    'r0ProductionRulesProbe', 'r0RulesApiDiagnosis', 'r1Quiescence',
+    'r2LifecycleDryBefore', 'r2LifecycleApply', 'r2LifecycleDryAfter',
+    'r3SharesDryBefore', 'r3SharesApply', 'r3SharesDryAfter',
+    'r4CounterLock', 'r4CounterApply', 'r4CounterAudit',
+    'r5TeacherAccessDry', 'r5TeacherAccessApply',
+    'r6SessionCountersDry', 'r6SessionCountersApply',
+    'r7PublicLibraryAudit', 'r8IndexReadiness'
+  ]) assert.match(runbook, new RegExp('`' + marker + '`'));
+
+  assert.match(runbook, /각 evidence entry[\s\S]*path[\s\S]*sha256[\s\S]*windowId[\s\S]*controlId[\s\S]*capturedAt/);
+  assert.match(runbook, /manifest top-level[\s\S]*schemaVersion[\s\S]*evidence[\s\S]*unknown[\s\S]*거부/);
+  assert.match(runbook, /R18\/R19[\s\S]*deployment authorization[\s\S]*거부/);
+  assert.match(runbook, /quiescence[\s\S]*releaseUpdateTime[\s\S]*immediate pre-PATCH[\s\S]*exact/);
+  assert.match(runbook, /rollback[\s\S]*sourceSha256[\s\S]*PATCH 전[\s\S]*GET/);
+  assert.match(runbook, /release exact readback[\s\S]*target Ruleset[\s\S]*다시 GET[\s\S]*SHA/);
+  assert.match(runbook, /safeForStaticDeployment:\s*true/);
+  assert.match(runbook, /providerMutationAttempted:\s*false/);
+  assert.match(runbook, /providerStateVerified:\s*false/);
+  assert.match(runbook, /r23-quiescence-evidence/);
+  assert.doesNotMatch(runbook, /safeForExistingFlowSmoke:\s*true/);
+});
+
+test('R2 distinguishes lifecycle apply authorization from the fail-closed final dry-run schema', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const r2Start = runbook.indexOf('### R2 — lifecycle migration과 전수 감사');
+  const r3Start = runbook.indexOf('### R3 — collaborator share index 보정', r2Start);
+  const r2 = runbook.slice(r2Start, r3Start);
+
+  assert.match(r2, /apply durable report[\s\S]*safeToDeployStrictRules:\s*true/);
+  assert.match(r2, /마지막 dry-run[\s\S]*safeToDeployStrictRules:\s*false/);
+  assert.match(r2, /마지막 dry-run[\s\S]*appliedCount:\s*0[\s\S]*planned count 0/);
+});
+
+test('release evidence directories are ignored and quarantined helpers are non-executable', () => {
+  assert.equal(fs.existsSync('.gitattributes'), true, '.gitattributes must pin Rules line endings');
+  const attributes = read('.gitattributes').split(/\r?\n/).filter(Boolean);
+  assert.equal(attributes.includes('firestore.rules text eol=lf'), true);
+
+  const ignored = read('.gitignore').split(/\r?\n/).map(line => line.trim());
+  assert.equal(ignored.includes('.release-artifacts/'), true);
+  assert.equal(ignored.includes('.release-maintenance/'), true);
+
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  assert.match(runbook, /\.release-maintenance\/r19-firestore-rules-release\.js/);
+  assert.match(runbook, /격리.*incident evidence[\s\S]*실행.*금지/);
+  assert.match(runbook, /\.release-artifacts\/[\s\S]*\.release-maintenance\/[\s\S]*stage.*금지/);
 });
 
 test('release runbook stops before mutation on source budget, Rules API, or compiler ERROR failures', () => {

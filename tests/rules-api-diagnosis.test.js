@@ -1,9 +1,11 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -49,7 +51,10 @@ function strictGetTransport(respond) {
 test('Rules API diagnosis validates an exact project and refuses emulator configuration', async () => {
   assert.throws(() => cli.parseArguments([
     '--project', 'Video-quiz-65798', '--target-mode', 'production', '--output', 'diagnosis.json'
-  ]), /exact Google Cloud project ID/);
+  ]), /fixed production project/);
+  assert.throws(() => cli.parseArguments([
+    '--project', 'other-valid-project', '--target-mode', 'production', '--output', 'diagnosis.json'
+  ]), /fixed production project/);
   assert.throws(() => cli.parseArguments([
     '--project', PROJECT, '--target-mode', 'production', '--expect-sha', 'ABC', '--output', 'x'
   ]), /exact lowercase sha256/);
@@ -176,6 +181,128 @@ test('Rules API diagnosis persists allowlisted read failures without raw private
   const persisted = fs.readFileSync(output, 'utf8');
   assert.equal(persisted.includes(secret), false);
   assert.equal(persisted.includes('private-token'), false);
+});
+
+test('with --expect-sha only one readable matching Ruleset is determinate success', async t => {
+  const source = "rules_version = '2';\n";
+  const expectedSha256 = sha256(source);
+  const matching = [
+    'projects/' + PROJECT + '/rulesets/match-a',
+    'projects/' + PROJECT + '/rulesets/match-b'
+  ];
+  const cases = [
+    ['no match', [matching[0]], () => ({
+      statusCode: 200,
+      body: { source: { files: [{ name: 'firestore.rules', content: source + '// other' }] } }
+    })],
+    ['unreadable match candidate', [matching[0]], () => ({
+      statusCode: 503,
+      body: { error: { code: 503, status: 'UNAVAILABLE' } }
+    })],
+    ['multiple matches', matching, () => ({
+      statusCode: 200,
+      body: { source: { files: [{ name: 'firestore.rules', content: source }] } }
+    })]
+  ];
+
+  for (const [name, rulesetNames, sourceResponse] of cases) {
+    await t.test(name, async () => {
+      const output = temporaryOutput(name.replace(/ /g, '-') + '.json');
+      const transport = strictGetTransport(url => {
+        if (url === API_ROOT + 'projects/' + PROJECT + '/releases/cloud.firestore') {
+          return { statusCode: 200, body: RELEASE };
+        }
+        if (url === API_ROOT + 'projects/' + PROJECT + '/rulesets?pageSize=100') {
+          return {
+            statusCode: 200,
+            body: { rulesets: rulesetNames.map((rulesetName, index) => ({
+              name: rulesetName,
+              createTime: '2026-08-23T05:0' + index + ':00Z'
+            })) }
+          };
+        }
+        if (rulesetNames.some(rulesetName => url === API_ROOT + rulesetName)) {
+          return sourceResponse();
+        }
+        throw new Error('unexpected URL ' + url);
+      });
+      const report = await cli.main(argumentsFor(output, expectedSha256), {
+        environment: {},
+        reserveReport,
+        acquireAccessToken: async () => 'private-token',
+        getJson: transport.getJson,
+        writeLine() {}
+      });
+
+      assert.equal(report.status, 'indeterminate');
+      assert.notEqual(report.reconciliation.matchingRulesetNames.length, 1);
+    });
+  }
+});
+
+test('diagnosis applies a bounded deadline to every injected GET', async () => {
+  const output = temporaryOutput('bounded-get.json');
+  let observedSignal = null;
+  const attempted = cli.main([
+    '--project', PROJECT,
+    '--target-mode', 'production',
+    '--output', output
+  ], {
+    environment: {},
+    requestTimeoutMs: 10,
+    reserveReport,
+    acquireAccessToken: async () => 'private-token',
+    getJson(request) {
+      observedSignal = request.signal;
+      return new Promise((resolve, reject) => {
+        if (request.signal) {
+          request.signal.addEventListener('abort', () => reject(request.signal.reason), {
+            once: true
+          });
+        }
+      });
+    },
+    writeLine() {}
+  });
+  const report = await Promise.race([
+    attempted,
+    new Promise(resolve => setTimeout(() => resolve('test-deadline'), 100))
+  ]);
+
+  assert.notEqual(report, 'test-deadline');
+  assert.ok(observedSignal instanceof AbortSignal);
+  assert.equal(observedSignal.aborted, true);
+  assert.equal(report.status, 'failed');
+});
+
+test('production GET transport destroys the HTTPS request when aborted', async t => {
+  const originalRequest = https.request;
+  const request = new EventEmitter();
+  const events = [];
+  request.destroy = error => {
+    events.push('destroy:' + error.code);
+    request.emit('error', error);
+  };
+  request.end = () => events.push('end');
+  https.request = () => request;
+  t.after(() => { https.request = originalRequest; });
+
+  const controller = new AbortController();
+  const requested = cli.getJson({
+    url: API_ROOT + 'projects/' + PROJECT + '/releases/cloud.firestore',
+    accessToken: 'private-token',
+    method: 'GET',
+    signal: controller.signal
+  });
+  controller.abort(Object.assign(new Error('deadline'), { code: 'ETIMEDOUT' }));
+  const result = await Promise.race([
+    requested.then(() => 'resolved', error => error),
+    new Promise(resolve => setTimeout(() => resolve('test-deadline'), 100))
+  ]);
+
+  assert.notEqual(result, 'test-deadline');
+  assert.equal(result.code, 'ETIMEDOUT');
+  assert.deepEqual(events, ['end', 'destroy:ETIMEDOUT']);
 });
 
 function sha256(value) {

@@ -7,7 +7,7 @@ const { spawnSync } = require('node:child_process');
 
 function defaultTestFiles(testDirectory = path.resolve(__dirname, '../tests')) {
   return fs.readdirSync(testDirectory)
-    .filter(name => name.endsWith('.test.js') && name !== 'rules-source-budget.test.js')
+    .filter(name => name.endsWith('.test.js'))
     .sort()
     .map(name => path.join(testDirectory, name));
 }

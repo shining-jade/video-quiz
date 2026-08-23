@@ -6,6 +6,7 @@
 
 - exact project ID, Auth/Firestore 환경, 현재 Rules release, static app commit, Firestore export/backup, rollback 대상을 한 change record에 먼저 고정한다.
 - 모든 CLI는 새 restricted output path를 사용한다. `.reserved`와 최종 JSON을 보존하고 기존 파일을 덮어쓰지 않는다. 이메일·UID·set ID가 들어갈 수 있는 상세 보고서는 운영 담당자만 읽을 수 있게 보관한다. 일반 stdout은 상태와 count만 기록한다.
+- `.release-artifacts/`와 `.release-maintenance/`는 restricted local-only 경로이며 어떤 파일도 stage하지 않는다. 특히 `.release-maintenance/r19-firestore-rules-release.js`는 응답 유실 당시의 격리된 incident evidence일 뿐 non-executable이다. 복구 helper나 운영 명령으로 실행하는 것을 금지한다.
 - `complete`, 안전 판정, zero-finding, exact token/generation 가운데 하나라도 없거나 scan이 partial이면 즉시 중단한다. unsafe 보고서를 사람이 “괜찮음”으로 덮어쓰지 않는다.
 - legacy의 안전한 한국어 표시 이름은 그대로 허용한다. blank, 이메일 모양, 정규화 owner email, UID와 동일하거나 UID 모양인 공개 표시 이름은 public audit finding이므로 먼저 authoritative allowance를 명시적으로 교정하고 다시 감사한다. 자동 추정·자동 공개 backfill은 하지 않는다.
 - 같은 canonical email의 legacy mirror가 다른 UID를 가리키거나 UID가 없는 상태에서 새 승인을 시도하면 자동 병합·덮어쓰기를 하지 않는다. Firebase Auth provider collision을 조사해 기존 로그인 방법을 안내하고, 사람이 exact Auth UID를 결정한 뒤 access migration/audit로 mirror와 `teacher_allowances/{uid}`를 한 identity로 맞춘다.
@@ -23,26 +24,38 @@ pnpm test
 pnpm test:rules
 node --check rules-source-metrics.js
 node --check scripts/test-production-rules-source.js
+node --check scripts/diagnose-rules-api.js
+node --check scripts/adopt-existing-ruleset.js
 git diff --check
 ```
 
 그 다음, 어떤 production mutation보다 먼저 exact production Rules source를 공식 `projects.test` API로 읽기 전용 검증한다.
 
 ```powershell
-pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-22/r17-production-rules-probe.json
+pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-23/r23-production-rules-probe.json
 ```
 
-`r17-production-rules-probe.json`은 새 restricted output 경로여야 하며 `.reserved`와 JSON을 모두 보존하고 기존 파일을 덮어쓰지(overwrite) 않는다. 이 probe는 `rulesets.create` 또는 release update를 절대로 호출하지 않는다. source budget 초과 또는 실패면 즉시 중단한다. Rules API HTTP 5xx이면 즉시 중단한다. `issueCounts.error`가 ERROR 0이 아니면 즉시 중단한다. `issueCounts.unknown`이 0이 아니거나 `status: "complete"`, `safeToCreateRuleset: true`가 아니거나 없으면 즉시 중단한다. report의 SHA-256과 metrics를 manifest의 exact `firestore.rules` bytes와 다시 대조한다.
+`r23-production-rules-probe.json`은 새 restricted output 경로여야 하며 `.reserved`와 JSON을 모두 보존하고 기존 파일을 덮어쓰지(overwrite) 않는다. 이 probe는 `rulesets.create` 또는 release update를 절대로 호출하지 않는다. source budget 초과 또는 실패면 즉시 중단한다. Rules API HTTP 5xx이면 즉시 중단한다. `issueCounts.error`가 ERROR 0이 아니면 즉시 중단한다. `issueCounts.unknown`이 0이 아니거나 `status: "complete"`, `safeToCreateRuleset: true`가 아니거나 없으면 즉시 중단한다. report의 SHA-256과 metrics를 manifest의 exact LF-only `firestore.rules` bytes와 다시 대조한다.
+
+같은 R0에서 R1을 시작하기 전에 GET-only R23 Rules API diagnosis를 새 non-overwriting 경로에 실행한다.
+
+```powershell
+pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --output .release-artifacts/2026-08-23/r23-rules-api-diagnosis.json
+```
+
+`--expect-sha`가 있으면 `status: "complete"`는 readable exact matching Ruleset이 정확히 하나이고 `writeLanded: true`일 때만 허용된다. 0개, 둘 이상, unreadable 후보, `writeLanded: false | null`은 모두 `indeterminate` 또는 failure이므로 nonzero로 중단한다. 이 진단은 GET만 사용하며 모든 GET에 bounded timeout/abort를 적용한다.
 
 ### R1 — exact write-quiescence 시작
 
 정적 앱 배포나 화면 배너를 quiescence로 간주하지 않는다. 별도의 운영 접근 제어로 모든 일반 client의 Firebase 읽기·쓰기를 차단하고, scheduler·Cloud Function·trusted Admin migration·수동 콘솔 쓰기를 중지한다. 현재 change window의 단일 운영자만 아래 명시된 CLI를 직렬 실행한다. 차단 시작 시각, 제어 ID, 중지한 writer 목록을 기록한다. 이 강제 수단이 없거나 다른 writer가 관찰되면 릴리스를 시작하지 않는다.
 
+R1은 strict manual schema의 `r1Quiescence` JSON을 만든다. `tool: "r23-quiescence-evidence"`, `schemaVersion: 1`, `projectId`, `targetMode`, R23 `windowId`/`controlId`, `capturedAt`, exact release/ruleset, release `updateTime`, anonymous 403, Cloud Functions API disabled, trusted writers stopped, `writeCount: 0`, `status: "complete"`를 모두 기록한다. 성공 값을 추정하거나 빈 필드를 채워 넣지 않는다.
+
 deny-all Ruleset barrier는 R10 target PATCH와 뒤이은 strict target Ruleset exact GET readback까지 유지한다. strict readback이 성공하면 deny-all barrier는 끝나며 그 **종료 시각**을 기록한다. 이는 migration lock과 같은 뜻이 아니다. set counter·teacher access·session migration lock과 단일 운영자 직렬 실행은 R13 exact unlock까지 계속되고, 그 **lock/직렬화 종료 시각**을 deny-all 종료 시각과 별도 기록한다. quiescence 중에는 정적 maintenance app을 먼저 배포하지 않는다.
 
 ### R2 — lifecycle migration과 전수 감사
 
-`migrate:lifecycle` production dry-run → apply → 새 dry-run 순서로 실행한다. 최종 durable report가 `status: "complete"`, `safeToDeployStrictRules: true`이고 legacy lifecycle 누락·불일치·orphan이 0이어야 한다. `publication_lifecycle_gates/current`와 owner lock이 active/stale/malformed이면 blind delete하지 말고 exact operation 복구 또는 Admin 조사 뒤 paired 상태로 해소한다.
+`migrate:lifecycle` production dry-run → apply → 새 dry-run 순서로 실행한다. apply durable report는 `status: "complete"`, `safeToDeployStrictRules: true`여야 한다. 마지막 dry-run은 도구의 dry-run fail-closed schema대로 `safeToDeployStrictRules: false`를 유지하되 `status: "complete"`, `appliedCount: 0`, planned count 0, legacy lifecycle 누락·불일치·orphan 0을 별도로 확인한다. `publication_lifecycle_gates/current`와 owner lock이 active/stale/malformed이면 blind delete하지 말고 exact operation 복구 또는 Admin 조사 뒤 paired 상태로 해소한다.
 
 ### R3 — collaborator share index 보정
 
@@ -68,17 +81,29 @@ session counter dry-run 뒤 별도 token으로 join lock/apply를 실행한다. 
 
 검토된 `firestore.indexes.json`의 `published_quiz_sets(status ASC, updatedAt DESC, __name__ DESC)` index를 배포하고 Firebase가 build 완료를 보고할 때까지 기다린다. building/error이면 다음 단계로 가지 않는다. 이 단계는 Rules 또는 static app 배포가 아니다.
 
+R8은 committed tool이 아직 직접 만들지 않는 strict manual schema의 `r8IndexReadiness` JSON을 사용한다. exact R23 `windowId`/`controlId`, `capturedAt`, `firestoreIndexesSha256`, required/ready index count, `allRequiredIndexesReady: true`, pending/failed/write count 0, `status: "complete"`를 Firebase readback에서 확인한 값으로만 기록한다. 성공 data를 발명하지 않는다.
+
 ### R9 — release manifest 봉인
 
-R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 token/generation, index 완료 증거, R0 compiler probe 경로·source SHA-256·metrics·issue count, tested `firestore.rules` hash와 static app commit을 한 manifest에 기록한다. rollback Rules는 `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 고정한다. R18/R19의 report는 응답 유실의 **원인 증거**로만 보존하며 migration·lock·generation·manifest 어느 것도 이번 배포의 승인 근거로 사용하지 않는다. 기록 뒤 quiescence 또는 gate generation이 변하면, 또는 probe hash와 배포 입력이 다르면 R2부터 새 보고서로 다시 시작한다.
+manifest의 `releaseWindow`는 fresh R23 `windowId`, `controlId`, `openedAt`, `quiescenceStartedAt`, `sealedAt`을 고정한다. `evidence` map은 아래 알려진 key를 빠짐없이 정확히 한 번만 포함하며 unknown key를 허용하지 않는다.
+
+manifest top-level은 `schemaVersion`, `projectId`, `targetMode`, `releaseWindow`, `quiescence`, `rollback`, `release`, `locks`, `task4`, `evidence`만 정확히 허용한다. 각 nested object도 runbook과 helper가 정한 exact field 집합만 허용하며 top-level 또는 nested의 unknown authorization field는 거부한다.
+
+- `r0ProductionRulesProbe`, `r0RulesApiDiagnosis`, `r1Quiescence`
+- `r2LifecycleDryBefore`, `r2LifecycleApply`, `r2LifecycleDryAfter`
+- `r3SharesDryBefore`, `r3SharesApply`, `r3SharesDryAfter`
+- `r4CounterLock`, `r4CounterApply`, `r4CounterAudit`
+- `r5TeacherAccessDry`, `r5TeacherAccessApply`
+- `r6SessionCountersDry`, `r6SessionCountersApply`
+- `r7PublicLibraryAudit`, `r8IndexReadiness`
+
+각 evidence entry는 `path`, `sha256`, `windowId`, `controlId`, `capturedAt` exact field만 가지며 `.release-artifacts/2026-08-23/r23-*.json`을 가리킨다. helper는 모든 path를 다시 열어 raw SHA-256을 계산하고 committed tool의 exact project/mode/status/safety/zero-finding/zero-dry-write/generation/source/compiler schema 또는 위에 명시한 R1/R8 strict schema를 검사한다. R0 두 보고서는 R1 시작 전, R1~R8은 quiescence 시작 이후와 manifest 봉인 이전이어야 한다. R18/R19 report는 응답 유실의 원인 증거로만 보존하며 배포 승인 근거로 사용하지 않는다. deployment authorization으로 제출하면 거부한다. path를 R23으로 바꾸거나 manifest에서 현재 window/control이라고 주장하는 것만으로 prior-window evidence를 승인하지 않는다.
+
+rollback Rules는 `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`와 exact `sourceSha256`을 manifest에 고정한다. quiescence에는 deny-all release `releaseUpdateTime`을 고정하고, release에는 tested `firestore.rules` SHA, `firestore.indexes.json` SHA, static app commit을 기록한다. 기록 뒤 quiescence 또는 gate generation이 변하면, 또는 probe hash와 배포 입력이 다르면 R2부터 새 보고서로 다시 시작한다.
 
 ### R10 — strict Firestore Rules 배포
 
-R10은 fresh R0~R9 manifest가 명시한 한 가지 branch만 실행한다. `create`와 `adopt-existing`는 상호 배타적이며, 한 창에서 서로 전환하거나 fallback으로 섞지 않는다. create 응답이 non-2xx인 사실은 서버 write의 성공 여부를 증명하지 않는다. 먼저 새 restricted path에 GET-only 진단을 남긴다.
-
-```powershell
-pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --output .release-artifacts/2026-08-23/r23-rules-api-diagnosis.json
-```
+R10은 fresh R0~R9 manifest가 명시한 한 가지 branch만 실행한다. `create`와 `adopt-existing`는 상호 배타적이며, 한 창에서 서로 전환하거나 fallback으로 섞지 않는다. create 응답이 non-2xx인 사실은 서버 write의 성공 여부를 증명하지 않는다. R0에서 R1 전에 만든 GET-only diagnosis를 exact hash로 다시 검증하며 R10에서 새 진단으로 교체하지 않는다.
 
 진단의 reconciliation은 실행 권한이 아니라 응답 유실 대조다.
 
@@ -92,7 +117,9 @@ pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production --ex
 pnpm release:rules:adopt-existing --project video-quiz-65798 --target-mode production --manifest .release-artifacts/2026-08-23/release-manifest-r23.json --ruleset projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1 --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --expect-manifest-sha <RAW_MANIFEST_SHA256> --output .release-artifacts/2026-08-23/r24-ruleset-adoption.json
 ```
 
-`<RAW_MANIFEST_SHA256>`은 raw manifest bytes의 trusted lowercase SHA-256이며, 새 non-overwriting output과 `.reserved`를 함께 보존한다. helper는 raw manifest SHA binding, 현재 로컬 commit 및 live gate-state를 다시 검증하고, target Ruleset을 GET하여 단일 `firestore.rules` source의 exact SHA를 확인한 뒤에만 `projects/video-quiz-65798/releases/cloud.firestore`를 PATCH한다. PATCH 전 release GET은 manifest의 deny-all `projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466`와 exact 일치해야 한다. PATCH 뒤에는 같은 release를 GET하여 target Ruleset과 byte-for-byte exact readback을 요구한다.
+`<RAW_MANIFEST_SHA256>`은 raw manifest bytes의 trusted lowercase SHA-256이며, 새 non-overwriting output과 `.reserved`를 함께 보존한다. helper는 raw manifest와 모든 fresh evidence, 현재 로컬 commit, LF-only Rules/index hash, clean deploy inputs, live gate-state를 다시 검증한다. staged/unstaged Rules·deploy input이나 두 restricted 경로 밖의 untracked deploy-root 파일이 있으면 중단한다.
+
+helper는 target Ruleset을 GET하여 단일 `firestore.rules` source의 exact SHA를 확인하고, rollback Ruleset도 manifest의 exact `sourceSha256`으로 PATCH 전에 GET 검증한다. immediate pre-PATCH release GET은 manifest의 deny-all `projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466`뿐 아니라 quiescence `releaseUpdateTime`과도 exact 일치해야 한다. PATCH 뒤에는 release exact readback을 요구하고 target Ruleset을 다시 GET하여 단일 source SHA를 재검증한다. 이 post-activation GET/SHA까지 통과한 report만 `safeForStaticDeployment: true`다. helper는 Auth를 읽거나 바꾸지 않으므로 `providerMutationAttempted: false`, `providerStateVerified: false`를 기록하며 existing-flow smoke readiness를 주장하지 않는다.
 
 알려진 settled PATCH 실패(완전한 실패 응답 또는 target readback mismatch)는 provider를 OFF로 둔 채 recorded rollback `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`으로 자동 rollback하고 exact GET readback을 요구한다. 반대로 PATCH가 전송된 뒤 transport가 끊기거나 timeout되어 `mutation-outcome-unknown`이면 helper는 멈춘다. 이 경우 read-only reconcile과 수동 조사를 수행하고, rollback을 실행하거나 rollback 성공을 주장하지 않는다. 어느 실패도 provider 활성화, legacy fallback 재개, 별도 head/staged Rules 선배포를 허용하지 않는다.
 

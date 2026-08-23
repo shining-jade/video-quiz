@@ -5,7 +5,9 @@ const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
+const path = require('node:path');
 const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
+const { validateEvidenceMap } = require('../release-evidence-contract.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 const API_ROOT = 'https://firebaserules.googleapis.com/v1/';
@@ -37,6 +39,15 @@ const STATIC_ASSET_PATHS = [
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const GENERATION_PATTERN = /^[0-9]+:[0-9]+$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA_PATTERN = /^[0-9a-f]{64}$/;
+const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const DEPLOY_INPUT_PATHS = new Set([
+  '.firebaserc', 'firebase.json', 'firestore.indexes.json', 'firestore.rules',
+  ...STATIC_ASSET_PATHS
+]);
+const RESTRICTED_UNTRACKED_PREFIXES = [
+  '.release-artifacts/', '.release-maintenance/'
+];
 
 function parseArguments(argv) {
   const options = {
@@ -94,49 +105,100 @@ function exactObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function exactKeys(value, keys) {
+  return exactObject(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+
 function assertManifest(condition) {
   if (!condition) throw new Error('Restricted manifest is not sealed for exact existing adoption.');
 }
 
+function validTimestamp(value) {
+  return typeof value === 'string' && RFC3339_PATTERN.test(value) &&
+    Number.isFinite(Date.parse(value));
+}
+
 function validateSealedManifest(manifest) {
-  assertManifest(exactObject(manifest));
+  assertManifest(exactKeys(manifest, [
+    'schemaVersion', 'projectId', 'targetMode', 'releaseWindow', 'quiescence',
+    'rollback', 'release', 'locks', 'task4', 'evidence'
+  ]));
   assertManifest(manifest.schemaVersion === 1);
   assertManifest(manifest.projectId === PROJECT_ID);
   assertManifest(manifest.targetMode === TARGET_MODE);
 
-  assertManifest(exactObject(manifest.quiescence));
+  assertManifest(exactKeys(manifest.releaseWindow, [
+    'windowId', 'controlId', 'openedAt', 'quiescenceStartedAt', 'sealedAt'
+  ]));
+  assertManifest(UUID_PATTERN.test(manifest.releaseWindow.windowId));
+  assertManifest(UUID_PATTERN.test(manifest.releaseWindow.controlId));
+  assertManifest(validTimestamp(manifest.releaseWindow.openedAt));
+  assertManifest(validTimestamp(manifest.releaseWindow.quiescenceStartedAt));
+  assertManifest(validTimestamp(manifest.releaseWindow.sealedAt));
+  assertManifest(Date.parse(manifest.releaseWindow.openedAt) <
+    Date.parse(manifest.releaseWindow.quiescenceStartedAt));
+  assertManifest(Date.parse(manifest.releaseWindow.quiescenceStartedAt) <
+    Date.parse(manifest.releaseWindow.sealedAt));
+
+  assertManifest(exactKeys(manifest.quiescence, [
+    'mechanism', 'rulesetName', 'releaseUpdateTime', 'evidenceWindowId',
+    'controlId', 'verifiedAnonymousStatus', 'cloudFunctionsApiDisabled',
+    'trustedWritersStopped'
+  ]));
   assertManifest(manifest.quiescence.mechanism === 'deny-all Firestore Rules');
   assertManifest(manifest.quiescence.rulesetName === QUIESCENCE_RULESET);
+  assertManifest(validTimestamp(manifest.quiescence.releaseUpdateTime));
+  assertManifest(manifest.quiescence.evidenceWindowId === manifest.releaseWindow.windowId);
+  assertManifest(manifest.quiescence.controlId === manifest.releaseWindow.controlId);
   assertManifest(manifest.quiescence.verifiedAnonymousStatus === 403);
   assertManifest(manifest.quiescence.cloudFunctionsApiDisabled === true);
+  assertManifest(manifest.quiescence.trustedWritersStopped === true);
 
-  assertManifest(exactObject(manifest.rollback));
+  assertManifest(exactKeys(manifest.rollback, [
+    'rulesetName', 'sourceSha256', 'staticCommit'
+  ]));
   assertManifest(manifest.rollback.rulesetName === ROLLBACK_RULESET);
+  assertManifest(SHA_PATTERN.test(manifest.rollback.sourceSha256));
   assertManifest(COMMIT_PATTERN.test(manifest.rollback.staticCommit));
 
-  assertManifest(exactObject(manifest.release));
+  assertManifest(exactKeys(manifest.release, [
+    'staticCommit', 'firestoreRulesSha256', 'firestoreIndexesSha256'
+  ]));
   assertManifest(COMMIT_PATTERN.test(manifest.release.staticCommit));
   assertManifest(manifest.release.firestoreRulesSha256 === EXPECTED_SOURCE_SHA);
+  assertManifest(SHA_PATTERN.test(manifest.release.firestoreIndexesSha256));
 
-  assertManifest(exactObject(manifest.locks));
-  assertManifest(exactObject(manifest.locks.setCounters));
+  assertManifest(exactKeys(manifest.locks, [
+    'setCounters', 'teacherAccess', 'sessionCounters'
+  ]));
+  assertManifest(exactKeys(manifest.locks.setCounters, [
+    'lockId', 'updateTimeGeneration'
+  ]));
   assertManifest(UUID_PATTERN.test(manifest.locks.setCounters.lockId));
   assertManifest(GENERATION_PATTERN.test(manifest.locks.setCounters.updateTimeGeneration));
-  assertManifest(exactObject(manifest.locks.teacherAccess));
+  assertManifest(exactKeys(manifest.locks.teacherAccess, [
+    'lockToken', 'updateTimeGeneration', 'migrationGeneration'
+  ]));
   assertManifest(UUID_PATTERN.test(manifest.locks.teacherAccess.lockToken));
   assertManifest(GENERATION_PATTERN.test(manifest.locks.teacherAccess.updateTimeGeneration));
   assertManifest(GENERATION_PATTERN.test(manifest.locks.teacherAccess.migrationGeneration));
-  assertManifest(exactObject(manifest.locks.sessionCounters));
+  assertManifest(exactKeys(manifest.locks.sessionCounters, [
+    'lockToken', 'updateTimeGeneration', 'gateGeneration'
+  ]));
   assertManifest(UUID_PATTERN.test(manifest.locks.sessionCounters.lockToken));
   assertManifest(GENERATION_PATTERN.test(manifest.locks.sessionCounters.updateTimeGeneration));
   assertManifest(GENERATION_PATTERN.test(manifest.locks.sessionCounters.gateGeneration));
 
-  assertManifest(exactObject(manifest.task4));
+  assertManifest(exactKeys(manifest.task4, [
+    'status', 'adoptionMode', 'rulesetName', 'headCommit', 'sourceSha256'
+  ]));
   assertManifest(manifest.task4.status === 'ready-for-ruleset-adoption');
   assertManifest(manifest.task4.adoptionMode === 'existing-exact');
   assertManifest(manifest.task4.rulesetName === TARGET_RULESET);
   assertManifest(COMMIT_PATTERN.test(manifest.task4.headCommit));
   assertManifest(manifest.task4.sourceSha256 === EXPECTED_SOURCE_SHA);
+  assertManifest(exactObject(manifest.evidence));
   return manifest;
 }
 
@@ -296,6 +358,14 @@ function httpSuccess(response) {
   return Boolean(response) && response.statusCode >= 200 && response.statusCode < 300;
 }
 
+function rulesetSourceExact(response, expectedName, expectedSha256) {
+  if (!httpSuccess(response) || !response.body || response.body.name !== expectedName) return false;
+  const files = response.body.source && response.body.source.files;
+  return Array.isArray(files) && files.length === 1 && files[0] &&
+    files[0].name === 'firestore.rules' && typeof files[0].content === 'string' &&
+    sha256(files[0].content) === expectedSha256;
+}
+
 function operationFailure(code, response, error) {
   const failure = new Error(code);
   failure.failureCode = code;
@@ -331,6 +401,83 @@ function readCurrentCommit() {
     throw new Error('Local Git commit readback is not exact.');
   }
   return { sourceCommit, staticCommit };
+}
+
+function sha256(contents) {
+  return crypto.createHash('sha256').update(contents).digest('hex');
+}
+
+function readCurrentDeployInputs() {
+  return {
+    rulesSourceSha256: sha256(fs.readFileSync(path.resolve('firestore.rules'))),
+    firestoreIndexesSha256: sha256(fs.readFileSync(path.resolve('firestore.indexes.json')))
+  };
+}
+
+function parseGitStatus(rawStatus) {
+  if (typeof rawStatus !== 'string') throw new Error('Git status output must be text.');
+  const records = rawStatus.split('\0');
+  if (records.at(-1) === '') records.pop();
+  const entries = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.length < 4 || record[2] !== ' ') {
+      throw new Error('Git status output is not porcelain v1 -z.');
+    }
+    const entry = {
+      indexStatus: record[0],
+      worktreeStatus: record[1],
+      path: record.slice(3).replace(/\\/g, '/')
+    };
+    if (['R', 'C'].includes(entry.indexStatus) || ['R', 'C'].includes(entry.worktreeStatus)) {
+      if (index + 1 >= records.length) throw new Error('Git rename status is incomplete.');
+      entry.originalPath = records[++index].replace(/\\/g, '/');
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function readGitStatus() {
+  const rawStatus = execFileSync(
+    'git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { encoding: 'utf8', timeout: 5_000, windowsHide: true }
+  );
+  return parseGitStatus(rawStatus);
+}
+
+function restrictedUntrackedPath(filePath) {
+  return RESTRICTED_UNTRACKED_PREFIXES.some(prefix => filePath.startsWith(prefix));
+}
+
+function repositoryInputsClean(entries) {
+  if (!Array.isArray(entries)) return false;
+  for (const entry of entries) {
+    if (!exactObject(entry) || typeof entry.path !== 'string' || !entry.path ||
+        typeof entry.indexStatus !== 'string' || entry.indexStatus.length !== 1 ||
+        typeof entry.worktreeStatus !== 'string' || entry.worktreeStatus.length !== 1) {
+      return false;
+    }
+    const filePath = entry.path.replace(/\\/g, '/');
+    const originalPath = typeof entry.originalPath === 'string'
+      ? entry.originalPath.replace(/\\/g, '/') : '';
+    const untracked = entry.indexStatus === '?' && entry.worktreeStatus === '?';
+    if (untracked) {
+      if (!restrictedUntrackedPath(filePath)) return false;
+      continue;
+    }
+    if (restrictedUntrackedPath(filePath) ||
+        (originalPath && restrictedUntrackedPath(originalPath))) return false;
+    if (DEPLOY_INPUT_PATHS.has(filePath) ||
+        (originalPath && DEPLOY_INPUT_PATHS.has(originalPath))) return false;
+  }
+  return true;
+}
+
+function currentDeployInputsExact(current, manifest) {
+  return exactObject(current) &&
+    current.rulesSourceSha256 === manifest.release.firestoreRulesSha256 &&
+    current.firestoreIndexesSha256 === manifest.release.firestoreIndexesSha256;
 }
 
 function snapshotGeneration(snapshot) {
@@ -472,6 +619,8 @@ function productionDependencies() {
     reserveReport,
     acquireAccessToken,
     readCurrentCommit,
+    readCurrentDeployInputs,
+    readGitStatus,
     readCurrentGateState,
     getJson: requestJson,
     patchJson: requestJson,
@@ -500,8 +649,9 @@ async function main(argv, dependencies) {
     releasePatchAttempted: false,
     rollbackAttempted: false,
     mutationOutcomeUnknown: false,
-    providerStillOff: true,
-    safeForExistingFlowSmoke: false,
+    providerMutationAttempted: false,
+    providerStateVerified: false,
+    safeForStaticDeployment: false,
     phase: 'reserved-before-manifest-validation',
     status: 'reserved-fail-closed'
   };
@@ -511,13 +661,19 @@ async function main(argv, dependencies) {
 
   let manifest = null;
   let manifestSha256 = '';
+  let evidenceValidation = null;
   let accessToken = '';
   let phase = 'manifest-validation';
   let releasePatchAttempted = false;
   let releasePatchHttpStatus = 0;
   let releaseReadbackHttpStatus = 0;
   let targetRulesetReadbackExact = false;
+  let rollbackRulesetReadbackExact = false;
+  let postActivationTargetRulesetReadbackExact = false;
+  let prePatchReleaseUpdateTimeExact = false;
   let currentCommitReadbackExact = false;
+  let currentDeployInputsReadbackExact = false;
+  let repositoryInputsCleanReadback = false;
   let currentGateReadbackExact = false;
   try {
     const sealedManifest = readAndValidateSealedManifest(
@@ -525,6 +681,16 @@ async function main(argv, dependencies) {
     );
     manifest = sealedManifest.manifest;
     manifestSha256 = sealedManifest.manifestSha256;
+    phase = 'evidence-validation';
+    evidenceValidation = validateEvidenceMap(manifest, {
+      projectId: PROJECT_ID,
+      targetMode: TARGET_MODE,
+      releaseName: RELEASE_NAME,
+      targetRuleset: TARGET_RULESET,
+      quiescenceRuleset: QUIESCENCE_RULESET,
+      sourceSha256: EXPECTED_SOURCE_SHA,
+      firestoreIndexesSha256: manifest.release.firestoreIndexesSha256
+    }, runtime.readEvidenceFile || fs.readFileSync);
     phase = 'local-commit-readback';
     let currentCommit;
     try {
@@ -538,6 +704,32 @@ async function main(argv, dependencies) {
       throw operationFailure('local-commit-readback-mismatch', null, null);
     }
     currentCommitReadbackExact = true;
+    phase = 'local-deploy-input-readback';
+    let currentDeployInputs;
+    try {
+      currentDeployInputs = await withTimeout(
+        () => runtime.readCurrentDeployInputs(), runtime.requestTimeoutMs
+      );
+    } catch (error) {
+      throw operationFailure('local-deploy-input-readback-failed', null, error);
+    }
+    if (!currentDeployInputsExact(currentDeployInputs, manifest)) {
+      throw operationFailure('local-deploy-input-readback-mismatch', null, null);
+    }
+    currentDeployInputsReadbackExact = true;
+    phase = 'repository-cleanliness-readback';
+    let gitStatus;
+    try {
+      gitStatus = await withTimeout(
+        () => runtime.readGitStatus(), runtime.requestTimeoutMs
+      );
+    } catch (error) {
+      throw operationFailure('repository-cleanliness-readback-failed', null, error);
+    }
+    if (!repositoryInputsClean(gitStatus)) {
+      throw operationFailure('repository-deploy-inputs-dirty', null, null);
+    }
+    repositoryInputsCleanReadback = true;
     accessToken = await runtime.acquireAccessToken();
 
     phase = 'target-ruleset-readback';
@@ -552,17 +744,29 @@ async function main(argv, dependencies) {
     if (!httpSuccess(target)) {
       throw operationFailure('target-ruleset-unreadable', target, null);
     }
-    const files = target.body && target.body.source && target.body.source.files;
-    if (target.body.name !== TARGET_RULESET || !Array.isArray(files) || files.length !== 1 ||
-        !files[0] || files[0].name !== 'firestore.rules' ||
-        typeof files[0].content !== 'string') {
-      throw operationFailure('target-ruleset-source-shape-mismatch', target, null);
-    }
-    const sourceSha256 = crypto.createHash('sha256').update(files[0].content).digest('hex');
-    if (sourceSha256 !== EXPECTED_SOURCE_SHA) {
+    if (!rulesetSourceExact(target, TARGET_RULESET, EXPECTED_SOURCE_SHA)) {
       throw operationFailure('target-ruleset-source-hash-mismatch', target, null);
     }
     targetRulesetReadbackExact = true;
+
+    phase = 'rollback-ruleset-readback';
+    let rollbackTarget;
+    try {
+      rollbackTarget = await runtimeRequest(runtime, 'getJson', {
+        method: 'GET', url: API_ROOT + ROLLBACK_RULESET, accessToken
+      });
+    } catch (error) {
+      throw operationFailure('rollback-ruleset-unreadable', null, error);
+    }
+    if (!httpSuccess(rollbackTarget)) {
+      throw operationFailure('rollback-ruleset-unreadable', rollbackTarget, null);
+    }
+    if (!rulesetSourceExact(
+      rollbackTarget, ROLLBACK_RULESET, manifest.rollback.sourceSha256
+    )) {
+      throw operationFailure('rollback-ruleset-source-hash-mismatch', rollbackTarget, null);
+    }
+    rollbackRulesetReadbackExact = true;
 
     phase = 'current-gate-readback';
     let currentGates;
@@ -591,9 +795,11 @@ async function main(argv, dependencies) {
       throw operationFailure('quiescence-release-unreadable', before, null);
     }
     if (!before.body || before.body.name !== RELEASE_NAME ||
-        before.body.rulesetName !== manifest.quiescence.rulesetName) {
+        before.body.rulesetName !== manifest.quiescence.rulesetName ||
+        before.body.updateTime !== manifest.quiescence.releaseUpdateTime) {
       throw operationFailure('quiescence-release-drift', before, null);
     }
+    prePatchReleaseUpdateTimeExact = true;
 
     phase = 'release-patch';
     releasePatchAttempted = true;
@@ -628,16 +834,46 @@ async function main(argv, dependencies) {
       throw operationFailure('target-release-readback-mismatch', after, null);
     }
 
+    phase = 'post-activation-target-ruleset-readback';
+    let postActivationTarget;
+    try {
+      postActivationTarget = await runtimeRequest(runtime, 'getJson', {
+        method: 'GET', url: API_ROOT + TARGET_RULESET, accessToken
+      });
+    } catch (error) {
+      throw operationFailure('post-activation-target-ruleset-unreadable', null, error);
+    }
+    if (!httpSuccess(postActivationTarget)) {
+      throw operationFailure(
+        'post-activation-target-ruleset-unreadable', postActivationTarget, null
+      );
+    }
+    if (!rulesetSourceExact(
+      postActivationTarget, TARGET_RULESET, EXPECTED_SOURCE_SHA
+    )) {
+      throw operationFailure(
+        'post-activation-target-ruleset-source-hash-mismatch', postActivationTarget, null
+      );
+    }
+    postActivationTargetRulesetReadbackExact = true;
+
     const report = {
       ...placeholder,
       sourceCommit: manifest.task4.headCommit,
       staticCommit: manifest.release.staticCommit,
       manifestSha256,
+      evidenceValidation,
       rollbackRulesetName: manifest.rollback.rulesetName,
       quiescenceRulesetName: manifest.quiescence.rulesetName,
+      quiescenceReleaseUpdateTime: manifest.quiescence.releaseUpdateTime,
       gateGenerations: manifestGateGenerations(manifest),
       targetRulesetReadbackExact,
+      rollbackRulesetReadbackExact,
+      postActivationTargetRulesetReadbackExact,
+      prePatchReleaseUpdateTimeExact,
       currentCommitExact: currentCommitReadbackExact,
+      currentDeployInputsExact: currentDeployInputsReadbackExact,
+      repositoryInputsClean: repositoryInputsCleanReadback,
       currentGateStateExact: currentGateReadbackExact,
       releasePatchAttempted: true,
       releasePatchHttpStatus,
@@ -645,9 +881,9 @@ async function main(argv, dependencies) {
       releaseReadbackRulesetName: TARGET_RULESET,
       releaseReadbackExact: true,
       rollbackAttempted: false,
-      phase: 'release-active-exact-readback',
+      phase: 'release-and-target-active-exact-readback',
       status: 'complete',
-      safeForExistingFlowSmoke: true
+      safeForStaticDeployment: true
     };
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     writeLineSafely(runtime, [
@@ -656,7 +892,8 @@ async function main(argv, dependencies) {
       'ruleset=' + TARGET_RULESET,
       'createAttempted=false',
       'releaseReadbackExact=true',
-      'providerStillOff=true'
+      'providerMutationAttempted=false',
+      'providerStateVerified=false'
     ].join(' '));
     return report;
   } catch (error) {
@@ -676,11 +913,18 @@ async function main(argv, dependencies) {
       sourceCommit: manifest ? manifest.task4.headCommit : null,
       staticCommit: manifest ? manifest.release.staticCommit : null,
       manifestSha256,
+      evidenceValidation,
       rollbackRulesetName: manifest ? manifest.rollback.rulesetName : null,
       quiescenceRulesetName: manifest ? manifest.quiescence.rulesetName : null,
+      quiescenceReleaseUpdateTime: manifest ? manifest.quiescence.releaseUpdateTime : null,
       gateGenerations: manifest ? manifestGateGenerations(manifest) : null,
       targetRulesetReadbackExact,
+      rollbackRulesetReadbackExact,
+      postActivationTargetRulesetReadbackExact,
+      prePatchReleaseUpdateTimeExact,
       currentCommitExact: currentCommitReadbackExact,
+      currentDeployInputsExact: currentDeployInputsReadbackExact,
+      repositoryInputsClean: repositoryInputsCleanReadback,
       currentGateStateExact: currentGateReadbackExact,
       releasePatchAttempted,
       releasePatchHttpStatus,
@@ -701,7 +945,7 @@ async function main(argv, dependencies) {
       status: mutationOutcomeUnknown
         ? 'mutation-outcome-unknown'
         : rollback && rollback.exact ? 'failed-rolled-back' : 'failed',
-      safeForExistingFlowSmoke: false
+      safeForStaticDeployment: false
     };
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     writeLineSafely(runtime, [
@@ -736,13 +980,18 @@ module.exports = {
   TARGET_RULESET,
   acquireAccessToken,
   main,
+  parseGitStatus,
   parseArguments,
   patchPayload,
   productionDependencies,
   readCurrentCommit,
+  readCurrentDeployInputs,
   readCurrentGateState,
+  readGitStatus,
   readAndValidateSealedManifest,
+  repositoryInputsClean,
   requestJson,
+  rulesetSourceExact,
   validateProductionEnvironment,
   validateSealedManifest
 };

@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -19,5 +20,16 @@ test('Firestore Rules source stays within the post-503 compiler characterization
   });
   await t.test('declares no more than 190 functions', () => {
     assert.ok(metrics.functions <= 190, `functions ${metrics.functions} exceeds 190`);
+  });
+  await t.test('uses the exact LF-only release source bytes', () => {
+    const bytes = fs.readFileSync(path.resolve(__dirname, '../firestore.rules'));
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    const crlfDigest = crypto.createHash('sha256')
+      .update(Buffer.from(bytes.toString('utf8').replace(/\n/g, '\r\n'), 'utf8'))
+      .digest('hex');
+
+    assert.equal(bytes.includes(13), false, 'firestore.rules must contain no CR bytes');
+    assert.equal(digest, 'c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d');
+    assert.notEqual(crlfDigest, digest, 'a CRLF rewrite must not satisfy the release SHA');
   });
 });
