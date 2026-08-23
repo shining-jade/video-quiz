@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+const { createHash } = require('node:crypto');
 const {
   EVIDENCE_ARGUMENT_FIELDS, authorEvidenceReport, captureEvidenceIdentity,
   validateEvidenceIdentityOptions, validCapturedAt
@@ -12,6 +13,8 @@ const PROJECT_ID = 'video-quiz-65798';
 const RELEASE_NAME = 'projects/video-quiz-65798/releases/cloud.firestore';
 const QUIESCENCE_RULESET =
   'projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466';
+const QUIESCENCE_RULESET_SOURCE_SHA256 =
+  'cd5089e4e5116dbb994013dc5fd5e7e411ec348935b8d06d13acd00173cca15b';
 const RULES_ROOT = 'https://firebaserules.googleapis.com/v1/';
 const FUNCTIONS_ROOT = 'https://cloudfunctions.googleapis.com/';
 const SCHEDULER_ROOT = 'https://cloudscheduler.googleapis.com/v1/';
@@ -87,7 +90,11 @@ async function runtimeRequest(runtime, request) {
     controller.abort(codedError('provider-read-timeout'));
   }, timeoutMilliseconds(runtime.requestTimeoutMs));
   try {
-    return await runtime.requestJson({ ...request, signal: controller.signal });
+    const response = await runtime.requestJson({ ...request, signal: controller.signal });
+    if (controller.signal.aborted) {
+      throw controller.signal.reason || codedError('provider-read-timeout');
+    }
+    return response;
   } finally {
     clearTimeout(timer);
   }
@@ -231,11 +238,59 @@ async function readWriterInventory(runtime, accessToken, inventory) {
   return inventory;
 }
 
-function patchPayload() {
+function patchPayload(rulesetName = QUIESCENCE_RULESET) {
   return {
-    release: { name: RELEASE_NAME, rulesetName: QUIESCENCE_RULESET },
+    release: { name: RELEASE_NAME, rulesetName },
     updateMask: 'rulesetName'
   };
+}
+
+function sourceSha256(content) {
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+function readRulesetSource(response, expectedName, errorCode) {
+  const body = response && response.body;
+  const files = body && body.source && body.source.files;
+  if (!httpSuccess(response) || !body || body.name !== expectedName ||
+      !Array.isArray(files) || files.length !== 1 || !files[0] ||
+      typeof files[0].name !== 'string' || !files[0].name ||
+      files[0].name.length > 128 || /[\\/]/.test(files[0].name) ||
+      typeof files[0].content !== 'string') {
+    throw codedError(errorCode, response);
+  }
+  return {
+    httpStatus: response.statusCode,
+    fileName: files[0].name,
+    sha256: sourceSha256(files[0].content)
+  };
+}
+
+function readRelease(response, errorCode) {
+  const body = response && response.body;
+  const projectRulesetPrefix = 'projects/' + PROJECT_ID + '/rulesets/';
+  const rulesetId = body && typeof body.rulesetName === 'string'
+    ? body.rulesetName.slice(projectRulesetPrefix.length) : '';
+  if (!httpSuccess(response) || !body || body.name !== RELEASE_NAME ||
+      typeof body.rulesetName !== 'string' ||
+      !body.rulesetName.startsWith(projectRulesetPrefix) ||
+      !rulesetId || rulesetId.length > 128 || rulesetId.includes('/') ||
+      !validCapturedAt(body.updateTime)) {
+    throw codedError(errorCode, response);
+  }
+  return {
+    httpStatus: response.statusCode,
+    rulesetName: body.rulesetName,
+    updateTime: body.updateTime
+  };
+}
+
+async function captureRequest(runtime, request) {
+  try {
+    return { response: await runtimeRequest(runtime, request), error: null };
+  } catch (error) {
+    return { response: null, error };
+  }
 }
 
 function safeError(error) {
@@ -271,88 +326,250 @@ async function main(argv = process.argv.slice(2), dependencies) {
     runtime.now
   );
   const inventory = emptyWriterInventory();
-  const base = authorEvidenceReport({
+  const facts = {
     operation: 'begin-quiescence', mode: 'patch-and-verify',
-    phase: 'reserved-before-provider-readback', status: 'reserved-fail-closed',
     mechanism: 'deny-all Firestore Rules', releaseName: RELEASE_NAME,
     rulesetName: QUIESCENCE_RULESET, releaseUpdateTime: '',
     releasePatchAttempted: false, releasePatchCount: 0,
-    releasePatchHttpStatus: 0, releaseReadbackHttpStatus: 0,
+    releasePatchHttpStatus: 0, releasePatchOutcome: 'not-attempted',
+    mutationOutcomeUnknown: false,
+    quiescenceRulesetSourceReadbackHttpStatus: 0,
+    quiescenceRulesetSourceFileName: '',
+    quiescenceRulesetSourceSha256: '',
+    quiescenceRulesetSourceReadbackExact: false,
+    priorReleaseReadbackHttpStatus: 0,
+    priorReleaseRulesetName: '', priorReleaseUpdateTime: '',
+    priorRulesetSourceReadbackHttpStatus: 0,
+    priorRulesetSourceFileName: '', priorRulesetSourceSha256: '',
+    priorRulesetSourceReadbackExact: false,
+    releaseReadbackHttpStatus: 0, releaseReadbackRulesetName: '',
+    releaseReadbackUpdateTime: '', releaseReadbackExact: false,
+    rollbackAttempted: false, rollbackPatchCount: 0,
+    rollbackPatchHttpStatus: 0, rollbackReadbackHttpStatus: 0,
+    rollbackReadbackRulesetName: '', rollbackReadbackUpdateTime: '',
+    rollbackReadbackExact: false,
+    finalReleaseRulesetName: '', finalReleaseUpdateTime: '',
+    finalReleaseStateKnown: false,
     verifiedAnonymousStatus: 0, providerChecksComplete: false,
     cloudFunctionsStopped: false, schedulerStopped: false,
     trustedWritersStopped: false, writerInventory: inventory,
-    firestoreDataWriteCount: 0, error: { code: 'not-completed', httpStatus: 0 }
+    firestoreDataWriteCount: 0
+  };
+  const makeReport = (phase, status, error) => authorEvidenceReport({
+    ...facts, phase, status, error
   }, identity);
+  const base = makeReport(
+    'reserved-before-provider-readback', 'reserved-fail-closed',
+    { code: 'not-completed', httpStatus: 0 }
+  );
   const reservation = runtime.reserveReport(
     options.outputPath, JSON.stringify(base, null, 2) + '\n'
   );
+  const finish = async (phase, status, error) => {
+    const report = makeReport(phase, status, error);
+    await reservation.commit(JSON.stringify(report, null, 2) + '\n');
+    writeLineSafely(runtime, 'R23 quiescence status=' + status +
+      (error ? ' code=' + report.error.code :
+        ' releaseUpdateTime=' + report.releaseUpdateTime));
+    return report;
+  };
   let accessToken = '';
-  let releasePatchAttempted = false;
-  let releasePatchHttpStatus = 0;
-  let releaseReadbackHttpStatus = 0;
-  let anonymousStatus = 0;
-  let providerChecksComplete = false;
   try {
     accessToken = await runtime.acquireAccessToken();
     await readWriterInventory(runtime, accessToken, inventory);
-    providerChecksComplete = true;
-    releasePatchAttempted = true;
-    const patch = await runtimeRequest(runtime, {
-      method: 'PATCH', url: RULES_ROOT + RELEASE_NAME, accessToken,
-      payload: patchPayload()
+    facts.providerChecksComplete = true;
+    facts.cloudFunctionsStopped = true;
+    facts.schedulerStopped = true;
+    facts.trustedWritersStopped = true;
+  } catch (error) {
+    return finish('provider-readback-failed', 'failed', safeError(error));
+  }
+
+  let baseline;
+  try {
+    const denyResponse = await runtimeRequest(runtime, {
+      method: 'GET', url: RULES_ROOT + QUIESCENCE_RULESET, accessToken
     });
-    releasePatchHttpStatus = patch && patch.statusCode || 0;
-    if (!httpSuccess(patch)) throw codedError('quiescence-patch-failed', patch);
-    const release = await runtimeRequest(runtime, {
+    facts.quiescenceRulesetSourceReadbackHttpStatus =
+      denyResponse && denyResponse.statusCode || 0;
+    const denySource = readRulesetSource(
+      denyResponse, QUIESCENCE_RULESET, 'quiescence-ruleset-source-unavailable'
+    );
+    facts.quiescenceRulesetSourceFileName = denySource.fileName;
+    facts.quiescenceRulesetSourceSha256 = denySource.sha256;
+    if (denySource.sha256 !== QUIESCENCE_RULESET_SOURCE_SHA256) {
+      throw codedError('quiescence-ruleset-source-hash-mismatch', denyResponse);
+    }
+    facts.quiescenceRulesetSourceReadbackExact = true;
+
+    const baselineResponse = await runtimeRequest(runtime, {
       method: 'GET', url: RULES_ROOT + RELEASE_NAME, accessToken
     });
-    releaseReadbackHttpStatus = release && release.statusCode || 0;
-    if (!httpSuccess(release) || !release.body || release.body.name !== RELEASE_NAME ||
-        release.body.rulesetName !== QUIESCENCE_RULESET ||
-        !validCapturedAt(release.body.updateTime)) {
-      throw codedError('quiescence-release-readback-mismatch', release);
-    }
-    const anonymous = await runtimeRequest(runtime, {
+    facts.priorReleaseReadbackHttpStatus =
+      baselineResponse && baselineResponse.statusCode || 0;
+    baseline = readRelease(
+      baselineResponse, 'quiescence-prior-release-unavailable'
+    );
+    facts.priorReleaseRulesetName = baseline.rulesetName;
+    facts.priorReleaseUpdateTime = baseline.updateTime;
+
+    const priorResponse = await runtimeRequest(runtime, {
+      method: 'GET', url: RULES_ROOT + baseline.rulesetName, accessToken
+    });
+    facts.priorRulesetSourceReadbackHttpStatus =
+      priorResponse && priorResponse.statusCode || 0;
+    const priorSource = readRulesetSource(
+      priorResponse, baseline.rulesetName, 'quiescence-prior-ruleset-source-unavailable'
+    );
+    facts.priorRulesetSourceFileName = priorSource.fileName;
+    facts.priorRulesetSourceSha256 = priorSource.sha256;
+    facts.priorRulesetSourceReadbackExact = true;
+  } catch (error) {
+    return finish('ruleset-preflight-failed', 'failed', safeError(error));
+  }
+
+  facts.releasePatchAttempted = true;
+  facts.releasePatchCount = 1;
+  const patchAttempt = await captureRequest(runtime, {
+    method: 'PATCH', url: RULES_ROOT + RELEASE_NAME, accessToken,
+    payload: patchPayload()
+  });
+  facts.releasePatchHttpStatus = patchAttempt.response &&
+    patchAttempt.response.statusCode || 0;
+
+  const readbackAttempt = await captureRequest(runtime, {
+    method: 'GET', url: RULES_ROOT + RELEASE_NAME, accessToken
+  });
+  facts.releaseReadbackHttpStatus = readbackAttempt.response &&
+    readbackAttempt.response.statusCode || 0;
+  const rawReadback = readbackAttempt.response && readbackAttempt.response.body;
+  if (rawReadback && typeof rawReadback.rulesetName === 'string') {
+    facts.releaseReadbackRulesetName = rawReadback.rulesetName;
+  }
+  if (rawReadback && validCapturedAt(rawReadback.updateTime)) {
+    facts.releaseReadbackUpdateTime = rawReadback.updateTime;
+  }
+  let releaseReadback = null;
+  try {
+    if (readbackAttempt.error) throw readbackAttempt.error;
+    releaseReadback = readRelease(
+      readbackAttempt.response, 'quiescence-release-readback-unavailable'
+    );
+  } catch (_) {
+    releaseReadback = null;
+  }
+  facts.releaseReadbackExact = Boolean(
+    releaseReadback && releaseReadback.rulesetName === QUIESCENCE_RULESET
+  );
+
+  if (facts.releaseReadbackExact) {
+    facts.releasePatchOutcome = httpSuccess(patchAttempt.response)
+      ? 'response-success' : 'landed-reconciled';
+    facts.mutationOutcomeUnknown = false;
+    facts.releaseUpdateTime = releaseReadback.updateTime;
+    facts.finalReleaseRulesetName = releaseReadback.rulesetName;
+    facts.finalReleaseUpdateTime = releaseReadback.updateTime;
+    facts.finalReleaseStateKnown = true;
+    const anonymousAttempt = await captureRequest(runtime, {
       method: 'GET', url: ANONYMOUS_PROBE_URL, accessToken: ''
     });
-    anonymousStatus = anonymous && anonymous.statusCode || 0;
-    if (anonymousStatus !== 403) throw codedError('anonymous-denial-not-verified', anonymous);
-    const report = authorEvidenceReport({
-      operation: 'begin-quiescence', mode: 'patch-and-verify',
-      phase: 'quiescence-established', status: 'complete',
-      mechanism: 'deny-all Firestore Rules', releaseName: RELEASE_NAME,
-      rulesetName: QUIESCENCE_RULESET,
-      releaseUpdateTime: release.body.updateTime,
-      releasePatchAttempted: true, releasePatchCount: 1,
-      releasePatchHttpStatus, releaseReadbackHttpStatus,
-      verifiedAnonymousStatus: 403, providerChecksComplete: true,
-      cloudFunctionsStopped: true, schedulerStopped: true,
-      trustedWritersStopped: true, writerInventory: inventory,
-      firestoreDataWriteCount: 0, error: null
-    }, identity);
-    await reservation.commit(JSON.stringify(report, null, 2) + '\n');
-    writeLineSafely(runtime, 'R23 quiescence status=complete releaseUpdateTime=' +
-      report.releaseUpdateTime);
-    return report;
-  } catch (error) {
-    const report = authorEvidenceReport({
-      operation: 'begin-quiescence', mode: 'patch-and-verify',
-      phase: releasePatchAttempted ? 'quiescence-readback-failed' : 'provider-readback-failed',
-      status: 'failed', mechanism: 'deny-all Firestore Rules',
-      releaseName: RELEASE_NAME, rulesetName: QUIESCENCE_RULESET,
-      releaseUpdateTime: '', releasePatchAttempted,
-      releasePatchCount: releasePatchAttempted ? 1 : 0,
-      releasePatchHttpStatus, releaseReadbackHttpStatus,
-      verifiedAnonymousStatus: anonymousStatus,
-      providerChecksComplete: false,
-      cloudFunctionsStopped: false, schedulerStopped: false,
-      trustedWritersStopped: false, writerInventory: inventory,
-      firestoreDataWriteCount: 0, error: safeError(error)
-    }, identity);
-    await reservation.commit(JSON.stringify(report, null, 2) + '\n');
-    writeLineSafely(runtime, 'R23 quiescence status=failed code=' + report.error.code);
-    return report;
+    facts.verifiedAnonymousStatus = anonymousAttempt.response &&
+      anonymousAttempt.response.statusCode || 0;
+    if (facts.verifiedAnonymousStatus !== 403) {
+      const anonymousError = anonymousAttempt.error || codedError(
+        'anonymous-denial-not-verified', anonymousAttempt.response
+      );
+      return finish(
+        'anonymous-denial-verification-failed', 'failed', safeError(anonymousError)
+      );
+    }
+    return finish('quiescence-established', 'complete', null);
   }
+
+  if (patchAttempt.error || !releaseReadback) {
+    facts.releasePatchOutcome = 'mutation-outcome-unknown';
+    facts.mutationOutcomeUnknown = true;
+    facts.finalReleaseStateKnown = false;
+    return finish(
+      'quiescence-mutation-indeterminate', 'mutation-outcome-unknown',
+      safeError(codedError('quiescence-mutation-outcome-unknown'))
+    );
+  }
+
+  const exactUnchangedBaseline = !httpSuccess(patchAttempt.response) &&
+    releaseReadback.rulesetName === baseline.rulesetName &&
+    releaseReadback.updateTime === baseline.updateTime;
+  if (exactUnchangedBaseline) {
+    facts.releasePatchOutcome = 'definitely-not-landed';
+    facts.finalReleaseRulesetName = releaseReadback.rulesetName;
+    facts.finalReleaseUpdateTime = releaseReadback.updateTime;
+    facts.finalReleaseStateKnown = true;
+    return finish(
+      'quiescence-patch-not-landed', 'failed',
+      safeError(codedError('quiescence-patch-definitely-not-landed', patchAttempt.response))
+    );
+  }
+
+  facts.rollbackAttempted = true;
+  facts.rollbackPatchCount = 1;
+  const rollbackAttempt = await captureRequest(runtime, {
+    method: 'PATCH', url: RULES_ROOT + RELEASE_NAME, accessToken,
+    payload: patchPayload(baseline.rulesetName)
+  });
+  facts.rollbackPatchHttpStatus = rollbackAttempt.response &&
+    rollbackAttempt.response.statusCode || 0;
+  const rollbackReadAttempt = await captureRequest(runtime, {
+    method: 'GET', url: RULES_ROOT + RELEASE_NAME, accessToken
+  });
+  facts.rollbackReadbackHttpStatus = rollbackReadAttempt.response &&
+    rollbackReadAttempt.response.statusCode || 0;
+  const rawRollback = rollbackReadAttempt.response && rollbackReadAttempt.response.body;
+  if (rawRollback && typeof rawRollback.rulesetName === 'string') {
+    facts.rollbackReadbackRulesetName = rawRollback.rulesetName;
+  }
+  if (rawRollback && validCapturedAt(rawRollback.updateTime)) {
+    facts.rollbackReadbackUpdateTime = rawRollback.updateTime;
+  }
+  let rollbackReadback = null;
+  try {
+    if (rollbackReadAttempt.error) throw rollbackReadAttempt.error;
+    rollbackReadback = readRelease(
+      rollbackReadAttempt.response, 'quiescence-rollback-readback-unavailable'
+    );
+  } catch (_) {
+    rollbackReadback = null;
+  }
+  facts.rollbackReadbackExact = Boolean(
+    rollbackReadback && rollbackReadback.rulesetName === baseline.rulesetName
+  );
+  if (facts.rollbackReadbackExact) {
+    facts.finalReleaseRulesetName = rollbackReadback.rulesetName;
+    facts.finalReleaseUpdateTime = rollbackReadback.updateTime;
+    facts.finalReleaseStateKnown = true;
+    facts.releasePatchOutcome = 'mismatch-rolled-back';
+    return finish(
+      'quiescence-mismatch-rolled-back', 'failed-rolled-back',
+      safeError(codedError('quiescence-target-mismatch-rolled-back'))
+    );
+  }
+
+  // A lost rollback response can still arrive after this read. Unless the
+  // readback already proves the exact prior release, a different release is
+  // only an observation in flight—not a truthful final-state assertion.
+  if (rollbackReadback && !rollbackAttempt.error) {
+    facts.finalReleaseRulesetName = rollbackReadback.rulesetName;
+    facts.finalReleaseUpdateTime = rollbackReadback.updateTime;
+    facts.finalReleaseStateKnown = true;
+  }
+
+  facts.releasePatchOutcome = 'mismatch-rollback-failed';
+  facts.mutationOutcomeUnknown = Boolean(rollbackAttempt.error) ||
+    !facts.finalReleaseStateKnown;
+  return finish(
+    'quiescence-rollback-failed',
+    facts.mutationOutcomeUnknown ? 'mutation-outcome-unknown' : 'failed',
+    safeError(codedError('quiescence-mismatch-rollback-failed', rollbackAttempt.response))
+  );
 }
 
 if (require.main === module) {
@@ -372,6 +589,7 @@ module.exports = {
   FUNCTIONS_V2_URL,
   PROJECT_ID,
   QUIESCENCE_RULESET,
+  QUIESCENCE_RULESET_SOURCE_SHA256,
   RELEASE_NAME,
   RULES_ROOT,
   SCHEDULER_LOCATIONS_URL,

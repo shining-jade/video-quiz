@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const https = require('node:https');
@@ -15,6 +16,10 @@ const TARGET = 'projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637a
 const SHA = 'c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d';
 const ROLLBACK = 'projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4';
 const QUIESCENCE = 'projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466';
+const QUIESCENCE_SOURCE_SHA =
+  'cd5089e4e5116dbb994013dc5fd5e7e411ec348935b8d06d13acd00173cca15b';
+const AUTH_CONFIG_NAME = 'projects/video-quiz-65798/config';
+const AUTH_CAPTURED_AT = '2026-08-23T05:03:00Z';
 const SOURCE_COMMIT = '8a5a888da98c304ba7b103fb5221c41ac2dc412e';
 const STATIC_COMMIT = 'c4f3136de2b140de7a98d415dc65ee68c086732f';
 const SOURCE = fs.readFileSync(path.resolve('firestore.rules'), 'utf8');
@@ -31,6 +36,7 @@ const QUIESCENCE_UPDATE_TIME = '2026-08-23T05:05:00.123456Z';
 const EVIDENCE_NAMES = [
   'r0ProductionRulesProbe',
   'r0RulesApiDiagnosis',
+  'r0AuthProviderOff',
   'r1Quiescence',
   'r2LifecycleDryBefore',
   'r2LifecycleApply',
@@ -261,6 +267,25 @@ function evidenceReports() {
       rulesetLimit: 2500,
       remainingSlots: 2479
     },
+    r0AuthProviderOff: {
+      tool: 'auth-email-password-off-evidence',
+      schemaVersion: 2,
+      projectId: PROJECT,
+      targetMode: 'production',
+      windowId: WINDOW_ID,
+      controlId: CONTROL_ID,
+      capturedAt: AUTH_CAPTURED_AT,
+      operation: 'email-password-provider-readback',
+      mode: 'get-only',
+      status: 'complete',
+      configName: AUTH_CONFIG_NAME,
+      configReadHttpStatus: 200,
+      emailPasswordEnabled: false,
+      providerStateVerified: true,
+      providerStillOff: true,
+      writeCount: 0,
+      error: null
+    },
     r1Quiescence: {
       tool: 'r23-quiescence-evidence',
       schemaVersion: 2,
@@ -280,7 +305,33 @@ function evidenceReports() {
       releasePatchAttempted: true,
       releasePatchCount: 1,
       releasePatchHttpStatus: 200,
+      releasePatchOutcome: 'response-success',
+      mutationOutcomeUnknown: false,
+      quiescenceRulesetSourceReadbackHttpStatus: 200,
+      quiescenceRulesetSourceFileName: 'firestore.maintenance.rules',
+      quiescenceRulesetSourceSha256: QUIESCENCE_SOURCE_SHA,
+      quiescenceRulesetSourceReadbackExact: true,
+      priorReleaseReadbackHttpStatus: 200,
+      priorReleaseRulesetName: ROLLBACK,
+      priorReleaseUpdateTime: '2026-08-23T04:59:00Z',
+      priorRulesetSourceReadbackHttpStatus: 200,
+      priorRulesetSourceFileName: 'firestore.rules',
+      priorRulesetSourceSha256: ROLLBACK_SHA,
+      priorRulesetSourceReadbackExact: true,
       releaseReadbackHttpStatus: 200,
+      releaseReadbackRulesetName: QUIESCENCE,
+      releaseReadbackUpdateTime: QUIESCENCE_UPDATE_TIME,
+      releaseReadbackExact: true,
+      rollbackAttempted: false,
+      rollbackPatchCount: 0,
+      rollbackPatchHttpStatus: 0,
+      rollbackReadbackHttpStatus: 0,
+      rollbackReadbackRulesetName: '',
+      rollbackReadbackUpdateTime: '',
+      rollbackReadbackExact: false,
+      finalReleaseRulesetName: QUIESCENCE,
+      finalReleaseUpdateTime: QUIESCENCE_UPDATE_TIME,
+      finalReleaseStateKnown: true,
       verifiedAnonymousStatus: 403,
       providerChecksComplete: true,
       cloudFunctionsStopped: true,
@@ -441,6 +492,7 @@ function installEvidence(directory, manifest) {
   const tools = {
     r0ProductionRulesProbe: 'production-rules-compiler-probe',
     r0RulesApiDiagnosis: 'rules-api-503-diagnosis',
+    r0AuthProviderOff: 'auth-email-password-off-evidence',
     r1Quiescence: 'r23-quiescence-evidence',
     r2LifecycleDryBefore: 'lifecycle-migration-cli',
     r2LifecycleApply: 'lifecycle-migration-cli',
@@ -465,7 +517,8 @@ function installEvidence(directory, manifest) {
     );
     const capturedAt = index < 2
       ? ['2026-08-23T05:01:00Z', '2026-08-23T05:02:00Z'][index]
-      : index === 2 ? QUIESCENCE_STARTED_AT
+      : name === 'r0AuthProviderOff' ? AUTH_CAPTURED_AT
+        : name === 'r1Quiescence' ? QUIESCENCE_STARTED_AT
         : name === 'r7PublicLibraryAudit' ? '2026-08-23T05:50:00Z'
           : name === 'r8IndexReadiness' ? '2026-08-23T05:55:00Z'
             : new Date(Date.parse('2026-08-23T05:10:00Z') + index * 60_000).toISOString();
@@ -525,6 +578,7 @@ function invalidateEvidenceReport(name, report) {
   const invalidators = {
     r0ProductionRulesProbe(value) { value.issueCounts.error = 1; },
     r0RulesApiDiagnosis(value) { value.reconciliation.matchingRulesetNames.push(ROLLBACK); },
+    r0AuthProviderOff(value) { value.providerStillOff = false; },
     r1Quiescence(value) { value.trustedWritersStopped = false; },
     r2LifecycleDryBefore(value) { value.appliedCount = 1; },
     r2LifecycleApply(value) { value.safeToDeployStrictRules = false; },
@@ -557,10 +611,20 @@ function validManifest() {
       quiescenceStartedAt: QUIESCENCE_STARTED_AT,
       sealedAt: WINDOW_SEALED_AT
     },
+    authProvider: {
+      configName: AUTH_CONFIG_NAME,
+      emailPasswordEnabled: false,
+      providerStillOff: true,
+      evidenceWindowId: WINDOW_ID,
+      controlId: CONTROL_ID,
+      capturedAt: AUTH_CAPTURED_AT
+    },
     quiescence: {
       mechanism: 'deny-all Firestore Rules',
       rulesetName: QUIESCENCE,
       releaseUpdateTime: QUIESCENCE_UPDATE_TIME,
+      rulesetSourceSha256: QUIESCENCE_SOURCE_SHA,
+      rulesetSourceReadbackExact: true,
       evidenceWindowId: WINDOW_ID,
       controlId: CONTROL_ID,
       verifiedAnonymousStatus: 403,
@@ -746,6 +810,12 @@ async function invoke(t, options = {}) {
     },
     async getJson(request) {
       calls.push({ ...request });
+      if (request.url === adopt.AUTH_CONFIG_URL) {
+        if (options.authConfigError) throw options.authConfigError;
+        return options.authConfigResponse || { statusCode: 200, body: {
+          name: AUTH_CONFIG_NAME, signIn: { email: { enabled: false } }
+        } };
+      }
       if (options.getJson) return options.getJson(request);
       if (request.url === adopt.API_ROOT + TARGET) {
         return options.target || targetResponse();
@@ -871,6 +941,16 @@ test('production adoption refuses any configured emulator before reserving outpu
   assert.equal(reserved, false);
 });
 
+test('production default commit readback binds source and static to whole HEAD', () => {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf8', windowsHide: true
+  }).trim();
+  assert.deepEqual(adopt.productionDependencies().readCurrentCommit(), {
+    sourceCommit: head,
+    staticCommit: head
+  });
+});
+
 test('an already-used output fails before credentials or Rules API access', async () => {
   let tokenCalls = 0;
   let networkCalls = 0;
@@ -899,10 +979,20 @@ test('the sealed manifest must use every exact adoption identity field', async t
     ['release source SHA', manifest => { manifest.release.firestoreRulesSha256 = '0'.repeat(64); }],
     ['source commit', manifest => { manifest.task4.headCommit = ''; }],
     ['static release commit', manifest => { manifest.release.staticCommit = 'not-a-commit'; }],
+    ['Auth provider config', manifest => { manifest.authProvider.configName = 'projects/other/config'; }],
+    ['Auth provider enabled', manifest => { manifest.authProvider.emailPasswordEnabled = true; }],
+    ['Auth provider OFF gate', manifest => { manifest.authProvider.providerStillOff = false; }],
+    ['Auth provider capture', manifest => { manifest.authProvider.capturedAt = WINDOW_OPENED_AT; }],
     ['rollback ruleset', manifest => { manifest.rollback.rulesetName = TARGET; }],
     ['rollback static commit', manifest => { manifest.rollback.staticCommit = ''; }],
     ['quiescence mechanism', manifest => { manifest.quiescence.mechanism = 'operator promise'; }],
     ['quiescence ruleset', manifest => { manifest.quiescence.rulesetName = ROLLBACK; }],
+    ['quiescence source SHA', manifest => {
+      manifest.quiescence.rulesetSourceSha256 = '0'.repeat(64);
+    }],
+    ['quiescence source readback', manifest => {
+      manifest.quiescence.rulesetSourceReadbackExact = false;
+    }],
     ['quiescence anonymous readback', manifest => { manifest.quiescence.verifiedAnonymousStatus = 200; }],
     ['quiescence trusted-writer gate', manifest => {
       manifest.quiescence.providerChecksComplete = false;
@@ -925,6 +1015,7 @@ test('the sealed manifest rejects unknown authorization fields at every contract
   const cases = [
     ['top level', manifest => { manifest.unreviewedAuthorization = true; }],
     ['release window', manifest => { manifest.releaseWindow.unreviewedAuthorization = true; }],
+    ['Auth provider', manifest => { manifest.authProvider.unreviewedAuthorization = true; }],
     ['quiescence', manifest => { manifest.quiescence.unreviewedAuthorization = true; }],
     ['rollback', manifest => { manifest.rollback.unreviewedAuthorization = true; }],
     ['release', manifest => { manifest.release.unreviewedAuthorization = true; }],
@@ -1105,6 +1196,48 @@ test('known nested evidence schemas reject unreviewed authorization fields', asy
   }
 });
 
+test('R1 success evidence requires pinned source, known exact final state, and no rollback', async t => {
+  const cases = [
+    ['deny source hash', report => { report.quiescenceRulesetSourceSha256 = '0'.repeat(64); }],
+    ['deny source exactness', report => { report.quiescenceRulesetSourceReadbackExact = false; }],
+    ['unsafe outcome', report => { report.releasePatchOutcome = 'definitely-not-landed'; }],
+    ['unknown mutation', report => { report.mutationOutcomeUnknown = true; }],
+    ['rollback attempted', report => { report.rollbackAttempted = true; }],
+    ['prior rollback identity mismatch', report => {
+      report.priorReleaseRulesetName = TARGET;
+    }],
+    ['prior rollback source mismatch', report => {
+      report.priorRulesetSourceSha256 = '0'.repeat(64);
+    }],
+    ['final Ruleset mismatch', report => { report.finalReleaseRulesetName = ROLLBACK; }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async t => {
+      const execution = await invoke(t, {
+        mutateEvidence({ manifest }) {
+          rewriteEvidence(manifest.evidence.r1Quiescence, mutate);
+        }
+      });
+      assert.equal(execution.result.status, 'failed');
+      assert.equal(execution.tokenCalls, 0);
+      assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+    });
+  }
+});
+
+test('R1 landed-reconciled evidence is accepted only with exact authoritative deny readback', async t => {
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest }) {
+      rewriteEvidence(manifest.evidence.r1Quiescence, report => {
+        report.releasePatchOutcome = 'landed-reconciled';
+        report.releasePatchHttpStatus = 0;
+      });
+    }
+  });
+  assert.equal(execution.result.status, 'complete');
+  assert.equal(execution.result.safeForStaticDeployment, true);
+});
+
 test('report-authored timestamps bind to the manifest evidence capture time', async t => {
   const execution = await invoke(t, {
     mutateEvidence({ manifest }) {
@@ -1128,8 +1261,20 @@ test('unchanged old R2 bytes cannot be relabeled with a fresh wrapper capture ti
   assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
 });
 
-test('manually authored legacy R1 and R8 success objects cannot authorize adoption', async t => {
+test('manually authored legacy Auth, R1, and R8 success objects cannot authorize adoption', async t => {
   const legacyReports = {
+    r0AuthProviderOff: {
+      tool: 'auth-email-password-off-evidence',
+      schemaVersion: 1,
+      projectId: PROJECT,
+      targetMode: 'production',
+      windowId: WINDOW_ID,
+      controlId: CONTROL_ID,
+      capturedAt: AUTH_CAPTURED_AT,
+      status: 'complete',
+      emailPasswordEnabled: false,
+      providerStillOff: true
+    },
     r1Quiescence: {
       tool: 'r23-quiescence-evidence',
       schemaVersion: 1,
@@ -1391,6 +1536,38 @@ test('untracked files are allowed only under the two restricted evidence directo
   });
   assert.equal(execution.result.status, 'complete');
   assert.equal(execution.calls.filter(call => call.method === 'PATCH').length, 1);
+});
+
+test('immediate Auth provider re-read fails closed before every Rules API operation', async t => {
+  const cases = [
+    ['403', { statusCode: 403, body: {} }],
+    ['missing enabled', { statusCode: 200, body: {
+      name: AUTH_CONFIG_NAME, signIn: { email: {} }
+    } }],
+    ['malformed name', { statusCode: 200, body: {
+      name: 'projects/other/config', signIn: { email: { enabled: false } }
+    } }],
+    ['enabled', { statusCode: 200, body: {
+      name: AUTH_CONFIG_NAME, signIn: { email: { enabled: true } }
+    } }],
+    ['transport failure', Object.assign(new Error('connection lost'), {
+      code: 'ECONNRESET'
+    })]
+  ];
+  for (const [name, authValue] of cases) {
+    await t.test(name, async t => {
+      const execution = await invoke(t, authValue instanceof Error
+        ? { authConfigError: authValue }
+        : { authConfigResponse: authValue });
+      assert.equal(execution.result.status, 'failed');
+      assert.equal(execution.result.phase, 'immediate-auth-provider-readback');
+      assert.equal(execution.result.providerStillOff, false);
+      assert.equal(execution.calls.some(call =>
+        typeof call.url === 'string' && call.url.startsWith(adopt.API_ROOT)
+      ), false);
+      assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+    });
+  }
 });
 
 test('an unreadable exact target records allowlisted failure evidence without patching', async t => {
@@ -1773,13 +1950,16 @@ test('success GETs only exact resources and PATCHes only the release rulesetName
   const patches = networkCalls.filter(call => call.method === 'PATCH');
 
   assert.equal(execution.result.status, 'complete');
+  assert.equal(execution.result.evidenceValidation.reportCount, 19);
   assert.equal(execution.result.createAttempted, false);
   assert.equal(execution.result.releaseReadbackRulesetName, TARGET);
   assert.equal(execution.result.releaseReadbackExact, true);
   assert.equal(execution.result.safeForStaticDeployment, true);
   assert.equal(execution.result.providerMutationAttempted, false);
-  assert.equal(execution.result.providerStateVerified, false);
-  assert.equal(Object.hasOwn(execution.result, 'providerStillOff'), false);
+  assert.equal(execution.result.providerStateVerified, true);
+  assert.equal(execution.result.providerStillOff, true);
+  assert.equal(execution.result.providerConfigName, AUTH_CONFIG_NAME);
+  assert.equal(execution.result.providerReadHttpStatus, 200);
   assert.equal(Object.hasOwn(execution.result, 'safeForExistingFlowSmoke'), false);
   assert.equal(execution.result.rollbackRulesetReadbackExact, true);
   assert.equal(execution.result.postActivationTargetRulesetReadbackExact, true);
@@ -1787,6 +1967,7 @@ test('success GETs only exact resources and PATCHes only the release rulesetName
   assert.deepEqual(execution.reports[0], execution.result);
   assert.equal(networkCalls.some(call => call.method === 'POST'), false);
   assert.deepEqual(networkCalls.filter(call => call.method === 'GET').map(call => call.url), [
+    adopt.AUTH_CONFIG_URL,
     adopt.API_ROOT + TARGET,
     adopt.API_ROOT + ROLLBACK,
     adopt.API_ROOT + RELEASE,

@@ -13,6 +13,9 @@ const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 const API_ROOT = 'https://firebaserules.googleapis.com/v1/';
 const PROJECT_ID = 'video-quiz-65798';
+const AUTH_CONFIG_NAME = 'projects/video-quiz-65798/config';
+const AUTH_CONFIG_URL =
+  'https://identitytoolkit.googleapis.com/admin/v2/' + AUTH_CONFIG_NAME;
 const TARGET_MODE = 'production';
 const RELEASE_NAME = 'projects/video-quiz-65798/releases/cloud.firestore';
 const TARGET_RULESET =
@@ -23,6 +26,8 @@ const ROLLBACK_RULESET =
   'projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4';
 const QUIESCENCE_RULESET =
   'projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466';
+const QUIESCENCE_RULESET_SOURCE_SHA256 =
+  'cd5089e4e5116dbb994013dc5fd5e7e411ec348935b8d06d13acd00173cca15b';
 const REQUEST_TIMEOUT_MS = 30_000;
 const SET_COUNTERS_PATH = 'migration_gates/set_counters';
 const TEACHER_ACCESS_PATH = 'migration_gates/teacher_access_status';
@@ -109,7 +114,7 @@ function validTimestamp(value) {
 
 function validateSealedManifest(manifest) {
   assertManifest(exactKeys(manifest, [
-    'schemaVersion', 'projectId', 'targetMode', 'releaseWindow', 'quiescence',
+    'schemaVersion', 'projectId', 'targetMode', 'releaseWindow', 'authProvider', 'quiescence',
     'rollback', 'release', 'locks', 'task4', 'evidence'
   ]));
   assertManifest(manifest.schemaVersion === 1);
@@ -129,14 +134,34 @@ function validateSealedManifest(manifest) {
   assertManifest(rfc3339Nanoseconds(manifest.releaseWindow.quiescenceStartedAt) <
     rfc3339Nanoseconds(manifest.releaseWindow.sealedAt));
 
+  assertManifest(exactKeys(manifest.authProvider, [
+    'configName', 'emailPasswordEnabled', 'providerStillOff',
+    'evidenceWindowId', 'controlId', 'capturedAt'
+  ]));
+  assertManifest(manifest.authProvider.configName === AUTH_CONFIG_NAME);
+  assertManifest(manifest.authProvider.emailPasswordEnabled === false);
+  assertManifest(manifest.authProvider.providerStillOff === true);
+  assertManifest(manifest.authProvider.evidenceWindowId ===
+    manifest.releaseWindow.windowId);
+  assertManifest(manifest.authProvider.controlId === manifest.releaseWindow.controlId);
+  assertManifest(validTimestamp(manifest.authProvider.capturedAt));
+  assertManifest(rfc3339Nanoseconds(manifest.authProvider.capturedAt) >=
+    rfc3339Nanoseconds(manifest.releaseWindow.openedAt));
+  assertManifest(rfc3339Nanoseconds(manifest.authProvider.capturedAt) <
+    rfc3339Nanoseconds(manifest.releaseWindow.quiescenceStartedAt));
+
   assertManifest(exactKeys(manifest.quiescence, [
-    'mechanism', 'rulesetName', 'releaseUpdateTime', 'evidenceWindowId',
+    'mechanism', 'rulesetName', 'releaseUpdateTime',
+    'rulesetSourceSha256', 'rulesetSourceReadbackExact', 'evidenceWindowId',
     'controlId', 'verifiedAnonymousStatus', 'providerChecksComplete',
     'cloudFunctionsStopped', 'schedulerStopped', 'trustedWritersStopped'
   ]));
   assertManifest(manifest.quiescence.mechanism === 'deny-all Firestore Rules');
   assertManifest(manifest.quiescence.rulesetName === QUIESCENCE_RULESET);
   assertManifest(validTimestamp(manifest.quiescence.releaseUpdateTime));
+  assertManifest(manifest.quiescence.rulesetSourceSha256 ===
+    QUIESCENCE_RULESET_SOURCE_SHA256);
+  assertManifest(manifest.quiescence.rulesetSourceReadbackExact === true);
   assertManifest(manifest.quiescence.evidenceWindowId === manifest.releaseWindow.windowId);
   assertManifest(manifest.quiescence.controlId === manifest.releaseWindow.controlId);
   assertManifest(manifest.quiescence.verifiedAnonymousStatus === 403);
@@ -383,14 +408,11 @@ function manifestGateGenerations(manifest) {
 
 function readCurrentCommit() {
   const options = { encoding: 'utf8', timeout: 5_000, windowsHide: true };
-  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], options).trim();
-  const staticCommit = execFileSync(
-    'git', ['log', '-1', '--format=%H', '--', ...STATIC_ASSET_PATHS], options
-  ).trim();
-  if (!COMMIT_PATTERN.test(sourceCommit) || !COMMIT_PATTERN.test(staticCommit)) {
+  const headCommit = execFileSync('git', ['rev-parse', 'HEAD'], options).trim();
+  if (!COMMIT_PATTERN.test(headCommit)) {
     throw new Error('Local Git commit readback is not exact.');
   }
-  return { sourceCommit, staticCommit };
+  return { sourceCommit: headCommit, staticCommit: headCommit };
 }
 
 function sha256(contents) {
@@ -638,6 +660,9 @@ async function main(argv, dependencies) {
     mutationOutcomeUnknown: false,
     providerMutationAttempted: false,
     providerStateVerified: false,
+    providerStillOff: false,
+    providerConfigName: AUTH_CONFIG_NAME,
+    providerReadHttpStatus: 0,
     safeForStaticDeployment: false,
     phase: 'reserved-before-manifest-validation',
     status: 'reserved-fail-closed'
@@ -662,6 +687,9 @@ async function main(argv, dependencies) {
   let currentDeployInputsReadbackExact = false;
   let repositoryInputsCleanReadback = false;
   let currentGateReadbackExact = false;
+  let providerStateVerified = false;
+  let providerStillOff = false;
+  let providerReadHttpStatus = 0;
   try {
     const sealedManifest = readAndValidateSealedManifest(
       options.manifestPath, options.expectManifestSha256
@@ -675,6 +703,7 @@ async function main(argv, dependencies) {
       releaseName: RELEASE_NAME,
       targetRuleset: TARGET_RULESET,
       quiescenceRuleset: QUIESCENCE_RULESET,
+      quiescenceRulesetSourceSha256: QUIESCENCE_RULESET_SOURCE_SHA256,
       sourceSha256: EXPECTED_SOURCE_SHA,
       firestoreIndexesSha256: manifest.release.firestoreIndexesSha256
     }, {
@@ -722,7 +751,47 @@ async function main(argv, dependencies) {
       throw operationFailure('repository-deploy-inputs-dirty', null, null);
     }
     repositoryInputsCleanReadback = true;
+
+    phase = 'current-gate-readback';
+    let currentGates;
+    try {
+      currentGates = await withTimeout(
+        () => runtime.readCurrentGateState(PROJECT_ID), runtime.requestTimeoutMs
+      );
+    } catch (error) {
+      throw operationFailure('current-gate-readback-failed', null, error);
+    }
+    if (!currentGateStateExact(currentGates, manifest)) {
+      throw operationFailure('current-gate-readback-mismatch', null, null);
+    }
+    currentGateReadbackExact = true;
+
+    phase = 'credential-acquisition';
     accessToken = await runtime.acquireAccessToken();
+    phase = 'immediate-auth-provider-readback';
+    let authConfig;
+    try {
+      authConfig = await runtimeRequest(runtime, 'getJson', {
+        method: 'GET', url: AUTH_CONFIG_URL, accessToken
+      });
+    } catch (error) {
+      throw operationFailure('auth-provider-config-unreadable', null, error);
+    }
+    providerReadHttpStatus = authConfig && authConfig.statusCode || 0;
+    if (!httpSuccess(authConfig)) {
+      throw operationFailure('auth-provider-config-unreadable', authConfig, null);
+    }
+    const emailConfig = authConfig.body && authConfig.body.signIn &&
+      authConfig.body.signIn.email;
+    if (!authConfig.body || authConfig.body.name !== AUTH_CONFIG_NAME ||
+        !emailConfig || typeof emailConfig.enabled !== 'boolean') {
+      throw operationFailure('auth-provider-config-malformed', authConfig, null);
+    }
+    providerStateVerified = true;
+    if (emailConfig.enabled !== false) {
+      throw operationFailure('email-password-provider-enabled', authConfig, null);
+    }
+    providerStillOff = true;
 
     phase = 'target-ruleset-readback';
     let target;
@@ -759,20 +828,6 @@ async function main(argv, dependencies) {
       throw operationFailure('rollback-ruleset-source-hash-mismatch', rollbackTarget, null);
     }
     rollbackRulesetReadbackExact = true;
-
-    phase = 'current-gate-readback';
-    let currentGates;
-    try {
-      currentGates = await withTimeout(
-        () => runtime.readCurrentGateState(PROJECT_ID), runtime.requestTimeoutMs
-      );
-    } catch (error) {
-      throw operationFailure('current-gate-readback-failed', null, error);
-    }
-    if (!currentGateStateExact(currentGates, manifest)) {
-      throw operationFailure('current-gate-readback-mismatch', null, null);
-    }
-    currentGateReadbackExact = true;
 
     phase = 'immediate-pre-patch-readback';
     let before;
@@ -867,6 +922,9 @@ async function main(argv, dependencies) {
       currentDeployInputsExact: currentDeployInputsReadbackExact,
       repositoryInputsClean: repositoryInputsCleanReadback,
       currentGateStateExact: currentGateReadbackExact,
+      providerStateVerified,
+      providerStillOff,
+      providerReadHttpStatus,
       releasePatchAttempted: true,
       releasePatchHttpStatus,
       releaseReadbackHttpStatus,
@@ -885,7 +943,8 @@ async function main(argv, dependencies) {
       'createAttempted=false',
       'releaseReadbackExact=true',
       'providerMutationAttempted=false',
-      'providerStateVerified=false'
+      'providerStateVerified=true',
+      'providerStillOff=true'
     ].join(' '));
     return report;
   } catch (error) {
@@ -918,6 +977,9 @@ async function main(argv, dependencies) {
       currentDeployInputsExact: currentDeployInputsReadbackExact,
       repositoryInputsClean: repositoryInputsCleanReadback,
       currentGateStateExact: currentGateReadbackExact,
+      providerStateVerified,
+      providerStillOff,
+      providerReadHttpStatus,
       releasePatchAttempted,
       releasePatchHttpStatus,
       releaseReadbackHttpStatus,
@@ -964,6 +1026,8 @@ if (require.main === module) {
 
 module.exports = {
   API_ROOT,
+  AUTH_CONFIG_NAME,
+  AUTH_CONFIG_URL,
   EXPECTED_SOURCE_SHA,
   PROJECT_ID,
   QUIESCENCE_RULESET,

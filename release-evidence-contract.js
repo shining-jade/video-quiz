@@ -11,6 +11,7 @@ const {
 const EVIDENCE_NAMES = Object.freeze([
   'r0ProductionRulesProbe',
   'r0RulesApiDiagnosis',
+  'r0AuthProviderOff',
   'r1Quiescence',
   'r2LifecycleDryBefore',
   'r2LifecycleApply',
@@ -77,9 +78,19 @@ function nonNegativeInteger(value) {
   return Number.isInteger(value) && value >= 0;
 }
 
+function successfulHttpStatus(value) {
+  return nonNegativeInteger(value) && value >= 200 && value < 300;
+}
+
 function boundedIdentity(value) {
   return typeof value === 'string' && value.length > 0 &&
-    value.length <= 128 && !value.includes('/');
+    value.length <= 128 && !/[\\/]/.test(value);
+}
+
+function projectRulesetName(value, projectId) {
+  const prefix = 'projects/' + projectId + '/rulesets/';
+  return typeof value === 'string' && value.startsWith(prefix) &&
+    boundedIdentity(value.slice(prefix.length));
 }
 
 function serializedFirestoreTimestamp(value) {
@@ -193,6 +204,28 @@ function validateDiagnosis(report, manifest, contract, entry) {
   assertEvidence(report.verdict === expectedVerdict);
 }
 
+function validateAuthProviderOff(report, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'operation', 'mode', 'status', 'configName', 'configReadHttpStatus',
+    'emailPasswordEnabled', 'providerStateVerified', 'providerStillOff',
+    'writeCount', 'error'
+  ])));
+  validateReportIdentity(
+    report, manifest, contract, entry, 'auth-email-password-off-evidence'
+  );
+  assertEvidence(report.operation === 'email-password-provider-readback' &&
+    report.mode === 'get-only' && report.status === 'complete');
+  assertEvidence(report.configName === 'projects/' + contract.projectId + '/config');
+  assertEvidence(report.configName === manifest.authProvider.configName);
+  assertEvidence(successfulHttpStatus(report.configReadHttpStatus));
+  assertEvidence(report.emailPasswordEnabled === false &&
+    report.providerStateVerified === true && report.providerStillOff === true);
+  assertEvidence(report.writeCount === 0 && report.error === null);
+  assertEvidence(report.capturedAt === manifest.authProvider.capturedAt);
+  assertEvidence(manifest.authProvider.emailPasswordEnabled === false &&
+    manifest.authProvider.providerStillOff === true);
+}
+
 function validateFunctionInventory(value, version) {
   assertEvidence(exactKeys(value, [
     'apiVersion', 'listSucceeded', 'pages', 'unreachable', 'functions'
@@ -231,7 +264,22 @@ function validateQuiescence(report, contract, manifest, entry) {
   assertEvidence(exactKeys(report, reportKeys([
     'operation', 'mode', 'phase', 'status', 'mechanism', 'releaseName',
     'rulesetName', 'releaseUpdateTime', 'releasePatchAttempted',
-    'releasePatchCount', 'releasePatchHttpStatus', 'releaseReadbackHttpStatus',
+    'releasePatchCount', 'releasePatchHttpStatus', 'releasePatchOutcome',
+    'mutationOutcomeUnknown',
+    'quiescenceRulesetSourceReadbackHttpStatus',
+    'quiescenceRulesetSourceFileName', 'quiescenceRulesetSourceSha256',
+    'quiescenceRulesetSourceReadbackExact',
+    'priorReleaseReadbackHttpStatus', 'priorReleaseRulesetName',
+    'priorReleaseUpdateTime', 'priorRulesetSourceReadbackHttpStatus',
+    'priorRulesetSourceFileName', 'priorRulesetSourceSha256',
+    'priorRulesetSourceReadbackExact',
+    'releaseReadbackHttpStatus', 'releaseReadbackRulesetName',
+    'releaseReadbackUpdateTime', 'releaseReadbackExact',
+    'rollbackAttempted', 'rollbackPatchCount', 'rollbackPatchHttpStatus',
+    'rollbackReadbackHttpStatus', 'rollbackReadbackRulesetName',
+    'rollbackReadbackUpdateTime', 'rollbackReadbackExact',
+    'finalReleaseRulesetName', 'finalReleaseUpdateTime',
+    'finalReleaseStateKnown',
     'verifiedAnonymousStatus', 'providerChecksComplete', 'cloudFunctionsStopped',
     'schedulerStopped', 'trustedWritersStopped', 'writerInventory',
     'firestoreDataWriteCount', 'error'
@@ -245,9 +293,49 @@ function validateQuiescence(report, contract, manifest, entry) {
   assertEvidence(report.releaseUpdateTime === manifest.quiescence.releaseUpdateTime);
   assertEvidence(validTimestamp(report.releaseUpdateTime));
   assertEvidence(report.releasePatchAttempted === true && report.releasePatchCount === 1);
-  assertEvidence(report.releasePatchHttpStatus >= 200 && report.releasePatchHttpStatus < 300);
-  assertEvidence(report.releaseReadbackHttpStatus >= 200 &&
-    report.releaseReadbackHttpStatus < 300);
+  assertEvidence(['response-success', 'landed-reconciled'].includes(
+    report.releasePatchOutcome
+  ));
+  if (report.releasePatchOutcome === 'response-success') {
+    assertEvidence(successfulHttpStatus(report.releasePatchHttpStatus));
+  } else {
+    assertEvidence(nonNegativeInteger(report.releasePatchHttpStatus) &&
+      !(report.releasePatchHttpStatus >= 200 && report.releasePatchHttpStatus < 300));
+  }
+  assertEvidence(report.mutationOutcomeUnknown === false);
+  assertEvidence(successfulHttpStatus(
+    report.quiescenceRulesetSourceReadbackHttpStatus
+  ));
+  assertEvidence(boundedIdentity(report.quiescenceRulesetSourceFileName));
+  assertEvidence(report.quiescenceRulesetSourceSha256 ===
+    contract.quiescenceRulesetSourceSha256);
+  assertEvidence(report.quiescenceRulesetSourceSha256 ===
+    manifest.quiescence.rulesetSourceSha256);
+  assertEvidence(report.quiescenceRulesetSourceReadbackExact === true &&
+    manifest.quiescence.rulesetSourceReadbackExact === true);
+  assertEvidence(successfulHttpStatus(report.priorReleaseReadbackHttpStatus));
+  assertEvidence(projectRulesetName(report.priorReleaseRulesetName, contract.projectId));
+  assertEvidence(report.priorReleaseRulesetName === manifest.rollback.rulesetName);
+  assertEvidence(validTimestamp(report.priorReleaseUpdateTime));
+  assertEvidence(timestampNanoseconds(report.priorReleaseUpdateTime) <
+    timestampNanoseconds(report.releaseUpdateTime));
+  assertEvidence(successfulHttpStatus(report.priorRulesetSourceReadbackHttpStatus));
+  assertEvidence(boundedIdentity(report.priorRulesetSourceFileName));
+  assertEvidence(SHA_PATTERN.test(report.priorRulesetSourceSha256));
+  assertEvidence(report.priorRulesetSourceSha256 === manifest.rollback.sourceSha256);
+  assertEvidence(report.priorRulesetSourceReadbackExact === true);
+  assertEvidence(successfulHttpStatus(report.releaseReadbackHttpStatus));
+  assertEvidence(report.releaseReadbackRulesetName === contract.quiescenceRuleset);
+  assertEvidence(report.releaseReadbackUpdateTime === report.releaseUpdateTime);
+  assertEvidence(report.releaseReadbackExact === true);
+  assertEvidence(report.rollbackAttempted === false && report.rollbackPatchCount === 0);
+  assertEvidence(report.rollbackPatchHttpStatus === 0 &&
+    report.rollbackReadbackHttpStatus === 0);
+  assertEvidence(report.rollbackReadbackRulesetName === '' &&
+    report.rollbackReadbackUpdateTime === '' && report.rollbackReadbackExact === false);
+  assertEvidence(report.finalReleaseRulesetName === contract.quiescenceRuleset);
+  assertEvidence(report.finalReleaseUpdateTime === report.releaseUpdateTime);
+  assertEvidence(report.finalReleaseStateKnown === true);
   assertEvidence(report.verifiedAnonymousStatus === 403);
   assertEvidence(report.providerChecksComplete === true &&
     report.cloudFunctionsStopped === true && report.schedulerStopped === true);
@@ -608,6 +696,7 @@ function validateReport(name, report, manifest, contract, entry) {
   const validators = {
     r0ProductionRulesProbe: () => validateCompilerProbe(report, manifest, contract, entry),
     r0RulesApiDiagnosis: () => validateDiagnosis(report, manifest, contract, entry),
+    r0AuthProviderOff: () => validateAuthProviderOff(report, manifest, contract, entry),
     r1Quiescence: () => validateQuiescence(report, contract, manifest, entry),
     r2LifecycleDryBefore: () => validateLifecycle(
       report, 'dry-run', false, manifest, contract, entry
@@ -684,6 +773,18 @@ function validateEvidenceMap(manifest, contract, accessOptions = {}) {
   const quiescenceAt = timestampNanoseconds(window.quiescenceStartedAt);
   const sealedAt = timestampNanoseconds(window.sealedAt);
   assertEvidence(openedAt < quiescenceAt && quiescenceAt < sealedAt);
+  assertEvidence(exactKeys(manifest.authProvider, [
+    'configName', 'emailPasswordEnabled', 'providerStillOff',
+    'evidenceWindowId', 'controlId', 'capturedAt'
+  ]));
+  assertEvidence(manifest.authProvider.configName ===
+    'projects/' + contract.projectId + '/config');
+  assertEvidence(manifest.authProvider.emailPasswordEnabled === false &&
+    manifest.authProvider.providerStillOff === true);
+  assertEvidence(manifest.authProvider.evidenceWindowId === window.windowId &&
+    manifest.authProvider.controlId === window.controlId);
+  const authCapturedAt = timestampNanoseconds(manifest.authProvider.capturedAt);
+  assertEvidence(authCapturedAt >= openedAt && authCapturedAt < quiescenceAt);
   assertEvidence(exactObject(manifest.evidence));
   assertEvidence(JSON.stringify(Object.keys(manifest.evidence).sort()) ===
     JSON.stringify([...EVIDENCE_NAMES].sort()));

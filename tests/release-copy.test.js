@@ -100,9 +100,13 @@ test('R23 evidence commands author immutable identity and use dedicated R1/R8 re
     packageJson.scripts['release:index-readiness:r23'],
     'node scripts/read-firestore-index-readiness.js'
   );
+  assert.equal(
+    packageJson.scripts['release:auth-provider-off:r23'],
+    'node scripts/read-auth-provider-off.js'
+  );
   for (const command of [
     'test:rules:production-source', 'diagnose:rules-api',
-    'release:quiescence:r23', 'migrate:lifecycle',
+    'release:auth-provider-off:r23', 'release:quiescence:r23', 'migrate:lifecycle',
     'migrate:collaborator-shares', 'gate:counters', 'migrate:counters',
     'migrate:teacher-access', 'migrate:session-counters',
     'audit:public-library', 'release:index-readiness:r23'
@@ -121,7 +125,7 @@ test('R23 evidence commands author immutable identity and use dedicated R1/R8 re
 test('R23 manifest binds exact fresh evidence, live release identity, and honest adoption readiness', () => {
   const runbook = read('docs/RELEASE-RUNBOOK.md');
   for (const marker of [
-    'r0ProductionRulesProbe', 'r0RulesApiDiagnosis', 'r1Quiescence',
+    'r0ProductionRulesProbe', 'r0RulesApiDiagnosis', 'r0AuthProviderOff', 'r1Quiescence',
     'r2LifecycleDryBefore', 'r2LifecycleApply', 'r2LifecycleDryAfter',
     'r3SharesDryBefore', 'r3SharesApply', 'r3SharesDryAfter',
     'r4CounterLock', 'r4CounterApply', 'r4CounterAudit',
@@ -138,12 +142,37 @@ test('R23 manifest binds exact fresh evidence, live release identity, and honest
   assert.match(runbook, /release exact readback[\s\S]*target Ruleset[\s\S]*다시 GET[\s\S]*SHA/);
   assert.match(runbook, /safeForStaticDeployment:\s*true/);
   assert.match(runbook, /providerMutationAttempted:\s*false/);
-  assert.match(runbook, /providerStateVerified:\s*false/);
+  assert.match(runbook, /providerStateVerified:\s*true/);
+  assert.match(runbook, /providerStillOff:\s*true/);
   assert.match(runbook, /r23-quiescence-evidence/);
   assert.match(runbook, /report 자체[\s\S]*windowId[\s\S]*controlId[\s\S]*capturedAt/);
   assert.match(runbook, /realpath[\s\S]*symlink[\s\S]*duplicate/);
   assert.match(runbook, /C:\\Users\\user\\Desktop\\영상퀴즈\\\.worktrees\\email-auth-public-library\\\.release-artifacts\\2026-08-23/);
   assert.doesNotMatch(runbook, /safeForExistingFlowSmoke:\s*true/);
+});
+
+test('R23 runbook pins Auth OFF evidence, R1 reconciliation, and whole-HEAD adoption gates', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const authCommand = runbook.indexOf('pnpm release:auth-provider-off:r23');
+  const r1 = runbook.indexOf('### R1 — exact write-quiescence');
+
+  assert.ok(authCommand >= 0 && authCommand < r1,
+    'authoritative Auth OFF evidence must be captured before R1');
+  assert.match(runbook, /firebaseauth\.configs\.get/);
+  assert.match(runbook, /identitytoolkit\.googleapis\.com\/admin\/v2\/projects\/video-quiz-65798\/config/);
+  assert.match(runbook, /403[\s\S]*missing[\s\S]*malformed[\s\S]*enabled[\s\S]*fail-closed/i);
+  assert.match(runbook, /manual[\s\S]*provider[\s\S]*success JSON[\s\S]*(금지|거부)/i);
+  assert.match(runbook,
+    /cd5089e4e5116dbb994013dc5fd5e7e411ec348935b8d06d13acd00173cca15b/);
+  for (const outcome of [
+    'response-success', 'landed-reconciled', 'definitely-not-landed',
+    'mismatch-rolled-back', 'mismatch-rollback-failed', 'mutation-outcome-unknown'
+  ]) assert.match(runbook, new RegExp(outcome));
+  assert.match(runbook, /exact pre-PATCH[\s\S]*Ruleset[\s\S]*rollback/i);
+  assert.match(runbook, /mutation-outcome-unknown[\s\S]*speculative rollback[\s\S]*(금지|하지 않)/i);
+  assert.match(runbook, /immediate pre-PATCH[\s\S]*Email\/Password[\s\S]*GET[\s\S]*OFF/i);
+  assert.match(runbook, /sourceCommit[\s\S]*staticCommit[\s\S]*HEAD/);
+  assert.match(runbook, /tracked worktree[\s\S]*index[\s\S]*clean/i);
 });
 
 test('R2 distinguishes lifecycle apply authorization from the fail-closed final dry-run schema', () => {
