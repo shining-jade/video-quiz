@@ -3,6 +3,10 @@
 
 const path = require('node:path');
 const migration = require('../collaborator-share-migration.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS, authorEvidenceReport, captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
@@ -12,7 +16,9 @@ function parseArgs(argv) {
     apply: false,
     confirmProject: '',
     output: '',
-    maxDocuments: 5000
+    maxDocuments: 5000,
+    windowId: '',
+    controlId: ''
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -25,7 +31,8 @@ function parseArgs(argv) {
       '--target-mode': 'targetMode',
       '--confirm-project': 'confirmProject',
       '--output': 'output',
-      '--max-documents': 'maxDocuments'
+      '--max-documents': 'maxDocuments',
+      ...EVIDENCE_ARGUMENT_FIELDS
     }[argument];
     if (!field) throw new Error('Unknown argument: ' + argument);
     const value = argv[++index];
@@ -43,6 +50,7 @@ function parseArgs(argv) {
   if (result.apply && result.confirmProject !== result.projectId) {
     throw new Error('--apply requires an exact --confirm-project.');
   }
+  validateEvidenceIdentityOptions(result);
   return result;
 }
 
@@ -69,6 +77,7 @@ function validateTarget(options, environment = process.env) {
 function productionDependencies() {
   return {
     reserveReport,
+    now: () => new Date().toISOString(),
     async initialize(projectId) {
       const admin = require('firebase-admin');
       const app = admin.initializeApp({ projectId });
@@ -97,14 +106,15 @@ function nonPiiSummary(report) {
 async function main(argv = process.argv.slice(2), dependencies = productionDependencies()) {
   const options = parseArgs(argv);
   const target = validateTarget(options, dependencies.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    { ...options, targetMode: target.targetMode },
+    { tool: 'collaborator-share-migration', schemaVersion: 2 },
+    dependencies.now
+  );
   const output = options.output || path.resolve(
     'collaborator-share-migration-' + options.projectId + '-' + Date.now() + '.json'
   );
-  const reservation = dependencies.reserveReport(output, JSON.stringify({
-    tool: 'collaborator-share-migration',
-    schemaVersion: 1,
-    projectId: options.projectId,
-    targetMode: target.targetMode,
+  const reservation = dependencies.reserveReport(output, JSON.stringify(authorEvidenceReport({
     mode: options.apply ? 'apply' : 'dry-run',
     operation: 'collaborator-share-backfill',
     maxDocuments: options.maxDocuments,
@@ -116,18 +126,18 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
     concurrentlySkippedCount: 0,
     status: 'reserved-fail-closed',
     safeToUseShareIndex: false
-  }, null, 2) + '\n');
+  }, identity), null, 2) + '\n');
   let services;
   try {
     services = await dependencies.initialize(options.projectId);
-    const report = await dependencies.runCollaboratorShareMigration({
+    const report = authorEvidenceReport(await dependencies.runCollaboratorShareMigration({
       db: services.db,
       projectId: options.projectId,
       targetMode: target.targetMode,
       apply: options.apply,
       confirmProject: options.confirmProject,
       maxDocuments: options.maxDocuments
-    });
+    }), identity);
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     try {
       dependencies.writeLine(nonPiiSummary(report));
@@ -136,7 +146,7 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
     }
     return report;
   } catch (error) {
-    const report = error.partialReport || {
+    const report = authorEvidenceReport(error.partialReport || {
       tool: 'collaborator-share-migration',
       schemaVersion: 1,
       projectId: options.projectId,
@@ -153,7 +163,7 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
       status: 'failed',
       safeToUseShareIndex: false,
       error: String(error && error.message || error)
-    };
+    }, identity);
     try {
       await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     } catch (publicationError) {

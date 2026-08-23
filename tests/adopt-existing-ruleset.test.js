@@ -263,21 +263,50 @@ function evidenceReports() {
     },
     r1Quiescence: {
       tool: 'r23-quiescence-evidence',
-      schemaVersion: 1,
+      schemaVersion: 2,
       projectId: PROJECT,
       targetMode: 'production',
       windowId: WINDOW_ID,
       controlId: CONTROL_ID,
       capturedAt: QUIESCENCE_STARTED_AT,
+      operation: 'begin-quiescence',
+      mode: 'patch-and-verify',
+      phase: 'quiescence-established',
       status: 'complete',
       mechanism: 'deny-all Firestore Rules',
       releaseName: RELEASE,
       rulesetName: QUIESCENCE,
       releaseUpdateTime: QUIESCENCE_UPDATE_TIME,
+      releasePatchAttempted: true,
+      releasePatchCount: 1,
+      releasePatchHttpStatus: 200,
+      releaseReadbackHttpStatus: 200,
       verifiedAnonymousStatus: 403,
-      cloudFunctionsApiDisabled: true,
+      providerChecksComplete: true,
+      cloudFunctionsStopped: true,
+      schedulerStopped: true,
       trustedWritersStopped: true,
-      writeCount: 0
+      writerInventory: {
+        cloudFunctionsV1: {
+          apiVersion: 'v1', listSucceeded: true, pages: 1,
+          unreachable: [], functions: []
+        },
+        cloudFunctionsV2: {
+          apiVersion: 'v2', listSucceeded: true, pages: 1,
+          unreachable: [], functions: []
+        },
+        cloudScheduler: {
+          locationsListSucceeded: true, locationPages: 1,
+          locations: ['projects/' + PROJECT + '/locations/us-central1'],
+          jobsListSucceeded: true, jobPages: 1,
+          jobs: [{
+            name: 'projects/' + PROJECT + '/locations/us-central1/jobs/nightly',
+            state: 'PAUSED'
+          }]
+        }
+      },
+      firestoreDataWriteCount: 0,
+      error: null
     },
     r2LifecycleDryBefore: { ...clone(lifecycleBase), mode: 'dry-run' },
     r2LifecycleApply: {
@@ -372,20 +401,34 @@ function evidenceReports() {
     },
     r8IndexReadiness: {
       tool: 'firestore-index-readiness-evidence',
-      schemaVersion: 1,
+      schemaVersion: 2,
       projectId: PROJECT,
       targetMode: 'production',
       windowId: WINDOW_ID,
       controlId: CONTROL_ID,
       capturedAt: '2026-08-23T05:55:00Z',
+      operation: 'exact-index-readback',
+      mode: 'get-only',
       status: 'complete',
+      indexName: 'projects/video-quiz-65798/databases/(default)/collectionGroups/' +
+        'published_quiz_sets/indexes/CICAgOjXh4EK',
+      indexState: 'READY',
+      indexDefinition: {
+        queryScope: 'COLLECTION',
+        fields: [
+          { fieldPath: 'status', order: 'ASCENDING' },
+          { fieldPath: 'updatedAt', order: 'DESCENDING' },
+          { fieldPath: '__name__', order: 'DESCENDING' }
+        ]
+      },
       firestoreIndexesSha256: INDEXES_SHA,
       requiredIndexCount: 1,
       readyIndexCount: 1,
       allRequiredIndexesReady: true,
       pendingCount: 0,
       failedCount: 0,
-      writeCount: 0
+      writeCount: 0,
+      error: null
     }
   };
 }
@@ -395,11 +438,43 @@ function installEvidence(directory, manifest) {
   fs.mkdirSync(evidenceDirectory, { recursive: true });
   const reports = evidenceReports();
   const entries = {};
+  const tools = {
+    r0ProductionRulesProbe: 'production-rules-compiler-probe',
+    r0RulesApiDiagnosis: 'rules-api-503-diagnosis',
+    r1Quiescence: 'r23-quiescence-evidence',
+    r2LifecycleDryBefore: 'lifecycle-migration-cli',
+    r2LifecycleApply: 'lifecycle-migration-cli',
+    r2LifecycleDryAfter: 'lifecycle-migration-cli',
+    r3SharesDryBefore: 'collaborator-share-migration',
+    r3SharesApply: 'collaborator-share-migration',
+    r3SharesDryAfter: 'collaborator-share-migration',
+    r4CounterLock: 'counter-gate-cli',
+    r4CounterApply: 'set-counter-migration-cli',
+    r4CounterAudit: 'set-counter-migration-cli',
+    r5TeacherAccessDry: 'teacher-access-migration',
+    r5TeacherAccessApply: 'teacher-access-migration',
+    r6SessionCountersDry: 'session-counter-migration',
+    r6SessionCountersApply: 'session-counter-migration',
+    r7PublicLibraryAudit: 'public-library-audit-cli',
+    r8IndexReadiness: 'firestore-index-readiness-evidence'
+  };
   EVIDENCE_NAMES.forEach((name, index) => {
     const reportPath = path.join(
       evidenceDirectory,
       'r23-' + name.replace(/[A-Z]/g, letter => '-' + letter.toLowerCase()) + '.json'
     );
+    const capturedAt = index < 2
+      ? ['2026-08-23T05:01:00Z', '2026-08-23T05:02:00Z'][index]
+      : index === 2 ? QUIESCENCE_STARTED_AT
+        : name === 'r7PublicLibraryAudit' ? '2026-08-23T05:50:00Z'
+          : name === 'r8IndexReadiness' ? '2026-08-23T05:55:00Z'
+            : new Date(Date.parse('2026-08-23T05:10:00Z') + index * 60_000).toISOString();
+    Object.assign(reports[name], {
+      tool: tools[name], schemaVersion: 2, projectId: PROJECT,
+      targetMode: 'production', windowId: WINDOW_ID, controlId: CONTROL_ID,
+      capturedAt
+    });
+    if (name === 'r7PublicLibraryAudit') reports[name].generatedAt = capturedAt;
     const raw = JSON.stringify(reports[name], null, 2) + '\n';
     fs.writeFileSync(reportPath, raw, 'utf8');
     entries[name] = {
@@ -407,12 +482,7 @@ function installEvidence(directory, manifest) {
       sha256: sha256(raw),
       windowId: WINDOW_ID,
       controlId: CONTROL_ID,
-      capturedAt: index < 2
-        ? ['2026-08-23T05:01:00Z', '2026-08-23T05:02:00Z'][index]
-        : index === 2 ? QUIESCENCE_STARTED_AT
-          : name === 'r7PublicLibraryAudit' ? '2026-08-23T05:50:00Z'
-            : name === 'r8IndexReadiness' ? '2026-08-23T05:55:00Z'
-              : new Date(Date.parse('2026-08-23T05:10:00Z') + index * 60_000).toISOString()
+      capturedAt
     };
   });
   manifest.evidence = entries;
@@ -494,7 +564,9 @@ function validManifest() {
       evidenceWindowId: WINDOW_ID,
       controlId: CONTROL_ID,
       verifiedAnonymousStatus: 403,
-      cloudFunctionsApiDisabled: true,
+      providerChecksComplete: true,
+      cloudFunctionsStopped: true,
+      schedulerStopped: true,
       trustedWritersStopped: true
     },
     rollback: {
@@ -636,6 +708,9 @@ async function invoke(t, options = {}) {
   let patchCallCount = 0;
   const runtime = {
     environment: options.environment || {},
+    evidenceRoot: evidence.directory,
+    realpathEvidencePath: options.realpathEvidencePath,
+    lstatEvidencePath: options.lstatEvidencePath,
     requestTimeoutMs: options.requestTimeoutMs || 20,
     reserveReport(output, initialContents) {
       calls.push({ operation: 'reserve', output, initial: JSON.parse(initialContents) });
@@ -829,7 +904,9 @@ test('the sealed manifest must use every exact adoption identity field', async t
     ['quiescence mechanism', manifest => { manifest.quiescence.mechanism = 'operator promise'; }],
     ['quiescence ruleset', manifest => { manifest.quiescence.rulesetName = ROLLBACK; }],
     ['quiescence anonymous readback', manifest => { manifest.quiescence.verifiedAnonymousStatus = 200; }],
-    ['quiescence trusted-writer gate', manifest => { manifest.quiescence.cloudFunctionsApiDisabled = false; }]
+    ['quiescence trusted-writer gate', manifest => {
+      manifest.quiescence.providerChecksComplete = false;
+    }]
   ];
 
   for (const [name, mutate] of cases) {
@@ -979,6 +1056,9 @@ test('known nested evidence schemas reject unreviewed authorization fields', asy
     ['diagnosis reconciliation', 'r0RulesApiDiagnosis', report => {
       report.reconciliation.unreviewed = true;
     }],
+    ['quiescence writer inventory', 'r1Quiescence', report => {
+      report.writerInventory.cloudFunctionsV1.unreviewed = true;
+    }],
     ['lifecycle audit', 'r2LifecycleDryAfter', report => {
       report.audit.unreviewed = true;
     }],
@@ -1005,6 +1085,9 @@ test('known nested evidence schemas reject unreviewed authorization fields', asy
     }],
     ['public scan', 'r7PublicLibraryAudit', report => {
       report.scanned.unreviewed = 1;
+    }],
+    ['index definition', 'r8IndexReadiness', report => {
+      report.indexDefinition.unreviewed = true;
     }]
   ];
 
@@ -1026,6 +1109,185 @@ test('report-authored timestamps bind to the manifest evidence capture time', as
   const execution = await invoke(t, {
     mutateEvidence({ manifest }) {
       manifest.evidence.r7PublicLibraryAudit.capturedAt = '2026-08-23T05:51:00Z';
+    }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('unchanged old R2 bytes cannot be relabeled with a fresh wrapper capture time', async t => {
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest }) {
+      manifest.evidence.r2LifecycleDryBefore.capturedAt =
+        '2026-08-23T05:20:59.999999999Z';
+    }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('manually authored legacy R1 and R8 success objects cannot authorize adoption', async t => {
+  const legacyReports = {
+    r1Quiescence: {
+      tool: 'r23-quiescence-evidence',
+      schemaVersion: 1,
+      projectId: PROJECT,
+      targetMode: 'production',
+      windowId: WINDOW_ID,
+      controlId: CONTROL_ID,
+      capturedAt: QUIESCENCE_STARTED_AT,
+      status: 'complete',
+      mechanism: 'deny-all Firestore Rules',
+      releaseName: RELEASE,
+      rulesetName: QUIESCENCE,
+      releaseUpdateTime: QUIESCENCE_UPDATE_TIME,
+      verifiedAnonymousStatus: 403,
+      cloudFunctionsApiDisabled: true,
+      trustedWritersStopped: true,
+      writeCount: 0
+    },
+    r8IndexReadiness: {
+      tool: 'firestore-index-readiness-evidence',
+      schemaVersion: 1,
+      projectId: PROJECT,
+      targetMode: 'production',
+      windowId: WINDOW_ID,
+      controlId: CONTROL_ID,
+      capturedAt: '2026-08-23T05:55:00Z',
+      status: 'complete',
+      firestoreIndexesSha256: INDEXES_SHA,
+      requiredIndexCount: 1,
+      readyIndexCount: 1,
+      allRequiredIndexesReady: true,
+      pendingCount: 0,
+      failedCount: 0,
+      writeCount: 0
+    }
+  };
+  for (const [name, legacyReport] of Object.entries(legacyReports)) {
+    await t.test(name, async t => {
+      const execution = await invoke(t, {
+        mutateEvidence({ manifest }) {
+          rewriteEvidence(manifest.evidence[name], report => {
+            for (const key of Object.keys(report)) delete report[key];
+            Object.assign(report, legacyReport);
+          });
+        }
+      });
+      assert.equal(execution.result.status, 'failed');
+      assert.equal(execution.tokenCalls, 0);
+      assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+    });
+  }
+});
+
+test('the sealed window rejects identical window and control identities in every report', async t => {
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest }) {
+      manifest.releaseWindow.controlId = WINDOW_ID;
+      manifest.quiescence.controlId = WINDOW_ID;
+      for (const entry of Object.values(manifest.evidence)) {
+        entry.controlId = WINDOW_ID;
+        rewriteEvidence(entry, report => { report.controlId = WINDOW_ID; });
+      }
+    }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('R8 readiness is bound to exactly the one fixed required index', async t => {
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest }) {
+      rewriteEvidence(manifest.evidence.r8IndexReadiness, report => {
+        report.requiredIndexCount = 2;
+        report.readyIndexCount = 2;
+      });
+    }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('full-precision evidence capture ordering rejects a one-nanosecond reversal', async t => {
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest }) {
+      manifest.evidence.r2LifecycleDryBefore.capturedAt =
+        '2026-08-23T05:20:00.000000002Z';
+      manifest.evidence.r2LifecycleApply.capturedAt =
+        '2026-08-23T05:20:00.000000001Z';
+    }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('evidence paths reject traversal and an absolute external root with a valid suffix', async t => {
+  const cases = [
+    ['lexical traversal', ({ manifest, directory }) => {
+      const entry = manifest.evidence.r2LifecycleDryBefore;
+      const nested = path.join(directory, 'nested');
+      fs.mkdirSync(nested);
+      entry.path = nested + path.sep + '..' + path.sep + path.basename(entry.path);
+    }],
+    ['external absolute suffix root', ({ manifest }) => {
+      const entry = manifest.evidence.r2LifecycleDryBefore;
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'external-evidence-root-'));
+      const suffix = path.join(outside, '.release-artifacts', '2026-08-23');
+      fs.mkdirSync(suffix, { recursive: true });
+      const externalPath = path.join(suffix, path.basename(entry.path));
+      fs.copyFileSync(entry.path, externalPath);
+      entry.path = externalPath;
+    }]
+  ];
+  for (const [name, mutateEvidence] of cases) {
+    await t.test(name, async t => {
+      const execution = await invoke(t, { mutateEvidence });
+      assert.equal(execution.result.status, 'failed');
+      assert.equal(execution.tokenCalls, 0);
+      assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+    });
+  }
+});
+
+test('a symlink alias and duplicate realpath cannot stand in for a direct evidence file', async t => {
+  let aliasPath = '';
+  let sourcePath = '';
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest, directory }) {
+      sourcePath = manifest.evidence.r2LifecycleDryBefore.path;
+      aliasPath = path.join(directory, 'r23-duplicate-realpath-alias.json');
+      fs.copyFileSync(sourcePath, aliasPath);
+      manifest.evidence.r2LifecycleDryAfter.path = aliasPath;
+      manifest.evidence.r2LifecycleDryAfter.sha256 = manifest.evidence.r2LifecycleDryBefore.sha256;
+    },
+    realpathEvidencePath(value) {
+      return value === aliasPath ? sourcePath : fs.realpathSync(value);
+    },
+    lstatEvidencePath(value) {
+      if (value === aliasPath) {
+        return { isFile: () => true, isSymbolicLink: () => true };
+      }
+      return fs.lstatSync(value);
+    }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('two evidence entries cannot reuse the same canonical realpath', async t => {
+  const execution = await invoke(t, {
+    mutateEvidence({ manifest }) {
+      manifest.evidence.r2LifecycleDryAfter.path =
+        manifest.evidence.r2LifecycleDryBefore.path;
+      manifest.evidence.r2LifecycleDryAfter.sha256 =
+        manifest.evidence.r2LifecycleDryBefore.sha256;
     }
   });
   assert.equal(execution.result.status, 'failed');
@@ -1102,6 +1364,8 @@ test('dirty Rules/deploy inputs and untracked deploy-root files stop before cred
   const cases = [
     ['staged Rules', [{ indexStatus: 'M', worktreeStatus: ' ', path: 'firestore.rules' }]],
     ['unstaged static asset', [{ indexStatus: ' ', worktreeStatus: 'M', path: 'index.html' }]],
+    ['staged root CNAME', [{ indexStatus: 'M', worktreeStatus: ' ', path: 'CNAME' }]],
+    ['unstaged root 404 page', [{ indexStatus: ' ', worktreeStatus: 'M', path: '404.html' }]],
     ['untracked deploy-root file', [{ indexStatus: '?', worktreeStatus: '?', path: 'debug-release.js' }]],
     ['staged restricted evidence', [{
       indexStatus: 'A', worktreeStatus: ' ',

@@ -66,7 +66,7 @@ test('release runbook probes the exact production Rules source after local verif
   const emulatorRulesIndex = runbook.indexOf('pnpm test:rules', localTestIndex);
   const adoptSyntaxIndex = runbook.indexOf('node --check scripts/adopt-existing-ruleset.js', emulatorRulesIndex);
   const productionProbeIndex = runbook.indexOf(
-    'pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-23/r23-production-rules-probe.json',
+    'pnpm test:rules:production-source --project video-quiz-65798 --target-mode production',
     emulatorRulesIndex
   );
   const diagnosisIndex = runbook.indexOf(
@@ -86,6 +86,36 @@ test('release runbook probes the exact production Rules source after local verif
   assert.match(runbook, /r23-production-rules-probe\.json[^\n]*(새|신규)[^\n]*(경로|output)[^\n]*(덮어쓰지|overwrite)/i);
   assert.doesNotMatch(runbook, /r17-production-rules-probe|2026-08-22\/r17/i);
   assert.doesNotMatch(runbook, /pnpm test:rules:production-source -- --project/);
+});
+
+test('R23 evidence commands author immutable identity and use dedicated R1/R8 readers', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const packageJson = JSON.parse(read('package.json'));
+
+  assert.equal(
+    packageJson.scripts['release:quiescence:r23'],
+    'node scripts/start-r23-quiescence.js'
+  );
+  assert.equal(
+    packageJson.scripts['release:index-readiness:r23'],
+    'node scripts/read-firestore-index-readiness.js'
+  );
+  for (const command of [
+    'test:rules:production-source', 'diagnose:rules-api',
+    'release:quiescence:r23', 'migrate:lifecycle',
+    'migrate:collaborator-shares', 'gate:counters', 'migrate:counters',
+    'migrate:teacher-access', 'migrate:session-counters',
+    'audit:public-library', 'release:index-readiness:r23'
+  ]) {
+    const line = runbook.split(/\r?\n/).find(value => value.includes('pnpm ' + command));
+    assert.ok(line, command + ' must have an authoritative R23 command');
+    assert.match(line, /--window-id <R23_WINDOW_UUID>/);
+    assert.match(line, /--control-id <R23_CONTROL_UUID>/);
+  }
+  assert.match(runbook, /schemaVersion:[ \t]*2/);
+  assert.doesNotMatch(runbook, /strict manual schema/);
+  assert.match(runbook, /Cloud Functions v1\/v2[\s\S]*Cloud Scheduler[\s\S]*fail-closed/);
+  assert.match(runbook, /exact required Firestore index[\s\S]*GET-only/);
 });
 
 test('R23 manifest binds exact fresh evidence, live release identity, and honest adoption readiness', () => {
@@ -110,6 +140,9 @@ test('R23 manifest binds exact fresh evidence, live release identity, and honest
   assert.match(runbook, /providerMutationAttempted:\s*false/);
   assert.match(runbook, /providerStateVerified:\s*false/);
   assert.match(runbook, /r23-quiescence-evidence/);
+  assert.match(runbook, /report 자체[\s\S]*windowId[\s\S]*controlId[\s\S]*capturedAt/);
+  assert.match(runbook, /realpath[\s\S]*symlink[\s\S]*duplicate/);
+  assert.match(runbook, /C:\\Users\\user\\Desktop\\영상퀴즈\\\.worktrees\\email-auth-public-library\\\.release-artifacts\\2026-08-23/);
   assert.doesNotMatch(runbook, /safeForExistingFlowSmoke:\s*true/);
 });
 

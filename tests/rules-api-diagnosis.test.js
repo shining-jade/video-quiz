@@ -13,6 +13,9 @@ const cli = require('../scripts/diagnose-rules-api.js');
 const { reserveReport } = require('../scripts/migrate-legacy-ownership.js');
 
 const PROJECT = 'video-quiz-65798';
+const WINDOW_ID = '8f81218d-f1ec-497a-9b33-2b895ef82780';
+const CONTROL_ID = '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45';
+const CAPTURED_AT = '2026-08-23T05:02:00.123456789Z';
 const API_ROOT = cli.API_ROOT;
 const RELEASE = {
   name: 'projects/video-quiz-65798/releases/cloud.firestore',
@@ -29,6 +32,8 @@ function argumentsFor(output, expectedSha256) {
   return [
     '--project', PROJECT,
     '--target-mode', 'production',
+    '--window-id', WINDOW_ID,
+    '--control-id', CONTROL_ID,
     '--expect-sha', expectedSha256,
     '--output', output
   ];
@@ -58,6 +63,9 @@ test('Rules API diagnosis validates an exact project and refuses emulator config
   assert.throws(() => cli.parseArguments([
     '--project', PROJECT, '--target-mode', 'production', '--expect-sha', 'ABC', '--output', 'x'
   ]), /exact lowercase sha256/);
+  assert.throws(() => cli.parseArguments([
+    '--project', PROJECT, '--target-mode', 'production', '--output', 'x'
+  ]), /window-id|control-id/i);
   assert.throws(() => cli.validateProductionEnvironment({
     FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
   }), /refuses emulator/i);
@@ -101,12 +109,18 @@ test('Rules API diagnosis reserves one output and propagates exact GET-only read
     reserveReport,
     acquireAccessToken: async () => 'private-token',
     getJson: transport.getJson,
+    now: () => CAPTURED_AT,
     writeLine() {}
   };
 
   const report = await cli.main(argumentsFor(output, expectedSha256), runtime);
 
   assert.equal(report.status, 'complete');
+  assert.equal(report.tool, 'rules-api-503-diagnosis');
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.windowId, WINDOW_ID);
+  assert.equal(report.controlId, CONTROL_ID);
+  assert.equal(report.capturedAt, CAPTURED_AT);
   assert.deepEqual(report.release, {
     readable: true,
     releaseName: RELEASE.name,
@@ -139,12 +153,14 @@ test('Rules API diagnosis accounts for the full 2,500-ruleset quota with GET onl
   });
 
   const report = await cli.main([
-    '--project', PROJECT, '--target-mode', 'production', '--output', output
+    '--project', PROJECT, '--target-mode', 'production',
+    '--window-id', WINDOW_ID, '--control-id', CONTROL_ID, '--output', output
   ], {
     environment: {},
     reserveReport,
     acquireAccessToken: async () => 'private-token',
     getJson: transport.getJson,
+    now: () => CAPTURED_AT,
     writeLine() {}
   });
 
@@ -159,7 +175,8 @@ test('Rules API diagnosis persists allowlisted read failures without raw private
   const secret = 'teacher@example.com uid_abc123 private rules source';
   const output = temporaryOutput('safe-failure.json');
   const report = await cli.main([
-    '--project', PROJECT, '--target-mode', 'production', '--output', output
+    '--project', PROJECT, '--target-mode', 'production',
+    '--window-id', WINDOW_ID, '--control-id', CONTROL_ID, '--output', output
   ], {
     environment: {},
     reserveReport,
@@ -172,6 +189,7 @@ test('Rules API diagnosis persists allowlisted read failures without raw private
         body: { error: { code: 503, status: 'UNAVAILABLE', message: secret } }
       };
     },
+    now: () => CAPTURED_AT,
     writeLine() {}
   });
 
@@ -231,6 +249,7 @@ test('with --expect-sha only one readable matching Ruleset is determinate succes
         reserveReport,
         acquireAccessToken: async () => 'private-token',
         getJson: transport.getJson,
+        now: () => CAPTURED_AT,
         writeLine() {}
       });
 
@@ -246,6 +265,8 @@ test('diagnosis applies a bounded deadline to every injected GET', async () => {
   const attempted = cli.main([
     '--project', PROJECT,
     '--target-mode', 'production',
+    '--window-id', WINDOW_ID,
+    '--control-id', CONTROL_ID,
     '--output', output
   ], {
     environment: {},
@@ -262,6 +283,7 @@ test('diagnosis applies a bounded deadline to every injected GET', async () => {
         }
       });
     },
+    now: () => CAPTURED_AT,
     writeLine() {}
   });
   const report = await Promise.race([

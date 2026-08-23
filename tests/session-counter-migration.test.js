@@ -7,6 +7,11 @@ const path = require('node:path');
 const migration = require('../session-counter-migration.js');
 const cli = require('../scripts/migrate-session-counters.js');
 
+const PRODUCTION_EVIDENCE_IDENTITY = [
+  '--window-id', '8f81218d-f1ec-497a-9b33-2b895ef82780',
+  '--control-id', '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45'
+];
+
 const DELETE = Symbol('delete-field');
 function timestamp(milliseconds) {
   return {
@@ -270,7 +275,8 @@ test('CLI enforces exact targets and output reservation before Admin init, prese
     const existing = path.join(directory, 'existing.json');
     fs.writeFileSync(existing, '{"foreign":true}\n', { flag: 'wx' });
     await assert.rejects(cli.main([
-      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a', '--output', existing
+      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a',
+      ...PRODUCTION_EVIDENCE_IDENTITY, '--output', existing
     ], {
       environment: {}, reserveReport: cli.reserveReport,
       initialize() { initialized += 1; throw new Error('must not initialize'); },
@@ -280,7 +286,8 @@ test('CLI enforces exact targets and output reservation before Admin init, prese
 
     const success = path.join(directory, 'success.json');
     await assert.rejects(cli.main([
-      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a', '--output', success
+      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a',
+      ...PRODUCTION_EVIDENCE_IDENTITY, '--output', success
     ], {
       environment: {}, reserveReport: cli.reserveReport,
       initialize() {

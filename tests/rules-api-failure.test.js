@@ -13,6 +13,10 @@ const probe = require('../scripts/test-production-rules-source.js');
 const { reserveReport } = require('../scripts/migrate-legacy-ownership.js');
 
 const SMALL_SOURCE = 'rules_version = \'2\';\nservice cloud.firestore {\n  function allowed() { return false; }\n}\n';
+const PRODUCTION_EVIDENCE_IDENTITY = [
+  '--window-id', '8f81218d-f1ec-497a-9b33-2b895ef82780',
+  '--control-id', '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45'
+];
 
 function temporaryOutput(name) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rules-api-failure-'));
@@ -125,7 +129,8 @@ test('failure reports persist only allowlisted diagnostics, never raw failure co
 
   const output = temporaryOutput('safe-persisted-failure.json');
   await probe.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
+    '--project', 'video-quiz-65798', '--target-mode', 'production',
+    ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
   ], {
     environment: {},
     readRulesSource: () => SMALL_SOURCE,
@@ -156,7 +161,8 @@ test('failure line renders every field the 503 triage needs', () => {
 test('compiler probe now records why a non-2xx response failed', async () => {
   const output = temporaryOutput('probe-failure.json');
   const report = await probe.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
+    '--project', 'video-quiz-65798', '--target-mode', 'production',
+    ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
   ], {
     environment: {},
     readRulesSource: () => SMALL_SOURCE,
@@ -198,7 +204,8 @@ test('Rules API diagnosis counts rulesets across pages and reports remaining slo
   const output = temporaryOutput('diagnosis.json');
   const urls = [];
   const report = await cli.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
+    '--project', 'video-quiz-65798', '--target-mode', 'production',
+    ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
   ], {
     environment: {},
     reserveReport,
@@ -266,7 +273,8 @@ test('Rules API diagnosis names the quota verdicts that explain a blocked create
 test('Rules API diagnosis keeps the API failure when the listing is refused', async () => {
   const output = temporaryOutput('diagnosis-refused.json');
   const report = await cli.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
+    '--project', 'video-quiz-65798', '--target-mode', 'production',
+    ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
   ], {
     environment: {},
     reserveReport,

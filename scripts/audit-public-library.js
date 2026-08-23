@@ -2,6 +2,9 @@
 
 const path = require('node:path');
 const { auditPublicLibrary, parseAuditArguments } = require('../public-library-audit.js');
+const {
+  authorEvidenceReport, captureEvidenceIdentity
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function defaultOutputPath(projectId, generatedAt) {
@@ -28,18 +31,21 @@ function productionDependencies() {
 async function main(argv, dependencies) {
   const runtime = dependencies || productionDependencies();
   const options = parseAuditArguments(argv, runtime.environment || process.env);
-  const generatedAt = (runtime.now || (() => new Date().toISOString()))();
+  const identity = captureEvidenceIdentity(
+    options,
+    { tool: 'public-library-audit-cli', schemaVersion: 2 },
+    runtime.now
+  );
+  const generatedAt = identity.capturedAt;
   const outputPath = options.outputPath || defaultOutputPath(options.projectId, generatedAt);
-  const placeholder = {
+  const placeholder = authorEvidenceReport({
     kind: 'public-quiz-library-privacy-audit',
-    projectId: options.projectId,
-    targetMode: options.targetMode,
     dryRun: true,
     generatedAt,
     complete: false,
     findings: [{ code: 'AUDIT_NOT_COMPLETED', path: '', detail: 'reserved' }],
     safeToDeployPublicLibrary: false
-  };
+  }, identity);
   const reservation = runtime.reserveReport(
     outputPath, JSON.stringify(placeholder, null, 2) + '\n'
   );
@@ -48,12 +54,10 @@ async function main(argv, dependencies) {
     const audit = await runtime.auditPublicLibrary({
       db: services.db, maxDocuments: options.maxDocuments
     });
-    const report = {
+    const report = authorEvidenceReport({
       ...audit,
-      projectId: options.projectId,
-      targetMode: options.targetMode,
       generatedAt
-    };
+    }, identity);
     reservation.commit(JSON.stringify(report, null, 2) + '\n');
     runtime.writeLine(
       `public-library audit: safe=${report.safeToDeployPublicLibrary} ` +

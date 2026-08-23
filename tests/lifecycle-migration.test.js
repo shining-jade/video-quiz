@@ -9,6 +9,11 @@ const {
   runLifecycleBackfill
 } = require('../lifecycle-migration.js');
 
+const PRODUCTION_EVIDENCE_IDENTITY = [
+  '--window-id', '8f81218d-f1ec-497a-9b33-2b895ef82780',
+  '--control-id', '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45'
+];
+
 function timestamp(milliseconds) {
   return { toMillis() { return milliseconds; } };
 }
@@ -321,7 +326,7 @@ test('lifecycle CLI reserves output before Admin initialization and refuses an e
       safeToDeployStrictRules: false
     });
     const report = await command.main([
-      '--project', 'demo-video-quiz', '--output', output
+      '--project', 'demo-video-quiz', ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
     ], {
       reserveReport(filePath, initialContents) {
         events.push('reserve');
@@ -350,7 +355,7 @@ test('lifecycle CLI reserves output before Admin initialization and refuses an e
     fs.writeFileSync(output, '{"foreign":true}\n', { flag: 'w' });
     let initialized = 0;
     await assert.rejects(command.main([
-      '--project', 'demo-video-quiz', '--output', output
+      '--project', 'demo-video-quiz', ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
     ], {
       reserveReport: command.reserveReport,
       initialize() { initialized += 1; throw new Error('must not initialize'); },
@@ -381,7 +386,8 @@ test('lifecycle CLI publishes a valid fail-closed partial report when a later ba
 
   await assert.rejects(command.main([
     '--project', 'demo-video-quiz', '--apply',
-    '--confirm-project', 'demo-video-quiz', '--output', 'partial.json'
+    '--confirm-project', 'demo-video-quiz', ...PRODUCTION_EVIDENCE_IDENTITY,
+    '--output', 'partial.json'
   ], {
     reserveReport() {
       events.push('reserve');
@@ -409,7 +415,7 @@ test('lifecycle CLI keeps published success JSON when stdout fails after commit'
   const output = path.join(directory, 'audit.json');
   try {
     await assert.rejects(command.main([
-      '--project', 'demo-video-quiz', '--output', output
+      '--project', 'demo-video-quiz', ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
     ], {
       reserveReport: command.reserveReport,
       initialize() { return { db: {}, async close() {} }; },

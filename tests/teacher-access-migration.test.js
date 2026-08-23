@@ -7,6 +7,11 @@ const path = require('node:path');
 const migration = require('../teacher-access-migration.js');
 const cli = require('../scripts/migrate-teacher-access-status.js');
 
+const PRODUCTION_EVIDENCE_IDENTITY = [
+  '--window-id', '8f81218d-f1ec-497a-9b33-2b895ef82780',
+  '--control-id', '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45'
+];
+
 function timestamp(milliseconds) {
   return { toMillis() { return milliseconds; } };
 }
@@ -375,7 +380,7 @@ test('CLI validates target and output before Admin initialization and keeps publ
     projectId: 'demo-video-quiz', targetMode: 'emulator', adminUid: 'admin-a',
     apply: false, confirmProject: 'demo-video-quiz', output: '', lockToken: 'token-a',
     expectedGeneration: '4:0', expectedMigrationGeneration: '',
-    unlock: true, verifyLock: false
+    unlock: true, verifyLock: false, windowId: '', controlId: ''
   });
   assert.throws(() => cli.validateTarget({ projectId: 'video-quiz-65798', targetMode: 'production' }, {
     FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
@@ -387,7 +392,8 @@ test('CLI validates target and output before Admin initialization and keeps publ
   try {
     fs.writeFileSync(output, '{"foreign":true}\n', { flag: 'wx' });
     await assert.rejects(cli.main([
-      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a', '--output', output
+      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a',
+      ...PRODUCTION_EVIDENCE_IDENTITY, '--output', output
     ], {
       environment: {}, reserveReport: cli.reserveReport,
       initialize() { initialized += 1; throw new Error('must not initialize'); },
@@ -397,7 +403,8 @@ test('CLI validates target and output before Admin initialization and keeps publ
 
     const successPath = path.join(directory, 'success.json');
     await assert.rejects(cli.main([
-      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a', '--output', successPath
+      '--project', 'demo-video-quiz', '--admin-uid', 'admin-a',
+      ...PRODUCTION_EVIDENCE_IDENTITY, '--output', successPath
     ], {
       environment: {}, reserveReport: cli.reserveReport,
       initialize() { initialized += 1; return { db: {}, auth: {}, serverTimestamp() {}, close() {} }; },

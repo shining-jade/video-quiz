@@ -159,9 +159,12 @@ test('share migration CLI reserves a fail-closed durable report before Admin ini
   let published;
   const expected = {
     tool: 'collaborator-share-migration',
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: 'demo-video-quiz',
     targetMode: 'emulator',
+    windowId: '',
+    controlId: '',
+    capturedAt: '2026-08-23T01:00:00.123456789Z',
     mode: 'apply',
     operation: 'collaborator-share-backfill',
     status: 'complete',
@@ -176,6 +179,7 @@ test('share migration CLI reserves a fail-closed durable report before Admin ini
     '--output', 'ignored.json'
   ], {
     environment: { FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080' },
+    now: () => '2026-08-23T01:00:00.123456789Z',
     reserveReport(path, contents) {
       events.push('reserve');
       assert.equal(path, 'ignored.json');
@@ -388,9 +392,12 @@ test('share migration CLI rejects unsafe targets and durably publishes partial r
   let published;
   const partialReport = {
     tool: 'collaborator-share-migration',
-    schemaVersion: 1,
+    schemaVersion: 2,
     projectId: 'demo-video-quiz',
     targetMode: 'emulator',
+    windowId: '',
+    controlId: '',
+    capturedAt: '2026-08-23T01:00:01.123456789Z',
     mode: 'apply',
     operation: 'collaborator-share-backfill',
     appliedUpsertCount: 1,
@@ -406,6 +413,7 @@ test('share migration CLI rejects unsafe targets and durably publishes partial r
     '--output', 'ignored.json'
   ], {
     environment: { FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080' },
+    now: () => '2026-08-23T01:00:01.123456789Z',
     reserveReport() { return { async commit(text) { published = JSON.parse(text); } }; },
     async initialize() { return { db: {}, async close() {} }; },
     async runCollaboratorShareMigration() { throw failure; },

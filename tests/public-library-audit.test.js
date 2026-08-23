@@ -6,6 +6,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const PRODUCTION_EVIDENCE_IDENTITY = [
+  '--window-id', '8f81218d-f1ec-497a-9b33-2b895ef82780',
+  '--control-id', '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45'
+];
+
 function fakeDb(initial) {
   const documents = new Map(Object.entries(initial));
   const readStats = { total: 0, queryDocuments: 0, directGets: 0 };
@@ -116,7 +121,9 @@ test('public-library auditor exports bounded read-only target and report contrac
     targetMode: 'emulator',
     maxDocuments: 100,
     outputPath: 'audit.json',
-    dryRun: true
+    dryRun: true,
+    windowId: '',
+    controlId: ''
   });
 });
 
@@ -294,6 +301,7 @@ test('CLI reserves before Admin init and never overwrites a durable report', asy
   };
   const args = [
     '--project', 'video-quiz-production', '--target-mode', 'production',
+    ...PRODUCTION_EVIDENCE_IDENTITY,
     '--max-documents', '10', '--output', outputPath
   ];
 

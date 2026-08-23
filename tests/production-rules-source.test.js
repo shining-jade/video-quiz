@@ -11,6 +11,17 @@ const { reserveReport } = require('../scripts/migrate-legacy-ownership.js');
 const { measureRulesSource } = require('../rules-source-metrics.js');
 
 const SMALL_SOURCE = 'rules_version = \'2\';\nservice cloud.firestore {\n  function allowed() { return false; }\n}\n';
+const WINDOW_ID = '8f81218d-f1ec-497a-9b33-2b895ef82780';
+const CONTROL_ID = '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45';
+const CAPTURED_AT = '2026-08-23T05:01:00.123456789Z';
+
+function productionArgs(output) {
+  return [
+    '--project', 'video-quiz-65798', '--target-mode', 'production',
+    '--window-id', WINDOW_ID, '--control-id', CONTROL_ID,
+    '--output', output
+  ];
+}
 
 function temporaryOutput(name) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rules-source-probe-'));
@@ -24,6 +35,7 @@ function dependencies(overrides = {}) {
     reserveReport,
     acquireAccessToken: async () => 'adc-token-must-not-escape',
     postJson: async () => ({ statusCode: 200, body: { issues: [] } }),
+    now: () => CAPTURED_AT,
     writeLine() {},
     ...overrides
   };
@@ -73,10 +85,11 @@ test('production compiler probe requires an exact production target and refuses 
   assert.throws(() => cli.parseArguments([
     '--project', 'video-quiz-65798', '--target-mode', 'production'
   ]), /output/);
-  const args = [
+  assert.throws(() => cli.parseArguments([
     '--project', 'video-quiz-65798', '--target-mode', 'production',
-    '--output', temporaryOutput('refused.json')
-  ];
+    '--output', temporaryOutput('missing-identity.json')
+  ]), /window-id|control-id/i);
+  const args = productionArgs(temporaryOutput('refused.json'));
   await assert.rejects(cli.main(args, dependencies({
     environment: { FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080' }
   })), /emulator/i);
@@ -89,9 +102,7 @@ test('production compiler probe posts only the supplied Rules source and keeps i
   const output = temporaryOutput('success.json');
   let request;
   const lines = [];
-  const report = await cli.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
-  ], dependencies({
+  const report = await cli.main(productionArgs(output), dependencies({
     postJson: async value => {
       request = value;
       return { statusCode: 200, body: { issues: [] } };
@@ -107,10 +118,16 @@ test('production compiler probe posts only the supplied Rules source and keeps i
   assert.equal(report.safeToCreateRuleset, true);
   assert.equal(report.status, 'complete');
   assert.deepEqual(Object.keys(report).sort(), [
-    'issueCounts', 'metrics', 'projectId', 'safeToCreateRuleset', 'sourceSha256', 'status',
-    'targetMode'
+    'capturedAt', 'controlId', 'issueCounts', 'metrics', 'projectId',
+    'safeToCreateRuleset', 'schemaVersion', 'sourceSha256', 'status', 'targetMode',
+    'tool', 'windowId'
   ]);
   assert.equal(report.targetMode, 'production');
+  assert.equal(report.tool, 'production-rules-compiler-probe');
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.windowId, WINDOW_ID);
+  assert.equal(report.controlId, CONTROL_ID);
+  assert.equal(report.capturedAt, CAPTURED_AT);
   const disclosed = JSON.stringify(report) + '\n' + lines.join('\n');
   assert.equal(disclosed.includes('adc-token-must-not-escape'), false);
   assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).safeToCreateRuleset, true);
@@ -123,9 +140,7 @@ test('production compiler probe keeps ERROR diagnostics and source-budget violat
   assert.equal(cli.sourceMeetsBudget({ bytes: 130000, lines: 2700, functions: 191 }), false);
 
   const output = temporaryOutput('diagnostics.json');
-  const report = await cli.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
-  ], dependencies({
+  const report = await cli.main(productionArgs(output), dependencies({
     postJson: async () => ({
       statusCode: 200,
       body: { issues: [{ severity: 'ERROR' }, { severity: 'WARNING' }] }
@@ -137,9 +152,7 @@ test('production compiler probe keeps ERROR diagnostics and source-budget violat
   assert.equal(report.safeToCreateRuleset, false);
 
   const oversizeOutput = temporaryOutput('oversize.json');
-  const oversize = await cli.main([
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', oversizeOutput
-  ], dependencies({
+  const oversize = await cli.main(productionArgs(oversizeOutput), dependencies({
     readRulesSource: () => 'x'.repeat(130001),
     postJson: async () => ({ statusCode: 200, body: { issues: [] } })
   }));
@@ -150,9 +163,7 @@ test('production compiler probe keeps ERROR diagnostics and source-budget violat
 test('production compiler probe reports HTTP 5xx failures and never overwrites an output', async () => {
   const output = temporaryOutput('failure.json');
   const runtime = dependencies({ postJson: async () => ({ statusCode: 503, body: {} }) });
-  const args = [
-    '--project', 'video-quiz-65798', '--target-mode', 'production', '--output', output
-  ];
+  const args = productionArgs(output);
 
   const failed = await cli.main(args, runtime);
   assert.equal(failed.status, 'failed');

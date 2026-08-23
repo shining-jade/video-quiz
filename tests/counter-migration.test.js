@@ -27,6 +27,8 @@ test('counter migration publishes targetMode and cumulative counters on a runner
   const failure = Object.assign(new Error('stopped'), { partialReport });
   await assert.rejects(cli.main([
     '--project', 'video-quiz-65798', '--apply',
+    '--window-id', '8f81218d-f1ec-497a-9b33-2b895ef82780',
+    '--control-id', '05ff8306-c60d-4a0b-8ffd-a51cd57e8e45',
     '--confirm-project', 'video-quiz-65798', '--gate-id', 'gate-1', '--output', 'ignored.json'
   ], {
     environment: {},

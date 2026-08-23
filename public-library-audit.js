@@ -2,6 +2,9 @@
 
 const PublicQuizLibraryCore = require('./public-quiz-library-core.js');
 const PublicAuthorLabelCore = require('./public-author-label-core.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS, validateEvidenceIdentityOptions
+} = require('./release-evidence-identity.js');
 
 const PARENT_KEYS = new Set(PublicQuizLibraryCore.PUBLIC_PARENT_KEYS.concat([
   'buildToken', 'buildVideoCount', 'buildQuestionCount', 'buildImageCount', 'buildMutation'
@@ -32,11 +35,13 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
 
 function parseAuditArguments(argv, environment = process.env) {
   const result = {
-    projectId: '', targetMode: '', maxDocuments: 0, outputPath: '', dryRun: true
+    projectId: '', targetMode: '', maxDocuments: 0, outputPath: '', dryRun: true,
+    windowId: '', controlId: ''
   };
   const valueOptions = new Map([
     ['--project', 'projectId'], ['--target-mode', 'targetMode'],
-    ['--max-documents', 'maxDocuments'], ['--output', 'outputPath']
+    ['--max-documents', 'maxDocuments'], ['--output', 'outputPath'],
+    ...Object.entries(EVIDENCE_ARGUMENT_FIELDS)
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -73,6 +78,7 @@ function parseAuditArguments(argv, environment = process.env) {
   } else if (firestoreHost || authHost) {
     throw new Error('production target refuses Firestore/Auth emulator environment variables.');
   }
+  validateEvidenceIdentityOptions(result);
   return result;
 }
 

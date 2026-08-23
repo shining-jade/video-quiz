@@ -3,19 +3,25 @@
 
 const path = require('node:path');
 const migration = require('../teacher-access-migration.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS, authorEvidenceReport, captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
   const result = {
     projectId: '', targetMode: 'production', adminUid: '', apply: false,
     confirmProject: '', output: '', lockToken: '', expectedGeneration: '',
-    expectedMigrationGeneration: '', unlock: false, verifyLock: false
+    expectedMigrationGeneration: '', unlock: false, verifyLock: false,
+    windowId: '', controlId: ''
   };
   const fields = {
     '--project': 'projectId', '--target-mode': 'targetMode', '--admin-uid': 'adminUid',
     '--confirm-project': 'confirmProject', '--output': 'output',
     '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration',
-    '--expected-migration-generation': 'expectedMigrationGeneration'
+    '--expected-migration-generation': 'expectedMigrationGeneration',
+    ...EVIDENCE_ARGUMENT_FIELDS
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -51,6 +57,7 @@ function parseArgs(argv) {
   if (result.unlock && result.confirmProject !== result.projectId) {
     throw new Error('--unlock requires an exact --confirm-project.');
   }
+  validateEvidenceIdentityOptions(result);
   return result;
 }
 
@@ -77,6 +84,7 @@ function validateTarget(options, environment = process.env) {
 function productionDependencies() {
   return {
     reserveReport,
+    now: () => new Date().toISOString(),
     async initialize(projectId) {
       const admin = require('firebase-admin');
       const app = admin.initializeApp({ projectId });
@@ -112,17 +120,20 @@ function failureReport(options, targetMode, error) {
 async function main(argv = process.argv.slice(2), dependencies = productionDependencies()) {
   const options = parseArgs(argv);
   const target = validateTarget(options, dependencies.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    { ...options, targetMode: target.targetMode },
+    { tool: 'teacher-access-migration', schemaVersion: 2 },
+    dependencies.now
+  );
   const output = options.output || path.resolve(
     'teacher-access-migration-' + options.projectId + '-' + Date.now() + '.json'
   );
-  const reservation = dependencies.reserveReport(output, JSON.stringify({
-    tool: 'teacher-access-migration-cli', schemaVersion: 1,
-    projectId: options.projectId, targetMode: target.targetMode,
+  const reservation = dependencies.reserveReport(output, JSON.stringify(authorEvidenceReport({
     mode: options.unlock ? 'unlock' : options.verifyLock ? 'verify-lock' : options.apply ? 'apply' : 'dry-run',
     operation: options.unlock ? 'teacher-access-status-unlock' :
       options.verifyLock ? 'teacher-access-status-lock-verification' : 'teacher-access-status-backfill',
     status: 'reserved-fail-closed', safeToDeployStrictRules: false
-  }, null, 2) + '\n');
+  }, identity), null, 2) + '\n');
   let services;
   let report;
   try {
@@ -166,10 +177,12 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
         lockToken: options.lockToken, serverTimestamp: services.serverTimestamp
       });
     }
-    report.targetMode = target.targetMode;
+    report = authorEvidenceReport(report, identity);
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
   } catch (error) {
-    const failure = failureReport(options, target.targetMode, error);
+    const failure = authorEvidenceReport(
+      failureReport(options, target.targetMode, error), identity
+    );
     try {
       await reservation.commit(JSON.stringify(failure, null, 2) + '\n');
     } catch (publicationError) {

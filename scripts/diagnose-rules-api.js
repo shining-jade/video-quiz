@@ -10,6 +10,12 @@
 
 const https = require('node:https');
 const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS,
+  authorEvidenceReport,
+  captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reconcileCreate } = require('../rules-ruleset-reconcile.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
@@ -22,12 +28,16 @@ const PAGE_SIZE = 100;
 const MAX_PAGES = 40;
 
 function parseArguments(argv) {
-  const options = { projectId: '', targetMode: '', outputPath: '', expectSha256: '' };
+  const options = {
+    projectId: '', targetMode: '', outputPath: '', expectSha256: '',
+    windowId: '', controlId: ''
+  };
   const fields = new Map([
     ['--project', 'projectId'],
     ['--target-mode', 'targetMode'],
     ['--output', 'outputPath'],
-    ['--expect-sha', 'expectSha256']
+    ['--expect-sha', 'expectSha256'],
+    ...Object.entries(EVIDENCE_ARGUMENT_FIELDS)
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -48,6 +58,7 @@ function parseArguments(argv) {
   if (options.expectSha256 && !/^[0-9a-f]{64}$/.test(options.expectSha256)) {
     throw new Error('--expect-sha must be an exact lowercase sha256 hex digest.');
   }
+  validateEvidenceIdentityOptions(options);
   return options;
 }
 
@@ -244,6 +255,7 @@ function productionDependencies() {
     reserveReport,
     acquireAccessToken,
     getJson,
+    now: () => new Date().toISOString(),
     writeLine(line) { process.stdout.write(line + '\n'); }
   };
 }
@@ -252,16 +264,17 @@ async function main(argv, dependencies) {
   const runtime = dependencies || productionDependencies();
   const options = parseArguments(argv);
   validateProductionEnvironment(runtime.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    options,
+    { tool: 'rules-api-503-diagnosis', schemaVersion: 2 },
+    runtime.now
+  );
 
-  const placeholder = {
-    tool: 'rules-api-503-diagnosis',
-    schemaVersion: 1,
-    projectId: options.projectId,
-    targetMode: 'production',
+  const placeholder = authorEvidenceReport({
     mutating: false,
     status: 'reserved-fail-closed',
     verdict: 'unknown'
-  };
+  }, identity);
   const reservation = runtime.reserveReport(
     options.outputPath, JSON.stringify(placeholder, null, 2) + '\n'
   );

@@ -3,6 +3,10 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const {
+  UUID_PATTERN,
+  rfc3339Nanoseconds
+} = require('./release-evidence-identity.js');
 
 const EVIDENCE_NAMES = Object.freeze([
   'r0ProductionRulesProbe',
@@ -26,10 +30,21 @@ const EVIDENCE_NAMES = Object.freeze([
 ]);
 
 const SHA_PATTERN = /^[0-9a-f]{64}$/;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const R23_PATH_PATTERN = /(?:^|\/)\.release-artifacts\/2026-08-23\/r23-[a-z0-9-]+\.json$/;
 const SOURCE_BUDGET = Object.freeze({ bytes: 130000, lines: 2700, functions: 190 });
+const EVIDENCE_ROOT =
+  'C:\\Users\\user\\Desktop\\영상퀴즈\\.worktrees\\email-auth-public-library\\.release-artifacts\\2026-08-23';
+const REQUIRED_INDEX_NAME = 'projects/video-quiz-65798/databases/(default)/' +
+  'collectionGroups/published_quiz_sets/indexes/CICAgOjXh4EK';
+const REQUIRED_INDEX_FIELDS = Object.freeze([
+  Object.freeze({ fieldPath: 'status', order: 'ASCENDING' }),
+  Object.freeze({ fieldPath: 'updatedAt', order: 'DESCENDING' }),
+  Object.freeze({ fieldPath: '__name__', order: 'DESCENDING' })
+]);
+const REPORT_IDENTITY_KEYS = Object.freeze([
+  'tool', 'schemaVersion', 'projectId', 'targetMode',
+  'windowId', 'controlId', 'capturedAt'
+]);
 
 function exactObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -49,13 +64,13 @@ function exactKeys(value, keys) {
 }
 
 function validTimestamp(value) {
-  return typeof value === 'string' && RFC3339_PATTERN.test(value) &&
-    Number.isFinite(Date.parse(value));
+  return rfc3339Nanoseconds(value) !== null;
 }
 
-function timestampMilliseconds(value) {
-  assertEvidence(validTimestamp(value));
-  return Date.parse(value);
+function timestampNanoseconds(value) {
+  const result = rfc3339Nanoseconds(value);
+  assertEvidence(result !== null);
+  return result;
 }
 
 function nonNegativeInteger(value) {
@@ -79,6 +94,18 @@ function exactProjectMode(report, contract) {
   assertEvidence(report.targetMode === contract.targetMode);
 }
 
+function reportKeys(keys) {
+  return [...REPORT_IDENTITY_KEYS, ...keys];
+}
+
+function validateReportIdentity(report, manifest, contract, entry, tool) {
+  exactProjectMode(report, contract);
+  assertEvidence(report.tool === tool && report.schemaVersion === 2);
+  assertEvidence(report.windowId === manifest.releaseWindow.windowId);
+  assertEvidence(report.controlId === manifest.releaseWindow.controlId);
+  assertEvidence(report.capturedAt === entry.capturedAt);
+}
+
 function zeroFields(value, fields) {
   assertEvidence(exactObject(value));
   for (const field of fields) assertEvidence(value[field] === 0);
@@ -88,12 +115,14 @@ function emptyArray(value) {
   assertEvidence(Array.isArray(value) && value.length === 0);
 }
 
-function validateCompilerProbe(report, contract) {
-  assertEvidence(exactKeys(report, [
-    'projectId', 'targetMode', 'sourceSha256', 'metrics', 'issueCounts',
+function validateCompilerProbe(report, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'sourceSha256', 'metrics', 'issueCounts',
     'status', 'safeToCreateRuleset'
-  ]));
-  exactProjectMode(report, contract);
+  ])));
+  validateReportIdentity(
+    report, manifest, contract, entry, 'production-rules-compiler-probe'
+  );
   assertEvidence(report.sourceSha256 === contract.sourceSha256);
   assertEvidence(report.status === 'complete' && report.safeToCreateRuleset === true);
   assertEvidence(exactKeys(report.metrics, ['bytes', 'lines', 'functions']));
@@ -107,14 +136,13 @@ function validateCompilerProbe(report, contract) {
   assertEvidence(report.issueCounts.error === 0 && report.issueCounts.unknown === 0);
 }
 
-function validateDiagnosis(report, contract) {
-  assertEvidence(exactKeys(report, [
-    'tool', 'schemaVersion', 'projectId', 'targetMode', 'mutating', 'status',
+function validateDiagnosis(report, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'mutating', 'status',
     'verdict', 'expectSha256', 'reconciliation', 'release',
     'rulesetInventory', 'rulesetLimit', 'remainingSlots'
-  ]));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'rules-api-503-diagnosis' && report.schemaVersion === 1);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'rules-api-503-diagnosis');
   assertEvidence(report.mutating === false && report.status === 'complete');
   assertEvidence(report.expectSha256 === contract.sourceSha256);
   const reconciliation = report.reconciliation;
@@ -153,8 +181,8 @@ function validateDiagnosis(report, contract) {
     report.rulesetInventory.pages >= 1 && report.rulesetInventory.pages <= 40);
   assertEvidence(validTimestamp(report.rulesetInventory.oldestCreateTime));
   assertEvidence(validTimestamp(report.rulesetInventory.newestCreateTime));
-  assertEvidence(timestampMilliseconds(report.rulesetInventory.oldestCreateTime) <=
-    timestampMilliseconds(report.rulesetInventory.newestCreateTime));
+  assertEvidence(timestampNanoseconds(report.rulesetInventory.oldestCreateTime) <=
+    timestampNanoseconds(report.rulesetInventory.newestCreateTime));
   assertEvidence(reconciliation.candidateCount === report.rulesetInventory.counted);
   assertEvidence(report.rulesetLimit === 2500);
   assertEvidence(report.remainingSlots === 2500 - report.rulesetInventory.counted);
@@ -165,35 +193,81 @@ function validateDiagnosis(report, contract) {
   assertEvidence(report.verdict === expectedVerdict);
 }
 
+function validateFunctionInventory(value, version) {
+  assertEvidence(exactKeys(value, [
+    'apiVersion', 'listSucceeded', 'pages', 'unreachable', 'functions'
+  ]));
+  assertEvidence(value.apiVersion === version && value.listSucceeded === true);
+  assertEvidence(nonNegativeInteger(value.pages) && value.pages >= 1);
+  emptyArray(value.unreachable);
+  emptyArray(value.functions);
+}
+
+function validateSchedulerInventory(value, contract) {
+  assertEvidence(exactKeys(value, [
+    'locationsListSucceeded', 'locationPages', 'locations',
+    'jobsListSucceeded', 'jobPages', 'jobs'
+  ]));
+  assertEvidence(value.locationsListSucceeded === true && value.jobsListSucceeded === true);
+  assertEvidence(nonNegativeInteger(value.locationPages) && value.locationPages >= 1);
+  assertEvidence(Array.isArray(value.locations) && value.locations.length >= 1);
+  for (const location of value.locations) {
+    assertEvidence(typeof location === 'string' &&
+      location.startsWith('projects/' + contract.projectId + '/locations/'));
+  }
+  assertEvidence(nonNegativeInteger(value.jobPages) &&
+    value.jobPages >= value.locations.length);
+  assertEvidence(Array.isArray(value.jobs));
+  for (const job of value.jobs) {
+    assertEvidence(exactKeys(job, ['name', 'state']));
+    assertEvidence(typeof job.name === 'string' && value.locations.some(
+      location => job.name.startsWith(location + '/jobs/')
+    ));
+    assertEvidence(['PAUSED', 'DISABLED'].includes(job.state));
+  }
+}
+
 function validateQuiescence(report, contract, manifest, entry) {
-  const keys = [
-    'tool', 'schemaVersion', 'projectId', 'targetMode', 'windowId', 'controlId',
-    'capturedAt', 'status', 'mechanism', 'releaseName', 'rulesetName',
-    'releaseUpdateTime', 'verifiedAnonymousStatus', 'cloudFunctionsApiDisabled',
-    'trustedWritersStopped', 'writeCount'
-  ];
-  assertEvidence(exactKeys(report, keys));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'r23-quiescence-evidence' && report.schemaVersion === 1);
-  assertEvidence(report.windowId === manifest.releaseWindow.windowId);
-  assertEvidence(report.controlId === manifest.releaseWindow.controlId);
-  assertEvidence(report.capturedAt === entry.capturedAt);
-  assertEvidence(report.status === 'complete' && report.mechanism === 'deny-all Firestore Rules');
+  assertEvidence(exactKeys(report, reportKeys([
+    'operation', 'mode', 'phase', 'status', 'mechanism', 'releaseName',
+    'rulesetName', 'releaseUpdateTime', 'releasePatchAttempted',
+    'releasePatchCount', 'releasePatchHttpStatus', 'releaseReadbackHttpStatus',
+    'verifiedAnonymousStatus', 'providerChecksComplete', 'cloudFunctionsStopped',
+    'schedulerStopped', 'trustedWritersStopped', 'writerInventory',
+    'firestoreDataWriteCount', 'error'
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'r23-quiescence-evidence');
+  assertEvidence(report.operation === 'begin-quiescence' && report.mode === 'patch-and-verify');
+  assertEvidence(report.phase === 'quiescence-established' && report.status === 'complete');
+  assertEvidence(report.mechanism === 'deny-all Firestore Rules');
   assertEvidence(report.releaseName === contract.releaseName);
   assertEvidence(report.rulesetName === contract.quiescenceRuleset);
   assertEvidence(report.releaseUpdateTime === manifest.quiescence.releaseUpdateTime);
+  assertEvidence(validTimestamp(report.releaseUpdateTime));
+  assertEvidence(report.releasePatchAttempted === true && report.releasePatchCount === 1);
+  assertEvidence(report.releasePatchHttpStatus >= 200 && report.releasePatchHttpStatus < 300);
+  assertEvidence(report.releaseReadbackHttpStatus >= 200 &&
+    report.releaseReadbackHttpStatus < 300);
   assertEvidence(report.verifiedAnonymousStatus === 403);
-  assertEvidence(report.cloudFunctionsApiDisabled === true);
-  assertEvidence(report.trustedWritersStopped === true && report.writeCount === 0);
+  assertEvidence(report.providerChecksComplete === true &&
+    report.cloudFunctionsStopped === true && report.schedulerStopped === true);
+  assertEvidence(report.trustedWritersStopped === true);
+  assertEvidence(exactKeys(report.writerInventory, [
+    'cloudFunctionsV1', 'cloudFunctionsV2', 'cloudScheduler'
+  ]));
+  validateFunctionInventory(report.writerInventory.cloudFunctionsV1, 'v1');
+  validateFunctionInventory(report.writerInventory.cloudFunctionsV2, 'v2');
+  validateSchedulerInventory(report.writerInventory.cloudScheduler, contract);
+  assertEvidence(report.firestoreDataWriteCount === 0 && report.error === null);
 }
 
-function validateLifecycle(report, mode, requireClean, contract) {
-  assertEvidence(exactKeys(report, [
-    'projectId', 'targetMode', 'mode', 'operation', 'plannedCount',
+function validateLifecycle(report, mode, requireClean, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'mode', 'operation', 'plannedCount',
     'appliedCount', 'skipped', 'concurrentlySkipped',
     'concurrentlySkippedCount', 'status', 'safeToDeployStrictRules', 'audit'
-  ]));
-  exactProjectMode(report, contract);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'lifecycle-migration-cli');
   assertEvidence(report.operation === 'lifecycle-backfill' && report.mode === mode);
   assertEvidence(report.status === 'complete');
   assertEvidence(nonNegativeInteger(report.plannedCount) && nonNegativeInteger(report.appliedCount));
@@ -220,15 +294,14 @@ function validateLifecycle(report, mode, requireClean, contract) {
   }
 }
 
-function validateShares(report, mode, requireClean, contract) {
-  assertEvidence(exactKeys(report, [
-    'tool', 'schemaVersion', 'projectId', 'targetMode', 'mode', 'operation',
+function validateShares(report, mode, requireClean, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'mode', 'operation',
     'maxDocuments', 'plannedUpsertCount', 'plannedDeleteCount',
     'appliedUpsertCount', 'appliedDeleteCount', 'concurrentlySkipped',
     'concurrentlySkippedCount', 'status', 'safeToUseShareIndex', 'audit'
-  ]));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'collaborator-share-migration' && report.schemaVersion === 1);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'collaborator-share-migration');
   assertEvidence(report.operation === 'collaborator-share-backfill' && report.mode === mode);
   assertEvidence(report.status === 'complete' && report.concurrentlySkippedCount === 0);
   assertEvidence(nonNegativeInteger(report.maxDocuments) &&
@@ -272,13 +345,12 @@ function validateSetCounterGate(gate, manifest, contract) {
     manifest.locks.setCounters.updateTimeGeneration);
 }
 
-function validateCounterLock(report, manifest, contract) {
-  assertEvidence(exactKeys(report, [
-    'tool', 'schemaVersion', 'action', 'projectId', 'targetMode', 'lockId',
+function validateCounterLock(report, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'action', 'lockId',
     'requestedGeneration', 'status', 'safeToRunCounterMigration', 'gate'
-  ]));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'counter-gate-cli' && report.schemaVersion === 1);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'counter-gate-cli');
   assertEvidence(report.action === 'lock' && report.status === 'complete');
   assertEvidence(report.safeToRunCounterMigration === true);
   assertEvidence(report.lockId === manifest.locks.setCounters.lockId);
@@ -291,13 +363,13 @@ function validateCounterLock(report, manifest, contract) {
   validateSetCounterGate(report.gate, manifest, contract);
 }
 
-function validateCounterMigration(report, mode, manifest, contract) {
-  assertEvidence(exactKeys(report, [
-    'projectId', 'targetMode', 'mode', 'operation', 'plannedCount',
+function validateCounterMigration(report, mode, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'mode', 'operation', 'plannedCount',
     'appliedCount', 'concurrentlySkipped', 'concurrentlySkippedCount',
     'status', 'safeToDeployStrictRules', 'gate', 'audit'
-  ]));
-  exactProjectMode(report, contract);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'set-counter-migration-cli');
   assertEvidence(report.operation === 'set-counter-backfill' && report.mode === mode);
   assertEvidence(report.status === 'complete' && report.safeToDeployStrictRules === true);
   assertEvidence(report.gate.lockId === manifest.locks.setCounters.lockId);
@@ -357,17 +429,16 @@ function validateTeacherAudit(audit, requireClean) {
   emptyArray(audit.issues);
 }
 
-function validateTeacherAccess(report, mode, manifest, contract) {
-  const keys = [
-    'tool', 'schemaVersion', 'operation', 'projectId', 'targetMode', 'mode',
+function validateTeacherAccess(report, mode, manifest, contract, entry) {
+  const keys = reportKeys([
+    'operation', 'mode',
     'status', 'plannedCount', 'appliedCount', 'reclassifiedCount',
     'concurrentlySkipped', 'concurrentlySkippedCount',
     'safeToDeployStrictRules', 'audit'
-  ];
+  ]);
   if (mode === 'apply') keys.push('lock');
   assertEvidence(exactKeys(report, keys));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'teacher-access-migration' && report.schemaVersion === 1);
+  validateReportIdentity(report, manifest, contract, entry, 'teacher-access-migration');
   assertEvidence(report.operation === 'teacher-access-status-backfill' && report.mode === mode);
   assertEvidence(report.status === 'complete' && nonNegativeInteger(report.plannedCount));
   assertEvidence(nonNegativeInteger(report.appliedCount) &&
@@ -421,15 +492,14 @@ function validateSessionAudit(audit, requireClean) {
   emptyArray(audit.issueSessionIds);
 }
 
-function validateSessionCounters(report, mode, manifest, contract) {
-  assertEvidence(exactKeys(report, [
-    'tool', 'schemaVersion', 'operation', 'projectId', 'targetMode', 'mode',
+function validateSessionCounters(report, mode, manifest, contract, entry) {
+  assertEvidence(exactKeys(report, reportKeys([
+    'operation', 'mode',
     'status', 'plannedCount', 'appliedCount', 'reclassifiedCount',
     'concurrentlySkipped', 'concurrentlySkippedCount', 'lock', 'gate',
     'safeToDeployStrictRules', 'audit'
-  ]));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'session-counter-migration' && report.schemaVersion === 1);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'session-counter-migration');
   assertEvidence(report.operation === 'session-counter-backfill-and-gate' && report.mode === mode);
   assertEvidence(report.status === 'complete' && nonNegativeInteger(report.plannedCount));
   assertEvidence(nonNegativeInteger(report.appliedCount) &&
@@ -484,12 +554,12 @@ function validateSessionCounters(report, mode, manifest, contract) {
 }
 
 function validatePublicAudit(report, manifest, contract, entry) {
-  assertEvidence(exactKeys(report, [
-    'kind', 'projectId', 'targetMode', 'dryRun', 'generatedAt',
+  assertEvidence(exactKeys(report, reportKeys([
+    'kind', 'dryRun', 'generatedAt',
     'maxDocuments', 'scanned', 'complete', 'findings',
     'safeToDeployPublicLibrary'
-  ]));
-  exactProjectMode(report, contract);
+  ])));
+  validateReportIdentity(report, manifest, contract, entry, 'public-library-audit-cli');
   assertEvidence(report.kind === 'public-quiz-library-privacy-audit');
   assertEvidence(report.dryRun === true && report.complete === true);
   assertEvidence(report.safeToDeployPublicLibrary === true);
@@ -504,29 +574,31 @@ function validatePublicAudit(report, manifest, contract, entry) {
   }
   emptyArray(report.findings);
   assertEvidence(report.generatedAt === entry.capturedAt);
-  const generatedAt = timestampMilliseconds(report.generatedAt);
-  assertEvidence(generatedAt >= timestampMilliseconds(manifest.releaseWindow.quiescenceStartedAt));
-  assertEvidence(generatedAt <= timestampMilliseconds(manifest.releaseWindow.sealedAt));
+  const generatedAt = timestampNanoseconds(report.generatedAt);
+  assertEvidence(generatedAt >= timestampNanoseconds(manifest.releaseWindow.quiescenceStartedAt));
+  assertEvidence(generatedAt <= timestampNanoseconds(manifest.releaseWindow.sealedAt));
 }
 
 function validateIndexReadiness(report, contract, manifest, entry) {
-  const keys = [
-    'tool', 'schemaVersion', 'projectId', 'targetMode', 'windowId', 'controlId',
-    'capturedAt', 'status', 'firestoreIndexesSha256', 'requiredIndexCount',
+  const keys = reportKeys([
+    'operation', 'mode', 'status', 'indexName', 'indexState', 'indexDefinition',
+    'firestoreIndexesSha256', 'requiredIndexCount',
     'readyIndexCount', 'allRequiredIndexesReady', 'pendingCount', 'failedCount',
-    'writeCount'
-  ];
+    'writeCount', 'error'
+  ]);
   assertEvidence(exactKeys(report, keys));
-  exactProjectMode(report, contract);
-  assertEvidence(report.tool === 'firestore-index-readiness-evidence' && report.schemaVersion === 1);
-  assertEvidence(report.windowId === manifest.releaseWindow.windowId);
-  assertEvidence(report.controlId === manifest.releaseWindow.controlId);
-  assertEvidence(report.capturedAt === entry.capturedAt);
-  assertEvidence(report.status === 'complete');
+  validateReportIdentity(
+    report, manifest, contract, entry, 'firestore-index-readiness-evidence'
+  );
+  assertEvidence(report.operation === 'exact-index-readback' && report.mode === 'get-only');
+  assertEvidence(report.status === 'complete' && report.error === null);
+  assertEvidence(report.indexName === REQUIRED_INDEX_NAME && report.indexState === 'READY');
+  assertEvidence(exactKeys(report.indexDefinition, ['queryScope', 'fields']));
+  assertEvidence(report.indexDefinition.queryScope === 'COLLECTION');
+  assertEvidence(JSON.stringify(report.indexDefinition.fields) ===
+    JSON.stringify(REQUIRED_INDEX_FIELDS));
   assertEvidence(report.firestoreIndexesSha256 === contract.firestoreIndexesSha256);
-  assertEvidence(nonNegativeInteger(report.requiredIndexCount) &&
-    report.requiredIndexCount > 0);
-  assertEvidence(report.readyIndexCount === report.requiredIndexCount);
+  assertEvidence(report.requiredIndexCount === 1 && report.readyIndexCount === 1);
   assertEvidence(report.allRequiredIndexesReady === true);
   assertEvidence(report.pendingCount === 0 && report.failedCount === 0 &&
     report.writeCount === 0);
@@ -534,62 +606,129 @@ function validateIndexReadiness(report, contract, manifest, entry) {
 
 function validateReport(name, report, manifest, contract, entry) {
   const validators = {
-    r0ProductionRulesProbe: () => validateCompilerProbe(report, contract),
-    r0RulesApiDiagnosis: () => validateDiagnosis(report, contract),
+    r0ProductionRulesProbe: () => validateCompilerProbe(report, manifest, contract, entry),
+    r0RulesApiDiagnosis: () => validateDiagnosis(report, manifest, contract, entry),
     r1Quiescence: () => validateQuiescence(report, contract, manifest, entry),
-    r2LifecycleDryBefore: () => validateLifecycle(report, 'dry-run', false, contract),
-    r2LifecycleApply: () => validateLifecycle(report, 'apply', true, contract),
-    r2LifecycleDryAfter: () => validateLifecycle(report, 'dry-run', true, contract),
-    r3SharesDryBefore: () => validateShares(report, 'dry-run', false, contract),
-    r3SharesApply: () => validateShares(report, 'apply', true, contract),
-    r3SharesDryAfter: () => validateShares(report, 'dry-run', true, contract),
-    r4CounterLock: () => validateCounterLock(report, manifest, contract),
-    r4CounterApply: () => validateCounterMigration(report, 'apply', manifest, contract),
-    r4CounterAudit: () => validateCounterMigration(report, 'dry-run', manifest, contract),
-    r5TeacherAccessDry: () => validateTeacherAccess(report, 'dry-run', manifest, contract),
-    r5TeacherAccessApply: () => validateTeacherAccess(report, 'apply', manifest, contract),
-    r6SessionCountersDry: () => validateSessionCounters(report, 'dry-run', manifest, contract),
-    r6SessionCountersApply: () => validateSessionCounters(report, 'apply', manifest, contract),
+    r2LifecycleDryBefore: () => validateLifecycle(
+      report, 'dry-run', false, manifest, contract, entry
+    ),
+    r2LifecycleApply: () => validateLifecycle(
+      report, 'apply', true, manifest, contract, entry
+    ),
+    r2LifecycleDryAfter: () => validateLifecycle(
+      report, 'dry-run', true, manifest, contract, entry
+    ),
+    r3SharesDryBefore: () => validateShares(
+      report, 'dry-run', false, manifest, contract, entry
+    ),
+    r3SharesApply: () => validateShares(
+      report, 'apply', true, manifest, contract, entry
+    ),
+    r3SharesDryAfter: () => validateShares(
+      report, 'dry-run', true, manifest, contract, entry
+    ),
+    r4CounterLock: () => validateCounterLock(report, manifest, contract, entry),
+    r4CounterApply: () => validateCounterMigration(
+      report, 'apply', manifest, contract, entry
+    ),
+    r4CounterAudit: () => validateCounterMigration(
+      report, 'dry-run', manifest, contract, entry
+    ),
+    r5TeacherAccessDry: () => validateTeacherAccess(
+      report, 'dry-run', manifest, contract, entry
+    ),
+    r5TeacherAccessApply: () => validateTeacherAccess(
+      report, 'apply', manifest, contract, entry
+    ),
+    r6SessionCountersDry: () => validateSessionCounters(
+      report, 'dry-run', manifest, contract, entry
+    ),
+    r6SessionCountersApply: () => validateSessionCounters(
+      report, 'apply', manifest, contract, entry
+    ),
     r7PublicLibraryAudit: () => validatePublicAudit(report, manifest, contract, entry),
     r8IndexReadiness: () => validateIndexReadiness(report, contract, manifest, entry)
   };
   validators[name]();
 }
 
-function validateEvidenceMap(manifest, contract, readFile = fs.readFileSync) {
+function pathIdentity(value) {
+  const normalized = path.resolve(value).replace(/\\/g, '/');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function lexicalPathSegments(value) {
+  return String(value).replace(/\\/g, '/').split('/');
+}
+
+function validateEvidenceMap(manifest, contract, accessOptions = {}) {
+  const access = typeof accessOptions === 'function'
+    ? { readFile: accessOptions } : accessOptions || {};
+  const evidenceRoot = access.evidenceRoot || EVIDENCE_ROOT;
+  const realpath = typeof access.realpath === 'function'
+    ? access.realpath : fs.realpathSync.native;
+  const lstat = typeof access.lstat === 'function' ? access.lstat : fs.lstatSync;
+  const readFile = typeof access.readFile === 'function' ? access.readFile : fs.readFileSync;
+  let realRoot;
+  try {
+    realRoot = realpath(evidenceRoot);
+  } catch (_) {
+    failEvidence();
+  }
+  assertEvidence(pathIdentity(realRoot) === pathIdentity(evidenceRoot));
   assertEvidence(exactObject(manifest.releaseWindow));
   const window = manifest.releaseWindow;
   assertEvidence(UUID_PATTERN.test(window.windowId) && UUID_PATTERN.test(window.controlId));
-  const openedAt = timestampMilliseconds(window.openedAt);
-  const quiescenceAt = timestampMilliseconds(window.quiescenceStartedAt);
-  const sealedAt = timestampMilliseconds(window.sealedAt);
+  assertEvidence(window.windowId !== window.controlId);
+  const openedAt = timestampNanoseconds(window.openedAt);
+  const quiescenceAt = timestampNanoseconds(window.quiescenceStartedAt);
+  const sealedAt = timestampNanoseconds(window.sealedAt);
   assertEvidence(openedAt < quiescenceAt && quiescenceAt < sealedAt);
   assertEvidence(exactObject(manifest.evidence));
   assertEvidence(JSON.stringify(Object.keys(manifest.evidence).sort()) ===
     JSON.stringify([...EVIDENCE_NAMES].sort()));
 
   const seenPaths = new Set();
+  let previousCapturedAt = null;
   for (const name of EVIDENCE_NAMES) {
     const entry = manifest.evidence[name];
     assertEvidence(exactKeys(entry, ['path', 'sha256', 'windowId', 'controlId', 'capturedAt']));
     assertEvidence(typeof entry.path === 'string' && entry.path.length > 0);
+    assertEvidence(path.isAbsolute(entry.path));
+    const segments = lexicalPathSegments(entry.path);
+    assertEvidence(!segments.includes('.') && !segments.includes('..'));
     const resolvedPath = path.resolve(entry.path);
     const normalizedPath = resolvedPath.replace(/\\/g, '/');
     assertEvidence(R23_PATH_PATTERN.test(normalizedPath));
-    const pathIdentity = process.platform === 'win32'
-      ? normalizedPath.toLowerCase() : normalizedPath;
-    assertEvidence(!seenPaths.has(pathIdentity));
-    seenPaths.add(pathIdentity);
+    assertEvidence(pathIdentity(path.dirname(resolvedPath)) === pathIdentity(realRoot));
+    let fileState;
+    let realPath;
+    try {
+      fileState = lstat(resolvedPath);
+      realPath = realpath(resolvedPath);
+    } catch (_) {
+      failEvidence();
+    }
+    assertEvidence(fileState && typeof fileState.isFile === 'function' && fileState.isFile());
+    assertEvidence(typeof fileState.isSymbolicLink !== 'function' ||
+      fileState.isSymbolicLink() === false);
+    assertEvidence(pathIdentity(realPath) === pathIdentity(resolvedPath));
+    assertEvidence(pathIdentity(path.dirname(realPath)) === pathIdentity(realRoot));
+    const realIdentity = pathIdentity(realPath);
+    assertEvidence(!seenPaths.has(realIdentity));
+    seenPaths.add(realIdentity);
     assertEvidence(SHA_PATTERN.test(entry.sha256));
     assertEvidence(entry.windowId === window.windowId && entry.controlId === window.controlId);
-    const capturedAt = timestampMilliseconds(entry.capturedAt);
+    const capturedAt = timestampNanoseconds(entry.capturedAt);
     assertEvidence(capturedAt >= openedAt && capturedAt <= sealedAt);
     if (name.startsWith('r0')) assertEvidence(capturedAt < quiescenceAt);
     else assertEvidence(capturedAt >= quiescenceAt);
+    if (previousCapturedAt !== null) assertEvidence(capturedAt > previousCapturedAt);
+    previousCapturedAt = capturedAt;
 
     let raw;
     try {
-      raw = readFile(resolvedPath);
+      raw = readFile(realPath);
     } catch (_) {
       failEvidence();
     }
@@ -611,4 +750,4 @@ function validateEvidenceMap(manifest, contract, readFile = fs.readFileSync) {
   };
 }
 
-module.exports = { EVIDENCE_NAMES, validateEvidenceMap };
+module.exports = { EVIDENCE_NAMES, EVIDENCE_ROOT, validateEvidenceMap };

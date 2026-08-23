@@ -8,6 +8,7 @@ const https = require('node:https');
 const path = require('node:path');
 const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
 const { validateEvidenceMap } = require('../release-evidence-contract.js');
+const { rfc3339Nanoseconds } = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 const API_ROOT = 'https://firebaserules.googleapis.com/v1/';
@@ -27,24 +28,11 @@ const SET_COUNTERS_PATH = 'migration_gates/set_counters';
 const TEACHER_ACCESS_PATH = 'migration_gates/teacher_access_status';
 const SESSION_COUNTERS_LOCK_PATH = 'migration_gates/session_counter_migration';
 const SESSION_COUNTERS_GATE_PATH = 'migration_gates/session_counters';
-const STATIC_ASSET_PATHS = [
-  'index.html', 'firestore-core.js', 'class-planning-core.js', 'editor-draft.js',
-  'editor-history-core.js', 'playlist-core.js', 'public-author-label-core.js',
-  'public-quiz-library-core.js', 'firestore-store.js', 'choice-order-core.js',
-  'image-lightbox-core.js', 'quiz-trigger-core.js', 'quiz-preview-core.js',
-  'teacher-stage.js', 'auth-core.js', 'teacher-email-auth-core.js',
-  'teacher-access-request-core.js', 'teacher-deletion-core.js',
-  'collaboration-trash-core.js'
-];
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const GENERATION_PATTERN = /^[0-9]+:[0-9]+$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA_PATTERN = /^[0-9a-f]{64}$/;
 const RFC3339_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
-const DEPLOY_INPUT_PATHS = new Set([
-  '.firebaserc', 'firebase.json', 'firestore.indexes.json', 'firestore.rules',
-  ...STATIC_ASSET_PATHS
-]);
 const RESTRICTED_UNTRACKED_PREFIXES = [
   '.release-artifacts/', '.release-maintenance/'
 ];
@@ -116,7 +104,7 @@ function assertManifest(condition) {
 
 function validTimestamp(value) {
   return typeof value === 'string' && RFC3339_PATTERN.test(value) &&
-    Number.isFinite(Date.parse(value));
+    rfc3339Nanoseconds(value) !== null;
 }
 
 function validateSealedManifest(manifest) {
@@ -136,15 +124,15 @@ function validateSealedManifest(manifest) {
   assertManifest(validTimestamp(manifest.releaseWindow.openedAt));
   assertManifest(validTimestamp(manifest.releaseWindow.quiescenceStartedAt));
   assertManifest(validTimestamp(manifest.releaseWindow.sealedAt));
-  assertManifest(Date.parse(manifest.releaseWindow.openedAt) <
-    Date.parse(manifest.releaseWindow.quiescenceStartedAt));
-  assertManifest(Date.parse(manifest.releaseWindow.quiescenceStartedAt) <
-    Date.parse(manifest.releaseWindow.sealedAt));
+  assertManifest(rfc3339Nanoseconds(manifest.releaseWindow.openedAt) <
+    rfc3339Nanoseconds(manifest.releaseWindow.quiescenceStartedAt));
+  assertManifest(rfc3339Nanoseconds(manifest.releaseWindow.quiescenceStartedAt) <
+    rfc3339Nanoseconds(manifest.releaseWindow.sealedAt));
 
   assertManifest(exactKeys(manifest.quiescence, [
     'mechanism', 'rulesetName', 'releaseUpdateTime', 'evidenceWindowId',
-    'controlId', 'verifiedAnonymousStatus', 'cloudFunctionsApiDisabled',
-    'trustedWritersStopped'
+    'controlId', 'verifiedAnonymousStatus', 'providerChecksComplete',
+    'cloudFunctionsStopped', 'schedulerStopped', 'trustedWritersStopped'
   ]));
   assertManifest(manifest.quiescence.mechanism === 'deny-all Firestore Rules');
   assertManifest(manifest.quiescence.rulesetName === QUIESCENCE_RULESET);
@@ -152,7 +140,9 @@ function validateSealedManifest(manifest) {
   assertManifest(manifest.quiescence.evidenceWindowId === manifest.releaseWindow.windowId);
   assertManifest(manifest.quiescence.controlId === manifest.releaseWindow.controlId);
   assertManifest(manifest.quiescence.verifiedAnonymousStatus === 403);
-  assertManifest(manifest.quiescence.cloudFunctionsApiDisabled === true);
+  assertManifest(manifest.quiescence.providerChecksComplete === true);
+  assertManifest(manifest.quiescence.cloudFunctionsStopped === true);
+  assertManifest(manifest.quiescence.schedulerStopped === true);
   assertManifest(manifest.quiescence.trustedWritersStopped === true);
 
   assertManifest(exactKeys(manifest.rollback, [
@@ -466,10 +456,7 @@ function repositoryInputsClean(entries) {
       if (!restrictedUntrackedPath(filePath)) return false;
       continue;
     }
-    if (restrictedUntrackedPath(filePath) ||
-        (originalPath && restrictedUntrackedPath(originalPath))) return false;
-    if (DEPLOY_INPUT_PATHS.has(filePath) ||
-        (originalPath && DEPLOY_INPUT_PATHS.has(originalPath))) return false;
+    return false;
   }
   return true;
 }
@@ -690,7 +677,12 @@ async function main(argv, dependencies) {
       quiescenceRuleset: QUIESCENCE_RULESET,
       sourceSha256: EXPECTED_SOURCE_SHA,
       firestoreIndexesSha256: manifest.release.firestoreIndexesSha256
-    }, runtime.readEvidenceFile || fs.readFileSync);
+    }, {
+      evidenceRoot: runtime.evidenceRoot,
+      readFile: runtime.readEvidenceFile || fs.readFileSync,
+      realpath: runtime.realpathEvidencePath,
+      lstat: runtime.lstatEvidencePath
+    });
     phase = 'local-commit-readback';
     let currentCommit;
     try {

@@ -3,19 +3,24 @@
 
 const path = require('node:path');
 const migration = require('../lifecycle-migration.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS, authorEvidenceReport, captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
   const result = {
     projectId: '', apply: false, confirmProject: '', output: '',
-    targetMode: 'production'
+    targetMode: 'production', windowId: '', controlId: ''
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--apply') { result.apply = true; continue; }
     const fields = new Map([
       ['--project', 'projectId'], ['--confirm-project', 'confirmProject'],
-      ['--output', 'output'], ['--target-mode', 'targetMode']
+      ['--output', 'output'], ['--target-mode', 'targetMode'],
+      ...Object.entries(EVIDENCE_ARGUMENT_FIELDS)
     ]);
     const field = fields.get(argument);
     if (!field) throw new Error('Unknown argument: ' + argument);
@@ -30,6 +35,7 @@ function parseArgs(argv) {
   if (result.apply && result.confirmProject !== result.projectId) {
     throw new Error('--apply requires an exact --confirm-project.');
   }
+  validateEvidenceIdentityOptions(result);
   return result;
 }
 
@@ -54,6 +60,7 @@ function validateTarget(options, environment = process.env) {
 function productionDependencies() {
   return {
     reserveReport,
+    now: () => new Date().toISOString(),
     initialize(projectId) {
       const admin = require('firebase-admin');
       const app = admin.initializeApp({ projectId });
@@ -87,16 +94,19 @@ async function main(argv = process.argv.slice(2), dependencies) {
   const options = parseArgs(argv);
   const runtime = dependencies || productionDependencies();
   const target = validateTarget(options, runtime.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    { ...options, targetMode: target.targetMode },
+    { tool: 'lifecycle-migration-cli', schemaVersion: 2 },
+    runtime.now
+  );
   const output = options.output || path.resolve(
     'lifecycle-migration-' + options.projectId + '-' + Date.now() + '.json'
   );
-  const placeholder = {
-    tool: 'lifecycle-migration-cli', schemaVersion: 1,
-    projectId: options.projectId, targetMode: target.targetMode,
+  const placeholder = authorEvidenceReport({
     mode: options.apply ? 'apply' : 'dry-run',
     operation: 'lifecycle-backfill', status: 'reserved-fail-closed',
     safeToDeployStrictRules: false
-  };
+  }, identity);
   const reservation = runtime.reserveReport(
     output, JSON.stringify(placeholder, null, 2) + '\n'
   );
@@ -109,13 +119,12 @@ async function main(argv = process.argv.slice(2), dependencies) {
       apply: options.apply, confirmProject: options.confirmProject,
       targetMode: target.targetMode
     });
-    report.targetMode = target.targetMode;
+    report = authorEvidenceReport(report, identity);
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
   } catch (error) {
-    const failure = failedReport(
+    const failure = authorEvidenceReport(failedReport(
       { ...options, targetMode: target.targetMode }, error, error && error.partialReport
-    );
-    failure.targetMode = target.targetMode;
+    ), identity);
     try {
       await reservation.commit(JSON.stringify(failure, null, 2) + '\n');
     } catch (publicationError) {

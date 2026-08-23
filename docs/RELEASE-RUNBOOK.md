@@ -19,12 +19,16 @@
 
 Password Policy 최소 길이 8·Enforcement `Require`, authorized domain, 이메일 인증/비밀번호 재설정 템플릿을 확인하되 Email/Password provider는 끈 상태로 둔다. backup과 rollback Rules/app를 기록하고 아래 로컬 검증을 순서대로 통과시킨다.
 
+릴리스 시작 전에 서로 다른 lowercase UUID인 `<R23_WINDOW_UUID>`와 `<R23_CONTROL_UUID>`를 생성해 change record에 고정한다. 아래 모든 R0/R2–R8 production evidence CLI에는 두 값을 exact `--window-id`와 `--control-id`로 전달한다. CLI가 실제 실행 시각의 `capturedAt`과 `projectId`, `targetMode`, `tool`, `schemaVersion: 2`를 report 자체에 기록하므로, manifest wrapper만 바꾸거나 과거 report bytes를 복사해서는 새 창의 증거가 될 수 없다. 모든 명령은 exact worktree `C:\Users\user\Desktop\영상퀴즈\.worktrees\email-auth-public-library`에서 실행하고, 모든 R23 output은 그 worktree의 exact restricted root `C:\Users\user\Desktop\영상퀴즈\.worktrees\email-auth-public-library\.release-artifacts\2026-08-23` 바로 아래에 둔다.
+
 ```powershell
 pnpm test
 pnpm test:rules
 node --check rules-source-metrics.js
 node --check scripts/test-production-rules-source.js
 node --check scripts/diagnose-rules-api.js
+node --check scripts/start-r23-quiescence.js
+node --check scripts/read-firestore-index-readiness.js
 node --check scripts/adopt-existing-ruleset.js
 git diff --check
 ```
@@ -32,7 +36,7 @@ git diff --check
 그 다음, 어떤 production mutation보다 먼저 exact production Rules source를 공식 `projects.test` API로 읽기 전용 검증한다.
 
 ```powershell
-pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --output .release-artifacts/2026-08-23/r23-production-rules-probe.json
+pnpm test:rules:production-source --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-production-rules-probe.json
 ```
 
 `r23-production-rules-probe.json`은 새 restricted output 경로여야 하며 `.reserved`와 JSON을 모두 보존하고 기존 파일을 덮어쓰지(overwrite) 않는다. 이 probe는 `rulesets.create` 또는 release update를 절대로 호출하지 않는다. source budget 초과 또는 실패면 즉시 중단한다. Rules API HTTP 5xx이면 즉시 중단한다. `issueCounts.error`가 ERROR 0이 아니면 즉시 중단한다. `issueCounts.unknown`이 0이 아니거나 `status: "complete"`, `safeToCreateRuleset: true`가 아니거나 없으면 즉시 중단한다. report의 SHA-256과 metrics를 manifest의 exact LF-only `firestore.rules` bytes와 다시 대조한다.
@@ -40,16 +44,20 @@ pnpm test:rules:production-source --project video-quiz-65798 --target-mode produ
 같은 R0에서 R1을 시작하기 전에 GET-only R23 Rules API diagnosis를 새 non-overwriting 경로에 실행한다.
 
 ```powershell
-pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --output .release-artifacts/2026-08-23/r23-rules-api-diagnosis.json
+pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --output .release-artifacts/2026-08-23/r23-rules-api-diagnosis.json
 ```
 
 `--expect-sha`가 있으면 `status: "complete"`는 readable exact matching Ruleset이 정확히 하나이고 `writeLanded: true`일 때만 허용된다. 0개, 둘 이상, unreadable 후보, `writeLanded: false | null`은 모두 `indeterminate` 또는 failure이므로 nonzero로 중단한다. 이 진단은 GET만 사용하며 모든 GET에 bounded timeout/abort를 적용한다.
 
 ### R1 — exact write-quiescence 시작
 
-정적 앱 배포나 화면 배너를 quiescence로 간주하지 않는다. 별도의 운영 접근 제어로 모든 일반 client의 Firebase 읽기·쓰기를 차단하고, scheduler·Cloud Function·trusted Admin migration·수동 콘솔 쓰기를 중지한다. 현재 change window의 단일 운영자만 아래 명시된 CLI를 직렬 실행한다. 차단 시작 시각, 제어 ID, 중지한 writer 목록을 기록한다. 이 강제 수단이 없거나 다른 writer가 관찰되면 릴리스를 시작하지 않는다.
+정적 앱 배포나 화면 배너를 quiescence로 간주하지 않는다. trusted Admin migration과 수동 콘솔 쓰기를 먼저 중지하고 단일 운영자 직렬화를 시작한 뒤 아래 CLI를 한 번 실행한다. 이 강제 수단이 없거나 다른 writer가 관찰되면 릴리스를 시작하지 않는다.
 
-R1은 strict manual schema의 `r1Quiescence` JSON을 만든다. `tool: "r23-quiescence-evidence"`, `schemaVersion: 1`, `projectId`, `targetMode`, R23 `windowId`/`controlId`, `capturedAt`, exact release/ruleset, release `updateTime`, anonymous 403, Cloud Functions API disabled, trusted writers stopped, `writeCount: 0`, `status: "complete"`를 모두 기록한다. 성공 값을 추정하거나 빈 필드를 채워 넣지 않는다.
+```powershell
+pnpm release:quiescence:r23 --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-quiescence.json
+```
+
+R1 도구는 Cloud Functions v1/v2 전체 location inventory와 Cloud Scheduler location/job 전체 inventory의 authoritative read가 모두 성공한 뒤에만 진행한다. Cloud Function이 하나라도 있거나 Scheduler job이 `PAUSED`/`DISABLED`가 아니거나, 403·unknown·partial pagination이면 PATCH 전에 fail-closed로 중단한다. 검증 성공 뒤 exact deny-all Ruleset을 고정 release에 한 번 PATCH하고, exact release GET의 Ruleset와 `updateTime`, anonymous Firestore GET 403을 확인한다. `r1Quiescence`는 `tool: "r23-quiescence-evidence"`, `schemaVersion: 2`, report-authored identity, exact provider inventory, PATCH/readback status, data write count 0, `error: null`, `status: "complete"`를 기록한다. 사람이 success JSON을 작성하거나 빈 값을 성공으로 채우지 않는다.
 
 deny-all Ruleset barrier는 R10 target PATCH와 뒤이은 strict target Ruleset exact GET readback까지 유지한다. strict readback이 성공하면 deny-all barrier는 끝나며 그 **종료 시각**을 기록한다. 이는 migration lock과 같은 뜻이 아니다. set counter·teacher access·session migration lock과 단일 운영자 직렬 실행은 R13 exact unlock까지 계속되고, 그 **lock/직렬화 종료 시각**을 deny-all 종료 시각과 별도 기록한다. quiescence 중에는 정적 maintenance app을 먼저 배포하지 않는다.
 
@@ -57,31 +65,69 @@ deny-all Ruleset barrier는 R10 target PATCH와 뒤이은 strict target Ruleset 
 
 `migrate:lifecycle` production dry-run → apply → 새 dry-run 순서로 실행한다. apply durable report는 `status: "complete"`, `safeToDeployStrictRules: true`여야 한다. 마지막 dry-run은 도구의 dry-run fail-closed schema대로 `safeToDeployStrictRules: false`를 유지하되 `status: "complete"`, `appliedCount: 0`, planned count 0, legacy lifecycle 누락·불일치·orphan 0을 별도로 확인한다. `publication_lifecycle_gates/current`와 owner lock이 active/stale/malformed이면 blind delete하지 말고 exact operation 복구 또는 Admin 조사 뒤 paired 상태로 해소한다.
 
+```powershell
+pnpm migrate:lifecycle --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-lifecycle-dry-before.json
+pnpm migrate:lifecycle --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --apply --confirm-project video-quiz-65798 --output .release-artifacts/2026-08-23/r23-lifecycle-apply.json
+pnpm migrate:lifecycle --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-lifecycle-dry-after.json
+```
+
 ### R3 — collaborator share index 보정
 
 `migrate:collaborator-shares` production dry-run → exact-project apply → 새 dry-run을 직렬 실행한다. 최종 `safeToUseShareIndex: true`, planned write/delete 0, orphan/malformed 0을 요구한다. 상세 이메일/set finding은 restricted durable report에만 남고 stdout에는 비식별 count만 남아야 한다.
+
+```powershell
+pnpm migrate:collaborator-shares --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-shares-dry-before.json
+pnpm migrate:collaborator-shares --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --apply --confirm-project video-quiz-65798 --output .release-artifacts/2026-08-23/r23-shares-apply.json
+pnpm migrate:collaborator-shares --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-shares-dry-after.json
+```
 
 ### R4 — set counter lock/apply/audit
 
 `migration_gates/set_counters`를 예측 불가능한 `lockId`로 잠그고 server `updateTimeGeneration`을 기록한다. 같은 lock identity 아래 `migrate:counters` apply와 post-audit를 실행해 `safeToDeployStrictRules: true` 및 missing/invalid/mismatch/orphan 0을 확인한다. 잠금은 R13까지 유지한다.
 
+```powershell
+pnpm gate:counters --action lock --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --confirm-project video-quiz-65798 --admin-uid <ADMIN_UID> --output .release-artifacts/2026-08-23/r23-counter-lock.json
+pnpm migrate:counters --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --apply --confirm-project video-quiz-65798 --gate-id <R4_LOCK_ID> --output .release-artifacts/2026-08-23/r23-counter-apply.json
+pnpm migrate:counters --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --gate-id <R4_LOCK_ID> --output .release-artifacts/2026-08-23/r23-counter-audit.json
+```
+
 ### R5 — teacher access exact lock/apply
 
 access migration dry-run 뒤 예측 불가능한 token으로 exact lock/apply를 실행한다. Auth UID, canonical email, role/status, authoritative allowance와 legacy mirror의 single-UID parity를 전수 감사한다. `status: "complete"`, `strictReady: true`, `safeToDeployStrictRules: true`, clean audit, exact `lockToken`, `migrationGeneration`, `updateTimeGeneration`을 기록하고 R13까지 잠근다.
+
+```powershell
+pnpm migrate:teacher-access --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --admin-uid <ADMIN_UID> --output .release-artifacts/2026-08-23/r23-teacher-access-dry.json
+pnpm migrate:teacher-access --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --admin-uid <ADMIN_UID> --lock-token <R5_LOCK_TOKEN> --apply --confirm-project video-quiz-65798 --output .release-artifacts/2026-08-23/r23-teacher-access-apply.json
+```
 
 ### R6 — session join lock/recount/completion gate
 
 session counter dry-run 뒤 별도 token으로 join lock/apply를 실행한다. 모든 non-ended session/student를 recount하고 `preflightNonEndedLegacyCount: 0`, invalid student/counter 0, exact operational lock generation과 `migration_gates/session_counters` completion generation, `safeToDeployStrictRules: true`를 확인한다. operational lock은 R13까지 유지한다.
 
+```powershell
+pnpm migrate:session-counters --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --admin-uid <ADMIN_UID> --output .release-artifacts/2026-08-23/r23-session-counters-dry.json
+pnpm migrate:session-counters --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --admin-uid <ADMIN_UID> --lock-token <R6_LOCK_TOKEN> --apply --confirm-project video-quiz-65798 --output .release-artifacts/2026-08-23/r23-session-counters-apply.json
+```
+
 ### R7 — public privacy/lifecycle 감사
 
 `audit:public-library` production read-only audit를 bounded budget과 새 restricted output으로 실행한다. `complete: true`, `safeToDeployPublicLibrary: true`, `findings: []`를 요구한다. PII key뿐 아니라 author label의 값-level 안전성, authoritative allowance parity, source lifecycle/revision, child schemaVersion, orphan child/audit/lock/gate를 모두 0으로 확인한다.
+
+```powershell
+pnpm audit:public-library --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --max-documents 5000 --output .release-artifacts/2026-08-23/r23-public-library-audit.json
+```
 
 ### R8 — composite index 배포와 build 대기
 
 검토된 `firestore.indexes.json`의 `published_quiz_sets(status ASC, updatedAt DESC, __name__ DESC)` index를 배포하고 Firebase가 build 완료를 보고할 때까지 기다린다. building/error이면 다음 단계로 가지 않는다. 이 단계는 Rules 또는 static app 배포가 아니다.
 
-R8은 committed tool이 아직 직접 만들지 않는 strict manual schema의 `r8IndexReadiness` JSON을 사용한다. exact R23 `windowId`/`controlId`, `capturedAt`, `firestoreIndexesSha256`, required/ready index count, `allRequiredIndexesReady: true`, pending/failed/write count 0, `status: "complete"`를 Firebase readback에서 확인한 값으로만 기록한다. 성공 data를 발명하지 않는다.
+build 완료가 예상되면 committed tool로 exact required Firestore index 하나를 GET-only로 읽는다.
+
+```powershell
+pnpm release:index-readiness:r23 --project video-quiz-65798 --target-mode production --window-id <R23_WINDOW_UUID> --control-id <R23_CONTROL_UUID> --output .release-artifacts/2026-08-23/r23-index-readiness.json
+```
+
+R8 도구는 exact index resource name, `READY`, `COLLECTION`, `status ASC`, `updatedAt DESC`, `__name__ DESC`, local `firestore.indexes.json` raw SHA-256을 모두 확인한 `schemaVersion: 2` report만 성공으로 만든다. 403, building/error/unknown state, name/definition mismatch 또는 GET 실패는 fail-closed이며, `error: null`과 `writeCount: 0`이 아닌 report는 승인 근거가 아니다. 사람이 `r8IndexReadiness` success JSON을 작성하지 않는다.
 
 ### R9 — release manifest 봉인
 
@@ -97,7 +143,9 @@ manifest top-level은 `schemaVersion`, `projectId`, `targetMode`, `releaseWindow
 - `r6SessionCountersDry`, `r6SessionCountersApply`
 - `r7PublicLibraryAudit`, `r8IndexReadiness`
 
-각 evidence entry는 `path`, `sha256`, `windowId`, `controlId`, `capturedAt` exact field만 가지며 `.release-artifacts/2026-08-23/r23-*.json`을 가리킨다. helper는 모든 path를 다시 열어 raw SHA-256을 계산하고 committed tool의 exact project/mode/status/safety/zero-finding/zero-dry-write/generation/source/compiler schema 또는 위에 명시한 R1/R8 strict schema를 검사한다. R0 두 보고서는 R1 시작 전, R1~R8은 quiescence 시작 이후와 manifest 봉인 이전이어야 한다. R18/R19 report는 응답 유실의 원인 증거로만 보존하며 배포 승인 근거로 사용하지 않는다. deployment authorization으로 제출하면 거부한다. path를 R23으로 바꾸거나 manifest에서 현재 window/control이라고 주장하는 것만으로 prior-window evidence를 승인하지 않는다.
+각 evidence entry는 `path`, `sha256`, `windowId`, `controlId`, `capturedAt` exact field만 가진다. `path`는 exact root `C:\Users\user\Desktop\영상퀴즈\.worktrees\email-auth-public-library\.release-artifacts\2026-08-23` 바로 아래의 absolute `r23-*.json`이어야 한다. helper는 root와 파일의 `realpath`를 다시 구하고 direct regular file만 허용하며 traversal, symlink/reparse alias, alternate absolute root, duplicate realpath, 하위 디렉터리 파일을 모두 거부한 뒤 canonical bytes의 SHA-256을 계산한다.
+
+각 report 자체도 manifest entry와 같은 `windowId`, `controlId`, `capturedAt`, `projectId`, `targetMode`, exact `tool`, `schemaVersion: 2`를 가져야 한다. wrapper metadata만 새로 쓴 과거 bytes나 manual R1/R8 success object는 거부한다. capture 시각은 최대 nanosecond 정밀도의 RFC3339 UTC 문자열로 전부 strict 증가해야 하며 R0 두 보고서는 R1 시작 전, R1~R8은 quiescence 시작 이후와 manifest 봉인 이전이어야 한다. helper는 각 tool의 exact operation/mode/phase, status/safety/zero-finding/zero-dry-write, generation/token, source/compiler/provider/index schema까지 검사한다. R18/R19 report는 응답 유실의 원인 증거로만 보존하며 배포 승인 근거로 사용하지 않는다. deployment authorization으로 제출하면 거부한다. path나 manifest wrapper에서 현재 window/control이라고 주장하는 것만으로 prior-window evidence를 승인하지 않는다.
 
 rollback Rules는 `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`와 exact `sourceSha256`을 manifest에 고정한다. quiescence에는 deny-all release `releaseUpdateTime`을 고정하고, release에는 tested `firestore.rules` SHA, `firestore.indexes.json` SHA, static app commit을 기록한다. 기록 뒤 quiescence 또는 gate generation이 변하면, 또는 probe hash와 배포 입력이 다르면 R2부터 새 보고서로 다시 시작한다.
 
@@ -117,7 +165,7 @@ R10은 fresh R0~R9 manifest가 명시한 한 가지 branch만 실행한다. `cre
 pnpm release:rules:adopt-existing --project video-quiz-65798 --target-mode production --manifest .release-artifacts/2026-08-23/release-manifest-r23.json --ruleset projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1 --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --expect-manifest-sha <RAW_MANIFEST_SHA256> --output .release-artifacts/2026-08-23/r24-ruleset-adoption.json
 ```
 
-`<RAW_MANIFEST_SHA256>`은 raw manifest bytes의 trusted lowercase SHA-256이며, 새 non-overwriting output과 `.reserved`를 함께 보존한다. helper는 raw manifest와 모든 fresh evidence, 현재 로컬 commit, LF-only Rules/index hash, clean deploy inputs, live gate-state를 다시 검증한다. staged/unstaged Rules·deploy input이나 두 restricted 경로 밖의 untracked deploy-root 파일이 있으면 중단한다.
+`<RAW_MANIFEST_SHA256>`은 raw manifest bytes의 trusted lowercase SHA-256이며, 새 non-overwriting output과 `.reserved`를 함께 보존한다. helper는 raw manifest와 모든 fresh evidence, 현재 로컬 commit, LF-only Rules/index hash, clean tracked worktree/index, live gate-state를 다시 검증한다. GitHub Pages는 branch 기반 deploy이므로 hosted asset allowlist를 쓰지 않는다. repository 어디든 staged 또는 unstaged tracked 변경이 하나라도 있으면 `CNAME`, `404.html`, 문서 등 파일 종류와 관계없이 중단한다. ignored untracked restricted evidence는 pushed branch input이 아니므로 허용하지만 stage하지 않는다.
 
 helper는 target Ruleset을 GET하여 단일 `firestore.rules` source의 exact SHA를 확인하고, rollback Ruleset도 manifest의 exact `sourceSha256`으로 PATCH 전에 GET 검증한다. immediate pre-PATCH release GET은 manifest의 deny-all `projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466`뿐 아니라 quiescence `releaseUpdateTime`과도 exact 일치해야 한다. PATCH 뒤에는 release exact readback을 요구하고 target Ruleset을 다시 GET하여 단일 source SHA를 재검증한다. 이 post-activation GET/SHA까지 통과한 report만 `safeForStaticDeployment: true`다. helper는 Auth를 읽거나 바꾸지 않으므로 `providerMutationAttempted: false`, `providerStateVerified: false`를 기록하며 existing-flow smoke readiness를 주장하지 않는다.
 

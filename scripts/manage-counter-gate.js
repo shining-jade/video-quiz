@@ -4,17 +4,23 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const gate = require('../counter-gate.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS, authorEvidenceReport, captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
   const result = {
     action: '', projectId: '', targetMode: 'production', confirmProject: '',
-    adminUid: '', gateId: '', gateGeneration: '', output: ''
+    adminUid: '', gateId: '', gateGeneration: '', output: '',
+    windowId: '', controlId: ''
   };
   const fields = {
     '--action': 'action', '--project': 'projectId', '--target-mode': 'targetMode',
     '--confirm-project': 'confirmProject', '--admin-uid': 'adminUid',
-    '--gate-id': 'gateId', '--gate-generation': 'gateGeneration', '--output': 'output'
+    '--gate-id': 'gateId', '--gate-generation': 'gateGeneration', '--output': 'output',
+    ...EVIDENCE_ARGUMENT_FIELDS
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -43,6 +49,7 @@ function parseArgs(argv) {
   if (result.action === 'unlock' && (!result.gateId || !result.gateGeneration)) {
     throw new Error('Unlock requires --gate-id and --gate-generation.');
   }
+  validateEvidenceIdentityOptions(result);
   return result;
 }
 
@@ -67,6 +74,7 @@ function validateTarget(options, environment = process.env) {
 function productionDependencies() {
   return {
     reserveReport,
+    now: () => new Date().toISOString(),
     createLockId: () => crypto.randomUUID(),
     async initialize(projectId) {
       const admin = require('firebase-admin');
@@ -94,22 +102,24 @@ function failureReport(base, error) {
 async function main(argv = process.argv.slice(2), dependencies = productionDependencies()) {
   const options = parseArgs(argv);
   const target = validateTarget(options, dependencies.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    { ...options, targetMode: target.targetMode },
+    { tool: 'counter-gate-cli', schemaVersion: 2 },
+    dependencies.now
+  );
   const generatedGateId = options.action === 'lock'
     ? String(options.gateId || dependencies.createLockId())
     : options.gateId;
   const output = options.output || path.resolve(
     'counter-gate-' + options.action + '-' + options.projectId + '-' + Date.now() + '.json'
   );
-  const base = {
-    tool: 'counter-gate-cli', schemaVersion: 1,
+  const base = authorEvidenceReport({
     action: options.action,
-    projectId: options.projectId,
-    targetMode: target.targetMode,
     lockId: generatedGateId || '',
     requestedGeneration: options.gateGeneration || '',
     status: 'reserved-fail-closed',
     safeToRunCounterMigration: false
-  };
+  }, identity);
   const reservation = dependencies.reserveReport(
     output, JSON.stringify(base, null, 2) + '\n'
   );
@@ -127,21 +137,21 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
       createLockId: dependencies.createLockId,
       serverTimestamp: services.serverTimestamp
     });
-    const report = {
+    const report = authorEvidenceReport({
       ...base,
       ...operation,
       targetMode: target.targetMode,
       status: 'complete',
       safeToRunCounterMigration: options.action === 'lock' && operation.gate &&
         operation.gate.locked === true
-    };
+    }, identity);
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     try { dependencies.writeLine(JSON.stringify(report, null, 2)); } catch (_) {
       // The durable committed report is authoritative.
     }
     return report;
   } catch (error) {
-    const report = failureReport(base, error);
+    const report = authorEvidenceReport(failureReport(base, error), identity);
     try {
       await reservation.commit(JSON.stringify(report, null, 2) + '\n');
     } catch (publicationError) {

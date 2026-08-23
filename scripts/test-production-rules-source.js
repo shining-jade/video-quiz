@@ -7,17 +7,26 @@ const https = require('node:https');
 const path = require('node:path');
 const { measureRulesSource } = require('../rules-source-metrics.js');
 const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS,
+  authorEvidenceReport,
+  captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 const PROJECT_ID = 'video-quiz-65798';
 const SOURCE_BUDGET = Object.freeze({ bytes: 130000, lines: 2700, functions: 190 });
 
 function parseArguments(argv) {
-  const options = { projectId: '', targetMode: '', outputPath: '' };
+  const options = {
+    projectId: '', targetMode: '', outputPath: '', windowId: '', controlId: ''
+  };
   const fields = new Map([
     ['--project', 'projectId'],
     ['--target-mode', 'targetMode'],
-    ['--output', 'outputPath']
+    ['--output', 'outputPath'],
+    ...Object.entries(EVIDENCE_ARGUMENT_FIELDS)
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -35,6 +44,7 @@ function parseArguments(argv) {
     throw new Error('--target-mode production is required.');
   }
   if (!options.outputPath) throw new Error('--output is required.');
+  validateEvidenceIdentityOptions(options);
   return options;
 }
 
@@ -128,16 +138,14 @@ function postJson({ url, accessToken, payload }) {
   });
 }
 
-function reportFor({ projectId, source, metrics, issueCounts, status, safeToCreateRuleset }) {
-  return {
-    projectId,
-    targetMode: 'production',
+function reportFor({ identity, source, metrics, issueCounts, status, safeToCreateRuleset }) {
+  return authorEvidenceReport({
     sourceSha256: sourceSha256(source),
     metrics,
     issueCounts,
     status,
     safeToCreateRuleset
-  };
+  }, identity);
 }
 
 function reportLine(report) {
@@ -156,9 +164,9 @@ function reportLine(report) {
   ].concat(report.failure ? [failureLine(report.failure)] : []).join(' ');
 }
 
-function failClosedReport(projectId, source, metrics, failure) {
+function failClosedReport(identity, source, metrics, failure) {
   const report = reportFor({
-    projectId,
+    identity,
     source,
     metrics,
     issueCounts: { error: 1, warning: 0, info: 0, unknown: 0 },
@@ -179,6 +187,7 @@ function productionDependencies() {
     reserveReport,
     acquireAccessToken,
     postJson,
+    now: () => new Date().toISOString(),
     writeLine(line) { process.stdout.write(line + '\n'); }
   };
 }
@@ -187,10 +196,15 @@ async function main(argv, dependencies) {
   const runtime = dependencies || productionDependencies();
   const options = parseArguments(argv);
   validateProductionEnvironment(runtime.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    options,
+    { tool: 'production-rules-compiler-probe', schemaVersion: 2 },
+    runtime.now
+  );
   const source = await runtime.readRulesSource();
   const metrics = measureRulesSource(source);
   const placeholder = reportFor({
-    projectId: options.projectId,
+    identity,
     source,
     metrics,
     issueCounts: { error: 1, warning: 0, info: 0, unknown: 0 },
@@ -210,14 +224,14 @@ async function main(argv, dependencies) {
     });
     if (!response || response.statusCode < 200 || response.statusCode >= 300) {
       report = failClosedReport(
-        options.projectId, source, metrics, describeRulesApiFailure(response, null)
+        identity, source, metrics, describeRulesApiFailure(response, null)
       );
     } else {
       const issueCounts = countIssues(response.body && response.body.issues);
       const safeToCreateRuleset = sourceMeetsBudget(metrics) && issueCounts.error === 0 &&
         issueCounts.unknown === 0;
       report = reportFor({
-        projectId: options.projectId,
+        identity,
         source,
         metrics,
         issueCounts,
@@ -227,7 +241,7 @@ async function main(argv, dependencies) {
     }
   } catch (error) {
     report = failClosedReport(
-      options.projectId, source, metrics, describeRulesApiFailure(null, error)
+      identity, source, metrics, describeRulesApiFailure(null, error)
     );
   }
   reservation.commit(JSON.stringify(report, null, 2) + '\n');

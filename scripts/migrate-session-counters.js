@@ -3,19 +3,25 @@
 
 const path = require('node:path');
 const migration = require('../session-counter-migration.js');
+const {
+  EVIDENCE_ARGUMENT_FIELDS, authorEvidenceReport, captureEvidenceIdentity,
+  validateEvidenceIdentityOptions
+} = require('../release-evidence-identity.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 function parseArgs(argv) {
   const result = {
     projectId: '', targetMode: 'production', adminUid: '', apply: false,
     confirmProject: '', output: '', lockToken: '', expectedGeneration: '',
-    expectedGateGeneration: '', unlock: false, verifyLock: false
+    expectedGateGeneration: '', unlock: false, verifyLock: false,
+    windowId: '', controlId: ''
   };
   const fields = {
     '--project': 'projectId', '--target-mode': 'targetMode', '--admin-uid': 'adminUid',
     '--confirm-project': 'confirmProject', '--output': 'output',
     '--lock-token': 'lockToken', '--expected-generation': 'expectedGeneration',
-    '--expected-gate-generation': 'expectedGateGeneration'
+    '--expected-gate-generation': 'expectedGateGeneration',
+    ...EVIDENCE_ARGUMENT_FIELDS
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -51,6 +57,7 @@ function parseArgs(argv) {
   if (result.unlock && result.confirmProject !== result.projectId) {
     throw new Error('--unlock requires an exact --confirm-project.');
   }
+  validateEvidenceIdentityOptions(result);
   return result;
 }
 
@@ -73,6 +80,7 @@ function validateTarget(options, environment = process.env) {
 function productionDependencies() {
   return {
     reserveReport,
+    now: () => new Date().toISOString(),
     async initialize(projectId) {
       const admin = require('firebase-admin');
       const app = admin.initializeApp({ projectId });
@@ -94,18 +102,21 @@ function productionDependencies() {
 async function main(argv = process.argv.slice(2), dependencies = productionDependencies()) {
   const options = parseArgs(argv);
   const target = validateTarget(options, dependencies.environment || process.env);
+  const identity = captureEvidenceIdentity(
+    { ...options, targetMode: target.targetMode },
+    { tool: 'session-counter-migration', schemaVersion: 2 },
+    dependencies.now
+  );
   const output = options.output || path.resolve(
     'session-counter-migration-' + options.projectId + '-' + Date.now() + '.json'
   );
-  const reservation = dependencies.reserveReport(output, JSON.stringify({
-    tool: 'session-counter-migration-cli', schemaVersion: 1,
-    projectId: options.projectId, targetMode: target.targetMode,
+  const reservation = dependencies.reserveReport(output, JSON.stringify(authorEvidenceReport({
     mode: options.unlock ? 'unlock' : options.verifyLock ? 'verify-lock' : options.apply ? 'apply' : 'dry-run',
     operation: options.unlock ? 'session-counter-migration-unlock' :
       options.verifyLock ? 'session-counter-migration-lock-verification' : 'session-counter-backfill-and-gate',
     status: 'reserved-fail-closed', safeToDeployStrictRules: false,
     gate: { path: 'migration_gates/session_counters', created: false }
-  }, null, 2) + '\n');
+  }, identity), null, 2) + '\n');
   let services;
   let report;
   try {
@@ -146,10 +157,10 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
         serverTimestamp: services.serverTimestamp, deleteField: services.deleteField
       });
     }
-    report.targetMode = target.targetMode;
+    report = authorEvidenceReport(report, identity);
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
   } catch (error) {
-    const failure = error && error.partialReport ? {
+    const failure = authorEvidenceReport(error && error.partialReport ? {
       ...error.partialReport, targetMode: target.targetMode, safeToDeployStrictRules: false
     } : {
       tool: 'session-counter-migration-cli', schemaVersion: 1,
@@ -160,7 +171,7 @@ async function main(argv = process.argv.slice(2), dependencies = productionDepen
       status: 'failed', safeToDeployStrictRules: false,
       gate: { path: 'migration_gates/session_counters', created: false },
       error: String(error && error.message || error)
-    };
+    }, identity);
     try {
       await reservation.commit(JSON.stringify(failure, null, 2) + '\n');
     } catch (publicationError) {
