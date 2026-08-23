@@ -38,7 +38,7 @@ pnpm test:rules:production-source --project video-quiz-65798 --target-mode produ
 
 정적 앱 배포나 화면 배너를 quiescence로 간주하지 않는다. 별도의 운영 접근 제어로 모든 일반 client의 Firebase 읽기·쓰기를 차단하고, scheduler·Cloud Function·trusted Admin migration·수동 콘솔 쓰기를 중지한다. 현재 change window의 단일 운영자만 아래 명시된 CLI를 직렬 실행한다. 차단 시작 시각, 제어 ID, 중지한 writer 목록을 기록한다. 이 강제 수단이 없거나 다른 writer가 관찰되면 릴리스를 시작하지 않는다.
 
-R1의 차단은 R14 provider 확인까지 유지한다. migration lock은 quiescence의 대체물이 아니라 추가 CAS 장벽이다. quiescence 중에는 정적 maintenance app을 먼저 배포하지 않는다.
+deny-all Ruleset barrier는 R10 target PATCH와 뒤이은 strict target Ruleset exact GET readback까지 유지한다. strict readback이 성공하면 deny-all barrier는 끝나며 그 **종료 시각**을 기록한다. 이는 migration lock과 같은 뜻이 아니다. set counter·teacher access·session migration lock과 단일 운영자 직렬 실행은 R13 exact unlock까지 계속되고, 그 **lock/직렬화 종료 시각**을 deny-all 종료 시각과 별도 기록한다. quiescence 중에는 정적 maintenance app을 먼저 배포하지 않는다.
 
 ### R2 — lifecycle migration과 전수 감사
 
@@ -70,17 +70,37 @@ session counter dry-run 뒤 별도 token으로 join lock/apply를 실행한다. 
 
 ### R9 — release manifest 봉인
 
-R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 token/generation, index 완료 증거, R0 compiler probe 경로·source SHA-256·metrics·issue count, tested `firestore.rules` hash와 static app commit을 한 manifest에 기록한다. rollback Rules는 `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 고정한다. 기록 뒤 quiescence 또는 gate generation이 변하거나 probe hash와 배포 입력이 다르면 R2부터 새 보고서로 다시 시작한다.
+R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 token/generation, index 완료 증거, R0 compiler probe 경로·source SHA-256·metrics·issue count, tested `firestore.rules` hash와 static app commit을 한 manifest에 기록한다. rollback Rules는 `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 고정한다. R18/R19의 report는 응답 유실의 **원인 증거**로만 보존하며 migration·lock·generation·manifest 어느 것도 이번 배포의 승인 근거로 사용하지 않는다. 기록 뒤 quiescence 또는 gate generation이 변하면, 또는 probe hash와 배포 입력이 다르면 R2부터 새 보고서로 다시 시작한다.
 
 ### R10 — strict Firestore Rules 배포
 
-모든 R0~R9 gate가 clean일 때만 공식 Rules API의 `projects/video-quiz-65798/rulesets.create`를 한 번 호출한다. request의 `source.files`에는 probe와 SHA-256이 동일한 `firestore.rules` 한 파일의 exact bytes만 넣고, 응답의 immutable `projects/video-quiz-65798/rulesets/<RULESET_ID>` 이름을 기록한다. create가 성공하기 전에는 release를 바꾸지 않는다.
+R10은 fresh R0~R9 manifest가 명시한 한 가지 branch만 실행한다. `create`와 `adopt-existing`는 상호 배타적이며, 한 창에서 서로 전환하거나 fallback으로 섞지 않는다. create 응답이 non-2xx인 사실은 서버 write의 성공 여부를 증명하지 않는다. 먼저 새 restricted path에 GET-only 진단을 남긴다.
 
-create 성공 뒤에만 `projects/video-quiz-65798/releases/cloud.firestore`의 `rulesetName`을 새 immutable ruleset으로 update한다. 곧바로 같은 release를 GET하고 `rulesetName`이 방금 생성한 exact ruleset name과 byte-for-byte 같아야 한다. mismatch, missing readback, source hash mismatch, API non-2xx/5xx가 하나라도 있으면 provider를 켜지 않고 recorded rollback ruleset으로 release를 복원한 뒤 exact GET readback을 요구한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다.
+```powershell
+pnpm diagnose:rules-api --project video-quiz-65798 --target-mode production --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --output .release-artifacts/2026-08-23/r23-rules-api-diagnosis.json
+```
+
+진단의 reconciliation은 실행 권한이 아니라 응답 유실 대조다.
+
+- `writeLanded: true`는 같은 source가 이미 저장됐다는 뜻이므로 create 재시도 금지다.
+- `writeLanded: false`는 읽을 수 있었던 후보에 같은 source가 없다는 관찰일 뿐이며, 단독으로 create 권한을 주지 않는다. 새 create는 manifest가 create를 명시하고 모든 R0~R9 approval이 별도로 다시 확인된 create branch에서만 고려한다.
+- `writeLanded: null`은 목록·후보 source·페이지 결과가 불완전하거나 판단할 수 없다는 뜻이다. 사람이 조사할 때까지 중단한다.
+
+이번 R19 복구는 create branch가 아니라 사람이 명시적으로 승인한 `adopt-existing` exact Ruleset/exact SHA branch만 쓴다. target `projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1`와 exact SHA `c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d`를 manifest와 CLI에서 모두 고정한다. 목록에서 비슷한 후보를 고르거나 candidate를 자동 선택하지 않는다. 이번 복구에서 `rulesets.create`는 호출하지 않는다.
+
+```powershell
+pnpm release:rules:adopt-existing --project video-quiz-65798 --target-mode production --manifest .release-artifacts/2026-08-23/release-manifest-r23.json --ruleset projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1 --expect-sha c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d --expect-manifest-sha <RAW_MANIFEST_SHA256> --output .release-artifacts/2026-08-23/r24-ruleset-adoption.json
+```
+
+`<RAW_MANIFEST_SHA256>`은 raw manifest bytes의 trusted lowercase SHA-256이며, 새 non-overwriting output과 `.reserved`를 함께 보존한다. helper는 raw manifest SHA binding, 현재 로컬 commit 및 live gate-state를 다시 검증하고, target Ruleset을 GET하여 단일 `firestore.rules` source의 exact SHA를 확인한 뒤에만 `projects/video-quiz-65798/releases/cloud.firestore`를 PATCH한다. PATCH 전 release GET은 manifest의 deny-all `projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466`와 exact 일치해야 한다. PATCH 뒤에는 같은 release를 GET하여 target Ruleset과 byte-for-byte exact readback을 요구한다.
+
+알려진 settled PATCH 실패(완전한 실패 응답 또는 target readback mismatch)는 provider를 OFF로 둔 채 recorded rollback `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`으로 자동 rollback하고 exact GET readback을 요구한다. 반대로 PATCH가 전송된 뒤 transport가 끊기거나 timeout되어 `mutation-outcome-unknown`이면 helper는 멈춘다. 이 경우 read-only reconcile과 수동 조사를 수행하고, rollback을 실행하거나 rollback 성공을 주장하지 않는다. 어느 실패도 provider 활성화, legacy fallback 재개, 별도 head/staged Rules 선배포를 허용하지 않는다.
+
+deny-all barrier는 R10 target PATCH를 지나 strict exact readback까지 유지한다. strict readback 직후 deny-all barrier 종료 시각을 기록하지만, migration lock과 single-operator serialization은 R13까지 계속된다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다.
 
 ### R11 — static app 배포
 
-R10의 strict Rules 적용을 확인한 뒤 manifest의 **static app release를 한 번 배포**한다. 이 런북의 유일한 rollout 순서는 항상 **Rules before static app**이다.
+모든 commit-bound code/docs는 merge/push 전에 broad final review를 받는다. R0~R10 operational work는 그 reviewed feature commit을 사용한다. R10의 strict Rules exact readback 뒤, R12/R13 전에만 그 commit을 merge하고 push한 뒤 manifest-bound static app release를 한 번 배포한다. merge/push/deploy 사이에 unreviewed code change를 하지 않는다. 이 런북의 유일한 rollout 순서는 항상 **Rules before static app**이다.
 
 ### R12 — 같은 generation post-deploy verify
 
@@ -88,7 +108,7 @@ write-quiescence와 세 lock을 유지한 채 access/session `--verify-lock`을 
 
 ### R13 — exact unlock
 
-R12가 모두 안전할 때만 session operational lock, teacher access operational lock, set counter lock을 각각 apply report의 exact token/generation으로 명시 해제한다. completion 상태는 삭제하지 않고 legacy fallback도 다시 열지 않는다. unlock report와 새 server generation을 보존한다.
+R12가 모두 안전할 때만 session operational lock, teacher access operational lock, set counter lock을 각각 apply report의 exact token/generation으로 명시 해제한다. completion 상태는 삭제하지 않고 legacy fallback도 다시 열지 않는다. unlock report와 새 server generation을 보존하고, 이때의 lock/직렬화 종료 시각을 R10 strict readback 직후 기록한 deny-all barrier 종료 시각과 별도로 남긴다.
 
 ### R14 — Email/Password provider gate
 
@@ -100,4 +120,4 @@ Password Policy·domain·template를 다시 확인하고, R10의 새 Rules exact
 
 ## 롤백
 
-실패 시 일반 traffic과 trusted writer를 계속 차단하고 provider를 새로 켰다면 먼저 다시 끈다. `projects/video-quiz-65798/releases/cloud.firestore`를 recorded rollback ruleset `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 update하고 GET의 exact `rulesetName` readback을 확인한다. 데이터, Auth 사용자, allowance, 이미 withdrawn인 publication, 독립 사본은 삭제하거나 역변환하지 않는다. 기록한 직전 호환 **Rules를 먼저 복원**하고 적용을 확인한 뒤 직전 static app commit을 복원한다. 즉 롤백도 Rules before static app 순서를 유지한다. migration/completion gate는 blind delete하지 않고 exact report identity로 재감사한다. rollback smoke까지 통과한 뒤에만 quiescence를 종료한다.
+알려진 settled PATCH 실패 또는 strict readback mismatch라면 일반 traffic과 trusted writer를 계속 차단하고 provider를 새로 켰다면 먼저 다시 끈다. `projects/video-quiz-65798/releases/cloud.firestore`를 recorded rollback ruleset `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 update하고 GET의 exact `rulesetName` readback을 확인한다. 단, 전송된 PATCH의 응답 유실·transport timeout인 `mutation-outcome-unknown`은 settled failure가 아니다. 이 경우 자동 rollback을 시도하거나 rollback됐다고 주장하지 말고, provider OFF·lock·single-operator serialization을 유지한 채 read-only reconciliation과 수동 incident 조사를 한다. 데이터, Auth 사용자, allowance, 이미 withdrawn인 publication, 독립 사본은 삭제하거나 역변환하지 않는다. 기록한 직전 호환 **Rules를 먼저 복원**하고 적용을 확인한 뒤 직전 static app commit을 복원한다. 즉 롤백도 Rules before static app 순서를 유지한다. migration/completion gate는 blind delete하지 않고 exact report identity로 재감사한다. rollback smoke까지 통과한 뒤에만 quiescence를 종료한다.

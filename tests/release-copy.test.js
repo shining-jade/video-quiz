@@ -101,6 +101,45 @@ test('release runbook retains the exact rollback ruleset through existing-flow a
   assert.ok(retentionIndex > providerSmokeIndex, 'rollback ruleset retention must cover all smoke completion');
 });
 
+test('R19 response-loss recovery is an explicit exact adoption branch with a fresh quiesced evidence window', () => {
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  const r10Start = runbook.indexOf('### R10 — strict Firestore Rules');
+  const r11Start = runbook.indexOf('### R11 — static app', r10Start);
+  const r10 = runbook.slice(r10Start, r11Start);
+  const targetRuleset = 'projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1';
+  const sourceSha = 'c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d';
+  const rollbackRuleset = 'projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4';
+  const denyAllRuleset = 'projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466';
+
+  assert.ok(r10Start >= 0 && r11Start > r10Start, 'R10 must remain a distinct authoritative gate');
+  assert.match(r10, /create 응답이 non-2xx[\s\S]*성공 여부를 증명하지 않는다/);
+  assert.match(r10, /writeLanded:\s*true[\s\S]*create 재시도 금지/);
+  assert.match(r10, /writeLanded:\s*false[\s\S]*create.*권한.*주지 않/);
+  assert.match(r10, /writeLanded:\s*null[\s\S]*조사.*중단/);
+  assert.match(r10, /create[\s\S]*writeLanded:\s*false[\s\S]*adopt-existing[\s\S]*exact Ruleset[\s\S]*exact SHA/);
+  assert.match(r10, new RegExp(targetRuleset));
+  assert.match(r10, new RegExp(sourceSha));
+  assert.match(r10, new RegExp(rollbackRuleset));
+  assert.match(r10, new RegExp(denyAllRuleset));
+  assert.match(r10, /사람.*명시.*adopt-existing/);
+  assert.match(r10, /후보.*자동 선택.*하지 않/);
+  assert.match(r10, /--expect-manifest-sha/);
+  assert.match(r10, /현재 로컬 commit[\s\S]*live gate-state/);
+  assert.match(r10, /target Ruleset.*GET[\s\S]*source[\s\S]*PATCH/);
+  assert.match(r10, /알려진.*PATCH 실패[\s\S]*rollback[\s\S]*exact GET readback/);
+  assert.match(r10, /mutation-outcome-unknown[\s\S]*수동 조사[\s\S]*rollback.*주장하지 않/);
+  assert.match(r10, /이번 복구[\s\S]*rulesets\.create.*호출하지 않/);
+  assert.match(runbook, /R18[\s\S]*R19[\s\S]*원인.*증거[\s\S]*승인.*근거.*사용하지 않/);
+  assert.match(runbook, /quiescence.*generation.*변하면[\s\S]*R2부터 새 보고서/);
+  assert.match(runbook, /deny-all.*R10 target PATCH.*유지[\s\S]*strict readback.*종료/);
+  assert.match(runbook, /migration lock[\s\S]*single-operator.*R13.*계속/);
+  assert.match(runbook, /deny-all.*종료 시각[\s\S]*migration lock.*종료 시각.*별도 기록/);
+  assert.match(runbook, /commit-bound.*code\/docs[\s\S]*broad final review[\s\S]*merge\/push/);
+  assert.match(runbook, /R0~R10[\s\S]*reviewed feature commit/);
+  assert.match(runbook, /R11[\s\S]*R12[\s\S]*R13/);
+  assert.match(runbook, /unreviewed code change.*하지 않/);
+});
+
 test('HANDOFF preserves the full authoritative email-auth release sequence without an unsafe shortcut', () => {
   const handoff = read('HANDOFF.md');
   const emailAuthBlock = handoff.slice(0, handoff.indexOf('> OX'));
