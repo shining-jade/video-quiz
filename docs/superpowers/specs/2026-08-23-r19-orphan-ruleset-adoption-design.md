@@ -1,5 +1,7 @@
 # R19 응답 유실 Ruleset 안전 채택 설계
 
+> **운영 판정(2026-08-23):** 이 문서의 이전 lifecycle 표현은 폐기되었고 `docs/RELEASE-RUNBOOK.md`가 우선한다. R10 target PATCH의 strict exact readback 직후 deny-all barrier를 종료하고, migration lock과 single-operator serialization은 R13까지 유지하며, Email/Password는 R14 existing-flow gate 통과까지 OFF로 둔다. R15는 deny-all 종료가 아니라 전체 change window 종료다. rollback Ruleset은 별도 복구 자산으로 R15 완료까지 보존한다.
+
 ## 배경과 확정된 원인
 
 R19의 `rulesets.create` 호출은 클라이언트에 HTTP 503을 반환했지만 서버에는 동일 요청의 Ruleset이 저장됐다. 생성된 Ruleset은 `projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1`이며, 소스 SHA-256은 배포 후보와 같은 `c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d`다. 활성 `cloud.firestore` 릴리스는 기존 rollback Ruleset에 남아 있어 운영 상태와 Email/Password provider는 변경되지 않았다.
@@ -10,7 +12,7 @@ R19의 `rulesets.create` 호출은 클라이언트에 HTTP 503을 반환했지�
 
 - 이미 저장된 동일 SHA Ruleset을 새 create 없이 안전하게 채택한다.
 - 이전 배포 창의 감사·잠금·매니페스트 증거를 재사용하지 않는다.
-- 모든 데이터·권한·개인정보·원자성 검사를 새로운 단일 quiescence 창에서 다시 수행한다.
+- 모든 데이터·권한·개인정보·원자성 검사를 새로운 단일 controlled change window에서 다시 수행한다.
 - release PATCH 직전과 직후에 Ruleset 소스와 활성 release를 exact readback한다.
 - 실패하면 Email/Password를 켜지 않고 기존 Ruleset으로 자동 롤백한다.
 
@@ -54,16 +56,16 @@ R19의 `rulesets.create` 호출은 클라이언트에 HTTP 503을 반환했지�
 ## 새 릴리스 순서
 
 1. R0 로컬 전체 검증과 새 official `projects.test` 보고서를 만든다.
-2. R1 exact write-quiescence를 시작하고 R14까지 유지한다.
+2. R1 exact write-quiescence의 deny-all barrier를 시작하고 R10 target PATCH의 strict exact readback 직후 종료 시각을 기록한다.
 3. R2–R8을 새 non-overwriting 보고서와 새 lock/token/generation으로 다시 수행한다.
 4. R9 manifest에 새 증거, 배포 소스 SHA, 기존 rollback Ruleset, 채택할 exact Ruleset 이름을 봉인한다.
 5. R10 helper가 manifest, quiescence, gate generation, source SHA를 다시 검증한다.
 6. 대상 Ruleset을 GET하고 source SHA가 exact 일치하면 create 없이 `cloud.firestore`만 PATCH한다.
 7. 즉시 release GET readback과 Ruleset source 재검증을 수행한다.
 8. mismatch 또는 API 실패면 기존 Ruleset으로 PATCH하고 exact rollback readback을 요구한다.
-9. R11–R13 정적 앱 배포, 같은 generation 사후 감사, exact unlock을 수행한다.
-10. R14 기존 Google admin/teacher 및 anonymous student smoke 후에만 Email/Password를 활성화한다.
-11. R15 이메일 인증·승인·로그인·재설정·공개 자료실 복사 smoke 후 quiescence를 종료한다.
+9. R11–R13 정적 앱 배포와 같은-generation 사후 감사를 수행하고, migration lock과 single-operator serialization을 R13 exact unlock까지 유지한 뒤 별도 종료 시각을 기록한다.
+10. Email/Password를 OFF로 유지한 채 R14 existing-flow gate의 기존 Google admin/teacher 및 anonymous student smoke를 수행하고, 통과 후에만 활성화한다.
+11. R15 이메일 인증·승인·로그인·재설정·공개 자료실 복사 smoke 후 전체 change window를 종료한다. deny-all barrier는 이미 R10 exact strict readback 직후 종료됐다.
 
 ## 안전 불변조건
 
@@ -72,6 +74,7 @@ R19의 `rulesets.create` 호출은 클라이언트에 HTTP 503을 반환했지�
 - 이전 배포 창의 R18/R19 보고서는 원인 증거로만 보존하고 배포 승인 근거로 사용하지 않는다.
 - quiescence 또는 lock/generation이 변하면 R2부터 다시 시작한다.
 - release PATCH/readback 실패 시 provider는 OFF 상태를 유지하고 기존 Ruleset으로 롤백한다.
+- deny-all 종료, migration lock/직렬화 종료, 전체 change window 종료를 각각 R10, R13, R15의 서로 다른 시각으로 기록한다.
 - 일반 stdout과 커밋에는 이메일, UID, 토큰, private source 또는 상세 finding을 넣지 않는다.
 - `.release-artifacts/`와 `.release-maintenance/`는 커밋하지 않는다.
 

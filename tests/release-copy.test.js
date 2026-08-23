@@ -263,6 +263,39 @@ test('R19 response-loss recovery is an explicit exact adoption branch with a fre
   assert.match(runbook, /unreviewed code change.*하지 않/);
 });
 
+test('authoritative R19 docs keep deny-all, locks, provider, and change-window boundaries distinct', () => {
+  const plan = read('docs/superpowers/plans/2026-08-23-r19-orphan-ruleset-adoption.md');
+  const spec = read('docs/superpowers/specs/2026-08-23-r19-orphan-ruleset-adoption-design.md');
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+
+  assert.match(plan, /Operational supersession[\s\S]*Earlier lifecycle wording[\s\S]*superseded/i);
+  assert.match(plan, /deny-all barrier ends immediately after[\s\S]*R10[\s\S]*exact strict readback/i);
+  assert.match(plan, /migration locks[\s\S]*single-operator serialization[\s\S]*R13/i);
+  assert.match(plan, /Email\/Password remains OFF[\s\S]*R14 existing-flow gate/i);
+  assert.match(plan, /R15[\s\S]*change window/i);
+
+  assert.match(spec, /운영 판정[\s\S]*이전 lifecycle 표현[\s\S]*폐기/);
+  assert.match(spec, /R10[\s\S]*strict exact readback 직후[\s\S]*deny-all barrier[\s\S]*종료/);
+  assert.match(spec, /migration lock[\s\S]*single-operator serialization[\s\S]*R13/);
+  assert.match(spec, /Email\/Password[\s\S]*R14 existing-flow gate[\s\S]*OFF/);
+  assert.match(spec, /R15[\s\S]*change window[\s\S]*종료/);
+
+  assert.match(runbook, /strict readback 직후 deny-all barrier 종료/);
+  assert.match(runbook, /migration lock과 single-operator serialization은 R13까지/);
+  assert.match(runbook, /provider는 아직 OFF[\s\S]*existing-flow smoke[\s\S]*통과한 뒤에만[\s\S]*활성화/);
+  assert.match(runbook, /R15 — controlled smoke와 change window 종료/);
+
+  for (const document of [plan, spec]) {
+    assert.doesNotMatch(document, /hold it through the R14 existing-flow gate/i);
+    assert.doesNotMatch(document, /end deny-all quiescence only after R15 succeeds/i);
+    assert.doesNotMatch(document, /R1 exact write-quiescence를 시작하고 R14까지 유지한다/);
+    assert.doesNotMatch(document, /R15[^\n]*smoke 후 quiescence를 종료한다/);
+  }
+  assert.doesNotMatch(plan, /Do not end quiescence yet|while quiescence and provider OFF remain/i);
+  assert.doesNotMatch(spec, /새로운 단일 quiescence 창/);
+  assert.doesNotMatch(runbook, /write-quiescence와 세 lock을 유지/);
+});
+
 test('HANDOFF preserves the full authoritative email-auth release sequence without an unsafe shortcut', () => {
   const handoff = read('HANDOFF.md');
   const emailAuthBlock = handoff.slice(0, handoff.indexOf('> OX'));

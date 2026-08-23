@@ -1,10 +1,12 @@
 # R19 Orphan Ruleset Adoption Implementation Plan
 
+> **Operational supersession (2026-08-23):** Earlier lifecycle wording in this plan is superseded by the approved boundary in `docs/RELEASE-RUNBOOK.md`. The deny-all barrier ends immediately after the R10 target PATCH and exact strict readback; migration locks and single-operator serialization continue through R13; Email/Password remains OFF through the R14 existing-flow gate; R15 closes the overall change window. The rollback Ruleset remains retained through R15 independently of the deny-all lifetime.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Safely adopt the already-created R19 Firestore Ruleset without another non-idempotent create, using a completely fresh R2–R9 evidence window and exact rollback protection.
 
-**Architecture:** Productionize the read-only failure/reconciliation utilities first, then add a dedicated `adopt-existing` release helper that cannot call `rulesets.create`. Re-enter quiescence with the recorded deny-all Ruleset, regenerate every migration/audit/manifest proof, and patch only `cloud.firestore` after exact target source readback.
+**Architecture:** Productionize the read-only failure/reconciliation utilities first, then add a dedicated `adopt-existing` release helper that cannot call `rulesets.create`. Open one controlled change window, establish its initial deny-all barrier with the recorded Ruleset, regenerate every migration/audit/manifest proof, and patch only `cloud.firestore` after exact target source readback.
 
 **Tech Stack:** Node.js 24, `node:test`, Firebase Admin ADC, Firebase Rules REST API, Firestore migration/audit CLIs, GitHub Pages.
 
@@ -15,7 +17,7 @@
 - Do not call `rulesets.create` for source SHA-256 `c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d`.
 - Adopt only `projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637afd163e1` after exact source readback.
 - Keep rollback Ruleset `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4` until R15 completes.
-- Re-enter write-quiescence with deny-all Ruleset `projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466` and hold it through the R14 existing-flow gate.
+- Re-enter write-quiescence with deny-all Ruleset `projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466`, hold it only through the R10 target PATCH and exact strict readback, and record that barrier end separately from later lock/serialization and change-window end times.
 - Never reuse R18/R19 migration, lock, generation, or manifest evidence as deployment authorization.
 - Every operational report uses a new non-overwriting path under `.release-artifacts/2026-08-23/`.
 - Never commit `.release-artifacts/` or `.release-maintenance/`, and never print tokens, email, UID, private source, or raw findings.
@@ -278,23 +280,28 @@ Only after strict Rules exact readback, merge the reviewed branch, push the shar
 
 - [ ] **Step 3: Run R12 same-generation audits and R13 exact unlocks**
 
-Verify all three lock/generation identities, repeat lifecycle/share/counter/public audits with new reports, then unlock session/access/counter locks using their exact recorded tokens. Do not end quiescence yet.
+Verify all three lock/generation identities, repeat lifecycle/share/counter/public audits with new reports, then unlock session/access/counter locks using their exact recorded tokens. Do not close the overall change window yet.
+
+The deny-all barrier already ended at the R10 exact strict readback. This step keeps the migration locks and single-operator serialization through the R13 exact unlock and records their later end time separately.
 
 - [ ] **Step 4: Perform R14 existing-flow smoke**
 
-Verify Google admin, Google teacher, and anonymous student join/end against the new Rules/static app with console error 0. If interactive account actions cannot be automated, stop with `NEEDS_CONTEXT` while quiescence and provider OFF remain.
+Verify Google admin, Google teacher, and anonymous student join/end against the new Rules/static app with console error 0. If interactive account actions cannot be automated, stop with `NEEDS_CONTEXT` while the change window remains closed and the provider remains OFF.
+
+Email/Password remains OFF through the R14 existing-flow gate and may be enabled only after that gate passes.
 
 - [ ] **Step 5: Enable Email/Password and perform R15 controlled smoke**
 
-After owner activation, test signup, Korean verification email receive/click, verified teacher request, admin approval, login, password reset, and public-library copy/privacy. On any failure, disable provider and restore the rollback Ruleset before ending quiescence.
+After owner activation, test signup, Korean verification email receive/click, verified teacher request, admin approval, login, password reset, and public-library copy/privacy. On any failure, disable provider, restore the rollback Ruleset, and keep the change window closed.
 
 - [ ] **Step 6: Close the change window**
 
-Record final smoke evidence and manifest hashes, end deny-all quiescence only after R15 succeeds, and retain rollback history plus the orphan Ruleset investigation artifacts.
+Record final smoke evidence and manifest hashes, close the overall change window only after R15 succeeds, and retain rollback history plus the orphan Ruleset investigation artifacts. Do not describe this as ending deny-all: that barrier ended immediately after the R10 exact strict readback.
 
 ## Plan Self-Review
 
 - Spec coverage: response-loss diagnostics, three-valued reconciliation, exact adoption, fresh R2–R9 evidence, no-create boundary, rollback, and provider-last smoke are assigned to Tasks 1–5.
 - Placeholder scan: runtime-generated UUIDs and report names are generated by explicit code/sequence; no implementation placeholder remains.
 - Interface consistency: expected SHA, target Ruleset, rollback Ruleset, and deny-all Ruleset are identical in every task.
+- Lifecycle consistency: R10 ends deny-all, R13 ends migration locks/single-operator serialization, R14 gates provider activation while it remains OFF, and R15 closes the overall change window.
 - Dirty-worktree protection: inherited diagnostic files are reviewed and committed in Task 1; restricted directories remain uncommitted throughout.

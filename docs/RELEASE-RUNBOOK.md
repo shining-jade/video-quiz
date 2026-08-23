@@ -190,7 +190,7 @@ deny-all barrier는 R10 target PATCH를 지나 strict exact readback까지 유�
 
 ### R12 — 같은 generation post-deploy verify
 
-write-quiescence와 세 lock을 유지한 채 access/session `--verify-lock`을 apply report의 exact token 및 모든 generation으로 실행한다. set counter gate도 같은 `lockId/updateTimeGeneration`인지 server-read하고 새 read-only counter audit가 clean인지 확인한다. lifecycle/share/public audit도 새 output으로 반복하고 R7의 zero-finding privacy 결과를 다시 요구한다. 어떤 generation 또는 Rules/app hash가 달라져도 unlock하지 않는다.
+migration lock과 single-operator serialization을 유지한 채 access/session `--verify-lock`을 apply report의 exact token 및 모든 generation으로 실행한다. set counter gate도 같은 `lockId/updateTimeGeneration`인지 server-read하고 새 read-only counter audit가 clean인지 확인한다. lifecycle/share/public audit도 새 output으로 반복하고 R7의 zero-finding privacy 결과를 다시 요구한다. 어떤 generation 또는 Rules/app hash가 달라져도 unlock하지 않는다.
 
 ### R13 — exact unlock
 
@@ -200,10 +200,10 @@ R12가 모두 안전할 때만 session operational lock, teacher access operatio
 
 Password Policy·domain·template를 다시 확인하고, R10의 새 Rules exact readback과 R12~R13 증거가 모두 같은 manifest에 있을 때도 provider는 아직 OFF로 유지한다. 먼저 기존 Google admin, 기존 Google teacher, anonymous student의 로그인·권한·수업 join/end smoke를 수행하고 console error 0을 확인한다. 이 existing-flow smoke가 모두 통과한 뒤에만 Email/Password provider를 활성화한다. Google과 Anonymous provider는 유지한다. provider 활성화는 allowance를 만들거나 계정을 자동 병합하지 않는다. 자동화할 수 없는 Firebase Console owner 조작, 실제 inbox 클릭, 또는 admin approval이 필요하면 추정하지 말고 그 지점에서 `NEEDS_CONTEXT`로 중단한다.
 
-### R15 — controlled smoke와 quiescence 종료
+### R15 — controlled smoke와 change window 종료
 
-일반 트래픽을 열기 전에 R14에서 통과한 기존 흐름에 이어 Email/Password `signup` → 한국어 verification email 실제 수신·클릭 → verified teacher request → admin approval → login → password reset → public-library copy 순서의 controlled smoke를 수행한다. private source 문서·이메일·UID가 public projection, copy, console, 일반 stdout에 노출되지 않고 console error가 0이어야 한다. provider collision 안내, 공개 author 비식별 표시, 게시/복사/철회/moderation도 확인한다. 성공 증거를 기록한 뒤에만 일반 client 접근과 trusted writers를 연다. recorded rollback ruleset은 이 provider smoke 완료까지 보존하며, 모든 smoke 완료 뒤에도 manifest의 rollback history에서 삭제하지 않는다.
+일반 트래픽을 열기 전에 R14에서 통과한 기존 흐름에 이어 Email/Password `signup` → 한국어 verification email 실제 수신·클릭 → verified teacher request → admin approval → login → password reset → public-library copy 순서의 controlled smoke를 수행한다. private source 문서·이메일·UID가 public projection, copy, console, 일반 stdout에 노출되지 않고 console error가 0이어야 한다. provider collision 안내, 공개 author 비식별 표시, 게시/복사/철회/moderation도 확인한다. 성공 증거를 기록한 뒤에만 일반 client 접근과 trusted writers를 열고 전체 change window를 종료한다. 이는 R10 strict exact readback 직후 이미 끝난 deny-all barrier의 종료가 아니다. recorded rollback ruleset은 이 provider smoke 완료까지 보존하며, 모든 smoke 완료 뒤에도 manifest의 rollback history에서 삭제하지 않는다.
 
 ## 롤백
 
-알려진 settled PATCH 실패 또는 strict readback mismatch라면 일반 traffic과 trusted writer를 계속 차단하고 provider를 새로 켰다면 먼저 다시 끈다. `projects/video-quiz-65798/releases/cloud.firestore`를 recorded rollback ruleset `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 update하고 GET의 exact `rulesetName` readback을 확인한다. 단, 전송된 PATCH의 응답 유실·transport timeout인 `mutation-outcome-unknown`은 settled failure가 아니다. 이 경우 자동 rollback을 시도하거나 rollback됐다고 주장하지 말고, provider OFF·lock·single-operator serialization을 유지한 채 read-only reconciliation과 수동 incident 조사를 한다. 데이터, Auth 사용자, allowance, 이미 withdrawn인 publication, 독립 사본은 삭제하거나 역변환하지 않는다. 기록한 직전 호환 **Rules를 먼저 복원**하고 적용을 확인한 뒤 직전 static app commit을 복원한다. 즉 롤백도 Rules before static app 순서를 유지한다. migration/completion gate는 blind delete하지 않고 exact report identity로 재감사한다. rollback smoke까지 통과한 뒤에만 quiescence를 종료한다.
+알려진 settled PATCH 실패 또는 strict readback mismatch라면 일반 traffic과 trusted writer를 계속 차단하고 provider를 새로 켰다면 먼저 다시 끈다. `projects/video-quiz-65798/releases/cloud.firestore`를 recorded rollback ruleset `projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4`로 update하고 GET의 exact `rulesetName` readback을 확인한다. 단, 전송된 PATCH의 응답 유실·transport timeout인 `mutation-outcome-unknown`은 settled failure가 아니다. 이 경우 자동 rollback을 시도하거나 rollback됐다고 주장하지 말고, provider OFF·lock·single-operator serialization을 유지한 채 read-only reconciliation과 수동 incident 조사를 한다. 데이터, Auth 사용자, allowance, 이미 withdrawn인 publication, 독립 사본은 삭제하거나 역변환하지 않는다. 기록한 직전 호환 **Rules를 먼저 복원**하고 적용을 확인한 뒤 직전 static app commit을 복원한다. 즉 롤백도 Rules before static app 순서를 유지한다. migration/completion gate는 blind delete하지 않고 exact report identity로 재감사한다. rollback smoke까지 통과한 뒤에만 전체 change window를 종료한다.
