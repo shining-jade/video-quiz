@@ -217,6 +217,15 @@ function requestJson({ method, url, accessToken, payload, signal }) {
       signal.removeEventListener('abort', abortRequest);
       complete(value);
     };
+    const rejectClosed = error => {
+      if (settled) return;
+      const failure = error || Object.assign(
+        new Error('Rules API transport closed before a complete response.'),
+        { code: 'ECONNRESET' }
+      );
+      if (method === 'PATCH') failure.mutationOutcomeUnknown = true;
+      settle(reject, failure);
+    };
     const request = https.request({
       protocol: endpoint.protocol,
       hostname: endpoint.hostname,
@@ -230,6 +239,15 @@ function requestJson({ method, url, accessToken, payload, signal }) {
         if (settled) return;
         if (!pendingError) pendingError = error;
         request.destroy(pendingError);
+      });
+      response.on('close', () => {
+        if (settled) return;
+        if (!pendingError) pendingError = Object.assign(
+          new Error('Rules API response closed before completion.'),
+          { code: 'ECONNRESET' }
+        );
+        if (!request.destroyed) request.destroy(pendingError);
+        rejectClosed(pendingError);
       });
       response.on('end', () => {
         if (settled || pendingError) return;
@@ -252,13 +270,11 @@ function requestJson({ method, url, accessToken, payload, signal }) {
       request.destroy(pendingError);
     }
     request.on('error', error => {
+      if (settled) return;
       if (!pendingError) pendingError = error;
     });
     request.on('close', () => {
-      if (pendingError) {
-        if (method === 'PATCH') pendingError.mutationOutcomeUnknown = true;
-        settle(reject, pendingError);
-      }
+      rejectClosed(pendingError);
     });
     signal.addEventListener('abort', abortRequest, { once: true });
     request.end(encoded == null ? undefined : encoded);

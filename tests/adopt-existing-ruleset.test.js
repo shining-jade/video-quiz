@@ -638,6 +638,65 @@ test('request transport settles abort only after the HTTPS request closes', asyn
   assert.equal(settlement.mutationOutcomeUnknown, true);
 });
 
+test('close before a later transport error settles unknown once without rollback or hang', async t => {
+  for (const closeBoundary of ['request', 'response']) {
+    await t.test(closeBoundary + ' closes first', async t => {
+      const originalRequest = https.request;
+      const unhandled = [];
+      const lateError = Object.assign(new Error('late transport error'), { code: 'ECONNRESET' });
+      const fakeRequest = new EventEmitter();
+      const fakeResponse = new EventEmitter();
+      const events = [];
+      fakeResponse.statusCode = 200;
+      fakeRequest.destroy = error => {
+        events.push('request-destroyed:' + error.code);
+        fakeRequest.emit('error', error);
+      };
+      https.request = (options, respond) => {
+        fakeRequest.end = () => {
+          events.push('request-ended');
+          if (closeBoundary === 'response') respond(fakeResponse);
+          setImmediate(() => {
+            events.push(closeBoundary + '-closed');
+            (closeBoundary === 'request' ? fakeRequest : fakeResponse).emit('close');
+            setTimeout(() => {
+              events.push('late-error');
+              fakeRequest.emit('error', lateError);
+            }, 5);
+          });
+        };
+        return fakeRequest;
+      };
+      const onUnhandled = error => { unhandled.push(error); };
+      process.on('unhandledRejection', onUnhandled);
+      t.after(() => {
+        process.removeListener('unhandledRejection', onUnhandled);
+        https.request = originalRequest;
+      });
+
+      const attempted = invoke(t, {
+        requestTimeoutMs: 15,
+        patchJson: adopt.requestJson
+      });
+      const execution = await Promise.race([
+        attempted,
+        new Promise(resolve => setTimeout(() => resolve('test-deadline'), 100))
+      ]);
+
+      assert.notEqual(execution, 'test-deadline', 'close must settle the PATCH transport');
+      assert.equal(execution.result.status, 'mutation-outcome-unknown');
+      assert.equal(execution.result.mutationOutcomeUnknown, true);
+      assert.equal(execution.result.rollbackAttempted, false);
+      assert.equal(execution.result.rollbackReadbackExact, false);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.equal(events.includes('late-error'), true);
+      assert.equal(execution.reports.length, 1);
+      assert.deepEqual(unhandled, []);
+      assert.equal(execution.calls.filter(call => call.method === 'PATCH').length, 1);
+    });
+  }
+});
+
 test('an ambiguous production PATCH transport stops without rollback claims', async t => {
   let patchCalls = 0;
   const uncertain = Object.assign(new Error('closed after transmit'), {
