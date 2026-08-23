@@ -1,0 +1,155 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const cli = require('../scripts/diagnose-rules-api.js');
+const { reserveReport } = require('../scripts/migrate-legacy-ownership.js');
+
+const PROJECT = 'video-quiz-65798';
+const API_ROOT = cli.API_ROOT;
+const RELEASE = {
+  name: 'projects/video-quiz-65798/releases/cloud.firestore',
+  rulesetName: 'projects/video-quiz-65798/rulesets/active',
+  updateTime: '2026-08-22T23:40:00Z'
+};
+
+function temporaryOutput(name) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rules-api-diagnosis-'));
+  return path.join(directory, name);
+}
+
+function argumentsFor(output, expectedSha256) {
+  return [
+    '--project', PROJECT,
+    '--target-mode', 'production',
+    '--expect-sha', expectedSha256,
+    '--output', output
+  ];
+}
+
+function strictGetTransport(respond) {
+  const calls = [];
+  return {
+    calls,
+    getJson: async request => {
+      if (request.method !== 'GET') {
+        throw new Error('diagnosis transport must use GET, received ' + String(request.method));
+      }
+      calls.push(request);
+      return respond(request.url);
+    }
+  };
+}
+
+test('Rules API diagnosis validates an exact project and refuses emulator configuration', async () => {
+  assert.throws(() => cli.parseArguments([
+    '--project', 'Video-quiz-65798', '--target-mode', 'production', '--output', 'diagnosis.json'
+  ]), /exact Google Cloud project ID/);
+  assert.throws(() => cli.parseArguments([
+    '--project', PROJECT, '--target-mode', 'production', '--expect-sha', 'ABC', '--output', 'x'
+  ]), /exact lowercase sha256/);
+  assert.throws(() => cli.validateProductionEnvironment({
+    FIRESTORE_EMULATOR_HOST: '127.0.0.1:8080'
+  }), /refuses emulator/i);
+
+  const source = 'rules_version = \'2\';\n';
+  const output = temporaryOutput('emulator-refused.json');
+  await assert.rejects(cli.main(argumentsFor(output, sha256(source)), {
+    environment: { FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099' },
+    reserveReport,
+    acquireAccessToken: async () => 'private-token',
+    getJson: async () => { throw new Error('must not issue a request'); },
+    writeLine() {}
+  }), /refuses emulator/i);
+});
+
+test('Rules API diagnosis reserves one output and propagates exact GET-only readback evidence', async () => {
+  const source = 'rules_version = \'2\';\n// recovered ruleset\n';
+  const expectedSha256 = sha256(source);
+  const output = temporaryOutput('diagnosis.json');
+  const recoveredName = 'projects/' + PROJECT + '/rulesets/recovered';
+  const transport = strictGetTransport(url => {
+    if (url === API_ROOT + 'projects/' + PROJECT + '/releases/cloud.firestore') {
+      return { statusCode: 200, body: RELEASE };
+    }
+    if (url === API_ROOT + 'projects/' + PROJECT + '/rulesets?pageSize=100') {
+      return {
+        statusCode: 200,
+        body: { rulesets: [{ name: recoveredName, createTime: '2026-08-22T23:41:00Z' }] }
+      };
+    }
+    if (url === API_ROOT + recoveredName) {
+      return {
+        statusCode: 200,
+        body: { source: { files: [{ name: 'firestore.rules', content: source }] } }
+      };
+    }
+    throw new Error('unexpected URL ' + url);
+  });
+  const runtime = {
+    environment: {},
+    reserveReport,
+    acquireAccessToken: async () => 'private-token',
+    getJson: transport.getJson,
+    writeLine() {}
+  };
+
+  const report = await cli.main(argumentsFor(output, expectedSha256), runtime);
+
+  assert.equal(report.status, 'complete');
+  assert.deepEqual(report.release, {
+    readable: true,
+    releaseName: RELEASE.name,
+    activeRulesetName: RELEASE.rulesetName,
+    updateTime: RELEASE.updateTime
+  });
+  assert.equal(report.reconciliation.writeLanded, true);
+  assert.deepEqual(report.reconciliation.matchingRulesetNames, [recoveredName]);
+  assert.equal(transport.calls.length, 4);
+  assert.equal(transport.calls.every(call => call.method === 'GET'), true);
+  assert.equal(JSON.stringify(report).includes('private-token'), false);
+
+  await assert.rejects(cli.main(argumentsFor(output, expectedSha256), runtime), /already exists/);
+});
+
+test('Rules API diagnosis accounts for the full 2,500-ruleset quota with GET only', async () => {
+  const output = temporaryOutput('quota.json');
+  const rulesets = Array.from({ length: cli.RULESET_LIMIT }, (_, index) => ({
+    name: 'projects/' + PROJECT + '/rulesets/' + index,
+    createTime: '2026-08-22T23:41:00Z'
+  }));
+  const transport = strictGetTransport(url => {
+    if (url === API_ROOT + 'projects/' + PROJECT + '/releases/cloud.firestore') {
+      return { statusCode: 200, body: RELEASE };
+    }
+    if (url === API_ROOT + 'projects/' + PROJECT + '/rulesets?pageSize=100') {
+      return { statusCode: 200, body: { rulesets } };
+    }
+    throw new Error('unexpected URL ' + url);
+  });
+
+  const report = await cli.main([
+    '--project', PROJECT, '--target-mode', 'production', '--output', output
+  ], {
+    environment: {},
+    reserveReport,
+    acquireAccessToken: async () => 'private-token',
+    getJson: transport.getJson,
+    writeLine() {}
+  });
+
+  assert.equal(report.rulesetInventory.counted, 2500);
+  assert.equal(report.rulesetLimit, 2500);
+  assert.equal(report.remainingSlots, 0);
+  assert.equal(report.verdict, 'ruleset-quota-exhausted');
+  assert.equal(transport.calls.every(call => call.method === 'GET'), true);
+});
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}

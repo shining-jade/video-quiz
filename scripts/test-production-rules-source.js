@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const https = require('node:https');
 const path = require('node:path');
 const { measureRulesSource } = require('../rules-source-metrics.js');
+const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
 const { reserveReport } = require('./migrate-legacy-ownership.js');
 
 const SOURCE_BUDGET = Object.freeze({ bytes: 130000, lines: 2700, functions: 190 });
@@ -106,12 +107,17 @@ function postJson({ url, accessToken, payload }) {
       response.on('data', chunk => chunks.push(chunk));
       response.on('error', reject);
       response.on('end', () => {
+        const status = response.statusCode || 0;
+        const text = Buffer.concat(chunks).toString('utf8');
         try {
-          resolve({
-            statusCode: response.statusCode || 0,
-            body: JSON.parse(Buffer.concat(chunks).toString('utf8'))
-          });
+          resolve({ statusCode: status, body: JSON.parse(text) });
         } catch (error) {
+          // A proxy or frontend can answer a rejected request with HTML. Losing
+          // the status code to a parse error would hide which failure it was.
+          if (status < 200 || status >= 300) {
+            resolve({ statusCode: status, body: null, rawBody: text });
+            return;
+          }
           reject(new Error('Rules API returned invalid JSON.', { cause: error }));
         }
       });
@@ -145,11 +151,11 @@ function reportLine(report) {
     'unknown=' + report.issueCounts.unknown,
     'status=' + report.status,
     'safeToCreateRuleset=' + report.safeToCreateRuleset
-  ].join(' ');
+  ].concat(report.failure ? [failureLine(report.failure)] : []).join(' ');
 }
 
-function failClosedReport(projectId, source, metrics) {
-  return reportFor({
+function failClosedReport(projectId, source, metrics, failure) {
+  const report = reportFor({
     projectId,
     source,
     metrics,
@@ -157,6 +163,11 @@ function failClosedReport(projectId, source, metrics) {
     status: 'failed',
     safeToCreateRuleset: false
   });
+  // Without this the report records only that the probe failed, never why: an
+  // HTTP 503 from a server-side deadline and one from a refused request look
+  // identical once the response body is dropped.
+  report.failure = failure || describeRulesApiFailure(null, null);
+  return report;
 }
 
 function productionDependencies() {
@@ -196,7 +207,9 @@ async function main(argv, dependencies) {
       payload: { source: { files: [{ name: 'firestore.rules', content: source }] } }
     });
     if (!response || response.statusCode < 200 || response.statusCode >= 300) {
-      report = failClosedReport(options.projectId, source, metrics);
+      report = failClosedReport(
+        options.projectId, source, metrics, describeRulesApiFailure(response, null)
+      );
     } else {
       const issueCounts = countIssues(response.body && response.body.issues);
       const safeToCreateRuleset = sourceMeetsBudget(metrics) && issueCounts.error === 0 &&
@@ -210,8 +223,10 @@ async function main(argv, dependencies) {
         safeToCreateRuleset
       });
     }
-  } catch (_) {
-    report = failClosedReport(options.projectId, source, metrics);
+  } catch (error) {
+    report = failClosedReport(
+      options.projectId, source, metrics, describeRulesApiFailure(null, error)
+    );
   }
   reservation.commit(JSON.stringify(report, null, 2) + '\n');
   runtime.writeLine(reportLine(report));
