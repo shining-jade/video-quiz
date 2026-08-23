@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,7 +13,13 @@ const TARGET = 'projects/video-quiz-65798/rulesets/d55f5b3e-a39d-4eea-b4af-4637a
 const SHA = 'c31ab7395271069cc5be9abe1dca4872fe41ac8e36b6bcb8f52ffabcb760248d';
 const ROLLBACK = 'projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4';
 const QUIESCENCE = 'projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466';
+const SOURCE_COMMIT = '8a5a888da98c304ba7b103fb5221c41ac2dc412e';
+const STATIC_COMMIT = 'c4f3136de2b140de7a98d415dc65ee68c086732f';
 const SOURCE = fs.readFileSync(path.resolve('firestore.rules'), 'utf8');
+
+function sha256(contents) {
+  return crypto.createHash('sha256').update(contents).digest('hex');
+}
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -34,7 +41,7 @@ function validManifest() {
       staticCommit: '62e4e4681025e325380c19026821baceb06a2c64'
     },
     release: {
-      staticCommit: 'c4f3136de2b140de7a98d415dc65ee68c086732f',
+      staticCommit: STATIC_COMMIT,
       firestoreRulesSha256: SHA
     },
     locks: {
@@ -57,8 +64,42 @@ function validManifest() {
       status: 'ready-for-ruleset-adoption',
       adoptionMode: 'existing-exact',
       rulesetName: TARGET,
-      headCommit: '8a5a888da98c304ba7b103fb5221c41ac2dc412e',
+      headCommit: SOURCE_COMMIT,
       sourceSha256: SHA
+    }
+  };
+}
+
+function currentCommitState() {
+  return { sourceCommit: SOURCE_COMMIT, staticCommit: STATIC_COMMIT };
+}
+
+function currentGateState() {
+  return {
+    setCounters: {
+      path: 'migration_gates/set_counters', exists: true, locked: true,
+      projectId: PROJECT, targetMode: 'production',
+      lockId: 'e3d1cef7-6c98-46c1-8ec5-b00dba3098b0',
+      updateTimeGeneration: '1787384912:204091000'
+    },
+    teacherAccess: {
+      path: 'migration_gates/teacher_access_status', exists: true, locked: true,
+      projectId: PROJECT, targetMode: 'production', status: 'complete', strictReady: true,
+      lockToken: 'd0c5fdb9-7dc9-4912-91e9-546e2ea940be',
+      updateTimeGeneration: '1787384983:34189000',
+      migrationGeneration: '1787266206:604244000'
+    },
+    sessionCountersLock: {
+      path: 'migration_gates/session_counter_migration', exists: true, locked: true,
+      projectId: PROJECT, targetMode: 'production',
+      lockToken: 'f421fdfe-647c-4039-815f-a6745052d20e',
+      updateTimeGeneration: '1787385018:993634000'
+    },
+    sessionCountersGate: {
+      path: 'migration_gates/session_counters', exists: true, complete: true,
+      projectId: PROJECT, targetMode: 'production', rulesVersion: 'session-counters-v1',
+      preflightNonEndedLegacyCount: 0,
+      updateTimeGeneration: '1787266359:259328000'
     }
   };
 }
@@ -90,6 +131,7 @@ function argumentsFor(manifestPath, outputPath, overrides = {}) {
     '--manifest', manifestPath,
     '--ruleset', overrides.rulesetName || TARGET,
     '--expect-sha', overrides.expectSha256 || SHA,
+    '--expect-manifest-sha', overrides.expectManifestSha || 'a'.repeat(64),
     '--output', outputPath
   ];
 }
@@ -110,8 +152,10 @@ async function invoke(t, options = {}) {
   const patches = [...(options.patchResponses || [{
     statusCode: 200, body: { name: RELEASE, rulesetName: TARGET }
   }])];
+  let patchCallCount = 0;
   const runtime = {
     environment: options.environment || {},
+    requestTimeoutMs: options.requestTimeoutMs || 20,
     reserveReport(output, initialContents) {
       calls.push({ operation: 'reserve', output, initial: JSON.parse(initialContents) });
       if (options.reusedOutput) throw new Error('Report output already exists.');
@@ -123,6 +167,16 @@ async function invoke(t, options = {}) {
     async acquireAccessToken() {
       tokenCalls += 1;
       return 'test-token';
+    },
+    async readCurrentCommit() {
+      calls.push({ operation: 'read-current-commit' });
+      if (options.currentCommitError) throw options.currentCommitError;
+      return options.currentCommit || currentCommitState();
+    },
+    async readCurrentGateState() {
+      calls.push({ operation: 'read-current-gate-state' });
+      if (options.currentGateError) throw options.currentGateError;
+      return options.currentGateState || currentGateState();
     },
     async getJson(request) {
       calls.push({ ...request });
@@ -137,15 +191,25 @@ async function invoke(t, options = {}) {
     },
     async patchJson(request) {
       calls.push({ ...request });
+      patchCallCount += 1;
+      if ((options.neverSettlePatchNumbers || []).includes(patchCallCount)) {
+        return new Promise(() => {});
+      }
       assert.ok(patches.length > 0, 'unexpected release PATCH');
       return patches.shift();
     },
-    writeLine() {}
+    writeLine(line) {
+      calls.push({ operation: 'write-line', line });
+      if (options.writeLineError) throw options.writeLineError;
+    }
   };
 
-  const result = await adopt.main(
-    argumentsFor(manifestPath, outputPath, options.arguments), runtime
-  );
+  const cliOverrides = {
+    ...(options.arguments || {}),
+    expectManifestSha: options.arguments && options.arguments.expectManifestSha ||
+      sha256(fs.readFileSync(manifestPath))
+  };
+  const result = await adopt.main(argumentsFor(manifestPath, outputPath, cliOverrides), runtime);
   return { calls, outputPath, reports, result, tokenCalls };
 }
 
@@ -177,6 +241,46 @@ test('CLI requires the fixed explicit target Ruleset and source SHA', async () =
     adopt.main(argumentsFor('manifest.json', 'out.json', { expectSha256: '0'.repeat(64) }), runtime),
     /sha/i
   );
+});
+
+test('CLI requires a trusted raw manifest SHA before parsing evidence', async t => {
+  const missingManifestSha = argumentsFor('manifest.json', 'out.json');
+  missingManifestSha.splice(missingManifestSha.indexOf('--expect-manifest-sha'), 2);
+  assert.throws(
+    () => adopt.parseArguments(missingManifestSha),
+    /manifest.*sha/i
+  );
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'adopt-manifest-sha-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const manifestPath = path.join(directory, 'manifest.json');
+  const rawManifest = JSON.stringify(validManifest());
+  fs.writeFileSync(manifestPath, rawManifest, 'utf8');
+  let tokenCalls = 0;
+  const args = argumentsFor(manifestPath, path.join(directory, 'report.json'), {
+    expectManifestSha: '0'.repeat(64)
+  });
+  const result = await adopt.main(args, {
+    environment: {},
+    reserveReport() { return { commit() {} }; },
+    async acquireAccessToken() { tokenCalls += 1; },
+    writeLine() {}
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(tokenCalls, 0);
+  assert.notEqual(sha256(rawManifest), '0'.repeat(64));
+});
+
+test('trusted raw manifest SHA binds an intentionally distinct static commit', async t => {
+  const manifest = validManifest();
+  manifest.release.staticCommit = '1'.repeat(40);
+  const execution = await invoke(t, {
+    manifest,
+    arguments: { expectManifestSha: sha256(JSON.stringify(validManifest())) }
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.tokenCalls, 0);
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
 });
 
 test('production adoption refuses any configured emulator before reserving output', async () => {
@@ -263,6 +367,66 @@ test('all manifest-bound lock identities and current generations are mandatory',
   }
 });
 
+test('live repository identity rejects valid but stale source and hosted-static commits', async t => {
+  const cases = [
+    ['source HEAD', manifest => { manifest.task4.headCommit = '1'.repeat(40); }],
+    ['hosted static revision', manifest => { manifest.release.staticCommit = '2'.repeat(40); }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async t => {
+      const manifest = validManifest();
+      mutate(manifest);
+      const execution = await invoke(t, { manifest });
+      assert.equal(execution.result.status, 'failed');
+      assert.equal(execution.result.phase, 'local-commit-readback');
+      assert.equal(execution.tokenCalls, 0);
+      assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+    });
+  }
+});
+
+test('current gate read failure stops before release mutation', async t => {
+  const execution = await invoke(t, {
+    currentGateError: Object.assign(new Error('read unavailable'), { code: 'ETIMEDOUT' })
+  });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.result.phase, 'current-gate-readback');
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+  assert.equal(execution.calls.some(call => call.url === adopt.API_ROOT + RELEASE), false);
+});
+
+test('every well-formed manifest lock token and generation must match current readback', async t => {
+  const cases = [
+    ['set counter lock ID', manifest => { manifest.locks.setCounters.lockId = '11111111-1111-4111-8111-111111111111'; }],
+    ['set counter generation', manifest => { manifest.locks.setCounters.updateTimeGeneration = '1787384912:204091001'; }],
+    ['teacher access token', manifest => { manifest.locks.teacherAccess.lockToken = '22222222-2222-4222-8222-222222222222'; }],
+    ['teacher access update generation', manifest => { manifest.locks.teacherAccess.updateTimeGeneration = '1787384983:34189001'; }],
+    ['teacher access migration generation', manifest => { manifest.locks.teacherAccess.migrationGeneration = '1787266206:604244001'; }],
+    ['session counter token', manifest => { manifest.locks.sessionCounters.lockToken = '33333333-3333-4333-8333-333333333333'; }],
+    ['session lock generation', manifest => { manifest.locks.sessionCounters.updateTimeGeneration = '1787385018:993634001'; }],
+    ['session gate generation', manifest => { manifest.locks.sessionCounters.gateGeneration = '1787266359:259328001'; }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async t => {
+      const manifest = validManifest();
+      mutate(manifest);
+      const execution = await invoke(t, { manifest });
+      assert.equal(execution.result.status, 'failed');
+      assert.equal(execution.result.phase, 'current-gate-readback');
+      assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+    });
+  }
+});
+
+test('current gate identity or locked/complete state mismatch stops before release mutation', async t => {
+  const state = currentGateState();
+  state.teacherAccess.locked = false;
+  const execution = await invoke(t, { currentGateState: state });
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.result.phase, 'current-gate-readback');
+  assert.equal(execution.calls.some(call => call.method === 'PATCH'), false);
+});
+
 test('an unreadable exact target records allowlisted failure evidence without patching', async t => {
   const execution = await invoke(t, {
     target: {
@@ -338,11 +502,53 @@ test('a failed target PATCH immediately restores and exactly reads back rollback
   });
   const patches = execution.calls.filter(call => call.method === 'PATCH');
   assert.equal(execution.result.status, 'failed-rolled-back');
+  assert.equal(execution.result.targetRulesetReadbackExact, true);
+  assert.equal(execution.result.currentCommitExact, true);
+  assert.equal(execution.result.currentGateStateExact, true);
   assert.equal(execution.result.rollbackReadbackExact, true);
   assert.equal(execution.result.failure.apiStatus, 'UNAVAILABLE');
   assert.equal(JSON.stringify(execution.result).includes('sensitive target patch failure'), false);
   assert.equal(patches.length, 2);
   assert.equal(patches[1].payload.release.rulesetName, ROLLBACK);
+});
+
+test('a never-settling target PATCH times out and restores exact rollback readback', async t => {
+  const attempted = invoke(t, {
+    requestTimeoutMs: 10,
+    neverSettlePatchNumbers: [1],
+    patchResponses: [
+      { statusCode: 200, body: { name: RELEASE, rulesetName: ROLLBACK } }
+    ],
+    releaseResponses: [releaseResponse(QUIESCENCE), releaseResponse(ROLLBACK)]
+  });
+  const execution = await Promise.race([
+    attempted,
+    new Promise(resolve => setTimeout(() => resolve('test-deadline'), 100))
+  ]);
+  assert.notEqual(execution, 'test-deadline', 'target PATCH must have a bounded settlement');
+  assert.equal(execution.result.status, 'failed-rolled-back');
+  assert.equal(execution.result.failure.transportError, 'ETIMEDOUT');
+  assert.equal(execution.result.rollbackReadbackExact, true);
+  assert.equal(execution.calls.filter(call => call.method === 'PATCH').length, 2);
+});
+
+test('a never-settling rollback PATCH times out and still performs rollback readback', async t => {
+  const attempted = invoke(t, {
+    requestTimeoutMs: 10,
+    neverSettlePatchNumbers: [2],
+    patchResponses: [
+      { statusCode: 503, body: { error: { code: 503, status: 'UNAVAILABLE' } } }
+    ],
+    releaseResponses: [releaseResponse(QUIESCENCE), releaseResponse(ROLLBACK)]
+  });
+  const execution = await Promise.race([
+    attempted,
+    new Promise(resolve => setTimeout(() => resolve('test-deadline'), 100))
+  ]);
+  assert.notEqual(execution, 'test-deadline', 'rollback PATCH must have a bounded settlement');
+  assert.equal(execution.result.status, 'failed');
+  assert.equal(execution.result.rollbackFailure.transportError, 'ETIMEDOUT');
+  assert.equal(execution.result.rollbackReadbackExact, true);
 });
 
 test('a target readback mismatch restores and exactly reads back rollback', async t => {
@@ -418,4 +624,22 @@ test('success GETs only exact resources and PATCHes only the release rulesetName
     release: { name: RELEASE, rulesetName: TARGET },
     updateMask: 'rulesetName'
   });
+});
+
+test('stdout failure after success cannot trigger rollback or contradict the durable report', async t => {
+  const execution = await invoke(t, {
+    writeLineError: new Error('stdout closed'),
+    patchResponses: [
+      { statusCode: 200, body: { name: RELEASE, rulesetName: TARGET } },
+      { statusCode: 200, body: { name: RELEASE, rulesetName: ROLLBACK } }
+    ],
+    releaseResponses: [
+      releaseResponse(QUIESCENCE), releaseResponse(TARGET), releaseResponse(ROLLBACK)
+    ]
+  });
+  assert.equal(execution.result.status, 'complete');
+  assert.equal(execution.reports.length, 1);
+  assert.equal(execution.reports[0].status, 'complete');
+  assert.equal(execution.calls.filter(call => call.method === 'PATCH').length, 1);
+  assert.equal(execution.result.rollbackAttempted, false);
 });

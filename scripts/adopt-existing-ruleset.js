@@ -2,6 +2,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
 const { describeRulesApiFailure, failureLine } = require('../rules-api-failure.js');
@@ -19,6 +20,20 @@ const ROLLBACK_RULESET =
   'projects/video-quiz-65798/rulesets/74e79134-8e2f-48cf-a99c-e621915154d4';
 const QUIESCENCE_RULESET =
   'projects/video-quiz-65798/rulesets/9a4258c3-12ed-4ee6-82aa-f596645a4466';
+const REQUEST_TIMEOUT_MS = 30_000;
+const SET_COUNTERS_PATH = 'migration_gates/set_counters';
+const TEACHER_ACCESS_PATH = 'migration_gates/teacher_access_status';
+const SESSION_COUNTERS_LOCK_PATH = 'migration_gates/session_counter_migration';
+const SESSION_COUNTERS_GATE_PATH = 'migration_gates/session_counters';
+const STATIC_ASSET_PATHS = [
+  'index.html', 'firestore-core.js', 'class-planning-core.js', 'editor-draft.js',
+  'editor-history-core.js', 'playlist-core.js', 'public-author-label-core.js',
+  'public-quiz-library-core.js', 'firestore-store.js', 'choice-order-core.js',
+  'image-lightbox-core.js', 'quiz-trigger-core.js', 'quiz-preview-core.js',
+  'teacher-stage.js', 'auth-core.js', 'teacher-email-auth-core.js',
+  'teacher-access-request-core.js', 'teacher-deletion-core.js',
+  'collaboration-trash-core.js'
+];
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const GENERATION_PATTERN = /^[0-9]+:[0-9]+$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -26,7 +41,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 function parseArguments(argv) {
   const options = {
     projectId: '', targetMode: '', manifestPath: '', rulesetName: '',
-    expectSha256: '', outputPath: ''
+    expectSha256: '', expectManifestSha256: '', outputPath: ''
   };
   const fields = new Map([
     ['--project', 'projectId'],
@@ -34,6 +49,7 @@ function parseArguments(argv) {
     ['--manifest', 'manifestPath'],
     ['--ruleset', 'rulesetName'],
     ['--expect-sha', 'expectSha256'],
+    ['--expect-manifest-sha', 'expectManifestSha256'],
     ['--output', 'outputPath']
   ]);
   for (let index = 0; index < argv.length; index += 1) {
@@ -57,6 +73,9 @@ function parseArguments(argv) {
   }
   if (options.expectSha256 !== EXPECTED_SOURCE_SHA) {
     throw new Error('--expect-sha must equal the fixed source SHA-256.');
+  }
+  if (!/^[0-9a-f]{64}$/.test(options.expectManifestSha256)) {
+    throw new Error('--expect-manifest-sha must be an exact lowercase SHA-256.');
   }
   if (!options.outputPath) throw new Error('--output is required.');
   return options;
@@ -121,17 +140,49 @@ function validateSealedManifest(manifest) {
   return manifest;
 }
 
-function readAndValidateSealedManifest(manifestPath) {
-  let manifest;
+function readAndValidateSealedManifest(manifestPath, expectedManifestSha256) {
+  let rawManifest;
   try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    rawManifest = fs.readFileSync(manifestPath);
   } catch (error) {
     throw new Error('Restricted manifest must be readable JSON.', { cause: error });
   }
-  return validateSealedManifest(manifest);
+  const manifestSha256 = crypto.createHash('sha256').update(rawManifest).digest('hex');
+  if (manifestSha256 !== expectedManifestSha256) {
+    throw new Error('Restricted manifest raw SHA-256 does not match the trusted expectation.');
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(rawManifest.toString('utf8'));
+  } catch (error) {
+    throw new Error('Restricted manifest must be readable JSON.', { cause: error });
+  }
+  return { manifest: validateSealedManifest(manifest), manifestSha256 };
 }
 
-function requestJson({ method, url, accessToken, payload }) {
+function timeoutMilliseconds(value) {
+  return Number.isInteger(value) && value > 0 && value <= 120_000
+    ? value : REQUEST_TIMEOUT_MS;
+}
+
+function timeoutError() {
+  const error = new Error('Rules API request timed out.');
+  error.code = 'ETIMEDOUT';
+  return error;
+}
+
+function withTimeout(start, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(timeoutError()), timeoutMilliseconds(timeoutMs));
+    Promise.resolve().then(start).then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
+function runtimeRequest(runtime, dependency, request) {
+  return withTimeout(() => runtime[dependency](request), runtime.requestTimeoutMs);
+}
+
+function requestJson({ method, url, accessToken, payload, timeoutMs }) {
   if (!['GET', 'PATCH'].includes(method)) {
     return Promise.reject(new Error('Existing Ruleset adoption permits GET and PATCH only.'));
   }
@@ -151,6 +202,7 @@ function requestJson({ method, url, accessToken, payload }) {
       headers
     }, response => {
       const chunks = [];
+      response.setTimeout(timeoutMilliseconds(timeoutMs), () => response.destroy(timeoutError()));
       response.on('data', chunk => chunks.push(chunk));
       response.on('error', reject);
       response.on('end', () => {
@@ -167,6 +219,7 @@ function requestJson({ method, url, accessToken, payload }) {
         }
       });
     });
+    request.setTimeout(timeoutMilliseconds(timeoutMs), () => request.destroy(timeoutError()));
     request.on('error', reject);
     request.end(encoded == null ? undefined : encoded);
   });
@@ -212,11 +265,117 @@ function manifestGateGenerations(manifest) {
   };
 }
 
+function readCurrentCommit() {
+  const options = { encoding: 'utf8', timeout: 5_000, windowsHide: true };
+  const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], options).trim();
+  const staticCommit = execFileSync(
+    'git', ['log', '-1', '--format=%H', '--', ...STATIC_ASSET_PATHS], options
+  ).trim();
+  if (!COMMIT_PATTERN.test(sourceCommit) || !COMMIT_PATTERN.test(staticCommit)) {
+    throw new Error('Local Git commit readback is not exact.');
+  }
+  return { sourceCommit, staticCommit };
+}
+
+function snapshotGeneration(snapshot) {
+  const updateTime = snapshot && snapshot.updateTime;
+  if (!updateTime || !Number.isInteger(updateTime.seconds) ||
+      !Number.isInteger(updateTime.nanoseconds)) return '';
+  return String(updateTime.seconds) + ':' + String(updateTime.nanoseconds);
+}
+
+function gateSnapshot(snapshot, path, fields) {
+  if (!snapshot || !snapshot.exists) return { path, exists: false };
+  const data = snapshot.data() || {};
+  const evidence = { path, exists: true };
+  for (const field of fields) evidence[field] = data[field];
+  evidence.updateTimeGeneration = snapshotGeneration(snapshot);
+  return evidence;
+}
+
+async function readCurrentGateState(projectId) {
+  const { applicationDefault, deleteApp, initializeApp } = require('firebase-admin/app');
+  const { getFirestore } = require('firebase-admin/firestore');
+  const app = initializeApp(
+    { credential: applicationDefault(), projectId },
+    'ruleset-adoption-gates-' + crypto.randomUUID()
+  );
+  try {
+    const db = getFirestore(app);
+    const paths = [
+      SET_COUNTERS_PATH, TEACHER_ACCESS_PATH,
+      SESSION_COUNTERS_LOCK_PATH, SESSION_COUNTERS_GATE_PATH
+    ];
+    const snapshots = await db.getAll(...paths.map(value => db.doc(value)));
+    return {
+      setCounters: gateSnapshot(snapshots[0], SET_COUNTERS_PATH, [
+        'locked', 'lockId', 'projectId', 'targetMode'
+      ]),
+      teacherAccess: gateSnapshot(snapshots[1], TEACHER_ACCESS_PATH, [
+        'locked', 'lockToken', 'projectId', 'targetMode',
+        'status', 'strictReady', 'migrationGeneration'
+      ]),
+      sessionCountersLock: gateSnapshot(snapshots[2], SESSION_COUNTERS_LOCK_PATH, [
+        'locked', 'lockToken', 'projectId', 'targetMode'
+      ]),
+      sessionCountersGate: (() => {
+        const gate = gateSnapshot(snapshots[3], SESSION_COUNTERS_GATE_PATH, [
+          'complete', 'projectId', 'environment',
+          'rulesVersion', 'preflightNonEndedLegacyCount'
+        ]);
+        if (gate.exists) {
+          gate.targetMode = gate.environment;
+          delete gate.environment;
+        }
+        return gate;
+      })()
+    };
+  } finally {
+    await deleteApp(app);
+  }
+}
+
+function currentCommitExact(current, manifest) {
+  return exactObject(current) && current.sourceCommit === manifest.task4.headCommit &&
+    current.staticCommit === manifest.release.staticCommit;
+}
+
+function currentGateStateExact(current, manifest) {
+  if (!exactObject(current)) return false;
+  const setCounters = current.setCounters;
+  const teacherAccess = current.teacherAccess;
+  const sessionLock = current.sessionCountersLock;
+  const sessionGate = current.sessionCountersGate;
+  return exactObject(setCounters) && setCounters.path === SET_COUNTERS_PATH &&
+    setCounters.exists === true && setCounters.locked === true &&
+    setCounters.projectId === PROJECT_ID && setCounters.targetMode === TARGET_MODE &&
+    setCounters.lockId === manifest.locks.setCounters.lockId &&
+    setCounters.updateTimeGeneration === manifest.locks.setCounters.updateTimeGeneration &&
+    exactObject(teacherAccess) && teacherAccess.path === TEACHER_ACCESS_PATH &&
+    teacherAccess.exists === true && teacherAccess.locked === true &&
+    teacherAccess.projectId === PROJECT_ID && teacherAccess.targetMode === TARGET_MODE &&
+    teacherAccess.status === 'complete' && teacherAccess.strictReady === true &&
+    teacherAccess.lockToken === manifest.locks.teacherAccess.lockToken &&
+    teacherAccess.updateTimeGeneration === manifest.locks.teacherAccess.updateTimeGeneration &&
+    teacherAccess.migrationGeneration === manifest.locks.teacherAccess.migrationGeneration &&
+    exactObject(sessionLock) && sessionLock.path === SESSION_COUNTERS_LOCK_PATH &&
+    sessionLock.exists === true && sessionLock.locked === true &&
+    sessionLock.projectId === PROJECT_ID && sessionLock.targetMode === TARGET_MODE &&
+    sessionLock.lockToken === manifest.locks.sessionCounters.lockToken &&
+    sessionLock.updateTimeGeneration === manifest.locks.sessionCounters.updateTimeGeneration &&
+    exactObject(sessionGate) && sessionGate.path === SESSION_COUNTERS_GATE_PATH &&
+    sessionGate.exists === true && sessionGate.complete === true &&
+    sessionGate.projectId === PROJECT_ID && sessionGate.targetMode === TARGET_MODE &&
+    sessionGate.rulesVersion === 'session-counters-v1' &&
+    sessionGate.preflightNonEndedLegacyCount === 0 &&
+    sessionGate.updateTimeGeneration === manifest.locks.sessionCounters.gateGeneration;
+}
+
 async function rollbackRelease(runtime, accessToken) {
   let patch = null;
   let patchError = null;
   try {
-    patch = await runtime.patchJson({
+    patch = await runtimeRequest(runtime, 'patchJson', {
       method: 'PATCH',
       url: API_ROOT + RELEASE_NAME,
       accessToken,
@@ -229,7 +388,7 @@ async function rollbackRelease(runtime, accessToken) {
   let readback = null;
   let readbackError = null;
   try {
-    readback = await runtime.getJson({
+    readback = await runtimeRequest(runtime, 'getJson', {
       method: 'GET', url: API_ROOT + RELEASE_NAME, accessToken
     });
   } catch (error) {
@@ -256,10 +415,16 @@ function productionDependencies() {
     environment: process.env,
     reserveReport,
     acquireAccessToken,
+    readCurrentCommit,
+    readCurrentGateState,
     getJson: requestJson,
     patchJson: requestJson,
     writeLine(line) { process.stdout.write(line + '\n'); }
   };
+}
+
+function writeLineSafely(runtime, line) {
+  try { runtime.writeLine(line); } catch (_) { /* durable report remains authoritative */ }
 }
 
 async function main(argv, dependencies) {
@@ -274,6 +439,7 @@ async function main(argv, dependencies) {
     releaseName: RELEASE_NAME,
     rulesetName: TARGET_RULESET,
     sourceSha256: EXPECTED_SOURCE_SHA,
+    expectedManifestSha256: options.expectManifestSha256,
     createAttempted: false,
     releasePatchAttempted: false,
     rollbackAttempted: false,
@@ -287,19 +453,40 @@ async function main(argv, dependencies) {
   );
 
   let manifest = null;
+  let manifestSha256 = '';
   let accessToken = '';
   let phase = 'manifest-validation';
   let releasePatchAttempted = false;
   let releasePatchHttpStatus = 0;
   let releaseReadbackHttpStatus = 0;
+  let targetRulesetReadbackExact = false;
+  let currentCommitReadbackExact = false;
+  let currentGateReadbackExact = false;
   try {
-    manifest = readAndValidateSealedManifest(options.manifestPath);
+    const sealedManifest = readAndValidateSealedManifest(
+      options.manifestPath, options.expectManifestSha256
+    );
+    manifest = sealedManifest.manifest;
+    manifestSha256 = sealedManifest.manifestSha256;
+    phase = 'local-commit-readback';
+    let currentCommit;
+    try {
+      currentCommit = await withTimeout(
+        () => runtime.readCurrentCommit(), runtime.requestTimeoutMs
+      );
+    } catch (error) {
+      throw operationFailure('local-commit-readback-failed', null, error);
+    }
+    if (!currentCommitExact(currentCommit, manifest)) {
+      throw operationFailure('local-commit-readback-mismatch', null, null);
+    }
+    currentCommitReadbackExact = true;
     accessToken = await runtime.acquireAccessToken();
 
     phase = 'target-ruleset-readback';
     let target;
     try {
-      target = await runtime.getJson({
+      target = await runtimeRequest(runtime, 'getJson', {
         method: 'GET', url: API_ROOT + TARGET_RULESET, accessToken
       });
     } catch (error) {
@@ -318,11 +505,26 @@ async function main(argv, dependencies) {
     if (sourceSha256 !== EXPECTED_SOURCE_SHA) {
       throw operationFailure('target-ruleset-source-hash-mismatch', target, null);
     }
+    targetRulesetReadbackExact = true;
+
+    phase = 'current-gate-readback';
+    let currentGates;
+    try {
+      currentGates = await withTimeout(
+        () => runtime.readCurrentGateState(PROJECT_ID), runtime.requestTimeoutMs
+      );
+    } catch (error) {
+      throw operationFailure('current-gate-readback-failed', null, error);
+    }
+    if (!currentGateStateExact(currentGates, manifest)) {
+      throw operationFailure('current-gate-readback-mismatch', null, null);
+    }
+    currentGateReadbackExact = true;
 
     phase = 'immediate-pre-patch-readback';
     let before;
     try {
-      before = await runtime.getJson({
+      before = await runtimeRequest(runtime, 'getJson', {
         method: 'GET', url: API_ROOT + RELEASE_NAME, accessToken
       });
     } catch (error) {
@@ -340,7 +542,7 @@ async function main(argv, dependencies) {
     releasePatchAttempted = true;
     let patched;
     try {
-      patched = await runtime.patchJson({
+      patched = await runtimeRequest(runtime, 'patchJson', {
         method: 'PATCH',
         url: API_ROOT + RELEASE_NAME,
         accessToken,
@@ -357,7 +559,7 @@ async function main(argv, dependencies) {
     phase = 'release-readback';
     let after;
     try {
-      after = await runtime.getJson({
+      after = await runtimeRequest(runtime, 'getJson', {
         method: 'GET', url: API_ROOT + RELEASE_NAME, accessToken
       });
     } catch (error) {
@@ -373,10 +575,13 @@ async function main(argv, dependencies) {
       ...placeholder,
       sourceCommit: manifest.task4.headCommit,
       staticCommit: manifest.release.staticCommit,
+      manifestSha256,
       rollbackRulesetName: manifest.rollback.rulesetName,
       quiescenceRulesetName: manifest.quiescence.rulesetName,
       gateGenerations: manifestGateGenerations(manifest),
-      targetRulesetReadbackExact: true,
+      targetRulesetReadbackExact,
+      currentCommitExact: currentCommitReadbackExact,
+      currentGateStateExact: currentGateReadbackExact,
       releasePatchAttempted: true,
       releasePatchHttpStatus,
       releaseReadbackHttpStatus,
@@ -388,7 +593,7 @@ async function main(argv, dependencies) {
       safeForExistingFlowSmoke: true
     };
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
-    runtime.writeLine([
+    writeLineSafely(runtime, [
       'project=' + PROJECT_ID,
       'status=complete',
       'ruleset=' + TARGET_RULESET,
@@ -408,10 +613,13 @@ async function main(argv, dependencies) {
       ...placeholder,
       sourceCommit: manifest ? manifest.task4.headCommit : null,
       staticCommit: manifest ? manifest.release.staticCommit : null,
+      manifestSha256,
       rollbackRulesetName: manifest ? manifest.rollback.rulesetName : null,
       quiescenceRulesetName: manifest ? manifest.quiescence.rulesetName : null,
       gateGenerations: manifest ? manifestGateGenerations(manifest) : null,
-      targetRulesetReadbackExact: false,
+      targetRulesetReadbackExact,
+      currentCommitExact: currentCommitReadbackExact,
+      currentGateStateExact: currentGateReadbackExact,
       releasePatchAttempted,
       releasePatchHttpStatus,
       releaseReadbackHttpStatus,
@@ -429,7 +637,7 @@ async function main(argv, dependencies) {
       safeForExistingFlowSmoke: false
     };
     await reservation.commit(JSON.stringify(report, null, 2) + '\n');
-    runtime.writeLine([
+    writeLineSafely(runtime, [
       'project=' + PROJECT_ID,
       'status=' + report.status,
       'phase=' + phase,
@@ -464,6 +672,8 @@ module.exports = {
   parseArguments,
   patchPayload,
   productionDependencies,
+  readCurrentCommit,
+  readCurrentGateState,
   readAndValidateSealedManifest,
   requestJson,
   validateProductionEnvironment,
