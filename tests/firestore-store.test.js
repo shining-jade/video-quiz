@@ -6692,10 +6692,10 @@ test('close reuses and awaits the in-flight grade promise before persisting the 
   await Promise.resolve();
   await Promise.resolve();
 
-  assert.deepEqual(order, ['grade-start']);
+  assert.deepEqual(order, ['play', 'grade-start']);
   resolveGrade();
   await Promise.all([firstGrade, secondGrade, closing]);
-  assert.deepEqual(order, ['grade-start', 'grade-end', 'board', 'play', 'live-close']);
+  assert.deepEqual(order, ['play', 'grade-start', 'grade-end', 'board', 'live-close']);
 });
 
 test('grade failure keeps the frozen question and queue retryable until grading succeeds', async () => {
@@ -9825,7 +9825,8 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
   await context.plCloseQuestion();
 
   assert.equal(calls.filter(call => call === 'board').length, 1);
-  assert.equal(calls[2], 'play');
+  assert.equal(calls[0], 'play');
+  assert.equal(calls[1], 'freeze');
   assert.deepEqual(clone(calls[3]), ['live', 'session-a', { q: 0, openedAt: undefined }]);
 });
 
@@ -14240,7 +14241,7 @@ test('계속 재생은 overlay를 가역적으로 숨긴 뒤 player 시작을 �
     },
     FirestoreCore: core,
     store: {
-      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async freezeLive() { order.push('freeze'); return true; }, async getResponses() { return {}; },
       async getGrades() { return {}; }, async closeLive() { return true; }
     },
     async plGradeCurrentResponses() {}, async plPushBoard() {},
@@ -14257,6 +14258,7 @@ test('계속 재생은 overlay를 가역적으로 숨긴 뒤 player 시작을 �
   assert.ok(order.indexOf('class:quiz-open') >= 0);
   assert.ok(order.indexOf('overlay') < order.indexOf('play'));
   assert.ok(order.indexOf('class:quiz-open') < order.indexOf('play'));
+  assert.ok(order.indexOf('play') < order.indexOf('freeze'));
 });
 
 test('계속 재생이 첫 시도에 실패하면 live·overlay·open 상태를 보존하고 다음 시도에서만 완료한다', async () => {

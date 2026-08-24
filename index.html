@@ -7902,27 +7902,10 @@ function plCloseQuestion() {
   state.closeError = '';
 
   const run = async () => {
-    const frozen = await store.freezeLive(state.sessionId, identity);
-    if (!frozen) return false;
-    if (!stillCurrent()) return false;
-    state.live = Object.assign({}, state.live, { accepting: false });
-    const [responseDocs, gradeDocs] = await Promise.all([
-      store.getResponses(state.sessionId),
-      store.getGrades(state.sessionId)
-    ]);
-    if (!stillCurrent()) return false;
-    state.responseDocs = responseDocs || {};
-    state.gradeDocs = gradeDocs || {};
-    state.responses = FirestoreCore.responseDocsToQuestionMaps(
-      state.responseDocs, state.gradeDocs
-    );
-    await plGradeCurrentResponses(state, questionIndex);
-    if (!stillCurrent()) return false;
-    await plPushBoard();
-    if (!stillCurrent()) return false;
     const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
     if (!hasQueuedFollowup) {
-      // 재생 probe 동안 overlay를 가역적으로 숨겨 실제 재생 frame과 퀴즈가 겹치지 않게 한다.
+      // playVideo는 클릭의 사용자 활성화가 살아 있는 첫 동기 구간에 호출해야 한다.
+      // Firestore 작업을 먼저 await하면 YouTube가 autoplay로 판단해 명령을 무시할 수 있다.
       if (typeof plSetQuizOpen === 'function') {
         plSetQuizOpen(false);
         flight.overlayHidden = true;
@@ -7945,6 +7928,24 @@ function plCloseQuestion() {
         return false;
       }
     }
+    const frozen = await store.freezeLive(state.sessionId, identity);
+    if (!frozen) return false;
+    if (!stillCurrent()) return false;
+    state.live = Object.assign({}, state.live, { accepting: false });
+    const [responseDocs, gradeDocs] = await Promise.all([
+      store.getResponses(state.sessionId),
+      store.getGrades(state.sessionId)
+    ]);
+    if (!stillCurrent()) return false;
+    state.responseDocs = responseDocs || {};
+    state.gradeDocs = gradeDocs || {};
+    state.responses = FirestoreCore.responseDocsToQuestionMaps(
+      state.responseDocs, state.gradeDocs
+    );
+    await plGradeCurrentResponses(state, questionIndex);
+    if (!stillCurrent()) return false;
+    await plPushBoard();
+    if (!stillCurrent()) return false;
     const closed = await store.closeLive(state.sessionId, identity);
     if (!closed) {
       rollbackContinuePlayback();
@@ -7980,6 +7981,9 @@ function plCloseQuestion() {
     return true;
   };
 
+  // run의 첫 동기 구간에서 사용자 클릭 활성화를 보존해 playVideo를 호출한다.
+  // 따라서 stale 검사가 이 flight를 현재 작업으로 볼 수 있도록 먼저 등록한다.
+  state.closeFlight = flight;
   flight.promise = run().catch(error => {
     rollbackContinuePlayback();
     if (pl === state && Number(state.live && state.live.q) === questionIndex) {
@@ -7990,7 +7994,6 @@ function plCloseQuestion() {
     if (pl === state && state.closeFlight === flight) state.closeFlight = null;
     if (pl === state && typeof plRenderOverlay === 'function') plRenderOverlay();
   });
-  state.closeFlight = flight;
   if (typeof plRenderOverlay === 'function') plRenderOverlay();
   return flight.promise;
 }
