@@ -497,7 +497,7 @@ body.stage-fallback-open { overflow: hidden; }
 }
 #pl-stage:fullscreen #pl-quiz-timeline,
 #pl-stage.fullscreen-fallback #pl-quiz-timeline {
-  width: min(92vw, calc(92vh * 16 / 9)); margin-left: auto; margin-right: auto; flex: none;
+  width: var(--pl-player-width); margin-left: auto; margin-right: auto; flex: none;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -6212,7 +6212,7 @@ function renderPlayIntro() {
           ? '<button class="btn primary lg" onclick="plOpenClassPlanDialog()">🚀 우리 반 시작하기</button>'
           : '<div class="field" style="max-width:420px;margin:0 auto 14px;text-align:left">' +
               '<label class="f" for="pl-label">반 이름 (선택)</label>' +
-              '<input type="text" id="pl-label" maxlength="80" placeholder="예) 2학년 3반" value="' + esc(lsGet('vq_last_label')) + '"></div>' +
+              '<input type="text" id="pl-label" maxlength="80" placeholder="학년반을 입력해 주세요" value=""></div>' +
             '<button class="btn primary lg" onclick="plStartSession()">🚀 우리 반 시작하기</button>') +
         '<dialog id="pl-plan-dialog" style="width:min(92vw,560px);border:0;border-radius:14px;padding:0;box-shadow:var(--shadow)">' +
           '<form style="padding:22px" onsubmit="plConfirmClassPlan(event)">' +
@@ -7564,7 +7564,6 @@ function plRenderCompletion() {
     '<p>' + esc(pl.set.title) + '의 플레이리스트를 모두 재생했습니다.<br>학생 응답과 순위는 그대로 유지됩니다.</p>' +
     '<div class="ov-actions">' +
       '<button class="btn" onclick="plToggleBoard()">🏆 순위 보기</button>' +
-      '<a class="btn" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
       '<button class="btn primary" onclick="plReplayPlaylist()">↺ 처음부터 다시 보기</button>' +
       '<button class="btn ghost" onclick="plEndSession()">진행 종료</button>' +
     '</div>' +
@@ -8392,7 +8391,6 @@ function plRenderOverlay() {
           ? '제출 정리 중…'
           : '▶ 계속 재생') + '</button>' +
       '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
-      '<a class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
     '</div>' +
   '</div>';
 

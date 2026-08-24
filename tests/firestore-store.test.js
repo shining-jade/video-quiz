@@ -7336,7 +7336,7 @@ test('전환 안내는 stage 안에 한 번만 표시되고 남은 초를 갱신
   assert.match(transition.innerHTML, /2초/);
 });
 
-test('완료 메뉴는 순위·대시보드·처음부터 재생·명시적 진행 종료를 제공한다', () => {
+test('완료 메뉴는 대시보드 없이 순위·처음부터 재생·명시적 진행 종료만 제공한다', () => {
   let completion = null;
   const stage = { appendChild(node) { completion = node; } };
   const ctx = loadStageFunctions(['plStageRoot', 'plRenderCompletion'], {
@@ -7358,7 +7358,7 @@ test('완료 메뉴는 순위·대시보드·처음부터 재생·명시적 진�
   assert.equal(completion.id, 'pl-completion');
   assert.match(completion.innerHTML, /모든 영상 재생 완료/);
   assert.match(completion.innerHTML, /onclick="plToggleBoard\(\)"/);
-  assert.match(completion.innerHTML, /href="#\/live\/session-a"/);
+  assert.doesNotMatch(completion.innerHTML, /대시보드|href="#\/live\/session-a"/);
   assert.match(completion.innerHTML, /onclick="plReplayPlaylist\(\)"/);
   assert.match(completion.innerHTML, /onclick="plEndSession\(\)"/);
 });
@@ -7790,6 +7790,8 @@ test('운영 우리 반 시작하기는 수업계획을 보관한 채 반 이름
 
   assert.match(html, /const classPlanningUiEnabled = false/);
   assert.match(html, /classPlanningUiEnabled[\s\S]*?id="pl-label"[\s\S]*?onclick="plStartSession\(\)"/);
+  assert.match(html, /id="pl-label"[^>]*placeholder="학년반을 입력해 주세요"[^>]*value=""/);
+  assert.doesNotMatch(html, /id="pl-label"[^>]*value="[^"]*vq_last_label/);
   assert.match(html, /planningEnabled\s*=\s*\(typeof classPlanningUiEnabled[^;]+classPlanningUiEnabled\)[\s\S]*?&&/);
   // 재개할 때 사용할 계획 UI와 저장 흐름은 삭제하지 않고 보관한다.
   assert.match(html, /id="pl-plan-dialog"/);
@@ -9602,6 +9604,8 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
   assert.match(appended[0].innerHTML, /종료 저장 실패: board offline/);
   assert.match(appended[0].innerHTML, /disabled aria-busy="true"/);
   assert.match(appended[0].innerHTML, /저장 중…/);
+  assert.match(appended[0].innerHTML, /🏆 순위/);
+  assert.doesNotMatch(appended[0].innerHTML, /대시보드|href="#\/live\//);
 });
 
 test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 유지한다', () => {
@@ -9615,6 +9619,7 @@ test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 
   assert.equal(Math.round(portrait.width), 920);
   assert.equal(Math.round(portrait.width / portrait.height * 1000), 1778);
   assert.match(html, /width:\s*var\(--pl-player-width,[^;]+;\s*height:\s*var\(--pl-player-height,/s);
+  assert.match(html, /#pl-stage:fullscreen #pl-quiz-timeline,[\s\S]*?width:\s*var\(--pl-player-width\)/);
   assert.match(html, /#pl-stage:fullscreen \.player-box,[\s\S]*aspect-ratio:\s*16\s*\/\s*9[^}]*flex:\s*none/);
   assert.match(html, /#pl-stage\.quiz-open \.player-box\s*\{[^}]*filter:\s*brightness\(\.42\)/s);
   assert.doesNotMatch(html, /#pl-stage\.quiz-open\s+\.player-box\s*\{[^}]*position:\s*fixed/s);
