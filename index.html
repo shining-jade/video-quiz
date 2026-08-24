@@ -4865,8 +4865,8 @@ function mkPreviewTick() {
     }
     return false;
   }
-  if (!timeReadSucceeded) return false;
   const timedOut = Date.now() - state.startedAt > Math.max(5000, (state.targetTime - state.startAt + 2) * 1000);
+  if (!timeReadSucceeded && !timedOut) return false;
   const next = QuizPreviewCore.advance(state, timedOut ? state.targetTime : currentTime);
   if (next === state) return false;
   mkQuestionPreviewState = next;

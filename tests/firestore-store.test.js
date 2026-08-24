@@ -8614,6 +8614,30 @@ test('흐름형 문항 미리보기는 현재 시간 읽기 실패를 seek 완�
   assert.deepEqual(calls[1], ['close']);
 });
 
+test('흐름형 문항 미리보기는 seek 완료 후 시간 읽기가 실패해도 재생 제한 시간에 문항을 연다', () => {
+  const calls = [];
+  const context = {
+    mkQuestionPreviewState: {
+      phase: 'video', startAt: 305, targetTime: 308,
+      seekPending: false, startedAt: 1000,
+      player: {
+        getCurrentTime() { throw new Error('player clock unavailable'); },
+        pauseVideo() { calls.push(['pause']); }
+      }
+    },
+    mkQuestionPreviewTimer: 2,
+    Date: { now() { return 7001; } },
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    clearInterval() { calls.push(['clear']); },
+    mkPreviewRender() { calls.push(['render']); return true; }
+  };
+  loadStageFunctions(['mkPreviewTick'], context);
+
+  assert.equal(context.mkPreviewTick(), true);
+  assert.equal(context.mkQuestionPreviewState.phase, 'question');
+  assert.deepEqual(calls.slice(-2), [['pause'], ['render']]);
+});
+
 test('흐름형 문항 미리보기는 제출을 채점하고 해설 뒤 계속 재생한다', () => {
   const calls = [];
   const context = {
