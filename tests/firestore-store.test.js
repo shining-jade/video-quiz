@@ -14240,6 +14240,34 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
   assert.equal(context.pl.live.q, -1);
 });
 
+test('열려 있는 현재 문항이 due queue에 중복되면 계속 재생 때 같은 문항을 다시 열지 않는다', async () => {
+  let plays = 0;
+  let opened = 0;
+  const context = {
+    pl: {
+      sessionId: 'session1', live: { q: 0, openedAt: 1, liveToken: 'token', accepting: false },
+      liveGeneration: 0, dueQuestions: [0], fired: [true],
+      flatQuestions: [{ t: 120, videoIndex: 0 }], set: { settings: {} },
+      player: { playVideo() { plays += 1; } }
+    },
+    FirestoreCore: core,
+    store: {
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; }, async closeLive() { return true; }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { opened += 1; return false; },
+    plTick() {}, plRenderOverlay() {}, console
+  };
+  loadStageFunctions(['plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), true);
+  assert.equal(plays, 1);
+  assert.deepEqual(context.pl.dueQuestions, []);
+  assert.equal(opened, 1);
+  assert.equal(context.pl.live.q, -1);
+});
+
 test('계속 재생은 overlay를 가역적으로 숨긴 뒤 player 시작을 확인하고 완료 문항을 확정한다', async () => {
   const order = [];
   const classes = {

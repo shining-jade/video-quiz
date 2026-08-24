@@ -7665,6 +7665,8 @@ function plQueueDueQuestions(prev, now) {
     });
     (result.rearmed || []).forEach(index => { pl.fired[index] = false; });
     (result.enqueue || []).forEach(index => {
+      if (Number(pl.live && pl.live.q) === Number(index) ||
+          Number(pl.pendingLiveQuestion) === Number(index)) return;
       if (pl.dueQuestions.indexOf(index) < 0) pl.dueQuestions.push(index);
     });
     return !!((result.rearmed && result.rearmed.length) || (result.enqueue && result.enqueue.length));
@@ -8002,6 +8004,13 @@ function plCloseQuestion() {
   state.closeError = '';
 
   const run = async () => {
+    // 열린 문항이 tick/seek 경계에서 다시 대기열에 들어왔더라도
+    // 계속 재생 시 같은 문항을 즉시 다시 열지 않는다.
+    if (Array.isArray(state.dueQuestions)) {
+      state.dueQuestions = state.dueQuestions.filter(
+        index => Number(index) !== questionIndex
+      );
+    }
     const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
     if (!hasQueuedFollowup) {
       // playVideo는 클릭의 사용자 활성화가 살아 있는 첫 동기 구간에 호출해야 한다.
