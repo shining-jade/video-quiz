@@ -4852,6 +4852,18 @@ function mkPreviewTick() {
   if (!state || state.phase !== 'video' || !state.player) return false;
   let currentTime = state.startAt;
   try { currentTime = state.player.getCurrentTime(); } catch (e) {}
+  if (state.seekPending) {
+    if (Math.abs(currentTime - state.startAt) <= .75) {
+      state.seekPending = false;
+      state.startedAt = Date.now();
+      return false;
+    }
+    if (Date.now() - state.seekRequestedAt > 7000) {
+      toast('영상이 문항 3초 전 위치로 이동하지 못했습니다. 다시 시도해 주세요.');
+      mkCloseQuestionPreview();
+    }
+    return false;
+  }
   const timedOut = Date.now() - state.startedAt > Math.max(5000, (state.targetTime - state.startAt + 2) * 1000);
   const next = QuizPreviewCore.advance(state, timedOut ? state.targetTime : currentTime);
   if (next === state) return false;
@@ -4894,7 +4906,8 @@ function mkOpenQuestionPreview(videoIndex, questionIndex) {
     const state = QuizPreviewCore.create(question, { startSec: video.startSec });
     mkQuestionPreviewState = Object.assign(state, {
       number, videoIndex, questionIndex, player: mkPlayer,
-      originalTime, originalWasPlaying, startedAt: Date.now()
+      originalTime, originalWasPlaying, startedAt: Date.now(),
+      seekPending: true, seekRequestedAt: Date.now()
     });
     mkPlayer.seekTo(mkQuestionPreviewState.startAt, true);
     mkPlayer.playVideo();

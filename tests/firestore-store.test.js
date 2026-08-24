@@ -8517,6 +8517,76 @@ test('흐름형 문항 미리보기는 3초 전 영상을 재생하고 문항 �
   assert.deepEqual(calls.slice(-2), [['pause'], ['render']]);
 });
 
+test('흐름형 문항 미리보기는 비동기 seek가 3초 전 위치에 도착하기 전에 퀴즈를 열지 않는다', () => {
+  const calls = [];
+  let currentTime = 315;
+  let now = 1000;
+  const player = {
+    seekTo(value) { calls.push(['seek', value]); },
+    playVideo() { calls.push(['play']); },
+    pauseVideo() { calls.push(['pause']); },
+    getCurrentTime() { return currentTime; },
+    getPlayerState() { return 2; }
+  };
+  const context = {
+    mk: { activeVideo: 0, videos: [{ videoId: 'video', startSec: 0, questions: [
+      { type: 'choice', t: 308, text: '질문', choices: ['가', '나'], answer: 1 }
+    ] }] },
+    mkPlayer: player,
+    mkQuestionPreviewState: null,
+    mkQuestionPreviewTimer: null,
+    mkQuestionPreviewRequest: 0,
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    Date: { now() { return now; } },
+    document: { getElementById() { return null; } },
+    mkCloseQuestionPreview() {},
+    mkPreviewRender() { calls.push(['render']); return true; },
+    renderMake() {}, toast(message) { calls.push(['toast', message]); },
+    setTimeout(callback) { callback(); return 1; },
+    setInterval() { return 2; }, clearInterval() {}
+  };
+  loadStageFunctions(['mkOpenQuestionPreview', 'mkPreviewTick'], context);
+
+  assert.equal(context.mkOpenQuestionPreview(0, 0), true);
+  assert.deepEqual(calls.slice(0, 2), [['seek', 305], ['play']]);
+  assert.equal(context.mkQuestionPreviewState.phase, 'video');
+  assert.equal(context.mkPreviewTick(), false);
+  assert.equal(context.mkQuestionPreviewState.phase, 'video');
+  assert.equal(calls.some(call => call[0] === 'render'), false);
+
+  currentTime = 305.2;
+  now = 1400;
+  assert.equal(context.mkPreviewTick(), false);
+  assert.equal(context.mkQuestionPreviewState.phase, 'video');
+
+  currentTime = 308;
+  now = 4400;
+  assert.equal(context.mkPreviewTick(), true);
+  assert.equal(context.mkQuestionPreviewState.phase, 'question');
+  assert.deepEqual(calls.slice(-2), [['pause'], ['render']]);
+});
+
+test('흐름형 문항 미리보기는 3초 전 위치 이동이 지연되면 안내하고 종료한다', () => {
+  const calls = [];
+  const context = {
+    mkQuestionPreviewState: {
+      phase: 'video', startAt: 305, targetTime: 308,
+      seekPending: true, seekRequestedAt: 1000,
+      player: { getCurrentTime() { return 315; } }
+    },
+    mkQuestionPreviewTimer: 2,
+    Date: { now() { return 8001; } },
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    toast(message) { calls.push(['toast', message]); },
+    mkCloseQuestionPreview() { calls.push(['close']); }
+  };
+  loadStageFunctions(['mkPreviewTick'], context);
+
+  assert.equal(context.mkPreviewTick(), false);
+  assert.match(calls[0][1], /3초 전 위치로 이동하지 못했습니다/);
+  assert.deepEqual(calls[1], ['close']);
+});
+
 test('흐름형 문항 미리보기는 제출을 채점하고 해설 뒤 계속 재생한다', () => {
   const calls = [];
   const context = {
