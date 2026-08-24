@@ -118,6 +118,21 @@ test('public quiz library projection core loads after playlist normalization and
   assert.ok(storeIndex < applicationIndex, 'firestore store must load before inline application code');
 });
 
+test('passwordless guest route loads capability dependencies and never uses the teacher route guard', () => {
+  const html = read('index.html');
+  const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
+  const guestCoreIndex = html.indexOf('<script src="guest-quiz-share-core.js"></script>');
+  const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
+  assert.ok(playlistIndex >= 0 && guestCoreIndex > playlistIndex && storeIndex > guestCoreIndex);
+  assert.match(html, /firebase-functions-compat\.js/);
+  assert.match(html, /case 'guest-play':\s*screenGuestPlay/);
+  assert.doesNotMatch(html, /case 'guest-play':\s*requireTeacher/);
+  assert.match(html, /exchangeGuestQuizShare/);
+  assert.match(html, /비로그인 진행 링크/);
+  assert.match(html, /사용할 수 없는 진행 링크입니다\. 만든 분에게 새 링크를 요청해 주세요/);
+  assert.match(html, /case 'play':\s*requireTeacher/);
+});
+
 test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
   const html = read('index.html');
   const inlineScripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
@@ -541,4 +556,17 @@ test('public library release gate documents lifecycle lock indexes legacy audit 
   assert.match(guide, /PUBLIC_AUTHOR_LABEL_PARITY/);
   assert.match(readme, /audit:public-library/);
   assert.match(handoff, /safeToDeployPublicLibrary/);
+});
+
+test('guest run release gates fix provider, deployment, concurrency, redaction, revoke and rollback', () => {
+  const pkg = JSON.parse(read('package.json'));
+  const runbook = read('docs/RELEASE-RUNBOOK.md');
+  assert.match(pkg.scripts['test:guest-functions'], /guest-share-service/);
+  assert.match(pkg.scripts['test:guest'], /guest-quiz-share-core/);
+  for (const marker of [
+    'Anonymous provider', 'exchangeGuestQuizShare', 'asia-northeast3',
+    'enforceAppCheck: false', 'Functions → Rules/indexes → static app',
+    '격리된 브라우저 두 개', '서로 다른 6자리 반 코드',
+    'bearer secret', '새 링크 발급', '기존 세션·학생·응답은 삭제하지 않는다'
+  ]) assert.match(runbook, new RegExp(marker));
 });

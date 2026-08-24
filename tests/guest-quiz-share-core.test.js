@@ -20,14 +20,14 @@ function sampleSet(patch = {}) {
 test('projection allow-lists run data and excludes private ownership', () => {
   const output = Core.projectQuizSet(sampleSet(), {
     v0q0: 'data:image/png;base64,question',
-    v0q0_explain: 'data:image/png;base64,explain',
+    v0q0e: 'data:image/png;base64,explain',
     unrelated: 'data:image/png;base64,private'
   });
   assert.equal(output.parent.title, '심폐소생술');
   assert.equal(output.questions[0].answer, 1);
   assert.equal(output.questions[0].imageKey, 'v0q0');
-  assert.equal(output.questions[0].explainImageKey, 'v0q0_explain');
-  assert.deepEqual(Object.keys(output.images).sort(), ['v0q0', 'v0q0_explain']);
+  assert.equal(output.questions[0].explainImageKey, 'v0q0e');
+  assert.deepEqual(Object.keys(output.images).sort(), ['v0q0', 'v0q0e']);
   assert.equal(JSON.stringify(output).includes('owner@school.kr'), false);
   assert.equal(JSON.stringify(output).includes('owner-secret'), false);
   assert.equal(Object.hasOwn(output.parent, 'ownerUid'), false);

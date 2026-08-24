@@ -92,7 +92,7 @@
     }
     if (Number.isFinite(question.limitSec)) output.limitSec = finite(question.limitSec, 'question limit', 1, 3600);
     if (question.imgUp && typeof images[key] === 'string') output.imageKey = key;
-    const explainKey = key + '_explain';
+    const explainKey = key + 'e';
     if (question.explainImgUp && typeof images[explainKey] === 'string') output.explainImageKey = explainKey;
     return output;
   }

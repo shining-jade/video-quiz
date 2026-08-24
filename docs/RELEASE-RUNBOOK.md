@@ -50,7 +50,7 @@ session counter dry-run 뒤 별도 token으로 join lock/apply를 실행한다. 
 
 ### R8 — composite index 배포와 build 대기
 
-검토된 `firestore.indexes.json`의 `published_quiz_sets(status ASC, updatedAt DESC, __name__ DESC)` index를 배포하고 Firebase가 build 완료를 보고할 때까지 기다린다. building/error이면 다음 단계로 가지 않는다. 이 단계는 Rules 또는 static app 배포가 아니다.
+검토된 `firestore.indexes.json`의 `published_quiz_sets(status ASC, updatedAt DESC, __name__ DESC)` 및 `sessions(sourceOwnerUid ASC, sourceSetId ASC, createdAt DESC, __name__ DESC)` index를 배포하고 Firebase가 build 완료를 보고할 때까지 기다린다. building/error이면 다음 단계로 가지 않는다. 이 단계는 Rules 또는 static app 배포가 아니다.
 
 ### R9 — release manifest 봉인
 
@@ -58,7 +58,7 @@ R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 
 
 ### R10 — strict Firestore Rules 배포
 
-manifest에 기록한 **strict Rules release를 한 번 배포**하고 적용된 Rules hash/release time을 재확인한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다.
+비로그인 진행 링크를 포함한 릴리스에서는 먼저 `asia-northeast3`의 callable `exchangeGuestQuizShare` Cloud Function을 배포하고 정상 호출 증거를 기록한다. 그 다음 manifest에 기록한 **strict Rules release를 한 번 배포**하고 적용된 Rules hash/release time을 재확인한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다. 즉 새 기능의 고정 순서는 **Functions → Rules/indexes → static app**이다.
 
 ### R11 — static app 배포
 
@@ -79,6 +79,15 @@ Password Policy·domain·template를 다시 확인하고, R10~R13 증거가 모�
 ### R15 — controlled smoke와 quiescence 종료
 
 일반 트래픽을 열기 전에 지정된 Google admin, 기존 Google teacher, 새 verified Email/Password teacher와 익명 학생만 허용하는 controlled smoke를 수행한다. 승인 신청/승인, provider collision 안내, 공개 author 비식별 표시, 게시/복사/철회/moderation, 기존 수업 join/end와 console error 0을 확인한다. 성공 증거를 기록한 뒤에만 일반 client 접근과 trusted writers를 연다.
+
+## 비로그인 진행 링크 추가 게이트
+
+- Firebase Authentication의 Anonymous provider가 활성화되어 있어야 한다. 교사용 공유 실행에는 비밀번호나 로그인 화면을 추가하지 않는다.
+- callable 이름은 `exchangeGuestQuizShare`, 배포 region은 `asia-northeast3`이다. 이번 릴리스의 App Check 결정은 `enforceAppCheck: false`이며, App Check 강제 전환은 별도 호환성 릴리스로 진행한다.
+- `pnpm test:guest-functions`, `pnpm test:guest`, `pnpm test:rules`를 모두 통과시키고, 로그·스크린샷·보고서·shell history·지속 테스트 산출물에 실제 bearer secret, `tokenHash`, custom token이 남지 않았는지 확인한다.
+- 서로 격리된 브라우저 두 개에서 같은 링크를 열어 로그인 안내가 없는지 확인한다. 각각 `3학년 1반`, `3학년 2반`으로 시작해 서로 다른 6자리 반 코드가 발급되고, 학생 한 명씩 서로 다른 답을 제출했을 때 각 실행 화면과 원본 교사의 실행 기록에 자기 반 응답만 나타나야 한다.
+- 링크를 해제한 뒤 세 번째 브라우저에는 `사용할 수 없는 진행 링크입니다. 만든 분에게 새 링크를 요청해 주세요.`가 표시되어야 한다. 이미 진행 중인 두 수업은 안전하게 종료할 수 있어야 한다. 새 링크 발급 후 이전 링크가 계속 거부되는지도 확인한다.
+- 롤백은 먼저 새 공유 링크 생성을 UI에서 비활성화하고 Functions/Rules/static을 직전 호환 release로 되돌린다. 기존 세션·학생·응답은 삭제하지 않는다.
 
 ## 롤백
 

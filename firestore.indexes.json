@@ -1,6 +1,16 @@
 {
   "indexes": [
     {
+      "collectionGroup": "sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "sourceOwnerUid", "order": "ASCENDING" },
+        { "fieldPath": "sourceSetId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "published_quiz_sets",
       "queryScope": "COLLECTION",
       "fields": [

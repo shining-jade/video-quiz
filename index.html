@@ -817,11 +817,13 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-functions-compat.js"></script>
 <script src="firestore-core.js"></script>
 <script src="class-planning-core.js"></script>
 <script src="editor-draft.js"></script>
 <script src="editor-history-core.js"></script>
 <script src="playlist-core.js"></script>
+<script src="guest-quiz-share-core.js"></script>
 <script src="public-author-label-core.js"></script>
 <script src="public-quiz-library-core.js"></script>
 <script src="firestore-store.js"></script>
@@ -857,6 +859,8 @@ const firebaseConfig = {
 };
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
+const functions = typeof firebase.app === 'function' && typeof firebase.app().functions === 'function'
+  ? firebase.app().functions('asia-northeast3') : null;
 const store = FirestoreStore.createFirestoreStore(db, firebase.firestore.FieldValue, () => Date.now());
 const SV_TS = firebase.firestore.FieldValue.serverTimestamp();
 
@@ -933,6 +937,7 @@ function esc(s) {
 /* 사생활 보호 모드나 학교 정책으로 저장소가 막혀도 화면이 죽지 않게 감싼다 */
 function lsGet(k, dflt) { try { const v = localStorage.getItem(k); return v === null ? (dflt || '') : v; } catch (e) { return dflt || ''; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
 function ssGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
 function ssSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) {} }
 function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
@@ -2666,6 +2671,8 @@ function router() {
     case 'trash': requireTeacher(screenTrash); break;
     case 'make':  requireTeacher(() => screenMake(arg)); break;
     case 'play':  requireTeacher(() => screenPlay(arg, parsePlayClassPlanRoute(routeQuery))); break;
+    case 'guest-play': screenGuestPlay(arg, routeQuery); break;
+    case 'guest-history': requireTeacher(() => screenGuestRunHistory(arg)); break;
     case 'join':  screenJoin(arg); break;
     case 'live':  requireTeacher(() => screenDashboard(arg)); break;
     case 'admin': requireAdmin(screenAdmin); break;
@@ -3429,14 +3436,21 @@ function screenSetList() {
     const checks = state.all.map(s => {
       if (s.ownerUid && teacherState && s.ownerUid === teacherState.uid && store.getOwnedPublicationStatus) {
         s.publicationStatus = 'checking';
-        return store.getOwnedPublicationStatus(s.id).then(status => {
+        s.guestShareStatus = 'checking';
+        const publicationCheck = store.getOwnedPublicationStatus(s.id).then(status => {
           applyOwnedPublicationStatus(s, status);
-          return s;
         }).catch(() => {
           s.publicationStatus = 'unknown';
           s.publicationRevision = '';
-          return s;
         });
+        const guestCheck = store.getOwnedGuestQuizShare
+          ? store.getOwnedGuestQuizShare(s.id, teacherState).then(share => {
+              s.guestShareStatus = share ? share.status : 'none';
+              s.guestShareId = share && share.shareId || '';
+              s.guestShareRevision = share && share.revision || 0;
+            }).catch(() => { s.guestShareStatus = 'unknown'; })
+          : Promise.resolve().then(() => { s.guestShareStatus = 'unknown'; });
+        return Promise.all([publicationCheck, guestCheck]).then(() => s);
       }
       if (!s.ownerUid || !teacherState || !store.canEditQuizSet) return Promise.resolve(s);
       return store.canEditQuizSet(s.id, teacherState).then(ok => { s.isCollaborator = !!ok; return s; }).catch(() => s);
@@ -3509,6 +3523,15 @@ function setListRow(s) {
   const publicationStatus = owner && ['published', 'moderated', 'checking', 'unknown'].includes(s.publicationStatus)
     ? s.publicationStatus : 'private';
   const publicationBusy = !!s.publicationBusy;
+  const guestShareBusy = !!s.guestShareBusy;
+  const guestShareAction = owner
+    ? '<button class="btn sm ghost" onclick="copyGuestRunLink(\'' + esc(s.id) + '\')"' +
+      (guestShareBusy ? ' disabled' : '') + '>🔗 비로그인 진행 링크</button>' +
+      (s.guestShareStatus === 'active'
+        ? '<button class="btn sm danger" onclick="revokeGuestRunLink(\'' + esc(s.id) + '\')"' +
+          (guestShareBusy ? ' disabled' : '') + '>공유 링크 해제</button>' : '')
+      + '<button class="btn sm ghost" onclick="go(\'guest-history/' + esc(s.id) + '\')">실행 기록</button>'
+    : '';
   const publicationBadge = owner
     ? (publicationStatus === 'published'
       ? '<span class="tag ok" style="margin-right:6px">공개 중</span>'
@@ -3548,14 +3571,14 @@ function setListRow(s) {
       ? (owner ? '<button class="btn sm" onclick="setArchive(\'' + esc(s.id) + '\', false)">↩ 다시 표시</button>' :
           startAndCopy + '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
           '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')">📤 파일</button>' +
-          '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>')
+          '')
       : startAndCopy +
         '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
         (collaborationEnabled
           ? (owner ? '<button class="btn sm" onclick="openCollaboratorDialog(\'' + esc(s.id) + '\')">👥 공동 편집자</button>' : '<span class="tag ok" title="공동 편집 권한">공동 편집</span>')
           : '') +
         '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')" title="다른 프로젝트로 옮기거나 백업할 때">📤 파일</button>' +
-        '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>' +
+        guestShareAction +
         (owner ? publicationAction + '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
           '<button class="btn sm danger" onclick="setMoveToTrash(\'' + esc(s.id) + '\')">🗑 휴지통</button>' : ''))
     : startAndCopy;
@@ -5413,6 +5436,130 @@ function mkExplanationField(q, videoIndex, questionIndex) {
     '</div>';
 }
 
+function guestOwnerTokenKey(ownerUid, shareId) {
+  return 'vq_guest_share_token:' + String(ownerUid || '') + ':' + String(shareId || '');
+}
+
+function guestShareUrl(shareId, token) {
+  return linkTo('guest-play/' + encodeURIComponent(shareId) + '?token=' + encodeURIComponent(token));
+}
+
+async function copyGuestRunLink(setId) {
+  const state = setList;
+  const item = state && state.all.find(value => value.id === setId);
+  const actor = teacherState;
+  if (!state || !item || !AuthCore.isTeacher(actor) || item.ownerUid !== actor.uid || item.guestShareBusy) return;
+  item.guestShareBusy = true;
+  renderSetList();
+  try {
+    let share = await store.getOwnedGuestQuizShare(setId, actor);
+    let token = share && share.status === 'active'
+      ? lsGet(guestOwnerTokenKey(actor.uid, share.shareId)) : '';
+    if (share && share.status === 'active' && !token) {
+      if (!confirm('이 기기에는 기존 링크의 비밀값이 없습니다. 기존 링크를 해제하고 새 링크를 발급할까요?')) return;
+      await store.revokeGuestQuizShare(setId, actor);
+      share = null;
+    }
+    if (!share || share.status !== 'active') {
+      const snapshot = await store.getQuizSetSnapshot(setId);
+      if (!snapshot || !snapshot.setSnapshot) throw new Error('공유할 원본 세트를 찾을 수 없습니다.');
+      token = GuestQuizShareCore.randomToken(32, window.crypto);
+      const tokenHash = await GuestQuizShareCore.sha256Hex(token, window.crypto);
+      const projection = GuestQuizShareCore.projectQuizSet(
+        snapshot.setSnapshot, snapshot.snapshotImages || {}
+      );
+      const shareId = GuestQuizShareCore.randomToken(32, window.crypto);
+      share = await store.createGuestQuizShare(setId, tokenHash, projection, actor, shareId);
+      lsSet(guestOwnerTokenKey(actor.uid, share.shareId), token);
+    }
+    copyText(guestShareUrl(share.shareId, token));
+    item.guestShareStatus = 'active';
+    item.guestShareId = share.shareId;
+    item.guestShareRevision = share.revision;
+  } catch (error) {
+    console.error('비로그인 진행 링크 처리 실패', error && error.code || 'error');
+    alert('비로그인 진행 링크를 만들지 못했습니다: ' + (error && error.message ? error.message : String(error)));
+    item.guestShareStatus = 'unknown';
+  } finally {
+    if (setList === state) {
+      item.guestShareBusy = false;
+      renderSetList();
+    }
+  }
+}
+
+async function revokeGuestRunLink(setId) {
+  const state = setList;
+  const item = state && state.all.find(value => value.id === setId);
+  const actor = teacherState;
+  if (!state || !item || !AuthCore.isTeacher(actor) || item.ownerUid !== actor.uid || item.guestShareBusy) return;
+  if (!confirm('이 비로그인 진행 링크를 해제할까요? 새 수업 시작은 즉시 차단되고 진행 중인 수업은 종료할 수 있습니다.')) return;
+  item.guestShareBusy = true;
+  renderSetList();
+  try {
+    const result = await store.revokeGuestQuizShare(setId, actor);
+    lsDel(guestOwnerTokenKey(actor.uid, result.shareId));
+    item.guestShareStatus = 'revoked';
+    item.guestShareId = result.shareId;
+    toast('비로그인 진행 링크를 해제했습니다');
+  } catch (error) {
+    console.error('비로그인 진행 링크 해제 실패', error && error.code || 'error');
+    alert('공유 링크 해제 실패: ' + (error && error.message ? error.message : String(error)));
+    item.guestShareStatus = 'unknown';
+  } finally {
+    if (setList === state) {
+      item.guestShareBusy = false;
+      renderSetList();
+    }
+  }
+}
+
+function screenGuestRunHistory(setId) {
+  if (!setId) { go('sets'); return; }
+  const actor = teacherState;
+  const request = { cancelled: false };
+  onCleanup(() => { request.cancelled = true; });
+  APP().innerHTML = topbar() + '<div class="wrap"><div class="row" style="align-items:center;margin-bottom:16px">' +
+    '<div><h1>비로그인 실행 기록</h1><p class="sub">같은 공유 세트로 시작한 반도 반 코드별로 따로 표시됩니다.</p></div>' +
+    '<div class="spacer"></div><button class="btn" onclick="go(\'sets\')">세트 목록</button></div>' +
+    '<div id="guest-run-history"><div class="card"><div class="empty">실행 기록을 불러오는 중…</div></div></div></div>';
+  store.listOwnedDerivedSessions(setId, actor).then(sessions => {
+    if (request.cancelled) return;
+    const body = $('#guest-run-history');
+    if (!body) return;
+    if (!sessions.length) {
+      body.innerHTML = '<div class="card"><div class="empty">아직 이 링크로 시작한 수업이 없습니다.</div></div>';
+      return;
+    }
+    body.innerHTML = sessions.map(session => {
+      const count = Number(session.registeredStudentCount || session.studentCount || 0);
+      const status = session.status === 'ended' ? '종료' : session.status === 'aborted' ? '취소' : '진행 중';
+      return '<div class="card" style="margin-bottom:12px"><div class="row" style="align-items:center">' +
+        '<div><h2 style="margin-bottom:5px">' + esc(session.label || '이름 없는 반') + '</h2>' +
+        '<div class="sub">반 코드 <b class="mono">' + esc(session.code || '-') + '</b> · ' + status +
+        ' · 참여 ' + count + '명 · 공유본 ' + Number(session.sourceRevision || 0) + '판' +
+        (session.createdAt ? ' · ' + esc(fmtDate(session.createdAt)) : '') + '</div></div></div></div>';
+    }).join('');
+  }).catch(error => {
+    if (request.cancelled) return;
+    console.error(error);
+    const body = $('#guest-run-history');
+    if (body) body.innerHTML = '<div class="card"><div class="empty">실행 기록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</div></div>';
+  });
+}
+
+async function refreshActiveGuestRunLinkAfterSave(setId, actor) {
+  if (!store.getOwnedGuestQuizShare || !store.refreshGuestQuizShare) return null;
+  const share = await store.getOwnedGuestQuizShare(setId, actor);
+  if (!share || share.status !== 'active') return null;
+  const snapshot = await store.getQuizSetSnapshot(setId);
+  if (!snapshot || !snapshot.setSnapshot) throw new Error('공유 링크에 반영할 저장본을 찾을 수 없습니다.');
+  const projection = GuestQuizShareCore.projectQuizSet(
+    snapshot.setSnapshot, snapshot.snapshotImages || {}
+  );
+  return store.refreshGuestQuizShare(setId, projection, actor);
+}
+
 function mkToggleExplanation(videoIndex, questionIndex) {
   const q = mk.videos[videoIndex].questions[questionIndex];
   q._explainOpen = !q._explainOpen;
@@ -5992,6 +6139,14 @@ function mkSave(forceNew, options) {
         }
         if (isNew || !state.id || !store.canEditQuizSet) await store.saveOwnedQuizSet(id, data, built.images, teacherState);
         else await store.saveQuizSetWithImages(state.id, data, built.images, teacherState);
+        if (!isNew) {
+          try {
+            await refreshActiveGuestRunLinkAfterSave(id, teacherState);
+          } catch (shareError) {
+            console.error('비로그인 진행 링크 갱신 실패', shareError && shareError.code || 'error');
+            toast('세트는 저장했지만 비로그인 진행 링크 갱신에 실패했습니다. 세트 목록에서 다시 시도해 주세요.');
+          }
+        }
       } catch (e) {
         state.saveProcessedSequence = request.sequence;
         // A queued newer request must still run after any failed write.
@@ -6084,7 +6239,80 @@ function plLoadSelectedClassPlan(state, selection) {
   });
 }
 
-function screenPlay(setId, routeClassPlan) {
+function guestTopbar(extraHTML) {
+  return '<div class="topbar"><a class="brand" href="#/">🎬 영상 <span>퀴즈</span></a>' +
+    '<div class="spacer"></div><span class="tag ok">공유 퀴즈 진행</span>' +
+    (extraHTML || '') + '</div>';
+}
+
+function guestLinkUnavailable(error) {
+  if (error) console.error('guest link unavailable', error && error.code || 'error');
+  const message = '사용할 수 없는 진행 링크입니다. 만든 분에게 새 링크를 요청해 주세요.';
+  APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="card"><div class="empty">' +
+    '<h2 style="margin-bottom:10px">사용할 수 없는 진행 링크입니다.</h2>' +
+    '<p>' + esc(message.replace('사용할 수 없는 진행 링크입니다. ', '')) + '</p></div></div></div>';
+}
+
+async function ensureGuestCapability(route) {
+  const auth = firebase.auth();
+  let current = auth.currentUser;
+  if (current && typeof current.getIdTokenResult === 'function') {
+    const tokenResult = await current.getIdTokenResult();
+    const claims = tokenResult && tokenResult.claims || {};
+    if (GuestQuizShareCore.guestClaimsValid(
+      claims, route.shareId, claims.guestShareRevision, Math.floor(Date.now() / 1000)
+    )) {
+      const cached = {
+        user: current,
+        shareId: route.shareId,
+        revision: claims.guestShareRevision,
+        sourceSetId: lsGet('vq_guest_source_set:' + current.uid + ':' + route.shareId),
+        sourceOwnerUid: lsGet('vq_guest_source_owner:' + current.uid + ':' + route.shareId)
+      };
+      if (cached.sourceSetId && cached.sourceOwnerUid) return cached;
+    }
+  }
+  if (current && !current.isAnonymous) await auth.signOut();
+  current = auth.currentUser;
+  const anonymous = current && current.isAnonymous
+    ? current : (await auth.signInAnonymously()).user;
+  if (!functions) throw new Error('비로그인 진행 서비스를 불러오지 못했습니다.');
+  const callable = functions.httpsCallable('exchangeGuestQuizShare');
+  const response = await callable({ shareId: route.shareId, token: route.token });
+  const capability = response && response.data || {};
+  if (!capability.customToken || capability.shareId !== route.shareId ||
+      !Number.isSafeInteger(capability.revision) || !capability.sourceSetId || !capability.sourceOwnerUid) {
+    throw new Error('guest capability 응답이 유효하지 않습니다.');
+  }
+  const credential = await auth.signInWithCustomToken(capability.customToken);
+  const tokenResult = await credential.user.getIdTokenResult(true);
+  if (!GuestQuizShareCore.guestClaimsValid(
+    tokenResult.claims, route.shareId, capability.revision, Math.floor(Date.now() / 1000)
+  )) throw new Error('guest capability claim이 일치하지 않습니다.');
+  lsSet('vq_guest_source_set:' + credential.user.uid + ':' + route.shareId, capability.sourceSetId);
+  lsSet('vq_guest_source_owner:' + credential.user.uid + ':' + route.shareId, capability.sourceOwnerUid);
+  return { ...capability, user: credential.user };
+}
+
+function screenGuestPlay(shareId, queryString) {
+  const route = GuestQuizShareCore.parseGuestRoute(shareId, queryString);
+  if (route.invalid) { guestLinkUnavailable(); return; }
+  const request = { cancelled: false };
+  onCleanup(() => { request.cancelled = true; });
+  APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="empty">공유받은 퀴즈를 준비하는 중…</div></div>';
+  ensureGuestCapability(route).then(async capability => {
+    if (request.cancelled) return;
+    if (!capability.sourceSetId || !capability.sourceOwnerUid) throw new Error('공유 출처 정보가 없습니다.');
+    const loaded = await store.loadGuestQuizRevision(
+      capability.shareId, capability.revision,
+      { sourceSetId: capability.sourceSetId, sourceOwnerUid: capability.sourceOwnerUid }
+    );
+    if (request.cancelled) return;
+    screenPlay(capability.sourceSetId, null, { ...loaded, guestUser: capability.user });
+  }).catch(error => { if (!request.cancelled) guestLinkUnavailable(error); });
+}
+
+function screenPlay(setId, routeClassPlan, guestLoad) {
   if (!setId) { go('make'); return; }
   pl = {
     setId: setId, set: null,
@@ -6108,7 +6336,9 @@ function screenPlay(setId, routeClassPlan) {
     qrDrag: null,
     previousVolume: 100,
     ytCancels: [],
-    routeClassPlan: (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled) && routeClassPlan ? routeClassPlan : null
+    routeClassPlan: (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled) && routeClassPlan ? routeClassPlan : null,
+    actorType: guestLoad ? 'guest' : 'teacher',
+    guestLoad: guestLoad || null
   };
   const state = pl;
   const fullscreenChange = () => { if (pl === state) plHandleFullscreenChange(); };
@@ -6149,14 +6379,15 @@ function screenPlay(setId, routeClassPlan) {
     if (pl === state) pl = null;
   });
 
-  APP().innerHTML = topbar() + '<div class="wrap"><div class="empty">퀴즈 세트를 불러오는 중…</div></div>';
+  APP().innerHTML = (guestLoad ? guestTopbar() : topbar()) +
+    '<div class="wrap"><div class="empty">퀴즈 세트를 불러오는 중…</div></div>';
 
-  store.getQuizSet(setId).then(async savedSet => {
+  (guestLoad ? Promise.resolve(guestLoad.setSnapshot) : store.getQuizSet(setId)).then(async savedSet => {
     if (pl !== state) return;
     const set = normSet(savedSet);
     const flatQuestions = set ? PlaylistCore.flattenQuestions(set.videos) : [];
     if (!set || !flatQuestions.length) {
-      APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">' +
+      APP().innerHTML = (guestLoad ? guestTopbar() : topbar()) + '<div class="wrap"><div class="card"><div class="empty">' +
         '세트를 찾을 수 없거나 문항이 없습니다.<br>링크가 정확한지 확인해 주세요.<br><br>' +
         '<a class="btn" href="#/make">새 세트 만들기</a></div></div></div>';
       return;
@@ -6183,7 +6414,7 @@ function screenPlay(setId, routeClassPlan) {
   }).catch(e => {
     if (pl !== state) return;
     console.error(e);
-    APP().innerHTML = topbar() + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>';
+    APP().innerHTML = (guestLoad ? guestTopbar() : topbar()) + '<div class="wrap"><div class="card"><div class="empty">불러오기 실패: ' + esc(e.message) + '</div></div></div>';
   });
 }
 
@@ -6191,10 +6422,11 @@ function screenPlay(setId, routeClassPlan) {
 function renderPlayIntro() {
   const s = pl.set;
   const questions = pl.flatQuestions;
-  const setAction = canEditSet(s, teacherState)
+  const guestMode = pl.actorType === 'guest';
+  const setAction = guestMode ? '' : canEditSet(s, teacherState)
     ? '<a class="btn sm ghost" href="#/make/' + esc(pl.setId) + '">세트 편집</a>'
     : '<button class="btn sm" onclick="setDuplicate(\'' + esc(pl.setId) + '\')">⧉ 사본 만들기</button>';
-  APP().innerHTML = topbar(setAction) +
+  APP().innerHTML = (guestMode ? guestTopbar() : topbar(setAction)) +
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">' + esc(s.title) + '</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
@@ -6208,7 +6440,10 @@ function renderPlayIntro() {
         '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
           '누르면 이 반만의 <b>새 반 코드</b>가 발급됩니다.<br>' +
           '다른 선생님이 같은 세트를 동시에 써도 응답은 반 코드별로 따로 저장됩니다.</p>' +
-        ((typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled)
+        (guestMode ? '<div class="notice info" style="max-width:620px;margin:0 auto 16px">' +
+          '로그인 없이 진행됩니다. 이 브라우저의 저장 공간을 지우거나 다른 기기로 옮기면 현재 수업을 다시 제어할 수 없습니다. ' +
+          '아래에서 발급되는 학생 참여 링크만 학생에게 보내 주세요.</div>' : '') +
+        (!guestMode && (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled)
           ? '<button class="btn primary lg" onclick="plOpenClassPlanDialog()">🚀 우리 반 시작하기</button>'
           : '<div class="field" style="max-width:420px;margin:0 auto 14px;text-align:left">' +
               '<label class="f" for="pl-label">반 이름 (선택)</label>' +
@@ -6483,9 +6718,11 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
   let timerId = null;
   let inFlight = false;
   let stopped = false;
-  const isCurrent = () => pl === state && AuthCore.isTeacher(teacherState) &&
-    teacherState.uid === owner.uid && teacherState.email === owner.email &&
-    (authGeneration === null || teacherAuthVersion === authGeneration);
+  const isCurrent = () => pl === state && (state.actorType === 'guest'
+    ? !!firebase.auth().currentUser && firebase.auth().currentUser.uid === owner.uid
+    : AuthCore.isTeacher(teacherState) && teacherState.uid === owner.uid &&
+      teacherState.email === owner.email &&
+      (authGeneration === null || teacherAuthVersion === authGeneration));
   const stop = () => {
     if (stopped) return;
     stopped = true;
@@ -6558,6 +6795,7 @@ function plSessionStartErrorMessage(error) {
 function plStartSession() {
   const state = pl;
   if (!state || state.startingSession) return Promise.resolve();
+  if (state.actorType === 'guest') return plStartGuestSession(state);
   const authState = teacherState;
   const authGeneration = typeof teacherAuthVersion === 'number' ? teacherAuthVersion : null;
   if (!AuthCore.isTeacher(authState)) return Promise.resolve(null);
@@ -6826,6 +7064,64 @@ function plStartSession() {
   }).finally(() => { if (pl === state) state.startingSession = false; });
 }
 
+async function plStartGuestSession(state) {
+  if (!state || pl !== state || state.startingSession || !state.guestLoad) return null;
+  const current = firebase.auth().currentUser;
+  if (!current || current.uid !== state.guestLoad.guestUser.uid) {
+    guestLinkUnavailable(new Error('guest identity changed'));
+    return null;
+  }
+  const labelInput = $('#pl-label');
+  const label = labelInput && typeof labelInput.value === 'string' ? labelInput.value.trim() : '';
+  if (label.length > 80) { alert('반 이름은 80자 이하여야 합니다.'); return null; }
+  state.startingSession = true;
+  const sessionId = rid(12);
+  const allocationToken = rid(24);
+  let code = '';
+  try {
+    const session = store.prepareGuestSession(
+      state.guestLoad, label, { uid: current.uid }, allocationToken
+    );
+    code = await store.startSession(sessionId, session, () => rid(6));
+    if (!code || pl !== state || firebase.auth().currentUser?.uid !== current.uid) {
+      if (code) await store.abortSessionAllocation(sessionId, code, current.uid, allocationToken);
+      return null;
+    }
+    const activated = await store.activateSessionAllocation(
+      sessionId, code, current.uid, allocationToken
+    );
+    if (activated !== true) {
+      await store.abortSessionAllocation(sessionId, code, current.uid, allocationToken);
+      throw new Error('생성된 반 세션을 활성화하지 못했습니다.');
+    }
+    Object.assign(state, {
+      sessionId,
+      code,
+      allocationToken,
+      snapshotVersion: 1,
+      set: state.guestLoad.setSnapshot,
+      videos: state.guestLoad.setSnapshot.videos,
+      flatQuestions: PlaylistCore.flattenQuestions(state.guestLoad.setSnapshot.videos)
+    });
+    Object.entries(state.guestLoad.snapshotImages || {}).forEach(([key, data]) => {
+      imgCache[sessionId + '/' + key] = data;
+    });
+    lsSet('vq_guest_active_session:' + current.uid + ':' + state.guestLoad.shareId, JSON.stringify({
+      sessionId, code, allocationToken, sourceSetId: state.setId
+    }));
+    plStartSessionHeartbeat(state, { uid: current.uid, email: '' }, null, allocationToken);
+    renderPlayRun();
+    return true;
+  } catch (error) {
+    console.error('guest session start failed', error && error.code || 'error');
+    alert(typeof plSessionStartErrorMessage === 'function'
+      ? plSessionStartErrorMessage(error) : '반 시작 실패');
+    return null;
+  } finally {
+    if (pl === state) state.startingSession = false;
+  }
+}
+
 /** 공개가 끝난 자동 채점 문항은 학생 쓰기와 분리해 세션 소유 교사 권한으로 채점한다. */
 function plGradeCurrentResponses(state, requestedQuestionIndex) {
   if (pl !== state || !state.live) return Promise.resolve([]);
@@ -6877,10 +7173,13 @@ function renderPlayRun() {
   const firstVideo = s.videos[0];
   const joinUrl = linkTo('join/' + pl.code);
 
-  APP().innerHTML = topbar(
-      '<a class="btn sm" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
-      '<button class="btn sm ghost" onclick="plEndSession()">진행 종료</button>'
-    ) +
+  const runTopbar = pl.actorType === 'guest'
+    ? guestTopbar('<button class="btn sm ghost" onclick="plEndSession()">진행 종료</button>')
+    : topbar(
+        '<a class="btn sm" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
+        '<button class="btn sm ghost" onclick="plEndSession()">진행 종료</button>'
+      );
+  APP().innerHTML = runTopbar +
     '<div class="wrap wide"><div class="play-layout">' +
 
       '<div>' +
@@ -8152,6 +8451,13 @@ async function plEndSession() {
   }
   pendingAllocationRemove(state.sessionId, state.allocationToken);
   toast('진행을 종료했습니다');
+  if (state.actorType === 'guest') {
+    if (typeof state.stopActivationHeartbeat === 'function') state.stopActivationHeartbeat();
+    APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="card"><div class="empty">' +
+      '<h2 style="margin-bottom:10px">수업 진행을 종료했습니다</h2>' +
+      '<p>학생 응답과 결과는 운영자에게 안전하게 저장되었습니다.</p></div></div></div>';
+    return;
+  }
   go('live/' + state.sessionId);
 }
 

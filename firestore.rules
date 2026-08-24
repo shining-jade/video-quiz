@@ -2186,6 +2186,11 @@ service cloud.firestore {
         data.get('sourceOwnerUid', '') == request.auth.uid;
     }
 
+    function sourceOwnerReadsGuestSession(sessionId) {
+      let path = /databases/$(database)/documents/sessions/$(sessionId);
+      return exists(path) && sourceOwnerReadsGuestSessionData(get(path).data);
+    }
+
     function validGuestSessionCreate() {
       let data = request.resource.data;
       let shareId = data.get('sourceShareId', '');
@@ -3474,6 +3479,9 @@ service cloud.firestore {
           (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
       allow list: if isAdmin() ||
         (isApprovedTeacher() && resource.data.teacherUid == request.auth.uid) ||
+        (isApprovedTeacher() && resource.data.get('sessionActorType', '') == 'guest' &&
+          resource.data.get('sourceOwnerUid', '') == request.auth.uid &&
+          request.query.limit != null && request.query.limit <= 200) ||
           (isStoppedTeacherForSafeEnd() && resource.data.teacherUid == request.auth.uid &&
           resource.data.status in ['allocating', 'active', 'live'] && request.query.limit != null &&
           request.query.limit <= 101);
@@ -3529,6 +3537,7 @@ service cloud.firestore {
 
       match /meta/live {
         allow get: if ownsSessionForSafeDeletionEnd(sessionId) || ownsSession(sessionId) || isAdmin() ||
+          sourceOwnerReadsGuestSession(sessionId) ||
           (isRegisteredStudent(sessionId) &&
             (validLiveData(resource.data) || validEndedLiveData(resource.data)));
         allow list: if isAdmin() || ownsSession(sessionId);
@@ -3542,8 +3551,8 @@ service cloud.firestore {
       }
 
       match /meta/board {
-        allow get: if isAdmin() || ownsSession(sessionId);
-        allow list: if isAdmin() || ownsSession(sessionId);
+        allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
+        allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
@@ -3555,11 +3564,11 @@ service cloud.firestore {
       }
 
       match /students/{studentId} {
-        allow get: if isAdmin() || ownsSession(sessionId) ||
+        allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId) ||
           (anonymousStudent() &&
             studentId == request.auth.uid &&
             (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
-        allow list: if isAdmin() || ownsSession(sessionId);
+        allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create: if sessionCounterMigrationUnlocked() &&
           anonymousStudent() && validStudent(studentId) &&
           existsAfter(/databases/$(database)/documents/sessions/$(sessionId)) &&
@@ -3581,9 +3590,9 @@ service cloud.firestore {
       }
 
       match /responses/{studentId} {
-        allow get: if isAdmin() || ownsSession(sessionId) ||
+        allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId) ||
           (isRegisteredStudent(sessionId) && studentId == request.auth.uid);
-        allow list: if isAdmin() || ownsSession(sessionId);
+        allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create: if isJoinedStudent(sessionId) &&
           sessionIsJoinable(sessionId) &&
           studentId == request.auth.uid &&
@@ -3597,7 +3606,7 @@ service cloud.firestore {
       }
 
       match /grades/{gradeId} {
-        allow get, list: if isAdmin() || ownsSession(sessionId);
+        allow get, list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create: if (isAdmin() || ownsSessionAfter(sessionId)) && validGrade(gradeId);
         allow update: if (isAdmin() || ownsSessionAfter(sessionId)) &&
           validGrade(gradeId) &&
@@ -3608,23 +3617,23 @@ service cloud.firestore {
       }
 
       match /student_scores/{studentId} {
-        allow get: if isAdmin() || ownsSession(sessionId) ||
+        allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId) ||
           (isRegisteredStudent(sessionId) && studentId == request.auth.uid);
-        allow list: if isAdmin() || ownsSession(sessionId);
+        allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId) && validStudentScore(studentId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
 
       match /snapshot/{document} {
-        allow get, list: if isAdmin() || ownsSession(sessionId);
+        allow get, list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
 
       match /snapshot_images/{questionKey} {
-        allow get, list: if isAdmin() || ownsSession(sessionId);
+        allow get, list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow create, update: if ownsSessionAfter(sessionId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;

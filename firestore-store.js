@@ -4392,6 +4392,7 @@
         endSec: video.endSec,
         questions: questions.filter(question => question.videoKey === video.videoKey).map(question => {
           const value = { ...question };
+          value.key = question.questionKey;
           delete value.shareId;
           delete value.revision;
           delete value.schemaVersion;
@@ -4687,6 +4688,22 @@
     async function listSessions() {
       const snapshot = await db.collection('sessions').get();
       return snapshot.docs.map(sessionValue);
+    }
+
+    async function listOwnedDerivedSessions(setId, actor) {
+      const id = canonicalPublicationId(setId, 'setId');
+      const current = actor || {};
+      const source = await db.doc('quiz_sets/' + id).get().then(snapshotValue);
+      requireGuestShareOwner(source, current);
+      const snapshot = await db.collection('sessions')
+        .where('sourceOwnerUid', '==', current.uid)
+        .where('sourceSetId', '==', id)
+        .orderBy('createdAt', 'desc')
+        .limit(200)
+        .get();
+      return snapshot.docs.map(sessionValue).filter(value =>
+        value.sessionActorType === 'guest' && value.sourceOwnerUid === current.uid && value.sourceSetId === id
+      );
     }
 
     async function purgeSessions(sessionIds) {
@@ -5515,6 +5532,7 @@
       setAnswerState,
       gradeAnswer,
       listSessions,
+      listOwnedDerivedSessions,
       purgeSessions,
       getBoard,
       getOwnScore,
