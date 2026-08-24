@@ -3681,6 +3681,58 @@ test('타임라인 문항 시각은 현재 영상의 원본 YouTube 초로 저�
   assert.equal(context.mk.videos[0].questions[0].t, 630);
 });
 
+test('문항 시간 변경은 새 범위로 타임라인 점과 문항 목록 시간을 함께 갱신한다', () => {
+  const input = { value: '' };
+  const bubbleTime = { textContent: '' };
+  const dot = { style: {}, title: '' };
+  const timeline = { querySelectorAll() { return [dot]; } };
+  const context = {
+    mk: { videos: [{ startSec: 0, endSec: null, durationSec: null, questions: [{ t: 700 }] }] },
+    parseTime(value) { return Number(value); },
+    fmtTime(value) { return value === 900 ? '15:00' : String(value); },
+    PlaylistCore: require('../playlist-core.js'),
+    document: {
+      querySelector(selector) {
+        if (selector === '[data-question-time="0-0"]') return input;
+        if (selector === '[data-question-bubble-time="0-0"]') return bubbleTime;
+        if (selector === '[data-timeline-video="0"]') return timeline;
+        return null;
+      }
+    },
+    mkMarkDirty() {}
+  };
+  loadStageFunctions(['mkTimelineDomain', 'mkSetQuestionTime'], context);
+
+  assert.equal(context.mkSetQuestionTime(0, 0, 900), true);
+  assert.equal(context.mk.videos[0].questions[0].t, 900);
+  assert.equal(input.value, '15:00');
+  assert.equal(bubbleTime.textContent, '15:00');
+  assert.equal(dot.style.left, '100%');
+  assert.match(dot.title, /15:00/);
+});
+
+test('문항 시간 실시간 입력은 완성된 시각만 반영하고 입력 문자열을 유지한다', () => {
+  const source = { value: '5:' };
+  const updates = [];
+  const context = {
+    mkSetQuestionTime(videoIndex, questionIndex, value, options) {
+      updates.push([videoIndex, questionIndex, value, options]);
+      return true;
+    }
+  };
+  loadStageFunctions(['mkInputQuestionTime'], context);
+
+  assert.equal(context.mkInputQuestionTime(0, 0, source), false);
+  assert.deepEqual(updates, []);
+
+  source.value = '5:08';
+  assert.equal(context.mkInputQuestionTime(0, 0, source), true);
+  assert.equal(source.value, '5:08');
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0][2], '5:08');
+  assert.equal(updates[0][3].preserveInput, true);
+});
+
 test('종료 시각이 없는 타임라인 드래그는 렌더와 같은 미확정 구간을 원본 초로 역산한다', () => {
   const listeners = {};
   let setTime;

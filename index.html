@@ -4579,7 +4579,8 @@ function renderMake() {
         'ondragover="mkQuestionDragOver(event)" ondragleave="mkQuestionDragLeave(event)" ' +
         'ondrop="mkQuestionDrop(event,' + videoIndex + ',' + questionIndex + ')" ' +
         'onkeydown="mkQuestionBubbleKeydown(event,' + videoIndex + ',' + questionIndex + ')">' +
-        '<b>' + globalQuestionNumber + '</b><span>' + esc(title) + '</span><time>' + esc(fmtTime(q.t)) + '</time></button>';
+        '<b>' + globalQuestionNumber + '</b><span>' + esc(title) + '</span><time data-question-bubble-time="' +
+          videoIndex + '-' + questionIndex + '">' + esc(fmtTime(q.t)) + '</time></button>';
     }).join('');
     const finalDropzone = '<button type="button" class="mk-question-dropzone" ' +
       'data-drop-video="' + videoIndex + '" data-drop-index="' + video.questions.length + '" ' +
@@ -4591,6 +4592,7 @@ function renderMake() {
       '<div class="q-card" id="mk-q-' + videoIndex + '-' + questionIndex + '">' +
         '<div class="q-head"><div class="q-no">' + (questionIndex + 1) + '</div>' +
           '<input type="text" class="time-input mono" data-question-time="' + videoIndex + '-' + questionIndex + '" value="' + esc(fmtTime(q.t)) + '" ' +
+            'oninput="mkInputQuestionTime(' + videoIndex + ',' + questionIndex + ',this)" ' +
             'onchange="mkSetQuestionTime(' + videoIndex + ',' + questionIndex + ',this.value)">' +
           '<button class="btn sm" onclick="mkStamp(' + videoIndex + ',' + questionIndex + ')">📍 현재 시각 찍기</button>' +
           '<button class="btn sm ghost" onclick="mkSeek(' + videoIndex + ',' + questionIndex + ')">↪ 이동</button>' +
@@ -5082,21 +5084,41 @@ function mkSetQuestionTime(videoIndex, questionIndex, value, options) {
   if (!question) return;
   let seconds = typeof value === 'number' ? value : parseTime(value);
   if (!Number.isFinite(seconds)) return;
+  const currentDomain = mkTimelineDomain(video);
+  const hasUpperBound = (video.endSec != null && video.endSec !== '') ||
+    (Number.isFinite(Number(video.durationSec)) && Number(video.durationSec) > 0);
+  const next = Math.round(Math.max(currentDomain.start,
+    hasUpperBound ? Math.min(currentDomain.end, seconds) : seconds));
+  const changed = next !== Number(question.t);
+  if (changed) {
+    question.t = next;
+    if (!(options && options.skipHistory)) mkMarkDirty(options && options.key);
+  }
   const domain = mkTimelineDomain(video);
-  const next = Math.round(Math.max(domain.start, Math.min(domain.end, seconds)));
-  if (next === Number(question.t)) return false;
-  question.t = next;
-  if (!(options && options.skipHistory)) mkMarkDirty(options && options.key);
   if (typeof document !== 'undefined' && document.querySelector) {
     const input = document.querySelector('[data-question-time="' + videoIndex + '-' + questionIndex + '"]');
-    if (input) input.value = fmtTime(question.t);
+    if (input && !(options && options.preserveInput)) input.value = fmtTime(question.t);
+    const bubbleTime = document.querySelector('[data-question-bubble-time="' + videoIndex + '-' + questionIndex + '"]');
+    if (bubbleTime) bubbleTime.textContent = fmtTime(question.t);
     const timeline = document.querySelector('[data-timeline-video="' + videoIndex + '"]');
     if (timeline) {
       const dot = timeline.querySelectorAll('.mk-q-dot')[questionIndex];
-      if (dot) dot.style.left = (PlaylistCore.timelineRatio(question.t, domain.start, domain.end) * 100) + '%';
+      if (dot) {
+        dot.style.left = (PlaylistCore.timelineRatio(question.t, domain.start, domain.end) * 100) + '%';
+        dot.title = (questionIndex + 1) + '번 · ' + fmtTime(question.t);
+      }
     }
   }
-  return true;
+  return changed;
+}
+
+function mkInputQuestionTime(videoIndex, questionIndex, source) {
+  const value = String(source && source.value || '').trim();
+  if (!/^\d{1,2}:\d{2}(?::\d{2})?$/.test(value)) return false;
+  return mkSetQuestionTime(videoIndex, questionIndex, value, {
+    preserveInput: true,
+    key: 'question-time:' + videoIndex + '-' + questionIndex
+  });
 }
 
 function mkStartQuestionDrag(event, videoIndex, questionIndex) {
