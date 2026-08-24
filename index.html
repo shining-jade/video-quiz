@@ -4351,7 +4351,10 @@ function mkRefreshVideoTiming(videoIndex) {
   const timeline = document.querySelector('[data-timeline-video="' + videoIndex + '"]');
   if (timeline) Array.from(timeline.querySelectorAll('.mk-q-dot')).forEach((dot, questionIndex) => {
     const q = video.questions[questionIndex];
-    if (q) dot.style.left = (PlaylistCore.timelineRatio(q.t, domain.start, domain.end) * 100) + '%';
+    if (q) {
+      dot.style.left = (PlaylistCore.timelineRatio(q.t, domain.start, domain.end) * 100) + '%';
+      dot.title = (questionIndex + 1) + '번 · ' + fmtTime(q.t);
+    }
   });
 }
 
@@ -5096,6 +5099,7 @@ function mkSetQuestionTime(videoIndex, questionIndex, value, options) {
   }
   const domain = mkTimelineDomain(video);
   if (typeof document !== 'undefined' && document.querySelector) {
+    if (typeof mkRefreshVideoTiming === 'function') mkRefreshVideoTiming(videoIndex);
     const input = document.querySelector('[data-question-time="' + videoIndex + '-' + questionIndex + '"]');
     if (input && !(options && options.preserveInput)) input.value = fmtTime(question.t);
     const bubbleTime = document.querySelector('[data-question-bubble-time="' + videoIndex + '-' + questionIndex + '"]');

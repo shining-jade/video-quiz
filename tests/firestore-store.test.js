@@ -3684,31 +3684,40 @@ test('타임라인 문항 시각은 현재 영상의 원본 YouTube 초로 저�
 test('문항 시간 변경은 새 범위로 타임라인 점과 문항 목록 시간을 함께 갱신한다', () => {
   const input = { value: '' };
   const bubbleTime = { textContent: '' };
-  const dot = { style: {}, title: '' };
-  const timeline = { querySelectorAll() { return [dot]; } };
+  const dots = [{ style: {}, title: '' }, { style: {}, title: '' }];
+  const timeline = { querySelectorAll() { return dots; } };
+  const startSlider = { max: '', value: '' };
+  const endSlider = { max: '', value: '' };
   const context = {
-    mk: { videos: [{ startSec: 0, endSec: null, durationSec: null, questions: [{ t: 700 }] }] },
+    mk: { videos: [{ startSec: 0, endSec: null, durationSec: null, questions: [{ t: 300 }, { t: 600 }] }] },
     parseTime(value) { return Number(value); },
-    fmtTime(value) { return value === 900 ? '15:00' : String(value); },
+    fmtTime(value) { return value === 900 ? '15:00' : value === 300 ? '5:00' : String(value); },
     PlaylistCore: require('../playlist-core.js'),
     document: {
       querySelector(selector) {
-        if (selector === '[data-question-time="0-0"]') return input;
-        if (selector === '[data-question-bubble-time="0-0"]') return bubbleTime;
+        if (selector === '[data-question-time="0-1"]') return input;
+        if (selector === '[data-question-bubble-time="0-1"]') return bubbleTime;
         if (selector === '[data-timeline-video="0"]') return timeline;
+        if (selector === '[data-range-slider="0-start"]') return startSlider;
+        if (selector === '[data-range-slider="0-end"]') return endSlider;
         return null;
       }
     },
     mkMarkDirty() {}
   };
-  loadStageFunctions(['mkTimelineDomain', 'mkSetQuestionTime'], context);
+  loadStageFunctions(['mkTimelineDomain', 'mkRefreshVideoTiming', 'mkSetQuestionTime'], context);
 
-  assert.equal(context.mkSetQuestionTime(0, 0, 900), true);
-  assert.equal(context.mk.videos[0].questions[0].t, 900);
+  assert.equal(context.mkSetQuestionTime(0, 1, 900), true);
+  assert.equal(context.mk.videos[0].questions[1].t, 900);
   assert.equal(input.value, '15:00');
   assert.equal(bubbleTime.textContent, '15:00');
-  assert.equal(dot.style.left, '100%');
-  assert.match(dot.title, /15:00/);
+  assert.ok(Math.abs(parseFloat(dots[0].style.left) - (100 / 3)) < 0.001);
+  assert.equal(dots[1].style.left, '100%');
+  assert.match(dots[0].title, /5:00/);
+  assert.match(dots[1].title, /15:00/);
+  assert.equal(startSlider.max, 900);
+  assert.equal(endSlider.max, 900);
+  assert.equal(endSlider.value, 900);
 });
 
 test('문항 시간 실시간 입력은 완성된 시각만 반영하고 입력 문자열을 유지한다', () => {
