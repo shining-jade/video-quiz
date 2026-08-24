@@ -2620,6 +2620,8 @@ function screenHome() {
     return;
   }
   const canShowTeacherDashboard = AuthCore.isTeacher(teacherState);
+  const canShowClassPlanningDashboard = canShowTeacherDashboard &&
+    (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled);
   const publicLibraryLink = canShowTeacherDashboard
     ? '<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a>' : '';
   APP().innerHTML = topbar(publicLibraryLink) + '<div class="wrap wide">' +
@@ -2641,7 +2643,7 @@ function screenHome() {
         '<div class="ico">🔐</div><h3>관리자 통합 조회</h3>' +
         '<p>전체 반의 응답과 점수를 학년·반·번호별로 모아서 봅니다. 승인된 교사 관리자 계정이 필요합니다.</p></a>' +
     '</div>' +
-    (canShowTeacherDashboard
+    (canShowClassPlanningDashboard
       ? '<section id="teacher-dashboard" class="teacher-dashboard card" aria-live="polite"><div class="empty">오늘의 수업 현황을 불러오는 중…</div></section>'
       : '') +
     (canShowTeacherDashboard && teacherState.role === 'teacher'
@@ -2658,7 +2660,7 @@ function screenHome() {
       '</ol>' +
     '</div>' +
   '</div>';
-  if (canShowTeacherDashboard && typeof startTeacherDashboard === 'function') {
+  if (canShowClassPlanningDashboard && typeof startTeacherDashboard === 'function') {
     startTeacherDashboard(teacherState);
   } else if (typeof stopTeacherDashboard === 'function') {
     stopTeacherDashboard();
@@ -2687,6 +2689,10 @@ function clearTeacherDashboard() {
 function renderTeacherDashboard(plans, identity, isAdmin, ownPlans) {
   const panel = document.getElementById('teacher-dashboard');
   if (!panel) return false;
+  if (typeof classPlanningUiEnabled !== 'undefined' && !classPlanningUiEnabled) {
+    panel.innerHTML = '';
+    return false;
+  }
   const escape = value => typeof esc === 'function' ? esc(value) : String(value == null ? '' : value)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .split('"').join('&quot;').split("'").join('&#39;');
@@ -2748,6 +2754,7 @@ function renderTeacherDashboard(plans, identity, isAdmin, ownPlans) {
 }
 
 function teacherDashboardPlanAction(planId, action) {
+  if (typeof classPlanningUiEnabled !== 'undefined' && !classPlanningUiEnabled) return false;
   const state = teacherDashboard;
   if (!state || state.stopped || !state.isCurrent || !state.isCurrent()) return false;
   const own = state.ownPlans && state.ownPlans[planId];
@@ -2761,6 +2768,12 @@ function teacherDashboardPlanAction(planId, action) {
 }
 
 function startTeacherDashboard(identity) {
+  if (typeof classPlanningUiEnabled !== 'undefined' && !classPlanningUiEnabled) {
+    stopTeacherDashboard();
+    const disabledPanel = document.getElementById('teacher-dashboard');
+    if (disabledPanel) disabledPanel.innerHTML = '';
+    return Promise.resolve(false);
+  }
   const panel = document.getElementById('teacher-dashboard');
   const stateIdentity = identity || teacherState;
   if (!panel || !AuthCore.isTeacher(teacherState) || !stateIdentity ||
@@ -6013,7 +6026,7 @@ function screenPlay(setId, routeClassPlan) {
     qrDrag: null,
     previousVolume: 100,
     ytCancels: [],
-    routeClassPlan: routeClassPlan || null
+    routeClassPlan: (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled) && routeClassPlan ? routeClassPlan : null
   };
   const state = pl;
   const fullscreenChange = () => { if (pl === state) plHandleFullscreenChange(); };

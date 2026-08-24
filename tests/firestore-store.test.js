@@ -15141,6 +15141,40 @@ test('teacher dashboard shows actions only for the caller own planned public row
   assert.deepEqual(routes, ['play/set-own?plan=own&revision=4&mode=edit']);
 });
 
+test('production class-planning stop skips dashboard reads and blocks dashboard and direct-route entry points', async () => {
+  const panel = { innerHTML: 'loading', isConnected: true };
+  let reads = 0;
+  const routes = [];
+  const context = {
+    classPlanningUiEnabled: false,
+    teacherDashboard: {
+      stopped: false, isCurrent() { return true; },
+      ownPlans: { own: { planId: 'own', revision: 1, status: 'planned' } },
+      publicPlans: { own: { planId: 'own', setId: 'set-own', status: 'planned' } }
+    },
+    teacherAuthVersion: 1,
+    teacherState: { uid: 'teacher-a', email: 'teacher-a@school.kr', role: 'teacher', status: 'teacher' },
+    location: { hash: '#/' }, AuthCore: require('../auth-core.js'),
+    document: { getElementById(id) { return id === 'teacher-dashboard' ? panel : null; } },
+    store: {
+      async listPublicPlans() { reads += 1; return {}; },
+      async listOwnClassPlans() { reads += 1; return {}; }
+    },
+    go(route) { routes.push(route); }
+  };
+  loadStageFunctions(['stopTeacherDashboard', 'startTeacherDashboard', 'teacherDashboardPlanAction'], context);
+
+  assert.equal(await context.startTeacherDashboard(context.teacherState), false);
+  assert.equal(reads, 0);
+  assert.equal(context.teacherDashboardPlanAction('own', 'edit'), false);
+  assert.deepEqual(routes, []);
+
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(html, /const canShowClassPlanningDashboard = canShowTeacherDashboard &&/);
+  assert.match(html, /\(canShowClassPlanningDashboard\s*\? '<section id="teacher-dashboard"/);
+  assert.match(html, /routeClassPlan:\s*\(typeof classPlanningUiEnabled === 'undefined' \|\| classPlanningUiEnabled\)\s*&& routeClassPlan\s*\? routeClassPlan : null/);
+});
+
 test('own class plan direct read returns the exact current owner plan and rejects a mismatched identity', async () => {
   const pair = storedClassPlanPair({ revision: 7 });
   const fake = makeFirestoreFake({
