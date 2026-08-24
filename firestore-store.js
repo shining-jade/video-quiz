@@ -4634,7 +4634,7 @@
       return updateCurrentLive(
         sessionId,
         expectedLive,
-        { revealed: true, publicAnswer: answer },
+        { accepting: false, revealed: true, publicAnswer: answer },
         { merge: true }
       );
     }

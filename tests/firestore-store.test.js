@@ -5862,6 +5862,7 @@ test('정답 공개는 publicAnswer를 병합해 openedAt Timestamp를 그대로
   assert.equal(live.liveToken, 'live-q2');
   assert.equal(live.openedAt.toMillis(), 12_345);
   assert.equal(live.revealed, true);
+  assert.equal(live.accepting, false);
   assert.equal(live.limitSec, 30);
   assert.deepEqual(live.publicAnswer, { answer: 1, explain: '해설' });
 });
@@ -14430,6 +14431,31 @@ test('계속 재생 명령 뒤에도 YouTube가 멈춰 있으면 live를 완료�
 
   assert.equal(result.ok, false);
   assert.match(result.error.message, /재생/);
+});
+
+test('지금 공개로 제출이 이미 마감되면 원래 grace 시각 전에도 계속 재생한다', async () => {
+  let closed = 0;
+  const context = {
+    pl: {
+      sessionId: 'session1',
+      live: { q: 0, openedAt: 1, liveToken: 'token', accepting: false, submitGraceUntil: 99_000 },
+      liveGeneration: 0, dueQuestions: [], fired: [true],
+      flatQuestions: [{ t: 10, videoIndex: 0 }], set: { settings: {} },
+      player: { playVideo() {} }
+    },
+    serverNow() { return 1_000; },
+    FirestoreCore: core,
+    store: {
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; }, async closeLive() { closed += 1; return true; }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; }, plTick() {}, plRenderOverlay() {}, console
+  };
+  loadStageFunctions(['plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), true);
+  assert.equal(closed, 1);
 });
 
 test('YouTube가 PLAYING을 순간 보고해도 재생 시간이 전진하지 않으면 성공으로 보지 않는다', async () => {

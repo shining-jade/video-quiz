@@ -7910,7 +7910,8 @@ function plCloseQuestion() {
   if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
   const submitGraceUntil = Number(state.live.submitGraceUntil);
   const closeNow = typeof serverNow === 'function' ? serverNow() : Date.now();
-  if (Number.isFinite(submitGraceUntil) && closeNow < submitGraceUntil) {
+  if (state.live.accepting !== false &&
+      Number.isFinite(submitGraceUntil) && closeNow < submitGraceUntil) {
     const waitSeconds = Math.max(1, Math.ceil((submitGraceUntil - closeNow) / 1000));
     state.closeError = '학생 답안 제출을 마감하는 중입니다. ' + waitSeconds +
       '초 후 계속 재생을 눌러 주세요.';
@@ -8275,7 +8276,7 @@ function plRenderOverlay() {
   const closeGraceUntil = Number(pl.live.submitGraceUntil);
   const closeWaitMs = Number.isFinite(closeGraceUntil)
     ? Math.max(0, closeGraceUntil - serverNow()) : 0;
-  const closeWaiting = closeWaitMs > 0;
+  const closeWaiting = pl.live.accepting !== false && closeWaitMs > 0;
 
   if (!ov) {
     ov = document.createElement('div');
@@ -8478,7 +8479,8 @@ function plTimerTick() {
   const closeButton = ov.querySelector('#ov-close');
   const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === questionIndex);
   const graceUntil = Number(pl.live.submitGraceUntil);
-  const waitMs = Number.isFinite(graceUntil) ? Math.max(0, graceUntil - serverNow()) : 0;
+  const waitMs = pl.live.accepting !== false && Number.isFinite(graceUntil)
+    ? Math.max(0, graceUntil - serverNow()) : 0;
   if (closeButton && !closeBusy) {
     closeButton.disabled = waitMs > 0;
     closeButton.textContent = waitMs > 0

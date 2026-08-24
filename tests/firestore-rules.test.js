@@ -2580,6 +2580,11 @@ rulesTest('fix-round-1: timer reveal is denied before revealAt and response is d
     revealed: true,
     publicAnswer: { answer: 1 }
   }));
+  await assertSucceeds(updateDoc(doc(owner, 'sessions/s1/meta/live'), {
+    accepting: false,
+    revealed: true,
+    publicAnswer: { answer: 1 }
+  }));
 
   await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
     responseClosesAt: Timestamp.fromMillis(now - 2_000),

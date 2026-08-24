@@ -2434,7 +2434,11 @@ service cloud.firestore {
           (resource.data.revealed == true ||
             request.resource.data.revealed == false ||
             !('revealAt' in resource.data) ||
-            request.time >= resource.data.revealAt));
+            request.time >= resource.data.revealAt ||
+            (resource.data.revealed == false &&
+              request.resource.data.revealed == true &&
+              resource.data.get('accepting', true) == true &&
+              request.resource.data.get('accepting', true) == false)));
     }
 
     function validAcceptingTransition() {
@@ -2444,7 +2448,11 @@ service cloud.firestore {
           (resource.data.get('accepting', true) == false || graceFinished)) ||
         (request.resource.data.q == resource.data.q &&
           (resource.data.get('accepting', true) == false ||
-            request.resource.data.get('accepting', true) == true || graceFinished));
+            request.resource.data.get('accepting', true) == true || graceFinished ||
+            (resource.data.revealed == false &&
+              request.resource.data.revealed == true &&
+              resource.data.get('accepting', true) == true &&
+              request.resource.data.get('accepting', true) == false)));
     }
 
     function validAtomicSessionEndLive(sessionId) {
