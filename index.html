@@ -7815,6 +7815,15 @@ async function plContinuePlayback(state) {
 function plCloseQuestion() {
   const state = pl;
   if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
+  const submitGraceUntil = Number(state.live.submitGraceUntil);
+  const closeNow = typeof serverNow === 'function' ? serverNow() : Date.now();
+  if (Number.isFinite(submitGraceUntil) && closeNow < submitGraceUntil) {
+    const waitSeconds = Math.max(1, Math.ceil((submitGraceUntil - closeNow) / 1000));
+    state.closeError = '학생 답안 제출을 마감하는 중입니다. ' + waitSeconds +
+      '초 후 계속 재생을 눌러 주세요.';
+    if (typeof plRenderOverlay === 'function') plRenderOverlay();
+    return Promise.resolve(false);
+  }
   const questionIndex = Number(state.live.q);
   const identity = { q: questionIndex, openedAt: state.live.openedAt };
   if (typeof state.live.liveToken === 'string' && state.live.liveToken) {
@@ -8167,6 +8176,10 @@ function plRenderOverlay() {
   if (!q) return;
   const mode = pl.set.settings.revealMode;
   const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === i);
+  const closeGraceUntil = Number(pl.live.submitGraceUntil);
+  const closeWaitMs = Number.isFinite(closeGraceUntil)
+    ? Math.max(0, closeGraceUntil - serverNow()) : 0;
+  const closeWaiting = closeWaitMs > 0;
 
   if (!ov) {
     ov = document.createElement('div');
@@ -8205,9 +8218,12 @@ function plRenderOverlay() {
         esc(pl.closeError) + ' · 다시 시도해 주세요.</div>' : '') +
       (mode === 'never' ? '' :
         '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
-      '<button class="btn primary" onclick="plCloseQuestion().catch(()=>{})"' +
-        (closeBusy ? ' disabled aria-busy="true"' : '') + '>' +
-        (closeBusy ? '저장 중…' : '▶ 계속 재생') + '</button>' +
+      '<button class="btn primary" id="ov-close" onclick="plCloseQuestion().catch(()=>{})"' +
+        ((closeBusy || closeWaiting) ? ' disabled' : '') +
+        (closeBusy ? ' aria-busy="true"' : '') + '>' +
+        (closeBusy ? '저장 중…' : closeWaiting
+          ? '제출 마감 중… ' + Math.ceil(closeWaitMs / 1000) + '초'
+          : '▶ 계속 재생') + '</button>' +
       '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
       '<a class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
     '</div>' +
@@ -8363,6 +8379,20 @@ function plTimerTick() {
   el.querySelector('.quiz-timer-track i').style.width = (t.ratio * 100) + '%';
   el.classList.toggle('warning', t.phase === 'warning');
   el.classList.toggle('urgent', t.phase === 'urgent');
+  const closeButton = ov.querySelector('#ov-close');
+  const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === questionIndex);
+  const graceUntil = Number(pl.live.submitGraceUntil);
+  const waitMs = Number.isFinite(graceUntil) ? Math.max(0, graceUntil - serverNow()) : 0;
+  if (closeButton && !closeBusy) {
+    closeButton.disabled = waitMs > 0;
+    closeButton.textContent = waitMs > 0
+      ? '제출 마감 중… ' + Math.ceil(waitMs / 1000) + '초'
+      : '▶ 계속 재생';
+  }
+  if (waitMs === 0 && /^학생 답안 제출을 마감하는 중입니다\./.test(String(pl.closeError || ''))) {
+    pl.closeError = '';
+    plRenderOverlay();
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════

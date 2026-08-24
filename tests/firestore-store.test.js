@@ -6915,6 +6915,43 @@ test('server-rejected stale freeze stops close before reading responses', async 
   assert.equal(state.live.accepting, true);
 });
 
+test('timer 문항은 제출 보호 시간이 끝나기 전 권한 쓰기를 시도하지 않고 안내 후 재시도한다', async () => {
+  let now = 12_100;
+  let freezes = 0;
+  let closes = 0;
+  const state = {
+    sessionId: 'session-a',
+    live: {
+      q: 0, liveToken: 'live-q0', openedAt: 10_000, accepting: true,
+      revealed: true, submitGraceUntil: 14_000
+    },
+    liveGeneration: 1, responses: {}, pendingLiveQuestion: -1,
+    player: { playVideo() {} }
+  };
+  const context = {
+    pl: state, FirestoreCore: core, serverNow() { return now; },
+    store: {
+      async freezeLive() { freezes += 1; return true; },
+      async getResponses() { return {}; }, async getGrades() { return {}; },
+      async closeLive() { closes += 1; return true; }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; }, plTick() {}, plRenderOverlay() {}
+  };
+  loadStageFunctions(['plCloseQuestion'], context);
+
+  assert.equal(await context.plCloseQuestion(), false);
+  assert.equal(freezes, 0);
+  assert.equal(closes, 0);
+  assert.match(state.closeError, /제출.*마감.*2초/);
+  assert.equal(state.closeFlight, undefined);
+
+  now = 14_000;
+  assert.equal(await context.plCloseQuestion(), true);
+  assert.equal(freezes, 1);
+  assert.equal(closes, 1);
+});
+
 test('close passes one captured live identity to freeze and final close CAS writes', async () => {
   const calls = [];
   const state = {
@@ -10172,7 +10209,9 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   const timerNumber = { textContent: '' };
   const overlay = {
     querySelector(selector) {
-      return selector === '#ov-timer' ? timer : timerNumber;
+      if (selector === '#ov-timer') return timer;
+      if (selector === '#ov-timer-n') return timerNumber;
+      return null;
     }
   };
   const context = {
@@ -10195,6 +10234,43 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   assert.equal(context.stLeftRatio().left, 10);
   context.plTimerTick();
   assert.equal(timerNumber.textContent, '10초');
+});
+
+test('교사 타이머는 제출 보호 시간 동안 계속 재생을 잠그고 종료 시 자동으로 연다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let now = 12_100;
+  const live = {
+    q: 0, openedAt: 10_000, revealed: true, limitSec: 2,
+    submitGraceUntil: 14_000, liveToken: 'live-q0'
+  };
+  const fill = { style: {} };
+  const timer = { style: {}, classList: { toggle() {} }, querySelector() { return fill; } };
+  const timerNumber = { textContent: '' };
+  const closeButton = { disabled: false, textContent: '' };
+  const overlay = {
+    querySelector(selector) {
+      if (selector === '#ov-timer') return timer;
+      if (selector === '#ov-timer-n') return timerNumber;
+      if (selector === '#ov-close') return closeButton;
+      return null;
+    }
+  };
+  const context = {
+    pl: { live, liveGeneration: 1, uiRevealed: true, closeError: '' },
+    serverNow() { return now; }, document: { getElementById() { return overlay; } },
+    plRevealed() { return true; }, plRenderOverlayCounts() {}, plRenderOverlay() {},
+    FirestoreCore: core
+  };
+  vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
+
+  context.plTimerTick();
+  assert.equal(closeButton.disabled, true);
+  assert.equal(closeButton.textContent, '제출 마감 중… 2초');
+
+  now = 14_000;
+  context.plTimerTick();
+  assert.equal(closeButton.disabled, false);
+  assert.equal(closeButton.textContent, '▶ 계속 재생');
 });
 
 test('학생은 세트 원본 대신 live 공개 문항의 전체 번호와 내용을 표시한다', () => {
