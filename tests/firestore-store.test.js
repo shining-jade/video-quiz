@@ -4127,7 +4127,7 @@ test('세트 목록을 떠난 뒤 늦게 온 Firestore 결과가 다음 화면�
   assert.equal(rendered, 0);
 });
 
-test('세트 목록 화면은 소유자 query와 공동편집 shared discovery를 현재 교사로 제한한다', async () => {
+test('세트 목록 화면은 중단한 공동편집 discovery 없이 소유자 세트만 조회한다', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const app = { innerHTML: '' };
@@ -4150,8 +4150,7 @@ test('세트 목록 화면은 소유자 query와 공동편집 shared discovery�
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(Object.fromEntries(calls), {
-    owned: { ownerUid: teacher.uid, role: teacher.role },
-    shared: teacher
+    owned: { ownerUid: teacher.uid, role: teacher.role }
   });
 });
 
@@ -5262,16 +5261,16 @@ test('공동 편집자와 휴지통 상태에 맞는 목록 행 동작을 표시
     teacherState: { uid: 'owner', email: 'owner@school.kr', role: 'teacher' },
     esc(value) { return String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[ch]); },
     fmtDate() { return ''; },
-    linkTo(value) { return value; }
+    linkTo(value) { return value; }, collaborationUiEnabled: false
   };
   loadStageFunctions(['canEditSet', 'setListRow'], context);
   const base = { id: 'set-1', title: '공유 세트', ownerUid: 'owner', ownerEmail: 'owner@school.kr', archived: false,
     trashedAt: null, purgeStartedAt: null, settings: { revealMode: 'timer' }, videos: [{ questions: [] }] };
   const owned = context.setListRow(base);
-  assert.match(owned, /공동 편집자/);
+  assert.doesNotMatch(owned, /공동 편집자/);
   assert.match(owned, /휴지통/);
   const collaborator = context.setListRow({ ...base, ownerUid: 'other', collaboratorEmails: ['owner@school.kr'] });
-  assert.match(collaborator, /공동 편집/);
+  assert.doesNotMatch(collaborator, /공동 편집/);
   assert.match(collaborator, /편집/);
   assert.doesNotMatch(collaborator, /공동 편집자 관리|휴지통으로 이동/);
   const other = context.setListRow({ ...base, ownerUid: 'other', collaboratorEmails: [] });
@@ -10238,7 +10237,7 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   assert.equal(timerNumber.textContent, '10초');
 });
 
-test('교사 타이머는 제출 보호 시간 동안 계속 재생을 잠그고 종료 시 자동으로 연다', () => {
+test('교사 타이머는 제출 보호 시간도 위 타이머 한 곳에서만 안내한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   let now = 12_100;
   const live = {
@@ -10248,7 +10247,7 @@ test('교사 타이머는 제출 보호 시간 동안 계속 재생을 잠그고
   const fill = { style: {} };
   const timer = { style: {}, classList: { toggle() {} }, querySelector() { return fill; } };
   const timerNumber = { textContent: '' };
-  const closeButton = { disabled: false, textContent: '' };
+  const closeButton = { disabled: false, textContent: '', style: {} };
   const overlay = {
     querySelector(selector) {
       if (selector === '#ov-timer') return timer;
@@ -10267,12 +10266,30 @@ test('교사 타이머는 제출 보호 시간 동안 계속 재생을 잠그고
 
   context.plTimerTick();
   assert.equal(closeButton.disabled, true);
-  assert.equal(closeButton.textContent, '제출 마감 중… 2초');
+  assert.equal(closeButton.style.display, 'none');
+  assert.equal(timerNumber.textContent, '제출 정리 중… 2초');
 
   now = 14_000;
   context.plTimerTick();
   assert.equal(closeButton.disabled, false);
   assert.equal(closeButton.textContent, '▶ 계속 재생');
+});
+
+test('종료 저장 중 숨긴 퀴즈 overlay는 live 구독 렌더가 다시 만들지 않는다', () => {
+  let closed = 0;
+  const context = {
+    pl: {
+      live: { q: 0 },
+      closeFlight: { questionIndex: 0, overlayHidden: true }
+    },
+    plSetQuizOpen(open) { if (!open) closed += 1; },
+    plRenderQList() {},
+    document: { getElementById() { return null; } }
+  };
+  loadStageFunctions(['plRenderOverlay'], context);
+
+  context.plRenderOverlay();
+  assert.equal(closed, 1);
 });
 
 test('학생은 세트 원본 대신 live 공개 문항의 전체 번호와 내용을 표시한다', () => {
@@ -14433,7 +14450,7 @@ test('계속 재생 명령 뒤에도 YouTube가 멈춰 있으면 live를 완료�
   assert.match(result.error.message, /재생/);
 });
 
-test('운영 규칙 호환 중에는 제출 마감 전 공개 쓰기를 보내지 않는다', async () => {
+test('지금 공개는 제출 마감 전에도 atomic 공개 쓰기를 보낸다', async () => {
   let reveals = 0;
   const context = {
     pl: {
@@ -14442,12 +14459,18 @@ test('운영 규칙 호환 중에는 제출 마감 전 공개 쓰기를 보내�
       flatQuestions: [{ type: 'choice', answer: 0 }]
     },
     serverNow() { return 2_000; },
-    store: { revealLive() { reveals += 1; } }
+    FirestoreStore: {
+      liveIdentity(live) { return { q: live.q }; },
+      publicAnswer() { return { answer: 0 }; }
+    },
+    async plExplanationImage() { return ''; },
+    plRenderOverlayCounts() {},
+    store: { revealLive() { reveals += 1; return true; } }
   };
   loadStageFunctions(['plReveal'], context);
 
-  assert.equal(await context.plReveal(), false);
-  assert.equal(reveals, 0);
+  assert.equal(await context.plReveal(), true);
+  assert.equal(reveals, 1);
 });
 
 test('repeated Google login clicks share one popup request instead of cancelling each other', async () => {

@@ -3400,6 +3400,9 @@ function cancelTeacherRequest() {
    4-2. 세트 목록 — 불러오기 / 복제
    ══════════════════════════════════════════════════════════════════════ */
 let setList = null;
+// 공동 편집 저장 경로는 현재 운영 규칙과 함께 제공할 수 없으므로 UI에서 숨긴다.
+// 내부 데이터/API는 보관해 두어 규칙 배포가 안정화되면 다시 켤 수 있다.
+const collaborationUiEnabled = false;
 
 function screenSetList() {
   setList = { all: [], q: '', showHidden: false, loadingAccess: true };
@@ -3410,7 +3413,7 @@ function screenSetList() {
 
   const listScope = { ownerUid: teacherState && teacherState.uid, role: teacherState && teacherState.role };
   const trashPromise = store.listTrash ? store.listTrash(listScope).catch(() => []) : Promise.resolve([]);
-  const sharedPromise = store.listSharedQuizSets && teacherState
+  const sharedPromise = typeof collaborationUiEnabled !== 'undefined' && collaborationUiEnabled && store.listSharedQuizSets && teacherState
     ? store.listSharedQuizSets(teacherState).catch(() => []) : Promise.resolve([]);
   Promise.all([store.listQuizSets(listScope), sharedPromise, trashPromise]).then(([owned, shared, trash]) => {
     if (setList !== state) return;
@@ -3460,7 +3463,7 @@ function renderSetList() {
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
-        '내 세트와 공동 편집으로 공유된 세트가 보입니다. <b>복제</b>하면 원본은 그대로 두고 우리 반용으로 고쳐 쓸 수 있습니다.</p>' +
+        '내가 만든 세트가 보입니다. <b>복제</b>하면 원본은 그대로 두고 우리 반용으로 고쳐 쓸 수 있습니다.</p>' +
       '<div class="notice info">' +
         '<b>다른 프로젝트로 세트 옮기기</b> — 세트마다 있는 <b>[📤 파일]</b>로 내보낸 뒤, 옮길 곳의 이 화면에서 ' +
         '<b>[📥 세트 가져오기]</b>로 넣으면 됩니다. 문항·설정·이미지가 그대로 따라갑니다. 백업으로도 쓸 수 있습니다.' +
@@ -3501,7 +3504,8 @@ function setListRow(s) {
   const questionCount = PlaylistCore.flattenQuestions(videos).length;
   const editable = canEditSet(s, teacherState);
   const owner = !!(s.ownerUid && teacherState && s.ownerUid === teacherState.uid);
-  const collaborator = !owner && editable;
+  const collaborationEnabled = typeof collaborationUiEnabled !== 'undefined' && collaborationUiEnabled;
+  const collaborator = collaborationEnabled && !owner && editable;
   const publicationStatus = owner && ['published', 'moderated', 'checking', 'unknown'].includes(s.publicationStatus)
     ? s.publicationStatus : 'private';
   const publicationBusy = !!s.publicationBusy;
@@ -3547,7 +3551,9 @@ function setListRow(s) {
           '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>')
       : startAndCopy +
         '<a class="btn sm" href="#/make/' + esc(s.id) + '">✏️ 편집</a>' +
-        (owner ? '<button class="btn sm" onclick="openCollaboratorDialog(\'' + esc(s.id) + '\')">👥 공동 편집자</button>' : '<span class="tag ok" title="공동 편집 권한">공동 편집</span>') +
+        (collaborationEnabled
+          ? (owner ? '<button class="btn sm" onclick="openCollaboratorDialog(\'' + esc(s.id) + '\')">👥 공동 편집자</button>' : '<span class="tag ok" title="공동 편집 권한">공동 편집</span>')
+          : '') +
         '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')" title="다른 프로젝트로 옮기거나 백업할 때">📤 파일</button>' +
         '<button class="btn sm ghost" onclick="copyText(\'' + esc(linkTo('play/' + s.id)) + '\')">🔗 링크</button>' +
         (owner ? publicationAction + '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
@@ -7862,20 +7868,29 @@ async function plExplanationImage(question, questionIndex) {
 
 async function plReveal() {
   if (!pl || pl.live.q < 0) return;
-  const revealAt = Number(pl.live.revealAt) || 0;
-  if (pl.live.accepting !== false && revealAt > 0 && serverNow() < revealAt) {
-    return false;
-  }
-  const question = pl.flatQuestions[pl.live.q];
+  if (pl.revealPending) return false;
+  const state = pl;
+  const questionIndex = state.live.q;
+  const question = state.flatQuestions[questionIndex];
   if (!question) return;
-  const identity = FirestoreStore.liveIdentity(pl.live);
+  const identity = FirestoreStore.liveIdentity(state.live);
   if (!identity) return Promise.resolve(false);
-  const explainImage = await plExplanationImage(question, pl.live.q);
-  return store.revealLive(
-    pl.sessionId,
-    identity,
-    FirestoreStore.publicAnswer(question, explainImage)
-  );
+  state.revealPending = true;
+  if (typeof plRenderOverlayCounts === 'function') plRenderOverlayCounts();
+  try {
+    const explainImage = await plExplanationImage(question, questionIndex);
+    if (pl !== state || Number(state.live.q) !== Number(questionIndex)) return false;
+    return await store.revealLive(
+      state.sessionId,
+      identity,
+      FirestoreStore.publicAnswer(question, explainImage)
+    );
+  } finally {
+    if (pl === state) {
+      state.revealPending = false;
+      if (typeof plRenderOverlayCounts === 'function') plRenderOverlayCounts();
+    }
+  }
 }
 
 /** 확장 프로그램이 끼워 넣은 광고 요청 rejection은 무시하되, YouTube의 재생
@@ -7980,6 +7995,7 @@ function plCloseQuestion() {
     }
     if (pl === state && Number(state.live && state.live.q) === questionIndex &&
         flight.overlayHidden && typeof plRenderOverlay === 'function') {
+      flight.overlayHidden = false;
       plRenderOverlay();
     }
   };
@@ -8290,6 +8306,13 @@ function plRenderBoardOverlay() {
 /* ── 교사 퀴즈 오버레이 ─────────────────────────────────────────────── */
 function plRenderOverlay() {
   let ov = document.getElementById('overlay');
+  // 계속 재생 클릭 직후 저장이 끝나기 전 live 구독이 다시 렌더되어도
+  // 방금 닫은 문항을 되살리지 않는다.
+  if (pl && pl.closeFlight && pl.closeFlight.overlayHidden) {
+    if (typeof plSetQuizOpen === 'function') plSetQuizOpen(false);
+    else if (ov) ov.remove();
+    return;
+  }
   if (!pl || pl.live.q < 0) {
     if (typeof plSetQuizOpen === 'function') plSetQuizOpen(false);
     else {
@@ -8312,6 +8335,8 @@ function plRenderOverlay() {
   const closeWaitMs = Number.isFinite(closeGraceUntil)
     ? Math.max(0, closeGraceUntil - serverNow()) : 0;
   const closeWaiting = pl.live.accepting !== false && closeWaitMs > 0;
+  const overlayRevealed = !!(pl.live.revealed && pl.live.publicAnswer);
+  const canContinue = mode === 'never' || overlayRevealed;
 
   if (!ov) {
     ov = document.createElement('div');
@@ -8352,9 +8377,10 @@ function plRenderOverlay() {
         '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
       '<button class="btn primary" id="ov-close" onclick="plCloseQuestion().catch(()=>{})"' +
         ((closeBusy || closeWaiting) ? ' disabled' : '') +
-        (closeBusy ? ' aria-busy="true"' : '') + '>' +
+        (closeBusy ? ' aria-busy="true"' : '') +
+        (!canContinue ? ' style="display:none"' : '') + '>' +
         (closeBusy ? '저장 중…' : closeWaiting
-          ? '제출 마감 중… ' + Math.ceil(closeWaitMs / 1000) + '초'
+          ? '제출 정리 중…'
           : '▶ 계속 재생') + '</button>' +
       '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
       '<a class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" href="#/live/' + esc(pl.sessionId) + '" target="_blank">📊 대시보드</a>' +
@@ -8461,14 +8487,14 @@ function plRenderOverlayCounts() {
   if (exImage) exImage.style.display = revealed ? '' : 'none';
   const rv = ov.querySelector('#ov-reveal');
   if (rv) {
-    const revealAt = Number(pl.live.revealAt) || 0;
-    const revealNow = typeof serverNow === 'function' ? serverNow() : Date.now();
-    const revealWaitMs = pl.live.accepting !== false && revealAt > revealNow
-      ? revealAt - revealNow : 0;
-    rv.disabled = revealed || revealWaitMs > 0;
-    rv.textContent = revealed ? '공개됨' : revealWaitMs > 0
-      ? '제출 마감까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
+    rv.disabled = revealed || !!pl.revealPending;
+    if (rv.style) rv.style.display = revealed ? 'none' : '';
+    rv.textContent = pl.revealPending ? '공개 중…'
       : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
+  }
+  const close = ov.querySelector('#ov-close');
+  if (close && !(pl.closeFlight && pl.closeFlight.overlayHidden)) {
+    close.style.display = (pl.set.settings.revealMode === 'never' || revealed) ? '' : 'none';
   }
 }
 
@@ -8491,7 +8517,6 @@ function plTimerTick() {
       !pl.live.revealed && !pl.revealPending && !pl.revealRequested &&
       serverNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;
-    state.revealPending = true;
     Promise.resolve(plReveal()).then(revealed => {
       if (!isCurrentTimer(state)) return;
       if (revealed === false) state.revealRetryAt = serverNow() + 1000;
@@ -8500,11 +8525,8 @@ function plTimerTick() {
       if (isCurrentTimer(state)) {
         state.revealRequested = false;
         state.revealRetryAt = serverNow() + 1000;
-        state.revealPending = false;
       }
       console.error(e);
-    }).finally(() => {
-      if (isCurrentTimer(state)) state.revealPending = false;
     });
   }
   if (plRevealed() !== pl.uiRevealed) plRenderOverlayCounts();
@@ -8513,32 +8535,34 @@ function plTimerTick() {
   const t = FirestoreCore.timerView(pl.live, serverNow());
   if (!t) { if (el) el.style.display = 'none'; return; }
   el.style.display = '';
-  num.textContent = Math.ceil(t.left) + '초';
+  const graceUntil = Number(pl.live.submitGraceUntil);
+  const graceWaitMs = pl.live.accepting !== false && Number.isFinite(graceUntil)
+    ? Math.max(0, graceUntil - serverNow()) : 0;
+  num.textContent = t.left > 0
+    ? Math.ceil(t.left) + '초'
+    : graceWaitMs > 0
+      ? '제출 정리 중… ' + Math.ceil(graceWaitMs / 1000) + '초'
+      : '0초';
   el.querySelector('.quiz-timer-track i').style.width = (t.ratio * 100) + '%';
   el.classList.toggle('warning', t.phase === 'warning');
   el.classList.toggle('urgent', t.phase === 'urgent');
   const closeButton = ov.querySelector('#ov-close');
   const revealButton = ov.querySelector('#ov-reveal');
   const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === questionIndex);
-  const graceUntil = Number(pl.live.submitGraceUntil);
-  const waitMs = pl.live.accepting !== false && Number.isFinite(graceUntil)
-    ? Math.max(0, graceUntil - serverNow()) : 0;
+  const waitMs = graceWaitMs;
   if (closeButton && !closeBusy) {
+    const revealMode = pl.set && pl.set.settings ? pl.set.settings.revealMode : 'timer';
     closeButton.disabled = waitMs > 0;
     if (closeButton.style) {
-      closeButton.style.display = waitMs > 0 && !plRevealed() ? 'none' : '';
+      closeButton.style.display = (revealMode === 'never' || plRevealed()) && waitMs === 0 ? '' : 'none';
     }
-    closeButton.textContent = waitMs > 0
-      ? '제출 마감 중… ' + Math.ceil(waitMs / 1000) + '초'
-      : '▶ 계속 재생';
+    closeButton.textContent = '▶ 계속 재생';
   }
   if (revealButton && !plRevealed()) {
-    const revealWaitMs = pl.live.accepting !== false && revealAt > serverNow()
-      ? revealAt - serverNow() : 0;
-    revealButton.disabled = revealWaitMs > 0;
-    revealButton.textContent = revealWaitMs > 0
-      ? '제출 마감까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
-      : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
+    const revealMode = pl.set && pl.set.settings ? pl.set.settings.revealMode : 'timer';
+    revealButton.disabled = !!pl.revealPending;
+    revealButton.textContent = pl.revealPending ? '공개 중…'
+      : ('✅ ' + (revealMode === 'manual' ? '정답 공개' : '지금 공개'));
   }
   if (waitMs === 0 && /^학생 답안 제출을 마감하는 중입니다\./.test(String(pl.closeError || ''))) {
     pl.closeError = '';
