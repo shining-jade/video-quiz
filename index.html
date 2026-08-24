@@ -4850,10 +4850,11 @@ function mkPreviewContinue() {
 function mkPreviewTick() {
   const state = mkQuestionPreviewState;
   if (!state || state.phase !== 'video' || !state.player) return false;
-  let currentTime = state.startAt;
-  try { currentTime = state.player.getCurrentTime(); } catch (e) {}
+  let currentTime = NaN;
+  try { currentTime = Number(state.player.getCurrentTime()); } catch (e) {}
+  const timeReadSucceeded = Number.isFinite(currentTime);
   if (state.seekPending) {
-    if (Math.abs(currentTime - state.startAt) <= .75) {
+    if (timeReadSucceeded && Math.abs(currentTime - state.startAt) <= .75) {
       state.seekPending = false;
       state.startedAt = Date.now();
       return false;
@@ -4864,6 +4865,7 @@ function mkPreviewTick() {
     }
     return false;
   }
+  if (!timeReadSucceeded) return false;
   const timedOut = Date.now() - state.startedAt > Math.max(5000, (state.targetTime - state.startAt + 2) * 1000);
   const next = QuizPreviewCore.advance(state, timedOut ? state.targetTime : currentTime);
   if (next === state) return false;

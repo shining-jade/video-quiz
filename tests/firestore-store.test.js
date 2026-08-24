@@ -8587,6 +8587,33 @@ test('흐름형 문항 미리보기는 3초 전 위치 이동이 지연되면 �
   assert.deepEqual(calls[1], ['close']);
 });
 
+test('흐름형 문항 미리보기는 현재 시간 읽기 실패를 seek 완료로 오인하지 않는다', () => {
+  const calls = [];
+  let now = 1000;
+  const context = {
+    mkQuestionPreviewState: {
+      phase: 'video', startAt: 305, targetTime: 308,
+      seekPending: true, seekRequestedAt: 1000,
+      player: { getCurrentTime() { throw new Error('player not ready'); } }
+    },
+    mkQuestionPreviewTimer: 2,
+    Date: { now() { return now; } },
+    QuizPreviewCore: require('../quiz-preview-core.js'),
+    toast(message) { calls.push(['toast', message]); },
+    mkCloseQuestionPreview() { calls.push(['close']); }
+  };
+  loadStageFunctions(['mkPreviewTick'], context);
+
+  assert.equal(context.mkPreviewTick(), false);
+  assert.equal(context.mkQuestionPreviewState.seekPending, true);
+  assert.deepEqual(calls, []);
+
+  now = 8001;
+  assert.equal(context.mkPreviewTick(), false);
+  assert.match(calls[0][1], /3초 전 위치로 이동하지 못했습니다/);
+  assert.deepEqual(calls[1], ['close']);
+});
+
 test('흐름형 문항 미리보기는 제출을 채점하고 해설 뒤 계속 재생한다', () => {
   const calls = [];
   const context = {
