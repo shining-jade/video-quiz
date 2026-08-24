@@ -7798,19 +7798,60 @@ async function plReveal() {
   );
 }
 
-/** YouTube IFrame API의 playVideo는 동기 명령이다. 확장 프로그램이 끼워 넣은
-    비동기 광고 요청 결과는 재생 명령의 성공 여부로 사용하지 않는다. */
+/** 확장 프로그램이 끼워 넣은 광고 요청 rejection은 무시하되, YouTube가 실제로
+    PLAYING 상태가 되었거나 재생 시간이 전진했는지를 확인한다. */
 async function plContinuePlayback(state) {
   if (!state || !state.player || typeof state.player.playVideo !== 'function') {
     return { ok: false, error: new Error('재생기를 찾을 수 없습니다.') };
   }
-  try {
-    const result = state.player.playVideo();
-    if (result === false) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
-    if (result && typeof result.then === 'function') {
-      Promise.resolve(result).catch(() => {});
+  const player = state.player;
+  const canProbeState = typeof player.getPlayerState === 'function';
+  const canProbeTime = typeof player.getCurrentTime === 'function';
+  let beforeTime = NaN;
+  if (canProbeTime) {
+    try { beforeTime = Number(player.getCurrentTime()); } catch (e) {}
+  }
+  const delay = typeof state.playbackProbeDelay === 'function'
+    ? state.playbackProbeDelay
+    : (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  const started = () => {
+    try {
+      if (canProbeState && Number(player.getPlayerState()) === 1) return true;
+    } catch (e) {}
+    try {
+      const current = canProbeTime ? Number(player.getCurrentTime()) : NaN;
+      if (Number.isFinite(beforeTime) && Number.isFinite(current) && current > beforeTime + 0.15) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  };
+  const command = () => {
+    const result = player.playVideo();
+    if (result === false) return false;
+    if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => {});
+    return true;
+  };
+  const probe = async () => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (started()) return true;
+      await delay(120);
     }
-    return { ok: true };
+    return started();
+  };
+  try {
+    if (!command()) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    // 상태 API가 없는 오래된 테스트/플레이어는 기존 동기 명령 계약을 유지한다.
+    if (!canProbeState && !canProbeTime) return { ok: true };
+    if (await probe()) return { ok: true };
+    // 간혹 퀴즈 overlay를 닫은 직후 첫 play 명령을 YouTube가 놓친다. 현재 위치를
+    // 거의 그대로 다시 확정한 뒤 사용자 클릭 처리 중 한 번만 재시도한다.
+    if (Number.isFinite(beforeTime) && typeof player.seekTo === 'function') {
+      try { player.seekTo(beforeTime + 0.05, true); } catch (e) {}
+    }
+    if (!command()) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    if (await probe()) return { ok: true };
+    return { ok: false, error: new Error('동영상 재생 상태를 확인하지 못했습니다.') };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };
   }

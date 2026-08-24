@@ -14387,6 +14387,47 @@ test('계속 재생 시작기는 YouTube 내부 비동기 rejection과 재생 �
   assert.equal((await ctx.plContinuePlayback({ player: { playVideo() {} } })).ok, true);
 });
 
+test('계속 재생은 명령 반환값이 아니라 실제 YouTube 재생 상태를 확인하고 한 번 복구한다', async () => {
+  let state = 2;
+  let currentTime = 120;
+  let plays = 0;
+  let seeks = 0;
+  const ctx = loadStageFunctions(['plContinuePlayback'], {});
+  const result = await ctx.plContinuePlayback({
+    playbackProbeDelay: async () => {},
+    player: {
+      playVideo() {
+        plays += 1;
+        if (plays === 2) state = 1;
+        return Promise.reject(new Error('youtube anti-adblock fetch'));
+      },
+      getPlayerState() { return state; },
+      getCurrentTime() { return currentTime; },
+      seekTo(value) { seeks += 1; currentTime = value; }
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(plays, 2);
+  assert.equal(seeks, 1);
+});
+
+test('계속 재생 명령 뒤에도 YouTube가 멈춰 있으면 live를 완료하지 않는다', async () => {
+  const ctx = loadStageFunctions(['plContinuePlayback'], {});
+  const result = await ctx.plContinuePlayback({
+    playbackProbeDelay: async () => {},
+    player: {
+      playVideo() {},
+      getPlayerState() { return 2; },
+      getCurrentTime() { return 120; },
+      seekTo() {}
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error.message, /재생/);
+});
+
 test('player tick은 quiz trigger가 준 문항만 queue하고 완료 직후 같은 시각을 다시 넣지 않는다', () => {
   const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
   const ctx = loadStageFunctions(['plQueueDueQuestions'], {
