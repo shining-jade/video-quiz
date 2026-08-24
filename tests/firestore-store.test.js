@@ -10514,6 +10514,7 @@ function teacherEmailAuthTestRuntime(overrides = {}) {
     teacherAuthVersion: 3,
     teacherAuthDialogRevision: 0,
     teacherAuthDialogState: { mode: 'login', status: 'idle', email: '', message: '', error: '' },
+    teacherEmailAuthUiEnabled: true,
     teacherEmailAuthRequests: {
       signup: { inFlight: null, cooldownUntil: 0 },
       resend: { inFlight: null, cooldownUntil: 0 },

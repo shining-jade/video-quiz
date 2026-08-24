@@ -243,8 +243,9 @@ test('데스크톱 왼쪽 패널 전체는 문항 편집 스크롤을 따라가�
   const html = read('index.html');
 
   assert.match(html, /\.mk-video-left\s*\{[^}]*position:\s*sticky[^}]*top:\s*68px[^}]*max-height:\s*calc\(100vh - 88px\)[^}]*overflow:\s*auto/s);
+  assert.match(html, /\.mk-video-left\s*\{[^}]*scrollbar-gutter:\s*stable/s);
   assert.match(html, /\.mk-question-navigator\s*\{[^}]*position:\s*static/s);
-  assert.match(html, /@media \(max-width:\s*1180px\)[\s\S]*?\.mk-video-left\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow:\s*visible/s);
+  assert.match(html, /@media \(max-width:\s*1180px\)[\s\S]*?\.mk-video-left\s*\{[^}]*position:\s*static[^}]*max-height:\s*none[^}]*overflow:\s*visible[^}]*scrollbar-gutter:\s*auto/s);
 });
 
 test('문항 해설은 넓게 쓰고 개별 제한 시간 입력은 160px로 줄인다', () => {
@@ -392,15 +393,15 @@ test('사용자 안내는 교사 계정 관리자 역할과 세트 소유권을 
   assert.match(readme, /\| ✏️ 편집 \| 소유자 또는 소유자가 지정한 공동 편집자가 내용을 고칩니다/);
 });
 
-test('교사 인증은 Google과 이메일 흐름을 한 접근 가능한 dialog에 제공한다', () => {
+test('교사 인증 공개 화면은 Google 로그인만 제공하고 중단한 이메일 인증 UI를 숨긴다', () => {
   const html = read('index.html');
 
   assert.match(html, /<dialog id="teacher-auth-dialog"[^>]*aria-labelledby="teacher-auth-title"/);
+  assert.match(html, /const teacherEmailAuthUiEnabled\s*=\s*false/);
+  assert.match(html, /function teacherAuthDialogMarkup\(\)\s*\{[\s\S]*?if \(!teacherEmailAuthUiEnabled\)[\s\S]*?Google로 로그인[\s\S]*?return/s);
   assert.match(html, /Google로 로그인/);
-  assert.match(html, /이메일로 로그인/);
-  assert.match(html, /이메일로 가입/);
-  assert.match(html, /비밀번호 재설정/);
   assert.match(html, /function openTeacherAuthDialog\(mode\)/);
+  // 재개 가능성을 위해 검증된 이메일 인증 로직은 보관하되 공개 markup에서는 호출하지 않는다.
   assert.match(html, /function submitTeacherEmailSignup\(event\)/);
   assert.match(html, /function submitTeacherEmailLogin\(event\)/);
   assert.match(html, /function sendTeacherVerificationEmail\(\)/);
