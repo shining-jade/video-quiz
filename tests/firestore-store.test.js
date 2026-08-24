@@ -14396,7 +14396,9 @@ test('계속 재생은 명령 반환값이 아니라 실제 YouTube 재생 상�
   let seeks = 0;
   const ctx = loadStageFunctions(['plContinuePlayback'], {});
   const result = await ctx.plContinuePlayback({
-    playbackProbeDelay: async () => {},
+    playbackProbeDelay: async () => {
+      if (state === 1) currentTime += 0.2;
+    },
     player: {
       playVideo() {
         plays += 1;
@@ -14428,6 +14430,23 @@ test('계속 재생 명령 뒤에도 YouTube가 멈춰 있으면 live를 완료�
 
   assert.equal(result.ok, false);
   assert.match(result.error.message, /재생/);
+});
+
+test('YouTube가 PLAYING을 순간 보고해도 재생 시간이 전진하지 않으면 성공으로 보지 않는다', async () => {
+  let plays = 0;
+  const ctx = loadStageFunctions(['plContinuePlayback'], {});
+  const result = await ctx.plContinuePlayback({
+    playbackProbeDelay: async () => {},
+    player: {
+      playVideo() { plays += 1; },
+      getPlayerState() { return 1; },
+      getCurrentTime() { return 120; },
+      seekTo() {}
+    }
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(plays, 2);
 });
 
 test('player tick은 quiz trigger가 준 문항만 queue하고 완료 직후 같은 시각을 다시 넣지 않는다', () => {

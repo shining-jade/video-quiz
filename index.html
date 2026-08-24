@@ -7843,8 +7843,9 @@ async function plReveal() {
   );
 }
 
-/** 확장 프로그램이 끼워 넣은 광고 요청 rejection은 무시하되, YouTube가 실제로
-    PLAYING 상태가 되었거나 재생 시간이 전진했는지를 확인한다. */
+/** 확장 프로그램이 끼워 넣은 광고 요청 rejection은 무시하되, YouTube의 재생
+    시간이 실제로 전진했는지를 확인한다. PLAYING은 아주 잠깐 보고된 뒤 다시
+    멈출 수 있으므로 시간 API가 있으면 상태값만으로 성공 처리하지 않는다. */
 async function plContinuePlayback(state) {
   if (!state || !state.player || typeof state.player.playVideo !== 'function') {
     return { ok: false, error: new Error('재생기를 찾을 수 없습니다.') };
@@ -7861,14 +7862,16 @@ async function plContinuePlayback(state) {
     : (ms) => new Promise(resolve => setTimeout(resolve, ms));
   const started = () => {
     try {
-      if (canProbeState && Number(player.getPlayerState()) === 1) return true;
-    } catch (e) {}
-    try {
       const current = canProbeTime ? Number(player.getCurrentTime()) : NaN;
       if (Number.isFinite(beforeTime) && Number.isFinite(current) && current > beforeTime + 0.15) {
         return true;
       }
     } catch (e) {}
+    if (!canProbeTime) {
+      try {
+        if (canProbeState && Number(player.getPlayerState()) === 1) return true;
+      } catch (e) {}
+    }
     return false;
   };
   const command = () => {
