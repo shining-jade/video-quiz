@@ -7748,9 +7748,13 @@ test('다른 영상 문항으로 이동하면 로드 뒤 목표 3초 전을 기�
   assert.equal(ctx.pl.fired[1], false);
 });
 
-test('우리 반 시작하기는 수업계획 입력과 로컬 경고 확인 dialog를 먼저 제공한다', () => {
+test('운영 우리 반 시작하기는 수업계획을 보관한 채 반 이름으로 바로 시작한다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 
+  assert.match(html, /const classPlanningUiEnabled = false/);
+  assert.match(html, /classPlanningUiEnabled[\s\S]*?id="pl-label"[\s\S]*?onclick="plStartSession\(\)"/);
+  assert.match(html, /planningEnabled\s*=\s*\(typeof classPlanningUiEnabled[^;]+classPlanningUiEnabled\)[\s\S]*?&&/);
+  // 재개할 때 사용할 계획 UI와 저장 흐름은 삭제하지 않고 보관한다.
   assert.match(html, /id="pl-plan-dialog"/);
   assert.match(html, /id="pl-plan-class-name"/);
   assert.match(html, /id="pl-plan-start"[^>]*type="datetime-local"|type="datetime-local"[^>]*id="pl-plan-start"/);
@@ -7759,7 +7763,7 @@ test('우리 반 시작하기는 수업계획 입력과 로컬 경고 확인 dia
   assert.match(html, /id="pl-plan-warning"/);
   assert.match(html, /id="pl-plan-ack"/);
   assert.match(html, /경고 확인 후 진행/);
-  assert.match(html, /onclick="plOpenClassPlanDialog\(\)"/);
+  assert.match(html, /function plOpenClassPlanDialog\(\)/);
 });
 
 test('datetime-local 기본값은 server 12:00:45를 같은 로컬 분의 12:00으로 절삭한다', () => {
