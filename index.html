@@ -1673,7 +1673,9 @@ function renderTeacherAuthDialog(dialogRevision) {
   if (!dialog) return false;
   dialog.innerHTML = teacherAuthDialogMarkup();
   const state = teacherAuthDialogState || {};
-  const selector = state.status === 'verification-sent'
+  const selector = !teacherEmailAuthUiEnabled
+    ? '#teacher-google-signin'
+    : state.status === 'verification-sent'
     ? (state.needsProfile ? '#teacher-verification-name' : '#teacher-verification-confirm')
     : state.mode === 'signup'
       ? '#teacher-signup-name'

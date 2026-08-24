@@ -11008,6 +11008,15 @@ test('mode controls expose selection state and rerender focuses the active mode 
   assert.equal(focusedSelector(), '#teacher-login-email');
 });
 
+test('production Google-only teacher auth focuses the Google sign-in button', () => {
+  const { context, focusedSelector } = teacherEmailAuthTestRuntime({ teacherEmailAuthUiEnabled: false });
+
+  context.openTeacherAuthDialog('login');
+
+  assert.equal(focusedSelector(), '#teacher-google-signin');
+  assert.doesNotMatch(context.teacherAuthDialogMarkup(), /이메일로 로그인|이메일로 가입|비밀번호 재설정/);
+});
+
 test('verification resend failure is rendered as an accessible error', () => {
   const { context } = teacherEmailAuthTestRuntime();
   context.teacherAuthDialogState = {
