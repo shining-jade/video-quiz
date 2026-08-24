@@ -14433,6 +14433,26 @@ test('계속 재생 명령 뒤에도 YouTube가 멈춰 있으면 live를 완료�
   assert.match(result.error.message, /재생/);
 });
 
+test('운영 규칙 호환 중에는 제출 마감 전 공개 요청을 보내지 않고 남은 시간을 안내한다', async () => {
+  let reveals = 0;
+  const notices = [];
+  const context = {
+    pl: {
+      sessionId: 'session-a',
+      live: { q: 0, accepting: true, revealAt: 5_000 },
+      flatQuestions: [{ type: 'choice', answer: 0 }]
+    },
+    serverNow() { return 2_000; },
+    toast(message) { notices.push(message); },
+    store: { revealLive() { reveals += 1; } }
+  };
+  loadStageFunctions(['plReveal'], context);
+
+  assert.equal(await context.plReveal(), false);
+  assert.equal(reveals, 0);
+  assert.match(notices[0], /3초 뒤/);
+});
+
 test('지금 공개로 제출이 이미 마감되면 원래 grace 시각 전에도 계속 재생한다', async () => {
   let closed = 0;
   const context = {

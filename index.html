@@ -7831,6 +7831,14 @@ async function plExplanationImage(question, questionIndex) {
 
 async function plReveal() {
   if (!pl || pl.live.q < 0) return;
+  const revealAt = Number(pl.live.revealAt) || 0;
+  if (pl.live.accepting !== false && revealAt > 0 && serverNow() < revealAt) {
+    const waitSeconds = Math.max(1, Math.ceil((revealAt - serverNow()) / 1000));
+    if (typeof toast === 'function') {
+      toast('학생 제출 마감 후 ' + waitSeconds + '초 뒤 정답을 공개할 수 있습니다.');
+    }
+    return false;
+  }
   const question = pl.flatQuestions[pl.live.q];
   if (!question) return;
   const identity = FirestoreStore.liveIdentity(pl.live);
@@ -8426,8 +8434,14 @@ function plRenderOverlayCounts() {
   if (exImage) exImage.style.display = revealed ? '' : 'none';
   const rv = ov.querySelector('#ov-reveal');
   if (rv) {
-    rv.disabled = revealed;
-    rv.textContent = revealed ? '공개됨' : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
+    const revealAt = Number(pl.live.revealAt) || 0;
+    const revealNow = typeof serverNow === 'function' ? serverNow() : Date.now();
+    const revealWaitMs = pl.live.accepting !== false && revealAt > revealNow
+      ? revealAt - revealNow : 0;
+    rv.disabled = revealed || revealWaitMs > 0;
+    rv.textContent = revealed ? '공개됨' : revealWaitMs > 0
+      ? '공개 가능까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
+      : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
   }
 }
 
@@ -8477,6 +8491,7 @@ function plTimerTick() {
   el.classList.toggle('warning', t.phase === 'warning');
   el.classList.toggle('urgent', t.phase === 'urgent');
   const closeButton = ov.querySelector('#ov-close');
+  const revealButton = ov.querySelector('#ov-reveal');
   const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === questionIndex);
   const graceUntil = Number(pl.live.submitGraceUntil);
   const waitMs = pl.live.accepting !== false && Number.isFinite(graceUntil)
@@ -8486,6 +8501,14 @@ function plTimerTick() {
     closeButton.textContent = waitMs > 0
       ? '제출 마감 중… ' + Math.ceil(waitMs / 1000) + '초'
       : '▶ 계속 재생';
+  }
+  if (revealButton && !plRevealed()) {
+    const revealWaitMs = pl.live.accepting !== false && revealAt > serverNow()
+      ? revealAt - serverNow() : 0;
+    revealButton.disabled = revealWaitMs > 0;
+    revealButton.textContent = revealWaitMs > 0
+      ? '공개 가능까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
+      : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
   }
   if (waitMs === 0 && /^학생 답안 제출을 마감하는 중입니다\./.test(String(pl.closeError || ''))) {
     pl.closeError = '';
