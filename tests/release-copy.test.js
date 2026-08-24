@@ -355,6 +355,18 @@ test('전체화면 퀴즈는 stage 기준의 안전 영역과 본문 내부 스�
   assert.match(html, /window\.removeEventListener\('orientationchange', applyLayout\)/);
 });
 
+test('일반 화면 퀴즈는 영상 높이에 맞춰 문항과 네 보기를 압축하고 전체화면 크기는 보존한다', () => {
+  const html = read('index.html');
+  const normal = /#pl-stage:not\(:fullscreen\):not\(\.fullscreen-fallback\) #overlay/;
+
+  assert.match(html, normal);
+  assert.match(html, /#pl-stage:not\(:fullscreen\):not\(\.fullscreen-fallback\) #overlay\s*\{[^}]*padding:\s*14px 18px[^}]*overflow:\s*hidden/s);
+  assert.match(html, /#pl-stage:not\(:fullscreen\):not\(\.fullscreen-fallback\) #overlay \.quiz-body\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(html, /#pl-stage:not\(:fullscreen\):not\(\.fullscreen-fallback\) #overlay \.ov-q\s*\{[^}]*font-size:\s*clamp\(18px,\s*2\.2vw,\s*28px\)[^}]*margin-bottom:\s*10px/s);
+  assert.match(html, /#pl-stage:not\(:fullscreen\):not\(\.fullscreen-fallback\) #overlay \.ov-choice\s*\{[^}]*padding:\s*8px 12px[^}]*font-size:\s*clamp\(14px,\s*1\.4vw,\s*18px\)/s);
+  assert.match(html, /#pl-stage:not\(:fullscreen\):not\(\.fullscreen-fallback\) #overlay \.ov-actions \.btn\s*\{[^}]*padding:\s*8px 14px[^}]*font-size:\s*14px/s);
+});
+
 test('편집기 단축키와 경로 종료 처리는 이전 화면의 listener가 남지 않게 정리한다', () => {
   const html = read('index.html');
 
