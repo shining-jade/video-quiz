@@ -2154,22 +2154,71 @@ service cloud.firestore {
           : false;
     }
 
+    function guestIdentity() {
+      return signedIn() &&
+        request.auth.token.firebase.sign_in_provider == 'custom' &&
+        request.auth.token.get('guestShareId', '') is string &&
+        request.auth.token.get('guestShareId', '').matches('^[A-Za-z0-9_-]{1,128}$') &&
+        request.auth.token.get('guestShareRevision', 0) is int &&
+        request.auth.token.get('guestShareRevision', 0) > 0;
+    }
+
+    function guestCapabilityActive(shareId, revision) {
+      let sharePath = /databases/$(database)/documents/guest_quiz_shares/$(shareId);
+      return guestIdentity() &&
+        request.auth.token.guestShareId == shareId &&
+        request.auth.token.guestShareRevision == revision &&
+        request.auth.token.get('guestCapabilityExpiresAt', 0) is int &&
+        request.auth.token.get('guestCapabilityExpiresAt', 0) * 1000 > request.time.toMillis() &&
+        exists(sharePath) && get(sharePath).data.status == 'active' &&
+        get(sharePath).data.revision == revision;
+    }
+
+    function guestOwnsSessionData(data) {
+      return guestIdentity() && data.get('sessionActorType', '') == 'guest' &&
+        data.teacherUid == request.auth.uid && data.get('teacherEmail', '') == '' &&
+        data.get('sourceShareId', '') == request.auth.token.guestShareId &&
+        data.get('sourceRevision', 0) is int && data.get('sourceRevision', 0) > 0;
+    }
+
+    function sourceOwnerReadsGuestSessionData(data) {
+      return isApprovedTeacher() && data.get('sessionActorType', '') == 'guest' &&
+        data.get('sourceOwnerUid', '') == request.auth.uid;
+    }
+
+    function validGuestSessionCreate() {
+      let data = request.resource.data;
+      let shareId = data.get('sourceShareId', '');
+      let revision = data.get('sourceRevision', 0);
+      let sharePath = /databases/$(database)/documents/guest_quiz_shares/$(shareId);
+      let revisionPath = /databases/$(database)/documents/guest_quiz_shares/$(shareId)/revisions/$(revision);
+      return guestOwnsSessionData(data) && guestCapabilityActive(shareId, revision) &&
+        exists(sharePath) && exists(revisionPath) &&
+        get(revisionPath).data.status == 'ready' &&
+        data.get('sourceSetId', '') == get(sharePath).data.sourceSetId &&
+        data.get('sourceOwnerUid', '') == get(sharePath).data.sourceOwnerUid &&
+        validSessionCreateCounter() &&
+        (data.status != 'live' ||
+          (data.get('activationLeaseUntil', null) is timestamp &&
+            data.get('activationLeaseUntil', null) <= request.time + duration.value(120, 's')));
+    }
+
     function ownsSession(sessionId) {
-      return isApprovedTeacher() &&
-        exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
-        get(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
+      let path = /databases/$(database)/documents/sessions/$(sessionId);
+      return exists(path) && get(path).data.teacherUid == request.auth.uid &&
+        (isApprovedTeacher() || guestOwnsSessionData(get(path).data));
     }
 
     function ownsSessionAfter(sessionId) {
-      return isApprovedTeacher() &&
-        existsAfter(/databases/$(database)/documents/sessions/$(sessionId)) &&
-        getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.teacherUid == request.auth.uid;
+      let path = /databases/$(database)/documents/sessions/$(sessionId);
+      return existsAfter(path) && getAfter(path).data.teacherUid == request.auth.uid &&
+        (isApprovedTeacher() || guestOwnsSessionData(getAfter(path).data));
     }
 
     function ownsSessionAfterForLiveMutation(sessionId) {
       let sessionPath = /databases/$(database)/documents/sessions/$(sessionId);
       return getAfter(sessionPath).data.teacherUid == request.auth.uid &&
-        (isApprovedTeacher() ||
+        (isApprovedTeacher() || guestOwnsSessionData(getAfter(sessionPath).data) ||
           (getAfter(sessionPath).data.status == 'ended' && isStoppedTeacherForSafeEnd()));
     }
 
@@ -3162,6 +3211,150 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    function ownsGuestShareSource(data) {
+      let sourcePath = /databases/$(database)/documents/quiz_sets/$(data.sourceSetId);
+      return isApprovedTeacher() && data.sourceOwnerUid == request.auth.uid &&
+        exists(sourcePath) && get(sourcePath).data.ownerUid == request.auth.uid &&
+        get(sourcePath).data.get('lifecycleState', '') == 'active';
+    }
+
+    function validGuestShareParentCreate(shareId) {
+      let data = request.resource.data;
+      return data.keys().hasOnly([
+          'shareId', 'sourceSetId', 'sourceOwnerUid', 'sourceContentRevision',
+          'status', 'tokenHash', 'revision', 'createdAt', 'updatedAt', 'revokedAt'
+        ]) && data.shareId == shareId && ownsGuestShareSource(data) &&
+        data.sourceContentRevision is string && data.sourceContentRevision.size() > 0 &&
+        data.sourceContentRevision.size() <= 200 && data.status == 'building' &&
+        data.tokenHash is string && data.tokenHash.matches('^[a-f0-9]{64}$') &&
+        data.revision == 1 && data.createdAt == request.time && data.updatedAt == request.time &&
+        data.revokedAt == null;
+    }
+
+    function validGuestShareParentUpdate(shareId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let stable = after.shareId == shareId && after.shareId == before.shareId &&
+        after.sourceSetId == before.sourceSetId && after.sourceOwnerUid == before.sourceOwnerUid &&
+        after.tokenHash == before.tokenHash && after.createdAt == before.createdAt &&
+        ownsGuestShareSource(before) && after.updatedAt == request.time;
+      return stable && (
+        (before.status == 'building' && after.status == 'active' &&
+          after.revision == before.revision && after.sourceContentRevision == before.sourceContentRevision &&
+          after.revokedAt == null &&
+          after.diff(before).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+        (before.status == 'active' && after.status == 'active' &&
+          after.revision == before.revision + 1 &&
+          after.sourceContentRevision is string && after.sourceContentRevision.size() > 0 &&
+          after.sourceContentRevision.size() <= 200 && after.revokedAt == null &&
+          after.diff(before).affectedKeys().hasOnly([
+            'revision', 'sourceContentRevision', 'updatedAt'
+          ])) ||
+        (before.status == 'active' && after.status == 'revoked' &&
+          after.revision == before.revision &&
+          after.sourceContentRevision == before.sourceContentRevision &&
+          after.revokedAt == request.time &&
+          after.diff(before).affectedKeys().hasOnly(['status', 'updatedAt', 'revokedAt']))
+      );
+    }
+
+    function ownerMayWriteGuestRevision(shareId, revision) {
+      let sharePath = /databases/$(database)/documents/guest_quiz_shares/$(shareId);
+      let share = get(sharePath).data;
+      return exists(sharePath) && ownsGuestShareSource(share) &&
+        share.status in ['building', 'active'] && revision is int && revision > 0 &&
+        revision <= share.revision + 1;
+    }
+
+    function guestMayReadRevision(shareId, revision) {
+      let revisionPath = /databases/$(database)/documents/guest_quiz_shares/$(shareId)/revisions/$(revision);
+      return guestCapabilityActive(shareId, revision) && exists(revisionPath) &&
+        get(revisionPath).data.status == 'ready';
+    }
+
+    match /guest_quiz_shares/{shareId} {
+      allow get: if isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid;
+      allow list: if false;
+      allow create: if validGuestShareParentCreate(shareId);
+      allow update: if validGuestShareParentUpdate(shareId);
+      allow delete: if false;
+      allow read, write: if false;
+
+      match /revisions/{revision} {
+        allow get: if guestMayReadRevision(shareId, int(revision)) ||
+          (isApprovedTeacher() &&
+            get(/databases/$(database)/documents/guest_quiz_shares/$(shareId)).data.sourceOwnerUid == request.auth.uid);
+        allow list: if false;
+        allow create: if ownerMayWriteGuestRevision(shareId, int(revision)) &&
+          request.resource.data.shareId == shareId && request.resource.data.revision == int(revision) &&
+          request.resource.data.status == 'ready' && request.resource.data.schemaVersion == 1 &&
+          request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+        allow read, write: if false;
+
+        match /videos/{key} {
+          allow get, list: if guestMayReadRevision(shareId, int(revision)) ||
+            (isApprovedTeacher() &&
+              get(/databases/$(database)/documents/guest_quiz_shares/$(shareId)).data.sourceOwnerUid == request.auth.uid);
+          allow create: if ownerMayWriteGuestRevision(shareId, int(revision)) &&
+            request.resource.data.shareId == shareId && request.resource.data.revision == int(revision) &&
+            request.resource.data.videoKey == key && request.resource.data.schemaVersion == 1;
+          allow update, delete: if false;
+          allow read, write: if false;
+        }
+
+        match /questions/{key} {
+          allow get, list: if guestMayReadRevision(shareId, int(revision)) ||
+            (isApprovedTeacher() &&
+              get(/databases/$(database)/documents/guest_quiz_shares/$(shareId)).data.sourceOwnerUid == request.auth.uid);
+          allow create: if ownerMayWriteGuestRevision(shareId, int(revision)) &&
+            request.resource.data.shareId == shareId && request.resource.data.revision == int(revision) &&
+            request.resource.data.questionKey == key;
+          allow update, delete: if false;
+          allow read, write: if false;
+        }
+
+        match /images/{key} {
+          allow get, list: if guestMayReadRevision(shareId, int(revision)) ||
+            (isApprovedTeacher() &&
+              get(/databases/$(database)/documents/guest_quiz_shares/$(shareId)).data.sourceOwnerUid == request.auth.uid);
+          allow create: if ownerMayWriteGuestRevision(shareId, int(revision)) &&
+            request.resource.data.keys().hasOnly(['data', 'shareId', 'revision', 'schemaVersion']) &&
+            request.resource.data.shareId == shareId && request.resource.data.revision == int(revision) &&
+            request.resource.data.schemaVersion == 1 && request.resource.data.data is string &&
+            request.resource.data.data.size() > 0 && request.resource.data.data.size() <= 1500000;
+          allow update, delete: if false;
+          allow read, write: if false;
+        }
+      }
+    }
+
+    match /guest_quiz_share_sources/{setId} {
+      allow get: if isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid &&
+        resource.data.sourceSetId == setId;
+      allow list: if false;
+      allow create: if isApprovedTeacher() && request.resource.data.sourceOwnerUid == request.auth.uid &&
+        request.resource.data.sourceSetId == setId && request.resource.data.status == 'active' &&
+        request.resource.data.revision == 1 && request.resource.data.updatedAt == request.time &&
+        get(/databases/$(database)/documents/guest_quiz_shares/$(request.resource.data.shareId)).data.status == 'active';
+      allow update: if isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid &&
+        request.resource.data.sourceOwnerUid == resource.data.sourceOwnerUid &&
+        request.resource.data.sourceSetId == resource.data.sourceSetId &&
+        request.resource.data.shareId == resource.data.shareId &&
+        request.resource.data.updatedAt == request.time &&
+        ((resource.data.status == 'active' && request.resource.data.status == 'active' &&
+            request.resource.data.revision == resource.data.revision + 1) ||
+          (resource.data.status == 'active' && request.resource.data.status == 'revoked' &&
+            request.resource.data.revision == resource.data.revision &&
+            request.resource.data.revokedAt == request.time));
+      allow delete: if false;
+      allow read, write: if false;
+    }
+
+    match /guest_share_rate_limits/{uid} {
+      allow read, write: if false;
+    }
+
     match /quiz_sets/{setId} {
       allow get: if !exists(publicationSourcePath(setId))
         ? isApprovedTeacher()
@@ -3264,7 +3457,7 @@ service cloud.firestore {
     }
 
     match /codes/{code} {
-      allow get: if anonymousStudent() || isApprovedTeacher();
+      allow get: if anonymousStudent() || isApprovedTeacher() || guestIdentity();
       allow list: if isAdmin() || ownsSession(resource.data.sessionId);
       allow create: if ownsSessionAfter(request.resource.data.sessionId);
       allow update: if ownsSession(resource.data.sessionId) &&
@@ -3275,6 +3468,7 @@ service cloud.firestore {
 
     match /sessions/{sessionId} {
       allow get: if ownsSessionForSafeDeletionEnd(sessionId) || ownsSession(sessionId) || isAdmin() ||
+        sourceOwnerReadsGuestSessionData(resource.data) ||
         (isApprovedTeacher() && !sessionExists(sessionId)) ||
         (anonymousStudent() &&
           (sessionIsJoinable(sessionId) || isRegisteredStudent(sessionId)));
@@ -3283,18 +3477,19 @@ service cloud.firestore {
           (isStoppedTeacherForSafeEnd() && resource.data.teacherUid == request.auth.uid &&
           resource.data.status in ['allocating', 'active', 'live'] && request.query.limit != null &&
           request.query.limit <= 101);
-      allow create: if isApprovedTeacher() &&
-        request.resource.data.teacherUid == request.auth.uid &&
-        request.resource.data.teacherEmail == request.auth.token.email &&
-        validSessionCreateCounter() &&
-        (!('setId' in request.resource.data) ||
-          (request.resource.data.setId is string &&
-            exists(/databases/$(database)/documents/quiz_sets/$(request.resource.data.setId)) &&
-            canStartSet(request.resource.data.setId))) &&
-        (request.resource.data.status != 'live' ||
-          (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
-            request.resource.data.get('activationLeaseUntil', null) <=
-              request.time + duration.value(120, 's')));
+      allow create: if validGuestSessionCreate() ||
+        (isApprovedTeacher() &&
+          request.resource.data.teacherUid == request.auth.uid &&
+          request.resource.data.teacherEmail == request.auth.token.email &&
+          validSessionCreateCounter() &&
+          (!('setId' in request.resource.data) ||
+            (request.resource.data.setId is string &&
+              exists(/databases/$(database)/documents/quiz_sets/$(request.resource.data.setId)) &&
+              canStartSet(request.resource.data.setId))) &&
+          (request.resource.data.status != 'live' ||
+            (request.resource.data.get('activationLeaseUntil', null) is timestamp &&
+              request.resource.data.get('activationLeaseUntil', null) <=
+                request.time + duration.value(120, 's'))));
       allow update: if request.resource.data.teacherUid == resource.data.teacherUid &&
         request.resource.data.teacherEmail == resource.data.teacherEmail &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly([

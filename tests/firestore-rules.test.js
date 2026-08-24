@@ -131,6 +131,15 @@ function actorFirestore(actorName) {
   return testEnvironment.authenticatedContext(actor.uid, actor.claims).firestore();
 }
 
+function guestFirestore(uid, shareId = 'share-a', revision = 2, expiresAtOffset = 600) {
+  return testEnvironment.authenticatedContext(uid, {
+    firebase: { sign_in_provider: 'custom' },
+    guestShareId: shareId,
+    guestShareRevision: revision,
+    guestCapabilityExpiresAt: Math.floor(Date.now() / 1000) + expiresAtOffset
+  }).firestore();
+}
+
 async function adminWrite(path, value) {
   await testEnvironment.withSecurityRulesDisabled(async context => {
     const reference = doc(context.firestore(), path);
@@ -5707,4 +5716,79 @@ rulesTest('clock과 알 수 없는 경로도 소유 범위 또는 기본 거부�
   await assertFails(getDoc(doc(owner, 'clock/student-uid-sample')));
   await assertFails(setDoc(doc(student, 'unknown/path'), { open: true }));
   await assertFails(getDoc(doc(student, 'unknown/path')));
+});
+
+rulesTest('guest capability는 정확한 활성 share revision만 읽고 private 원본은 읽지 못한다', async () => {
+  await adminWrite('guest_quiz_shares/share-a', {
+    shareId: 'share-a', sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
+    sourceContentRevision: '3', status: 'active', tokenHash: 'a'.repeat(64), revision: 2,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2), revokedAt: null
+  });
+  await adminWrite('guest_quiz_shares/share-a/revisions/2', {
+    shareId: 'share-a', revision: 2, sourceContentRevision: '3', status: 'ready',
+    title: '공유 세트', description: '', revealMode: 'manual', limitSec: 20,
+    revealDelaySec: 0, autoPause: true, videoCount: 1, questionCount: 1,
+    imageCount: 0, schemaVersion: 1, createdAt: Timestamp.fromMillis(2)
+  });
+  const guest = guestFirestore('guest-a');
+  await assertSucceeds(getDoc(doc(guest, 'guest_quiz_shares/share-a/revisions/2')));
+  await assertFails(getDoc(doc(guest, 'guest_quiz_shares/share-a')));
+  await assertFails(getDoc(doc(guest, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(guestFirestore('guest-a', 'share-b'),
+    'guest_quiz_shares/share-a/revisions/2')));
+  await assertFails(getDoc(doc(guestFirestore('guest-a', 'share-a', 1),
+    'guest_quiz_shares/share-a/revisions/2')));
+  await assertFails(getDoc(doc(guestFirestore('guest-a', 'share-a', 2, -1),
+    'guest_quiz_shares/share-a/revisions/2')));
+});
+
+rulesTest('같은 share의 두 guest session은 UID별로 생성·조회가 격리된다', async () => {
+  await adminWrite('guest_quiz_shares/share-a', {
+    shareId: 'share-a', sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
+    sourceContentRevision: '3', status: 'active', tokenHash: 'a'.repeat(64), revision: 2,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2), revokedAt: null
+  });
+  await adminWrite('guest_quiz_shares/share-a/revisions/2', {
+    shareId: 'share-a', revision: 2, sourceContentRevision: '3', status: 'ready',
+    title: '공유 세트', description: '', revealMode: 'manual', limitSec: 20,
+    revealDelaySec: 0, autoPause: true, videoCount: 1, questionCount: 1,
+    imageCount: 0, schemaVersion: 1, createdAt: Timestamp.fromMillis(2)
+  });
+  const guestA = guestFirestore('guest-a');
+  const guestB = guestFirestore('guest-b');
+  const session = {
+    teacherUid: 'guest-a', teacherEmail: '', sessionActorType: 'guest',
+    sourceShareId: 'share-a', sourceSetId: 'set1', sourceRevision: 2,
+    sourceOwnerUid: 'owner-uid', status: 'allocating', registeredStudentCount: 0,
+    studentCountRevision: 0, createdAt: Timestamp.fromMillis(2)
+  };
+  await assertSucceeds(setDoc(doc(guestA, 'sessions/guest-session-a'), session));
+  await assertSucceeds(getDoc(doc(guestA, 'sessions/guest-session-a')));
+  await assertFails(getDoc(doc(guestB, 'sessions/guest-session-a')));
+  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'sessions/guest-session-a')));
+  await assertFails(getDoc(doc(actorFirestore('otherTeacher'), 'sessions/guest-session-a')));
+  await assertFails(setDoc(doc(guestB, 'sessions/guest-session-b'), { ...session, teacherUid: 'guest-a' }));
+});
+
+rulesTest('revoked share는 새 guest session 생성을 막지만 이미 만든 session 읽기는 UID에 묶인다', async () => {
+  await adminWrite('guest_quiz_shares/share-a', {
+    shareId: 'share-a', sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
+    sourceContentRevision: '3', status: 'revoked', tokenHash: 'a'.repeat(64), revision: 2,
+    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2),
+    revokedAt: Timestamp.fromMillis(2)
+  });
+  await adminWrite('sessions/guest-existing', {
+    teacherUid: 'guest-a', teacherEmail: '', sessionActorType: 'guest',
+    sourceShareId: 'share-a', sourceSetId: 'set1', sourceRevision: 2,
+    sourceOwnerUid: 'owner-uid', status: 'live', registeredStudentCount: 0,
+    studentCountRevision: 0, activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60000)
+  });
+  const guest = guestFirestore('guest-a');
+  await assertSucceeds(getDoc(doc(guest, 'sessions/guest-existing')));
+  await assertFails(setDoc(doc(guest, 'sessions/guest-new'), {
+    teacherUid: 'guest-a', teacherEmail: '', sessionActorType: 'guest',
+    sourceShareId: 'share-a', sourceSetId: 'set1', sourceRevision: 2,
+    sourceOwnerUid: 'owner-uid', status: 'allocating', registeredStudentCount: 0,
+    studentCountRevision: 0
+  }));
 });
