@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const GuestQuizShareCore = require('../guest-quiz-share-core.js');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
@@ -16860,4 +16861,63 @@ test('copyPublished preflight rejects more than 500 writes before destination tr
   );
   assert.equal(fake.calls().some(call => call.operation === 'runTransaction'), false);
   assert.equal(fake.value('quiz_sets/copy-1'), undefined);
+});
+
+function guestShareProjection() {
+  return GuestQuizShareCore.projectQuizSet({
+    id: 'set1', title: '공유 세트', description: '',
+    settings: { revealMode: 'manual', limitSec: 20, revealDelaySec: 0, autoPause: true },
+    videos: [{ id: 'abcdefghijk', videoId: 'abcdefghijk',
+      url: 'https://youtu.be/abcdefghijk', startSec: 0, endSec: 60,
+      questions: [{ type: 'mc', t: 10, text: '문제', choices: ['A', 'B'], answer: 0 }] }]
+  }, {});
+}
+
+test('guest quiz share publishes a ready revision before activating its owner mapping', async () => {
+  const fake = makeFirestoreFake({
+    'quiz_sets/set1': {
+      title: '공유 세트', ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr',
+      lifecycleState: 'active', contentRevision: 3, videos: []
+    }
+  });
+  const store = createStore(fake);
+  const result = await store.createGuestQuizShare(
+    'set1', 'a'.repeat(64), guestShareProjection(),
+    { uid: 'owner-uid', email: 'owner@school.kr' }, 'share-fixed'
+  );
+  assert.deepEqual(result, { shareId: 'share-fixed', revision: 1, status: 'active' });
+  assert.equal(fake.value('guest_quiz_shares/share-fixed').status, 'active');
+  assert.equal(fake.value('guest_quiz_shares/share-fixed/revisions/1').status, 'ready');
+  assert.equal(fake.value('guest_quiz_share_sources/set1').shareId, 'share-fixed');
+  assert.equal(JSON.stringify(fake.value('guest_quiz_shares/share-fixed')).includes('owner@school.kr'), false);
+});
+
+test('guest quiz share refresh pins a new revision and revoke never reactivates it', async () => {
+  const initial = {
+    'quiz_sets/set1': {
+      title: '공유 세트', ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr',
+      lifecycleState: 'active', contentRevision: 4, videos: []
+    },
+    'guest_quiz_share_sources/set1': {
+      sourceSetId: 'set1', sourceOwnerUid: 'owner-uid', shareId: 'share-fixed', status: 'active', revision: 1
+    },
+    'guest_quiz_shares/share-fixed': {
+      shareId: 'share-fixed', sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
+      status: 'active', tokenHash: 'a'.repeat(64), revision: 1, sourceContentRevision: 3
+    }
+  };
+  const fake = makeFirestoreFake(initial);
+  const store = createStore(fake);
+  const refreshed = await store.refreshGuestQuizShare(
+    'set1', guestShareProjection(), { uid: 'owner-uid', email: 'owner@school.kr' }
+  );
+  assert.equal(refreshed.revision, 2);
+  assert.equal(fake.value('guest_quiz_shares/share-fixed/revisions/2').status, 'ready');
+  const revoked = await store.revokeGuestQuizShare(
+    'set1', { uid: 'owner-uid', email: 'owner@school.kr' }
+  );
+  assert.equal(revoked.status, 'revoked');
+  await assert.rejects(() => store.refreshGuestQuizShare(
+    'set1', guestShareProjection(), { uid: 'owner-uid', email: 'owner@school.kr' }
+  ), /활성.*공유/);
 });
