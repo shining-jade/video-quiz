@@ -4291,8 +4291,9 @@
       } catch (error) {
         return Promise.reject(error);
       }
-      const sourceReference = storedSession.setId && db.doc('quiz_sets/' + storedSession.setId);
-      const sourceCheck = storedSession.setId && sourceReference &&
+      const guestSession = storedSession.sessionActorType === 'guest';
+      const sourceReference = !guestSession && storedSession.setId && db.doc('quiz_sets/' + storedSession.setId);
+      const sourceCheck = !guestSession && storedSession.setId && sourceReference &&
         typeof sourceReference.get === 'function'
         ? getQuizSet(storedSession.setId).then(source => {
           if (!source) throw new Error('수업을 시작할 원본 세트를 찾을 수 없습니다.');
@@ -4345,6 +4346,116 @@
         candidates,
         code => claimSessionCode(code, sessionId, { ...session, code })
       );
+    }
+
+    async function loadGuestQuizRevision(shareIdValue, revisionValue, sourceContext) {
+      const shareId = guestShareId(shareIdValue);
+      if (!Number.isSafeInteger(revisionValue) || revisionValue < 1) {
+        throw new Error('비로그인 공유 revision이 유효하지 않습니다.');
+      }
+      const context = sourceContext || {};
+      const sourceSetId = canonicalPublicationId(context.sourceSetId, 'sourceSetId');
+      const sourceOwnerUid = canonicalPublicationId(context.sourceOwnerUid, 'sourceOwnerUid');
+      const base = 'guest_quiz_shares/' + shareId + '/revisions/' + revisionValue;
+      const [parentSnapshot, videosSnapshot, questionsSnapshot, imagesSnapshot] = await Promise.all([
+        db.doc(base).get({ source: 'server' }),
+        db.collection(base + '/videos').get({ source: 'server' }),
+        db.collection(base + '/questions').get({ source: 'server' }),
+        db.collection(base + '/images').get({ source: 'server' })
+      ]);
+      if (!parentSnapshot.exists) throw new Error('공유받은 퀴즈 revision을 찾을 수 없습니다.');
+      const parent = parentSnapshot.data() || {};
+      if (parent.shareId !== shareId || parent.revision !== revisionValue ||
+          parent.status !== 'ready' || parent.schemaVersion !== 1) {
+        throw new Error('공유받은 퀴즈 revision이 유효하지 않습니다.');
+      }
+      const videos = (videosSnapshot.docs || []).map(document => ({ ...document.data() }))
+        .sort((left, right) => left.videoKey.localeCompare(right.videoKey));
+      const questions = (questionsSnapshot.docs || []).map(document => ({ ...document.data() }))
+        .sort((left, right) => left.questionKey.localeCompare(right.questionKey));
+      const imageValues = {};
+      for (const document of imagesSnapshot.docs || []) {
+        const image = document.data() || {};
+        if (image.shareId !== shareId || image.revision !== revisionValue || image.schemaVersion !== 1 ||
+            typeof image.data !== 'string') throw new Error('공유받은 퀴즈 이미지가 유효하지 않습니다.');
+        imageValues[document.id] = image.data;
+      }
+      if (videos.length !== parent.videoCount || questions.length !== parent.questionCount ||
+          Object.keys(imageValues).length !== parent.imageCount) {
+        throw new Error('공유받은 퀴즈 projection 개수가 일치하지 않습니다.');
+      }
+      const playlist = videos.map(video => ({
+        id: video.videoId,
+        videoId: video.videoId,
+        url: video.videoUrl,
+        startSec: video.startSec,
+        endSec: video.endSec,
+        questions: questions.filter(question => question.videoKey === video.videoKey).map(question => {
+          const value = { ...question };
+          delete value.shareId;
+          delete value.revision;
+          delete value.schemaVersion;
+          delete value.questionKey;
+          delete value.videoKey;
+          if (question.imageKey) value.imgUp = true;
+          if (question.explainImageKey) value.explainImgUp = true;
+          return value;
+        })
+      }));
+      const setSnapshot = {
+        id: sourceSetId,
+        title: parent.title,
+        description: parent.description || '',
+        author: '',
+        settings: {
+          revealMode: parent.revealMode,
+          limitSec: parent.limitSec,
+          revealDelaySec: parent.revealDelaySec,
+          autoPause: parent.autoPause
+        },
+        videos: playlist
+      };
+      return {
+        setSnapshot,
+        snapshotImages: imageValues,
+        shareId,
+        revision: revisionValue,
+        sourceSetId,
+        sourceOwnerUid
+      };
+    }
+
+    function prepareGuestSession(loaded, labelValue, guest, allocationToken) {
+      const value = loaded || {};
+      const current = guest || {};
+      const label = typeof labelValue === 'string' ? labelValue.trim() : '';
+      if (!current.uid || !/^[A-Za-z0-9_-]{1,128}$/.test(current.uid) || label.length > 80 ||
+          !value.setSnapshot || !Array.isArray(value.setSnapshot.videos) ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(value.shareId || '') ||
+          !Number.isSafeInteger(value.revision) || value.revision < 1 ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(value.sourceSetId || '') ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(value.sourceOwnerUid || '') ||
+          typeof allocationToken !== 'string' || allocationToken.length < 16 || allocationToken.length > 128) {
+        throw new Error('비로그인 세션 준비 정보가 유효하지 않습니다.');
+      }
+      return {
+        setId: value.sourceSetId,
+        setTitle: value.setSnapshot.title,
+        label,
+        teacher: '',
+        teacherUid: current.uid,
+        teacherEmail: '',
+        sessionActorType: 'guest',
+        sourceShareId: value.shareId,
+        sourceSetId: value.sourceSetId,
+        sourceRevision: value.revision,
+        sourceOwnerUid: value.sourceOwnerUid,
+        createdAt: fieldValue.serverTimestamp(),
+        status: 'live',
+        setSnapshot: value.setSnapshot,
+        snapshotImages: value.snapshotImages || {},
+        allocationToken
+      };
     }
 
     function subscribeStudents(sessionId, next, error) {
@@ -5378,6 +5489,8 @@
       withdrawOwnedPublicationsForLifecycle,
       getPublishedQuizSet,
       copyPublishedQuizSet,
+      loadGuestQuizRevision,
+      prepareGuestSession,
       startSession,
       activateSessionAllocation,
       renewSessionActivationLease,

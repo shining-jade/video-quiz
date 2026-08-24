@@ -32,7 +32,10 @@ function request(data = { shareId: 'share-a', token: secret }, authPatch = {}) {
 test('exchange binds a short-lived share capability to the anonymous caller uid', async () => {
   const { handler, calls } = fixture();
   const result = await handler(request());
-  assert.deepEqual(result, { customToken: 'signed-token', shareId: 'share-a', revision: 7, expiresAt: 1900 });
+  assert.deepEqual(result, {
+    customToken: 'signed-token', shareId: 'share-a', revision: 7, expiresAt: 1900,
+    sourceSetId: 'set-1', sourceOwnerUid: 'owner-a'
+  });
   assert.deepEqual(calls.tokens[0], { uid: 'anon-a', claims: {
     guestShareId: 'share-a', guestShareRevision: 7, guestCapabilityExpiresAt: 1900
   } });

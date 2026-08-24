@@ -72,9 +72,11 @@ function createGuestShareExchange(deps) {
       guestCapabilityExpiresAt: expiresAt
     };
     const customToken = await deps.createCustomToken(auth.uid, claims);
-    return { customToken, shareId: data.shareId, revision: share.revision, expiresAt };
+    return {
+      customToken, shareId: data.shareId, revision: share.revision, expiresAt,
+      sourceSetId: share.sourceSetId, sourceOwnerUid: share.sourceOwnerUid
+    };
   };
 }
 
 module.exports = { GuestShareError, createGuestShareExchange, safeCode };
-

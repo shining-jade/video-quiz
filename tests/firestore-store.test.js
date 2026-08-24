@@ -16921,3 +16921,46 @@ test('guest quiz share refresh pins a new revision and revoke never reactivates 
     'set1', guestShareProjection(), { uid: 'owner-uid', email: 'owner@school.kr' }
   ), /활성.*공유/);
 });
+
+test('guest revision loader assembles playlist data without reading the private source set', async () => {
+  const fake = makeFirestoreFake({
+    'guest_quiz_shares/share-a/revisions/2': {
+      shareId: 'share-a', revision: 2, sourceContentRevision: '3', status: 'ready',
+      title: '공유 세트', description: '', revealMode: 'manual', limitSec: 20,
+      revealDelaySec: 0, autoPause: true, videoCount: 1, questionCount: 1,
+      imageCount: 0, schemaVersion: 1
+    },
+    'guest_quiz_shares/share-a/revisions/2/videos/v0': {
+      shareId: 'share-a', revision: 2, videoKey: 'v0', videoId: 'abcdefghijk',
+      videoUrl: 'https://youtu.be/abcdefghijk', startSec: 0, endSec: 60, schemaVersion: 1
+    },
+    'guest_quiz_shares/share-a/revisions/2/questions/v0q0': {
+      shareId: 'share-a', revision: 2, questionKey: 'v0q0', videoKey: 'v0',
+      type: 'mc', t: 10, text: '문제', choices: ['A', 'B'], answer: 0
+    }
+  });
+  const loaded = await createStore(fake).loadGuestQuizRevision('share-a', 2, {
+    sourceSetId: 'set1', sourceOwnerUid: 'owner-uid'
+  });
+  assert.equal(loaded.setSnapshot.title, '공유 세트');
+  assert.equal(loaded.setSnapshot.videos[0].questions[0].answer, 0);
+  assert.equal(fake.calls().some(call => call.path === 'quiz_sets/set1'), false);
+});
+
+test('guest session preparation pins share provenance and uses the ordinary allocation snapshot', async () => {
+  const fake = makeFirestoreFake({});
+  const store = createStore(fake);
+  const loaded = {
+    setSnapshot: { title: '공유 세트', author: '', videos: [{ questions: [] }] },
+    snapshotImages: {}, shareId: 'share-a', revision: 2,
+    sourceSetId: 'set1', sourceOwnerUid: 'owner-uid'
+  };
+  const session = store.prepareGuestSession(loaded, '3학년 2반', { uid: 'guest-a' }, 'token-1234567890123456');
+  assert.equal(session.teacherUid, 'guest-a');
+  assert.equal(session.teacherEmail, '');
+  assert.equal(session.sessionActorType, 'guest');
+  assert.equal(session.sourceShareId, 'share-a');
+  assert.equal(session.sourceRevision, 2);
+  assert.equal(session.setId, 'set1');
+  assert.equal(session.setSnapshot.title, '공유 세트');
+});
