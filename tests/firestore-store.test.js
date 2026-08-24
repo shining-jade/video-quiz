@@ -14433,9 +14433,8 @@ test('계속 재생 명령 뒤에도 YouTube가 멈춰 있으면 live를 완료�
   assert.match(result.error.message, /재생/);
 });
 
-test('운영 규칙 호환 중에는 제출 마감 전 공개 요청을 보내지 않고 남은 시간을 안내한다', async () => {
+test('운영 규칙 호환 중에는 제출 마감 전 공개 쓰기를 보내지 않는다', async () => {
   let reveals = 0;
-  const notices = [];
   const context = {
     pl: {
       sessionId: 'session-a',
@@ -14443,14 +14442,46 @@ test('운영 규칙 호환 중에는 제출 마감 전 공개 요청을 보내�
       flatQuestions: [{ type: 'choice', answer: 0 }]
     },
     serverNow() { return 2_000; },
-    toast(message) { notices.push(message); },
     store: { revealLive() { reveals += 1; } }
   };
   loadStageFunctions(['plReveal'], context);
 
   assert.equal(await context.plReveal(), false);
   assert.equal(reveals, 0);
-  assert.match(notices[0], /3초 뒤/);
+});
+
+test('repeated Google login clicks share one popup request instead of cancelling each other', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  let finishPopup;
+  let popupCount = 0;
+  const user = { uid: 'google-user' };
+  const auth = {
+    currentUser: null,
+    signInWithPopup() {
+      popupCount += 1;
+      return new Promise(resolve => {
+        finishPopup = () => { this.currentUser = user; resolve({ user }); };
+      });
+    }
+  };
+  function authFactory() { return auth; }
+  authFactory.GoogleAuthProvider = function GoogleAuthProvider() {};
+  const context = {
+    teacherUser: null, teacherGoogleSignInFlight: null,
+    teacherAuthDialogRevision: 1, teacherAuthVersion: 1,
+    firebase: { auth: authFactory },
+    teacherEmailAuthOperationIsCurrent() { return true; },
+    async applyTeacherUser(value) { context.teacherUser = value; return true; }
+  };
+  vm.runInNewContext(extractFunction(html, 'signInTeacher'), context);
+
+  const first = context.signInTeacher(1);
+  const second = context.signInTeacher(1);
+  assert.equal(first, second);
+  assert.equal(popupCount, 1);
+  finishPopup();
+  assert.equal(await first, user);
+  assert.equal(context.teacherGoogleSignInFlight, null);
 });
 
 test('지금 공개로 제출이 이미 마감되면 원래 grace 시각 전에도 계속 재생한다', async () => {

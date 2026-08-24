@@ -1497,6 +1497,7 @@ let teacherRequestReroute = null;
 let adminTeacherRequestScreen = null;
 let teacherDashboard = null;
 let teacherAuthDialogState = { mode: 'login', status: 'idle', email: '', message: '', error: '' };
+let teacherGoogleSignInFlight = null;
 // Email/Password 가입 흐름은 보관만 하고, 운영 UI에서는 Google 인증만 노출한다.
 const teacherEmailAuthUiEnabled = false;
 // 운영 Rules 전환 전까지 수업계획은 보관만 하고 기존 반 코드 직접 시작을 사용한다.
@@ -2466,22 +2467,44 @@ function ensureClock(user) {
   return clockPromise;
 }
 
-async function signInTeacher(dialogRevision) {
-  if (teacherUser) return teacherUser;
-  const provider = new firebase.auth.GoogleAuthProvider();
-  const result = await firebase.auth().signInWithPopup(provider);
-  if (dialogRevision !== undefined) {
-    const authGeneration = teacherAuthVersion;
-    if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, result.user && result.user.uid)) {
-      return null;
-    }
+function signInTeacher(dialogRevision) {
+  if (teacherUser) return Promise.resolve(teacherUser);
+  if (typeof teacherGoogleSignInFlight !== 'undefined' && teacherGoogleSignInFlight) {
+    return teacherGoogleSignInFlight;
   }
-  const applied = await applyTeacherUser(result.user);
-  return applied === false ? null : teacherUser;
+  let operation;
+  operation = (async () => {
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      const result = await firebase.auth().signInWithPopup(provider);
+      if (dialogRevision !== undefined) {
+        const authGeneration = teacherAuthVersion;
+        if (!teacherEmailAuthOperationIsCurrent(dialogRevision, authGeneration, result.user && result.user.uid)) {
+          return null;
+        }
+      }
+      const applied = await applyTeacherUser(result.user);
+      return applied === false ? null : teacherUser;
+    } finally {
+      if (teacherGoogleSignInFlight === operation) teacherGoogleSignInFlight = null;
+    }
+  })();
+  teacherGoogleSignInFlight = operation;
+  return operation;
 }
 
 async function signInTeacherFromDialog() {
+  if (typeof teacherGoogleSignInFlight !== 'undefined' && teacherGoogleSignInFlight) {
+    return { status: 'busy' };
+  }
   const dialogRevision = teacherAuthDialogRevision;
+  const button = typeof document !== 'undefined'
+    ? document.getElementById('teacher-google-signin') : null;
+  if (button) {
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = '로그인 창 여는 중…';
+  }
   try {
     const user = await signInTeacher(dialogRevision);
     if (!user || teacherAuthDialogRevision !== dialogRevision) return { status: 'stale' };
@@ -2495,6 +2518,14 @@ async function signInTeacherFromDialog() {
     if (teacherAuthDialogRevision !== dialogRevision) return { status: 'stale' };
     showTeacherAuthError(error);
     return { status: 'error' };
+  } finally {
+    const currentButton = typeof document !== 'undefined'
+      ? document.getElementById('teacher-google-signin') : null;
+    if (currentButton && teacherAuthDialogRevision === dialogRevision) {
+      currentButton.disabled = false;
+      currentButton.removeAttribute('aria-busy');
+      currentButton.textContent = 'Google로 로그인';
+    }
   }
 }
 
@@ -7833,10 +7864,6 @@ async function plReveal() {
   if (!pl || pl.live.q < 0) return;
   const revealAt = Number(pl.live.revealAt) || 0;
   if (pl.live.accepting !== false && revealAt > 0 && serverNow() < revealAt) {
-    const waitSeconds = Math.max(1, Math.ceil((revealAt - serverNow()) / 1000));
-    if (typeof toast === 'function') {
-      toast('학생 제출 마감 후 ' + waitSeconds + '초 뒤 정답을 공개할 수 있습니다.');
-    }
     return false;
   }
   const question = pl.flatQuestions[pl.live.q];
@@ -8440,7 +8467,7 @@ function plRenderOverlayCounts() {
       ? revealAt - revealNow : 0;
     rv.disabled = revealed || revealWaitMs > 0;
     rv.textContent = revealed ? '공개됨' : revealWaitMs > 0
-      ? '공개 가능까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
+      ? '제출 마감까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
       : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
   }
 }
@@ -8498,6 +8525,9 @@ function plTimerTick() {
     ? Math.max(0, graceUntil - serverNow()) : 0;
   if (closeButton && !closeBusy) {
     closeButton.disabled = waitMs > 0;
+    if (closeButton.style) {
+      closeButton.style.display = waitMs > 0 && !plRevealed() ? 'none' : '';
+    }
     closeButton.textContent = waitMs > 0
       ? '제출 마감 중… ' + Math.ceil(waitMs / 1000) + '초'
       : '▶ 계속 재생';
@@ -8507,7 +8537,7 @@ function plTimerTick() {
       ? revealAt - serverNow() : 0;
     revealButton.disabled = revealWaitMs > 0;
     revealButton.textContent = revealWaitMs > 0
-      ? '공개 가능까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
+      ? '제출 마감까지 ' + Math.ceil(revealWaitMs / 1000) + '초'
       : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
   }
   if (waitMs === 0 && /^학생 답안 제출을 마감하는 중입니다\./.test(String(pl.closeError || ''))) {
