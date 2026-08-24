@@ -9,6 +9,21 @@ test('continue 직후 같은 시각 tick은 완료 문항을 다시 queue하지 
   assert.deepEqual(trigger.advance({ videoIndex: 0, previousTime: 174.1, currentTime: 174.2, event: 'tick' }).enqueue, []);
 });
 
+test('continue 직후 플레이어 시각이 1초 흔들려도 완료 문항을 재무장하지 않는다', () => {
+  const trigger = QuizTriggerCore.create([{ t: 120, videoIndex: 0 }]);
+  trigger.advance({ videoIndex: 0, previousTime: 119.5, currentTime: 120, event: 'tick' });
+  trigger.complete(0);
+
+  assert.deepEqual(
+    trigger.advance({ videoIndex: 0, previousTime: 120, currentTime: 119, event: 'tick' }).rearmed,
+    []
+  );
+  assert.deepEqual(
+    trigger.advance({ videoIndex: 0, previousTime: 120, currentTime: 119, event: 'seek' }).rearmed,
+    [0]
+  );
+});
+
 test('문항 시각은 영상 시작 시각과 무관한 원본 YouTube 절대 초다', () => {
   const trigger = QuizTriggerCore.create([{ t: 174, videoIndex: 0 }]);
   assert.deepEqual(trigger.advance({ videoIndex: 0, previousTime: 15, currentTime: 173.9, event: 'tick' }).enqueue, []);

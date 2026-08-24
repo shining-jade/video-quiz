@@ -31,7 +31,8 @@
       }
 
       matching(videoIndex).forEach(question => {
-        if (statuses[question.index] === 'completed' && currentTime <= question.t - rearmSeconds) {
+        if (value.event === 'seek' && statuses[question.index] === 'completed' &&
+            currentTime <= question.t - rearmSeconds) {
           statuses[question.index] = 'rearmed';
           rearmed.push(question.index);
         }

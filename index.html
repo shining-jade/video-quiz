@@ -7574,11 +7574,12 @@ function plQueueDueQuestions(prev, now) {
   if (!pl) return false;
   if (!Array.isArray(pl.dueQuestions)) pl.dueQuestions = [];
   if (pl.quizTrigger && pl.quizTrigger.advance) {
+    const triggerEvent = now < prev - 2 ? 'seek' : 'tick';
     const result = pl.quizTrigger.advance({
       videoIndex: pl.videoIndex,
       previousTime: prev,
       currentTime: now,
-      event: 'tick'
+      event: triggerEvent
     });
     (result.rearmed || []).forEach(index => { pl.fired[index] = false; });
     (result.enqueue || []).forEach(index => {
