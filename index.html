@@ -7797,15 +7797,18 @@ async function plReveal() {
   );
 }
 
-/** 재생 시작은 close 확정 전에 확인한다. false/throw/rejection은 재시도 가능한 실패다. */
+/** YouTube IFrame API의 playVideo는 동기 명령이다. 확장 프로그램이 끼워 넣은
+    비동기 광고 요청 결과는 재생 명령의 성공 여부로 사용하지 않는다. */
 async function plContinuePlayback(state) {
   if (!state || !state.player || typeof state.player.playVideo !== 'function') {
     return { ok: false, error: new Error('재생기를 찾을 수 없습니다.') };
   }
   try {
     const result = state.player.playVideo();
-    const settled = result && typeof result.then === 'function' ? await result : result;
-    if (settled === false) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    if (result === false) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    if (result && typeof result.then === 'function') {
+      Promise.resolve(result).catch(() => {});
+    }
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error : new Error(String(error)) };

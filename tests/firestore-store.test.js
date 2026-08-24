@@ -14377,11 +14377,13 @@ test('closeLive 성공 직후 newer live로 바뀐 stale 경로도 이전 재생
   assert.equal(renders.at(-1), 1);
 });
 
-test('계속 재생 시작기는 false·throw·Promise rejection을 모두 재시도 가능한 실패로 반환한다', async () => {
+test('계속 재생 시작기는 YouTube 내부 비동기 rejection과 재생 명령을 분리한다', async () => {
   const ctx = loadStageFunctions(['plContinuePlayback'], {});
   assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { return false; } } })).ok, false);
   assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { throw new Error('blocked'); } } })).ok, false);
-  assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { return Promise.reject(new Error('async')); } } })).ok, false);
+  assert.equal((await ctx.plContinuePlayback({ player: {
+    playVideo() { return Promise.reject(new Error('youtube anti-adblock fetch')); }
+  } })).ok, true);
   assert.equal((await ctx.plContinuePlayback({ player: { playVideo() {} } })).ok, true);
 });
 
