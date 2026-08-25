@@ -118,6 +118,13 @@ test('public quiz library projection core loads after playlist normalization and
   assert.ok(storeIndex < applicationIndex, 'firestore store must load before inline application code');
 });
 
+test('operator authorization core is cache-busted in the static release', () => {
+  const html = read('index.html');
+
+  assert.match(html, /<script src="auth-core\.js\?v=[a-z0-9.-]+"><\/script>/,
+    'auth-core.js must carry a release version so browsers do not retain stale authorization logic');
+});
+
 test('collaboration identity core loads before the Firestore store captures it', () => {
   const html = read('index.html');
   const collaborationIndex = html.indexOf('<script src="collaboration-trash-core.js"></script>');
