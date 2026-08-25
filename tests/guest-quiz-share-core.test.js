@@ -42,35 +42,26 @@ test('projection validates content bounds and supported question types', () => {
   assert.throws(() => Core.projectQuizSet(invalid, {}), /question type/i);
 });
 
-test('random token has exact url-safe entropy and sha256 is canonical', async () => {
+test('random token has exact url-safe entropy', () => {
   const token = Core.randomToken(32, crypto);
   assert.match(token, /^[A-Za-z0-9_-]{43}$/);
-  assert.equal(await Core.sha256Hex('secret', crypto),
-    '2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b');
   assert.throws(() => Core.randomToken(15, crypto), /byteLength/);
 });
 
-test('guest route accepts one bounded share and token only', () => {
-  assert.deepEqual(Core.parseGuestRoute('share_ABC-123', 'token=abc_DEF-123'), {
-    shareId: 'share_ABC-123', token: 'abc_DEF-123'
-  });
-  assert.deepEqual(Core.parseGuestRoute('bad/id', 'token=abc'), { invalid: true });
-  assert.deepEqual(Core.parseGuestRoute('share-a', 'token=a&token=b'), { invalid: true });
-  assert.deepEqual(Core.parseGuestRoute('share-a', 'token=a&extra=b'), { invalid: true });
-});
-
-test('guest claims expire and bind exact share revision', () => {
-  const claims = { guestShareId: 'share-a', guestShareRevision: 4, guestCapabilityExpiresAt: 200 };
-  assert.equal(Core.guestClaimsValid(claims, 'share-a', 4, 199), true);
-  assert.equal(Core.guestClaimsValid(claims, 'share-a', 3, 199), false);
-  assert.equal(Core.guestClaimsValid(claims, 'share-a', 4, 200), false);
+test('guest route accepts one 43-character share id and no query capability', () => {
+  const shareId = 'A'.repeat(43);
+  assert.deepEqual(Core.parseGuestRoute(shareId, ''), { shareId });
+  assert.deepEqual(Core.parseGuestRoute(shareId, 'token=legacy'), { invalid: true });
+  assert.deepEqual(Core.parseGuestRoute('short', ''), { invalid: true });
 });
 
 test('share lifecycle never revives a revoked identity', () => {
-  const active = Core.nextShareState(null, { type: 'create', shareId: 'share-a', tokenHash: 'a'.repeat(64) }, 10);
+  const shareId = 'A'.repeat(43);
+  const active = Core.nextShareState(null, { type: 'create', shareId }, 10);
   assert.equal(active.status, 'active');
+  assert.equal(Object.hasOwn(active, 'tokenHash'), false);
   const revoked = Core.nextShareState(active, { type: 'revoke' }, 20);
   assert.equal(revoked.status, 'revoked');
   assert.throws(() => Core.nextShareState(revoked, { type: 'refresh', revision: 2 }, 30), /revoked/i);
-  assert.throws(() => Core.nextShareState(revoked, { type: 'create', shareId: 'share-a', tokenHash: 'b'.repeat(64) }, 30), /new share/i);
+  assert.throws(() => Core.nextShareState(revoked, { type: 'create', shareId }, 30), /new share/i);
 });

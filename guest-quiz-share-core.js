@@ -5,9 +5,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
-  const TOKEN = /^[A-Za-z0-9_-]{1,256}$/;
-  const HASH = /^[a-f0-9]{64}$/;
+  const SHARE_ID = /^[A-Za-z0-9_-]{43}$/;
   const QUESTION_TYPES = new Set(['mc', 'multi', 'short', 'essay', 'ox']);
 
   function fail(message) { throw new Error('Guest quiz share ' + message); }
@@ -44,18 +42,6 @@
       ? btoa(binary)
       : Buffer.from(bytes).toString('base64');
     return encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  }
-
-  async function sha256Hex(value, cryptoApi) {
-    if (typeof value !== 'string' || !value || value.length > 512) fail('token is invalid');
-    if (!cryptoApi || !cryptoApi.subtle || typeof cryptoApi.subtle.digest !== 'function') {
-      fail('crypto digest API is unavailable');
-    }
-    const bytes = typeof TextEncoder === 'function'
-      ? new TextEncoder().encode(value)
-      : Uint8Array.from(Buffer.from(value, 'utf8'));
-    const digest = await cryptoApi.subtle.digest('SHA-256', bytes);
-    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
   }
 
   function projectQuestion(question, videoKey, questionIndex, images) {
@@ -155,29 +141,18 @@
   }
 
   function parseGuestRoute(shareId, query) {
-    if (typeof shareId !== 'string' || !SAFE_ID.test(shareId) || typeof query !== 'string') return { invalid: true };
+    if (typeof shareId !== 'string' || !SHARE_ID.test(shareId) || typeof query !== 'string') return { invalid: true };
     const params = new URLSearchParams(query.replace(/^\?/, ''));
-    if (Array.from(params.keys()).some(key => key !== 'token') || params.getAll('token').length !== 1) {
-      return { invalid: true };
-    }
-    const token = params.get('token');
-    if (!token || !TOKEN.test(token)) return { invalid: true };
-    return { shareId, token };
-  }
-
-  function guestClaimsValid(claims, shareId, revision, nowSeconds) {
-    return !!claims && typeof shareId === 'string' && SAFE_ID.test(shareId) &&
-      Number.isSafeInteger(revision) && revision >= 1 && Number.isSafeInteger(nowSeconds) &&
-      claims.guestShareId === shareId && claims.guestShareRevision === revision &&
-      Number.isSafeInteger(claims.guestCapabilityExpiresAt) && claims.guestCapabilityExpiresAt > nowSeconds;
+    if (Array.from(params.keys()).length) return { invalid: true };
+    return { shareId };
   }
 
   function nextShareState(current, action, nowValue) {
     if (!action || typeof action !== 'object') fail('action is invalid');
     if (action.type === 'create') {
       if (current) fail(current.status === 'revoked' ? 'revoked identity requires a new share' : 'share already exists');
-      if (!SAFE_ID.test(action.shareId || '') || !HASH.test(action.tokenHash || '')) fail('create is invalid');
-      return deepFreeze({ shareId: action.shareId, tokenHash: action.tokenHash, status: 'active', revision: 1,
+      if (!SHARE_ID.test(action.shareId || '')) fail('create is invalid');
+      return deepFreeze({ shareId: action.shareId, status: 'active', revision: 1,
         createdAt: nowValue, updatedAt: nowValue, revokedAt: null });
     }
     if (!current || current.status !== 'active') fail('revoked or missing share cannot change');
@@ -192,6 +167,5 @@
     fail('action is invalid');
   }
 
-  return Object.freeze({ randomToken, sha256Hex, projectQuizSet, parseGuestRoute,
-    guestClaimsValid, nextShareState });
+  return Object.freeze({ randomToken, projectQuizSet, parseGuestRoute, nextShareState });
 });
