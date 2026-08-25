@@ -16217,3 +16217,66 @@ test('튜토리얼은 앞뒤로 넘기고 마지막에서 닫힌다', () => {
   ctx.plGuestTourGo(1);
   assert.equal(ctx.isOpen(), false);
 });
+
+function revealFailureContext(error) {
+  let calls = 0;
+  const state = {
+    live: { q: 0, revealed: false, liveToken: 'tok', openedAt: 1 },
+    flatQuestions: [{ type: 'choice', text: 'Q', choices: ['A', 'B'], answer: 0 }],
+    sessionId: 's1'
+  };
+  const context = {
+    pl: state,
+    store: { async revealLive() { calls += 1; if (error) throw error; return true; } },
+    FirestoreStore: {
+      liveIdentity() { return { q: 0, openedAt: 1, liveToken: 'tok' }; },
+      publicAnswer() { return { answer: 0 }; }
+    },
+    async plExplanationImage() { return null; },
+    plRenderOverlayCounts() {},
+    plRenderOverlay() {},
+    console: { error() {} },
+    Number, String
+  };
+  loadStageFunctions(['plRevealBlockedMessage', 'plReveal'], context);
+  context.calls = () => calls;
+  return context;
+}
+
+test('정답 공개가 권한 문제로 막히면 교사에게 사유를 알리고 재시도를 멈춘다', async () => {
+  const denied = new Error('Missing or insufficient permissions.');
+  denied.code = 'permission-denied';
+  const ctx = revealFailureContext(denied);
+
+  assert.equal(await ctx.plReveal(), false);
+  // 되돌릴 수 없는 실패는 한 번 만에 알린다. 1초마다 조용히 반복하면 화면이 멈춘 것처럼 보인다.
+  assert.equal(ctx.pl.revealFatal, true);
+  assert.match(ctx.pl.revealError, /더 이상 이 반을 진행할 수 없습니다/);
+  assert.match(ctx.pl.revealError, /새로 반을 열고/);
+});
+
+test('일시적인 실패는 몇 번 참았다가 알린다', async () => {
+  const flaky = new Error('network');
+  flaky.code = 'unavailable';
+  const ctx = revealFailureContext(flaky);
+
+  await ctx.plReveal();
+  assert.equal(ctx.pl.revealError, undefined, '한 번 실패로는 경고하지 않는다');
+  await ctx.plReveal();
+  assert.equal(ctx.pl.revealError, undefined);
+  await ctx.plReveal();
+  assert.match(ctx.pl.revealError, /지연되고 있습니다/);
+  assert.equal(ctx.pl.revealFatal, false, '일시적 실패는 재시도를 막지 않는다');
+});
+
+test('정답 공개에 성공하면 남아 있던 경고를 지운다', async () => {
+  const ctx = revealFailureContext(null);
+  ctx.pl.revealError = '이전 경고';
+  ctx.pl.revealFailures = 5;
+  ctx.pl.revealFatal = true;
+
+  assert.equal(await ctx.plReveal(), true);
+  assert.equal(ctx.pl.revealError, '');
+  assert.equal(ctx.pl.revealFailures, 0);
+  assert.equal(ctx.pl.revealFatal, false);
+});

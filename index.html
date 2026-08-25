@@ -890,7 +890,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="guest-quiz-share-core.js?v=20260826-resume"></script>
 <script src="public-author-label-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
-<script src="firestore-store.js?v=20260826-resume"></script>
+<script src="firestore-store.js?v=20260826-reveal"></script>
 <script src="choice-order-core.js"></script>
 <script src="image-lightbox-core.js"></script>
 <script src="quiz-trigger-core.js?v=20260825-seek"></script>
@@ -7162,12 +7162,19 @@ function renderPlayRun() {
       state.liveGeneration = (Number(state.liveGeneration) || 0) + 1;
       state.revealRequested = false;
       state.revealRetryAt = 0;
+      // 지난 문항의 경고가 다음 문항까지 남아 있으면 안 된다.
+      state.revealError = '';
+      state.revealFailures = 0;
+      state.revealFatal = false;
     }
     state.live = nextLive;
     if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
     if (state.live.revealed) {
       state.revealRequested = false;
       state.revealRetryAt = 0;
+      state.revealError = '';
+      state.revealFailures = 0;
+      state.revealFatal = false;
     }
     if (state.live.revealed) {
       plGradeCurrentResponses(state).catch(e => { if (pl === state) console.error(e); });
@@ -8057,6 +8064,27 @@ async function plExplanationImage(question, questionIndex) {
   );
 }
 
+/**
+ * 정답 공개가 막혔을 때 교사에게 무엇을 해야 하는지 알려 준다.
+ * 권한 거부는 이 브라우저가 더 이상 이 반의 주인이 아니라는 뜻이라 다시 시도해도 소용없다.
+ */
+function plRevealBlockedMessage(error) {
+  const code = String(error && error.code || '').toLowerCase();
+  const message = String(error && error.message || error || '');
+  if (code.includes('permission-denied') || /insufficient permissions/i.test(message)) {
+    return {
+      fatal: true,
+      text: '이 브라우저에서 더 이상 이 반을 진행할 수 없습니다. ' +
+        '진행 중에 로그인하거나 로그아웃하면 이렇게 됩니다. ' +
+        '[진행 종료] 후 새로 반을 열고 학생에게 새 반 코드를 알려 주세요.'
+    };
+  }
+  if (code.includes('resource-exhausted') || /quota/i.test(message)) {
+    return { fatal: true, text: 'Firestore 무료 사용량을 모두 썼습니다. 잠시 후 다시 시도해 주세요.' };
+  }
+  return { fatal: false, text: '정답 공개가 지연되고 있습니다. 다시 시도하는 중입니다: ' + message };
+}
+
 async function plReveal() {
   if (!pl || pl.live.q < 0) return;
   if (pl.revealPending) return false;
@@ -8071,15 +8099,33 @@ async function plReveal() {
   try {
     const explainImage = await plExplanationImage(question, questionIndex);
     if (pl !== state || Number(state.live.q) !== Number(questionIndex)) return false;
-    return await store.revealLive(
+    const revealed = await store.revealLive(
       state.sessionId,
       identity,
       FirestoreStore.publicAnswer(question, explainImage)
     );
+    if (pl === state && revealed !== false) {
+      state.revealError = '';
+      state.revealFailures = 0;
+      state.revealFatal = false;
+    }
+    return revealed;
+  } catch (error) {
+    // 조용히 1초마다 다시 시도만 하면 교사 화면은 0초에서 멈춘 것처럼 보인다.
+    console.error('reveal failed', error && error.code || 'error');
+    if (pl === state) {
+      const blocked = plRevealBlockedMessage(error);
+      state.revealFailures = (Number(state.revealFailures) || 0) + 1;
+      state.revealFatal = blocked.fatal;
+      // 한두 번의 일시적 실패까지 경고하면 오히려 산만하다.
+      if (blocked.fatal || state.revealFailures >= 3) state.revealError = blocked.text;
+    }
+    return false;
   } finally {
     if (pl === state) {
       state.revealPending = false;
       if (typeof plRenderOverlayCounts === 'function') plRenderOverlayCounts();
+      if (typeof plRenderOverlay === 'function') plRenderOverlay();
     }
   }
 }
@@ -8645,6 +8691,7 @@ function plRenderOverlay() {
     '<div class="ov-actions">' +
       (pl.closeError ? '<div class="notice bad" role="alert">종료 저장 실패: ' +
         esc(pl.closeError) + ' · 다시 시도해 주세요.</div>' : '') +
+      (pl.revealError ? '<div class="notice bad" role="alert">' + esc(pl.revealError) + '</div>' : '') +
       (mode === 'never' ? '' :
         '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
       '<button class="btn primary" id="ov-close" onclick="plCloseQuestion().catch(()=>{})"' +
@@ -8786,8 +8833,10 @@ function plTimerTick() {
   // timer 모드는 시간이 차면 정답 projection도 Firestore에 함께 공개한다.
   const revealAt = Number(pl.live.revealAt) || 0;
   const revealDue = revealAt > 0 && serverNow() >= revealAt;
+  // 되돌릴 수 없는 실패(신분 상실 등)는 1초마다 다시 시도해도 소용없다.
+  // 화면에 사유를 띄운 뒤 멈춰서 교사가 새 반을 열도록 한다.
   if (pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
-      !pl.live.revealed && !pl.revealPending && !pl.revealRequested &&
+      !pl.live.revealed && !pl.revealPending && !pl.revealRequested && !pl.revealFatal &&
       serverNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;
     Promise.resolve(plReveal()).then(revealed => {
