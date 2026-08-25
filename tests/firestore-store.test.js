@@ -4709,14 +4709,14 @@ test('allocation과 heartbeat lease는 호출 시작의 보정 서버 시각에 
     'leased-session', 'LEASE1', 'teacher-1', token
   ), true);
   assert.equal(fake.value('sessions/leased-session').status, 'live');
-  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 180_000);
+  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 150_000);
 
   now = 70_000;
   moveClockDuringRenew = true;
   assert.equal(await store.renewSessionActivationLease(
     'leased-session', 'LEASE1', 'teacher-1', token
   ), true);
-  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 190_000);
+  assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 160_000);
 });
 
 test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지우며 부분 실패를 재시도한다', async () => {

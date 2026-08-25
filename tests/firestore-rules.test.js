@@ -1388,7 +1388,8 @@ rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동
 rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 접근을 자동 차단한다', async () => {
   const token = 'lease-token-1234567890';
   let synchronizedNow = Date.now();
-  const activationLeaseUntil = synchronizedNow + 120_000;
+  // 저장소는 Rules 상한(120초)에서 시계 오차 여유 30초를 빼고 리스를 요청한다.
+  const activationLeaseUntil = synchronizedNow + 90_000;
   let reachedRead;
   let releaseRead;
   const atRead = new Promise(resolve => { reachedRead = resolve; });
@@ -1457,7 +1458,7 @@ rulesTest('stale activation과 heartbeat는 server-time lease 밖에서 학생 �
   const atRenewRead = new Promise(resolve => { reachedRenewRead = resolve; });
   const releaseRenew = new Promise(resolve => { releaseRenewRead = resolve; });
   synchronizedNow = Date.now();
-  const renewedLeaseUntil = synchronizedNow + 120_000;
+  const renewedLeaseUntil = synchronizedNow + 90_000;
   const renewStore = emulatorStore(owner, null, {
     path: 'sessions/lease-race',
     async wait() {
@@ -3843,6 +3844,96 @@ function guestRunSource() {
       ]
     }]
   };
+}
+
+function realisticGuestRunSource(imageCount) {
+  return {
+    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr',
+    trashedAt: null, purgeStartedAt: null, lifecycleState: 'active',
+    collaboratorCount: 0, imageCount, contentRevision: '31',
+    title: '심폐소생술 완벽 알기', description: '',
+    settings: { revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true },
+    videos: [{
+      videoId: 'dQw4w9WgXcQ',
+      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      startSec: 0, endSec: null,
+      questions: Array.from({ length: 10 }, (_, index) => ({
+        type: 'choice', t: 120 + index * 40,
+        text: '문항 ' + (index + 1) + ' 내용입니다',
+        choices: ['보기1', '보기2', '보기3', '보기4'], answer: index % 4,
+        explain: '해설 ' + (index + 1), imgUp: index < imageCount
+      }))
+    }]
+  };
+}
+
+function realisticGuestRunImages(imageCount) {
+  const images = {};
+  for (let index = 0; index < imageCount; index += 1) {
+    images['v0q' + index] = 'data:image/png;base64,AAAA';
+  }
+  return images;
+}
+
+for (const imageCount of [0, 3, 10]) {
+  rulesTest('실제 크기(문항 10개 이미지 ' + imageCount + '개) 세트도 비로그인 반 시작이 된다', async () => {
+    const setId = 'real-set-' + imageCount;
+    const shareId = String(imageCount).padStart(2, 'S').repeat(21) + 'x';
+    const source = realisticGuestRunSource(imageCount);
+    await adminWrite('quiz_sets/' + setId, source);
+
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    const projection = GuestQuizShareCore.projectQuizSet(
+      source, realisticGuestRunImages(imageCount)
+    );
+    const share = await ownerStore.createGuestQuizShare(
+      setId, projection, guestRunOwner, shareId
+    );
+
+    const guestTeacherStore = emulatorStore(guestFirestore('guest-real-' + imageCount));
+    const loaded = await guestTeacherStore.loadActiveGuestQuizShare(share.shareId);
+    assert.equal(loaded.setSnapshot.videos[0].questions.length, 10);
+    assert.equal(Object.keys(loaded.snapshotImages || {}).length, imageCount);
+
+    const session = guestTeacherStore.prepareGuestSession(
+      loaded, '1반', { uid: 'guest-real-' + imageCount }, 'guest-alloc-token-abcdef'
+    );
+    const code = await guestTeacherStore.startSession(
+      'real-session-' + imageCount, session, () => 'RS' + imageCount + '001'
+    );
+    assert.equal(code, 'RS' + imageCount + '001');
+  });
+}
+
+for (const skewSeconds of [0, 20]) {
+  rulesTest('기기 시계가 서버보다 ' + skewSeconds + '초 빨라도 비로그인 반이 활성화된다', async () => {
+    const setId = 'skew-set-' + skewSeconds;
+    const shareId = 'K'.repeat(42) + (skewSeconds ? 'b' : 'a');
+    const source = realisticGuestRunSource(0);
+    await adminWrite('quiz_sets/' + setId, source);
+
+    const ownerStore = emulatorStore(actorFirestore('owner'));
+    const share = await ownerStore.createGuestQuizShare(
+      setId, GuestQuizShareCore.projectQuizSet(source, {}), guestRunOwner, shareId
+    );
+
+    // 기기 시계가 서버보다 앞선 상황을 그대로 만든다.
+    const aheadClock = () => Date.now() + skewSeconds * 1000;
+    const guestUid = 'guest-skew-' + skewSeconds;
+    const guestStore = emulatorStore(guestFirestore(guestUid), undefined, undefined, aheadClock);
+    const loaded = await guestStore.loadActiveGuestQuizShare(share.shareId);
+    const session = guestStore.prepareGuestSession(
+      loaded, '1반', { uid: guestUid }, 'skew-alloc-token-abcdef'
+    );
+    const sessionId = 'skew-session-' + skewSeconds;
+    const code = await guestStore.startSession(sessionId, session, () => 'SK' + skewSeconds + '01');
+
+    assert.equal(
+      await guestStore.activateSessionAllocation(sessionId, code, guestUid, 'skew-alloc-token-abcdef'),
+      true
+    );
+    assert.equal((await adminRead('sessions/' + sessionId)).status, 'live');
+  });
 }
 
 rulesTest('비로그인 링크 하나로 다른 교사가 자기 반을 열고 학생이 참여해 답을 낸다', async () => {

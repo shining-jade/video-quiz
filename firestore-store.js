@@ -212,7 +212,14 @@
   }
 
   function createFirestoreStore(db, fieldValue, nowFn) {
-    const SESSION_ACTIVATION_LEASE_MS = 120_000;
+    // Rules는 activationLeaseUntil을 request.time + 120초까지만 허용한다. 리스를 상한과
+    // 똑같이 계산하면 여유가 0초라, 기기 시계가 서버보다 조금이라도 빠르면 반 활성화가
+    // permission-denied로 거부된다(그래서 "됐다 안 됐다" 한다). 시계 오차 여유를 빼고
+    // 요청한다. 하트비트가 60초마다 갱신하므로 90초 리스로도 수업은 끊기지 않는다.
+    const SESSION_ACTIVATION_LEASE_LIMIT_MS = 120_000;
+    const SESSION_ACTIVATION_CLOCK_SKEW_MS = 30_000;
+    const SESSION_ACTIVATION_LEASE_MS =
+      SESSION_ACTIVATION_LEASE_LIMIT_MS - SESSION_ACTIVATION_CLOCK_SKEW_MS;
     let serverOffset = 0;
     const serverNow = () => nowFn() + serverOffset;
     const serverTimestampProbe = fieldValue && typeof fieldValue.serverTimestamp === 'function'
