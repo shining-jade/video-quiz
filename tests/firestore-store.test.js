@@ -16251,8 +16251,8 @@ test('정답 공개가 권한 문제로 막히면 교사에게 사유를 알리�
   assert.equal(await ctx.plReveal(), false);
   // 되돌릴 수 없는 실패는 한 번 만에 알린다. 1초마다 조용히 반복하면 화면이 멈춘 것처럼 보인다.
   assert.equal(ctx.pl.revealFatal, true);
-  assert.match(ctx.pl.revealError, /더 이상 이 반을 진행할 수 없습니다/);
-  assert.match(ctx.pl.revealError, /새로 반을 열고/);
+  assert.match(ctx.pl.revealError, /정답을 공개하지 못했습니다/);
+  assert.match(ctx.pl.revealError, /새로 반을 열어 주세요/);
 });
 
 test('일시적인 실패는 몇 번 참았다가 알린다', async () => {

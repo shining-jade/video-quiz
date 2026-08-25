@@ -616,15 +616,12 @@ service cloud.firestore {
         request.resource.data.uid == request.auth.uid;
     }
 
+    // 보기를 하나씩 펼쳐 검사하면 요청당 1,000개 표현식 한도에 걸려 학생 제출이
+    // 통째로 거부된다. join()은 문자열이 아닌 보기에서 실패해 타입 검사를 겸하므로
+    // 한 번에 검사하고, 길이는 보기 수 기준 총량(보기당 200자)으로 묶는다.
     function validChoiceList(values) {
-      return values is list &&
-        values.size() <= 6 &&
-        (values.size() < 1 || (values[0] is string && values[0].size() <= 200)) &&
-        (values.size() < 2 || (values[1] is string && values[1].size() <= 200)) &&
-        (values.size() < 3 || (values[2] is string && values[2].size() <= 200)) &&
-        (values.size() < 4 || (values[3] is string && values[3].size() <= 200)) &&
-        (values.size() < 5 || (values[4] is string && values[4].size() <= 200)) &&
-        (values.size() < 6 || (values[5] is string && values[5].size() <= 200));
+      return values is list && values.size() <= 6 &&
+        (values.size() == 0 || values.join(' ').size() <= values.size() * 201 - 1);
     }
 
     function validNumberList(values) {
@@ -679,8 +676,10 @@ service cloud.firestore {
         (value.size() < 6 || (validChoiceIndex(value[5], choices) && value[5] != value[0] && value[5] != value[1] && value[5] != value[2] && value[5] != value[3] && value[5] != value[4]));
     }
 
+    // O·X는 보기 2개짜리 선택형이라 choice와 같은 방식으로 답이 오간다.
+    // 목록에서 빠져 있으면 학생 제출도 정답 공개도 통째로 거부된다.
     function validAnswerForQuestion(answer, question) {
-      return ((question.type in ['choice', 'mc']) && validChoiceIndex(answer, question.choices)) ||
+      return ((question.type in ['choice', 'mc', 'ox']) && validChoiceIndex(answer, question.choices)) ||
         (question.type == 'multi' && validMultiChoice(answer, question.choices)) ||
         (question.type == 'short' && answer is string && answer.size() <= 100) ||
         (question.type == 'long' && answer is string && answer.size() <= 1000);
@@ -715,7 +714,7 @@ service cloud.firestore {
             !('answer' in answer) && !('answers' in answer) && !('accept' in answer)) ||
           (questionType == 'multi' && answer.keys().hasAll(['answers']) &&
             !('answer' in answer) && !('accept' in answer) && validNumberList(answer.answers)) ||
-          ((questionType in ['choice', 'mc']) && answer.keys().hasAll(['answer']) &&
+          ((questionType in ['choice', 'mc', 'ox']) && answer.keys().hasAll(['answer']) &&
             !('answers' in answer) && !('accept' in answer) && validAnswerValue(answer.answer)));
     }
 
@@ -811,8 +810,9 @@ service cloud.firestore {
       let live = get(
         /databases/$(database)/documents/sessions/$(sessionId)/meta/live
       ).data;
-      return sessionIsJoinable(sessionId) &&
-        exists(/databases/$(database)/documents/sessions/$(sessionId)/meta/live) &&
+      // 참여 가능 여부는 이 함수를 부르는 쪽(isJoinedStudent)이 이미 확인한다.
+      // 여기서 또 확인하면 요청당 표현식 한도만 축낸다.
+      return exists(/databases/$(database)/documents/sessions/$(sessionId)/meta/live) &&
         live is map &&
         live.q >= 0 &&
         validPublicQuestion(live.publicQuestion) &&
@@ -880,24 +880,24 @@ service cloud.firestore {
 
     function validStudentResponseCreate(sessionId) {
       let live = get(/databases/$(database)/documents/sessions/$(sessionId)/meta/live).data;
+      // 같은 값을 매번 다시 계산하면 요청당 표현식 한도를 넘겨 제출이 거부된다.
+      let key = string(live.q);
+      let answers = request.resource.data.answers;
       return currentQuestionIsOpen(sessionId) &&
         request.resource.data.keys().hasAll(['uid', 'answers']) &&
         request.resource.data.keys().hasOnly(['uid', 'answers']) &&
         request.resource.data.uid == request.auth.uid &&
-        request.resource.data.answers is map &&
-        request.resource.data.answers.keys().hasAll([currentQuestionKey(sessionId)]) &&
-        request.resource.data.answers.keys().hasOnly([currentQuestionKey(sessionId)]) &&
-        validAnswer(request.resource.data.answers[currentQuestionKey(sessionId)]) &&
-        validAnswerForQuestion(
-          request.resource.data.answers[currentQuestionKey(sessionId)].answer,
-          live.publicQuestion
-        );
+        answers is map &&
+        answers.keys().hasAll([key]) &&
+        answers.keys().hasOnly([key]) &&
+        validAnswer(answers[key]) &&
+        validAnswerForQuestion(answers[key].answer, live.publicQuestion);
     }
 
     function validOpenStudentResponseUpdate(sessionId) {
-      let questionKey = currentQuestionKey(sessionId);
-      let previousAnswer = resource.data.answers.get(questionKey, { 'revision': 0 });
       let live = get(/databases/$(database)/documents/sessions/$(sessionId)/meta/live).data;
+      let questionKey = string(live.q);
+      let previousAnswer = resource.data.answers.get(questionKey, { 'revision': 0 });
       return request.resource.data.keys().hasAll(['uid', 'answers']) &&
         request.resource.data.keys().hasOnly(['uid', 'answers']) &&
         resource.data.keys().hasAll(['uid', 'answers']) &&
@@ -1834,13 +1834,11 @@ service cloud.firestore {
         allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId) ||
           (isRegisteredStudent(sessionId) && studentId == request.auth.uid);
         allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
-        allow create: if isJoinedStudent(sessionId) &&
-          sessionIsJoinable(sessionId) &&
-          studentId == request.auth.uid &&
+        allow create: if studentId == request.auth.uid &&
+          isJoinedStudent(sessionId) &&
           validStudentResponseCreate(sessionId);
-        allow update: if isJoinedStudent(sessionId) &&
-          sessionIsJoinable(sessionId) &&
-          studentId == request.auth.uid &&
+        allow update: if studentId == request.auth.uid &&
+          isJoinedStudent(sessionId) &&
           validStudentResponseUpdate(sessionId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;

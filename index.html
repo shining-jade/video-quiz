@@ -8140,9 +8140,9 @@ function plRevealBlockedMessage(error) {
   if (code.includes('permission-denied') || /insufficient permissions/i.test(message)) {
     return {
       fatal: true,
-      text: '이 브라우저에서 더 이상 이 반을 진행할 수 없습니다. ' +
-        '진행 중에 로그인하거나 로그아웃하면 이렇게 됩니다. ' +
-        '[진행 종료] 후 새로 반을 열고 학생에게 새 반 코드를 알려 주세요.'
+      text: '정답을 공개하지 못했습니다. 이 반을 계속 진행할 수 없다면 ' +
+        '[진행 종료] 후 새로 반을 열어 주세요. ' +
+        '(진행 중에 로그인하거나 로그아웃하면 이렇게 될 수 있습니다.)'
     };
   }
   if (code.includes('resource-exhausted') || /quota/i.test(message)) {

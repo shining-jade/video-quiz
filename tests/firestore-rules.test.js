@@ -2640,6 +2640,61 @@ rulesTest('fix-round: adversarial queries and ownership spoofing stay denied', a
   await assertFails(getDoc(doc(student, 'sessions/s1/students/missing-student-uid')));
 });
 
+rulesTest('O·X 문항도 학생이 답을 내고 교사가 정답을 공개할 수 있다', async () => {
+  const owner = actorFirestore('owner');
+  const student = actorFirestore('student');
+  const oxQuestion = {
+    number: 1, total: 2, type: 'ox',
+    text: '넘어진 후 의식을 잃었다면 병원에서 확인받아야 한다.',
+    choices: ['O (맞다)', 'X (아니다)']
+  };
+
+  await assertSucceeds(setDoc(doc(owner, 'sessions/s1/meta/live'), liveQuestion(0, {
+    publicQuestion: oxQuestion
+  })));
+
+  // 학생 제출 (시드에 revision 1 답안이 있으므로 갱신 경로를 탄다)
+  await assertSucceeds(setDoc(doc(student, 'sessions/s1/responses/student-uid'), {
+    uid: 'student-uid',
+    answers: { 0: { answer: 0, submitted: true, revision: 2 } }
+  }));
+  assert.equal((await adminRead('sessions/s1/responses/student-uid')).answers['0'].answer, 0);
+
+  // 교사 정답 공개 — 이게 막히면 화면이 0초에서 멈춘다.
+  await assertSucceeds(setDoc(doc(owner, 'sessions/s1/meta/live'), liveQuestion(0, {
+    publicQuestion: oxQuestion,
+    revealed: true,
+    accepting: false,
+    publicAnswer: { answer: 0, explain: '의식을 잃을 정도면 확인이 필요합니다.' }
+  })));
+
+  const stored = await adminRead('sessions/s1/meta/live');
+  assert.equal(stored.revealed, true);
+  assert.equal(stored.publicAnswer.answer, 0);
+
+  // 학생도 공개된 O·X 정답을 읽을 수 있어야 한다.
+  await assertSucceeds(getDoc(doc(student, 'sessions/s1/meta/live')));
+});
+
+rulesTest('O·X 문항의 잘못된 답안은 그대로 막는다', async () => {
+  const owner = actorFirestore('owner');
+  const student = actorFirestore('student');
+  const oxQuestion = {
+    number: 1, total: 2, type: 'ox', text: 'O·X 문항', choices: ['O', 'X']
+  };
+  await assertSucceeds(setDoc(doc(owner, 'sessions/s1/meta/live'), liveQuestion(0, {
+    publicQuestion: oxQuestion
+  })));
+
+  // 보기 범위를 벗어난 값과 문자열 답안은 계속 거부되어야 한다.
+  for (const bad of [2, -1, 'O']) {
+    await assertFails(setDoc(doc(student, 'sessions/s1/responses/student-uid'), {
+      uid: 'student-uid',
+      answers: { 0: { answer: bad, submitted: true, revision: 2 } }
+    }));
+  }
+});
+
 rulesTest('fix-round-2: publicAnswer accept is bounded and string-only', async t => {
   const cases = [
     ['nested map', [{ answer: 'private' }]],
