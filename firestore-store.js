@@ -5049,7 +5049,6 @@
       return db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionRef);
         const liveSnapshot = await transaction.get(liveRef);
-        const migrationGateSnapshot = await transaction.get(migrationGateRef);
         if (!sessionSnapshot.exists || !liveSnapshot.exists) {
           throw new Error('종료할 session 또는 live 문서가 없습니다.');
         }
@@ -5062,6 +5061,9 @@
             count > 0 && typeof session.lastStudentUid === 'string' &&
               Boolean(session.lastStudentUid));
         if (!validCounter) {
+          // migration gate는 legacy 세션에만 필요하다. 항상 읽으면 이 문서를 읽을 수 없는
+          // 비로그인 진행 계정이 정상 세션조차 종료하지 못한다(permission-denied).
+          const migrationGateSnapshot = await transaction.get(migrationGateRef);
           if (migrationGateSnapshot.exists &&
               validSessionCounterMigrationGate(migrationGateSnapshot.data())) {
             throw new Error('session student counter migration이 완료되어 legacy 종료가 닫혔습니다.');

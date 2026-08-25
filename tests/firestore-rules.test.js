@@ -3936,6 +3936,38 @@ for (const skewSeconds of [0, 20]) {
   });
 }
 
+rulesTest('비로그인 교사는 학생이 참여한 자기 반을 직접 종료할 수 있다', async () => {
+  const setId = 'guest-end-set';
+  const shareId = 'E'.repeat(43);
+  const source = realisticGuestRunSource(0);
+  await adminWrite('quiz_sets/' + setId, source);
+
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const share = await ownerStore.createGuestQuizShare(
+    setId, GuestQuizShareCore.projectQuizSet(source, {}), guestRunOwner, shareId
+  );
+
+  const guestUid = 'guest-end-uid';
+  const guestStore = emulatorStore(guestFirestore(guestUid));
+  const loaded = await guestStore.loadActiveGuestQuizShare(share.shareId);
+  const session = guestStore.prepareGuestSession(
+    loaded, '1반', { uid: guestUid }, 'end-alloc-token-abcdef'
+  );
+  const code = await guestStore.startSession('guest-end-session', session, () => 'ENDX01');
+  await guestStore.activateSessionAllocation('guest-end-session', code, guestUid, 'end-alloc-token-abcdef');
+
+  const studentStore = emulatorStore(guestFirestore('guest-end-student'));
+  await studentStore.joinStudent('guest-end-session', 'guest-end-student', { num: 1, name: '학생' });
+
+  // 종료가 막히면 학생 화면이 종료 안내로 바뀌지 않고 반이 계속 열려 있게 된다.
+  await assertSucceeds(guestStore.endSession('guest-end-session'));
+
+  const ended = await adminRead('sessions/guest-end-session');
+  assert.equal(ended.status, 'ended');
+  assert.equal(ended.actualParticipants, 1);
+  assert.equal((await adminRead('sessions/guest-end-session/meta/live')).status, 'ended');
+});
+
 rulesTest('비로그인 링크 하나로 다른 교사가 자기 반을 열고 학생이 참여해 답을 낸다', async () => {
   await adminWrite('quiz_sets/guest-run-set', guestRunSource());
 
