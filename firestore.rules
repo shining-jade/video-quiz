@@ -262,59 +262,6 @@ service cloud.firestore {
         getAfter(target).data.updatedByUid == request.auth.uid;
     }
 
-    function validTeacherSuspension(uid) {
-      let before = resource.data;
-      let after = request.resource.data;
-      return before.status == 'active' && before.enabled == true && before.role == 'teacher' &&
-        isAdmin() &&
-        validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
-        after.keys().hasOnly([
-          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
-          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
-          'suspendedAt', 'suspendedByUid', 'suspensionReason', 'revision'
-        ]) &&
-        after.status == 'suspended' && after.enabled == false &&
-        after.administrativeHold == true &&
-        after.revision == before.get('revision', 0) + 1 &&
-        after.suspendedAt == request.time && after.suspendedByUid == request.auth.uid &&
-        after.suspensionReason is string && after.suspensionReason.size() <= 200 &&
-        after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
-        validLifecycleLegacyAllowance(before.emailCanonical, false) &&
-        validConsumedPublicationLifecycleLock(uid, before, 'teacher-suspension') &&
-        after.diff(before).affectedKeys().hasOnly([
-          'status', 'enabled', 'administrativeHold', 'revision',
-          'suspendedAt', 'suspendedByUid', 'suspensionReason',
-          'updatedAt', 'updatedByUid'
-        ]);
-    }
-
-    function validTeacherRestore(uid) {
-      let before = resource.data;
-      let after = request.resource.data;
-      return before.status == 'suspended' && before.enabled == false && before.role == 'teacher' &&
-        isAdmin() &&
-        validStoredTeacherAllowance(uid, before) && validStoredTeacherAllowance(uid, after) &&
-        before.keys().hasOnly([
-          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
-          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
-          'suspendedAt', 'suspendedByUid', 'suspensionReason', 'revision'
-        ]) &&
-        after.keys().hasOnly([
-          'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
-          'administrativeHold', 'approvedAt', 'approvedByUid', 'updatedAt', 'updatedByUid',
-          'revision'
-        ]) &&
-        after.status == 'active' && after.enabled == true && after.administrativeHold == false &&
-        after.revision == before.get('revision', 0) + 1 &&
-        after.updatedAt == request.time && after.updatedByUid == request.auth.uid &&
-        validLifecycleLegacyAllowance(before.emailCanonical, true) &&
-        after.diff(before).affectedKeys().hasOnly([
-          'status', 'enabled', 'administrativeHold', 'revision',
-          'suspendedAt', 'suspendedByUid', 'suspensionReason',
-          'updatedAt', 'updatedByUid'
-        ]);
-    }
-
     function deletionAllowanceKeysOnly(data) {
       return data.keys().hasOnly([
         'uid', 'emailCanonical', 'displayName', 'status', 'enabled', 'role',
@@ -1065,12 +1012,14 @@ service cloud.firestore {
     }
 
     function sourceRevision(data) {
-      let revision = data.get('contentRevision', null);
-      return revision is string ? revision.trim() :
-        revision is int && revision >= 0 ? string(revision) :
-        revision is timestamp
-          ? string(revision.toMillis()) + ':' + string(revision.nanos())
-          : '';
+      return data.get('contentRevision', null) is string
+        ? data.get('contentRevision', '').trim()
+        : data.get('contentRevision', null) is int && data.get('contentRevision', -1) >= 0
+          ? string(data.get('contentRevision', 0))
+          : data.get('contentRevision', null) is timestamp
+            ? string(data.get('contentRevision', null).toMillis()) + ':' +
+              string(data.get('contentRevision', null).nanos())
+            : '';
     }
 
     function validSourceOwnerAllowanceAfter(source) {
@@ -1113,11 +1062,6 @@ service cloud.firestore {
           [source.ownerUid, source.ownerEmail, 'active', true] &&
         allowance.role in ['teacher', 'admin'] &&
         !exists(publicationLifecycleLockPath(source.ownerUid));
-    }
-
-    function validActivePublicationSource(setId) {
-      return validActivePublicationSourceIdentity(setId) &&
-        validAuthoritativeCounters(get(publicationSourcePath(setId)).data);
     }
 
     function requesterOwnsPublicationSource(setId) {
@@ -1834,7 +1778,7 @@ service cloud.firestore {
           validPublicImageData(data, data.revision, data.buildToken);
     }
 
-    function validPublicImageList(setId, key, data) {
+    function validPublicImageList(setId, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
       return !exists(path)
@@ -1864,7 +1808,7 @@ service cloud.firestore {
           validPublicVideoPart(data, key, data.revision, data.buildToken);
     }
 
-    function validPublicVideoList(setId, key, data) {
+    function validPublicVideoList(setId, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
       return exists(path) &&
@@ -1886,7 +1830,7 @@ service cloud.firestore {
           validPublicQuestionPart(data, key, data.revision, data.buildToken);
     }
 
-    function validPublicQuestionList(setId, key, data) {
+    function validPublicQuestionList(setId, data) {
       let path = publicationPath(setId);
       let parent = get(path).data;
       return exists(path) &&
@@ -2043,7 +1987,7 @@ service cloud.firestore {
         publicImage.data == request.resource.data.data;
     }
 
-    function validPrivateCopyFinalize(setId) {
+    function validPrivateCopyFinalize() {
       let before = resource.data;
       let after = request.resource.data;
       let publication = getAfter(publicationPath(before.publicationId)).data;
@@ -2097,7 +2041,7 @@ service cloud.firestore {
       return resource.data.get('lifecycleState', '') == 'copying'
         ? (request.resource.data.get('lifecycleState', '') == 'copying'
           ? validCopyImageIncrement(setId)
-          : validPrivateCopyFinalize(setId))
+          : validPrivateCopyFinalize())
         : resource.data.get('lifecycleState', '') == 'purging' ||
           request.resource.data.diff(resource.data).affectedKeys().hasAny([
             'trashedAt', 'purgeStartedAt', 'lifecycleState', 'imageCount',
@@ -3173,7 +3117,7 @@ service cloud.firestore {
 
       match /videos/{key} {
         allow get: if validPublicVideoGet(setId, key, resource.data);
-        allow list: if validPublicVideoList(setId, key, resource.data);
+        allow list: if validPublicVideoList(setId, resource.data);
         allow create, update: if validPublicVideoBind(setId, key);
         allow delete: if false;
         allow read, write: if false;
@@ -3181,7 +3125,7 @@ service cloud.firestore {
 
       match /questions/{key} {
         allow get: if validPublicQuestionGet(setId, key, resource.data);
-        allow list: if validPublicQuestionList(setId, key, resource.data);
+        allow list: if validPublicQuestionList(setId, resource.data);
         allow create, update: if validPublicQuestionBind(setId, key);
         allow delete: if false;
         allow read, write: if false;
@@ -3189,7 +3133,7 @@ service cloud.firestore {
 
       match /images/{key} {
         allow get: if validPublicImageGet(setId, key, resource.data);
-        allow list: if validPublicImageList(setId, key, resource.data);
+        allow list: if validPublicImageList(setId, resource.data);
         allow create, update: if validPublicImageBind(setId, key);
         allow delete: if validPublicImagePurgeDelete(setId, key);
         allow read, write: if false;
