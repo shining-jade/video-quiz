@@ -634,3 +634,14 @@ test('Spark guest-first rules close the public library deployment surface', () =
   assert.match(rules, /match \/guest_quiz_shares\/\{shareId\}/);
   assert.match(rules, /match \/guest_quiz_share_sources\/\{setId\}/);
 });
+
+test('진행 화면의 id는 겹치지 않는다', () => {
+  const html = read('index.html');
+  const ids = [...html.matchAll(/\bid="(pl-[a-z0-9-]+)"/g)].map(match => match[1]);
+  const seen = new Map();
+  ids.forEach(id => seen.set(id, (seen.get(id) || 0) + 1));
+  const duplicated = [...seen.entries()].filter(([, count]) => count > 1).map(([id]) => id);
+
+  // 같은 id가 둘이면 $()가 첫 번째만 잡아 나머지가 조용히 갱신되지 않는다.
+  assert.deepEqual(duplicated, []);
+});

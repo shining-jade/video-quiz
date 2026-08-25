@@ -15813,7 +15813,8 @@ test('옆 패널 학생 명단은 순위가 아니라 번호 순으로 보여 �
   const ctx = loadStageFunctions(['plRoster', 'plRenderStudents'], {
     pl: { flatQuestions: [{}, {}] },
     $(selector) {
-      if (selector === '#pl-nstu') return { set textContent(value) { rows.push('count:' + value); } };
+      if (selector === '#pl-roster-count') return { set textContent(value) { rows.push('count:' + value); } };
+      if (selector === '#pl-nstu') return null;
       if (selector === '#pl-stulist') return { set innerHTML(value) { rows.push(value); } };
       return null;
     },

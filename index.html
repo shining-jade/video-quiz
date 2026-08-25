@@ -6713,7 +6713,7 @@ function renderPlayRun() {
         '</div>' +
         '<div class="card" style="margin-top:14px">' +
           '<div class="row" style="align-items:center;margin-bottom:8px">' +
-            '<h2 style="font-size:14px">접속한 학생 <span id="pl-nstu">0</span>명</h2>' +
+            '<h2 style="font-size:14px">접속한 학생 <span id="pl-roster-count">0</span>명</h2>' +
             '<div style="flex:1"></div>' +
             '<button class="btn sm" onclick="plToggleBoard()" title="교실 화면에 순위를 크게 띄웁니다">🏆 순위 크게 보기</button>' +
           '</div>' +
@@ -8061,9 +8061,10 @@ function plRoster() {
 }
 
 function plRenderStudents() {
-  const list = $('#pl-stulist'), n = $('#pl-nstu');
+  const list = $('#pl-stulist'), n = $('#pl-nstu'), rosterCount = $('#pl-roster-count');
   const rows = plRoster();
   if (n) n.textContent = rows.length;
+  if (rosterCount) rosterCount.textContent = rows.length;
   if (!list) { plRenderQrBubble(); return; }
   if (!rows.length) {
     list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">' +
