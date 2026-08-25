@@ -118,6 +118,16 @@ test('public quiz library projection core loads after playlist normalization and
   assert.ok(storeIndex < applicationIndex, 'firestore store must load before inline application code');
 });
 
+test('collaboration identity core loads before the Firestore store captures it', () => {
+  const html = read('index.html');
+  const collaborationIndex = html.indexOf('<script src="collaboration-trash-core.js"></script>');
+  const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
+
+  assert.ok(collaborationIndex >= 0, 'collaboration identity core must be included');
+  assert.ok(collaborationIndex < storeIndex,
+    'collaboration identity core must load before the Firestore store factory runs');
+});
+
 test('free passwordless guest route uses anonymous auth and never uses the teacher route guard', () => {
   const html = read('index.html');
   const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
