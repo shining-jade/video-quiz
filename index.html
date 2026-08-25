@@ -924,8 +924,12 @@ function ssDel(k) { try { sessionStorage.removeItem(k); } catch (e) {} }
 
 const PENDING_ALLOCATION_KEY = 'vq_pending_allocations_v1';
 const PENDING_ALLOCATION_RECOVERY_DELAY_MS = 30000;
-const SESSION_HEARTBEAT_MS = 60000;
-const SESSION_ACTIVATION_LEASE_MS = 120000;
+/* 하트비트가 한 번이라도 늦으면 lease가 비고, 그동안 학생 제출이 전부 거부된다
+   ("전송 실패"). lease 90초에 30초 주기를 쓰면 두 번 연속 실패해도 버틴다.
+   실패했을 때는 다음 주기를 기다리지 않고 곧바로 다시 시도한다. */
+const SESSION_HEARTBEAT_MS = 30000;
+const SESSION_HEARTBEAT_RETRY_MS = 5000;
+const SESSION_ACTIVATION_LEASE_MS = 90000;
 let pendingAllocationRecoveryTimer = null;
 
 function pendingAllocationRead() {
@@ -6134,12 +6138,12 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
     state.activationHeartbeatId = null;
     if (state.stopActivationHeartbeat === stop) state.stopActivationHeartbeat = null;
   };
-  const schedule = () => {
+  const schedule = (delayMs) => {
     if (stopped || !isCurrent()) {
       stop();
       return false;
     }
-    timerId = setTimeout(heartbeat, SESSION_HEARTBEAT_MS);
+    timerId = setTimeout(heartbeat, delayMs === undefined ? SESSION_HEARTBEAT_MS : delayMs);
     state.activationHeartbeatId = timerId;
     return true;
   };
@@ -6170,7 +6174,7 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
       state.heartbeatError = error && error.message ? error.message : String(error);
       toast('학생 접속 유지에 실패했습니다. ' + Math.round(SESSION_ACTIVATION_LEASE_MS / 1000) +
         '초 안에 접속이 닫힙니다: ' + state.heartbeatError);
-      schedule();
+      schedule(SESSION_HEARTBEAT_RETRY_MS);
       return false;
     } finally {
       inFlight = false;
@@ -8775,6 +8779,21 @@ function stQueueWrite(state, questionIndex, task) {
   });
 }
 
+/** 제출이 거부된 이유 — 다시 시도해 볼 만한지, 이미 끝난 문항인지 구분한다. */
+function stSubmitFailureReason(state, questionIndex) {
+  if (st !== state || !state.live || state.live.q !== questionIndex) return 'moved';
+  if (stRevealed()) return 'revealed';
+  if (stLocked()) return 'closed';
+  return 'retry';
+}
+
+function stSubmitFailureText(reason) {
+  if (reason === 'moved') return '다음 문항으로 넘어가 제출되지 않았습니다';
+  if (reason === 'revealed') return '정답이 공개되어 제출되지 않았습니다';
+  if (reason === 'closed') return '시간이 끝나 제출되지 않았습니다';
+  return '전송 실패 — 다시 시도해 주세요';
+}
+
 function stSend(payload, localRec) {
   const state = st;
   if (!state) return Promise.resolve(false);
@@ -8786,9 +8805,16 @@ function stSend(payload, localRec) {
   state.submitted = true;
   state.myAnswers[i] = localRec;
   stRender();
-  return stQueueWrite(state, i, () => store.writeStudentAnswer(
-    state.sessionId, state.authUid, i, payload
-  ))
+  // 교사 하트비트가 한 번 늦으면 lease가 잠깐 비어 반 전체 제출이 거부된다.
+  // 문항이 아직 열려 있으면 학생에게 실패를 보이기 전에 조용히 한 번 더 보낸다.
+  const send = attempt => store.writeStudentAnswer(
+    state.sessionId, state.authUid, i,
+    attempt > 0 ? { ...payload, revision: revision + attempt } : payload
+  );
+  return stQueueWrite(state, i, () => send(0).catch(error => {
+    if (stSubmitFailureReason(state, i) !== 'retry') throw error;
+    return new Promise(resolve => setTimeout(resolve, 1200)).then(() => send(1));
+  }))
     .then(() => {
       if (state.optimisticRevisions && state.optimisticRevisions[i] === revision) {
         delete state.optimisticRevisions[i];
@@ -8804,7 +8830,7 @@ function stSend(payload, localRec) {
         else delete state.myAnswers[i];
         if (state.live.q === i) state.submitted = !!previous;
         stRender();
-        toast('전송 실패 — 다시 시도해 주세요');
+        toast(stSubmitFailureText(stSubmitFailureReason(state, i)));
       }
       return false;
     });

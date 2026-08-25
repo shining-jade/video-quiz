@@ -7512,16 +7512,17 @@ test('heartbeat는 single-flight이고 stale 완료 뒤 재예약하지 않으�
     teacherState: clone(owner),
     teacherAuthVersion: 12,
     AuthCore: require('../auth-core.js'),
-    SESSION_HEARTBEAT_MS: 60_000,
-    SESSION_ACTIVATION_LEASE_MS: 120_000,
+    SESSION_HEARTBEAT_MS: 30_000,
+    SESSION_HEARTBEAT_RETRY_MS: 5_000,
+    SESSION_ACTIVATION_LEASE_MS: 90_000,
     setTimeout(callback, ms) {
-      assert.equal(ms, 60000);
+      assert.equal(ms, 30000);
       const id = ++nextTimerId;
       timers.set(id, callback);
       return id;
     },
     every(ms, callback) {
-      assert.equal(ms, 60000);
+      assert.equal(ms, 30000);
       const id = ++nextTimerId;
       timers.set(id, callback);
       return id;
@@ -7588,16 +7589,18 @@ test('current heartbeat failure schedules one non-overlapping retry', async () =
   const cleanups = [];
   const renewCalls = [];
   const messages = [];
+  const scheduledDelays = [];
   const state = { sessionId: 'session-a', code: 'CODE12' };
   const context = {
     pl: state,
     teacherState: clone(owner),
     teacherAuthVersion: 12,
     AuthCore: require('../auth-core.js'),
-    SESSION_HEARTBEAT_MS: 60_000,
-    SESSION_ACTIVATION_LEASE_MS: 120_000,
+    SESSION_HEARTBEAT_MS: 30_000,
+    SESSION_HEARTBEAT_RETRY_MS: 5_000,
+    SESSION_ACTIVATION_LEASE_MS: 90_000,
     setTimeout(callback, ms) {
-      assert.equal(ms, 60000);
+      scheduledDelays.push(ms);
       const id = ++nextTimerId;
       timers.set(id, callback);
       return id;
@@ -7619,12 +7622,15 @@ test('current heartbeat failure schedules one non-overlapping retry', async () =
   assert.equal(renewCalls.length, 1);
   assert.equal(messages.length, 1);
   assert.equal(timers.has(2), true);
+  // 실패했을 때는 다음 주기(30초)를 기다리지 않고 곧바로 다시 시도해야
+  // lease가 비는 동안 학생 제출이 거부되는 구간이 생기지 않는다.
+  assert.deepEqual(scheduledDelays, [30_000, 5_000]);
 
   cleanups[0]();
   assert.equal(timers.has(2), false);
 });
 
-test('무료 Firestore 쓰기를 아끼도록 heartbeat는 60초 간격을 사용한다', () => {
+test('heartbeat는 lease 90초를 여유 있게 덮는 30초 간격을 사용한다', () => {
   const owner = {
     status: 'teacher', uid: 'teacher-1', email: 'teacher@school.kr', role: 'teacher'
   };
@@ -7635,7 +7641,7 @@ test('무료 Firestore 쓰기를 아끼도록 heartbeat는 60초 간격을 사�
     teacherState: clone(owner),
     teacherAuthVersion: 1,
     AuthCore: require('../auth-core.js'),
-    SESSION_HEARTBEAT_MS: 60_000,
+    SESSION_HEARTBEAT_MS: 30_000,
     setTimeout(callback, ms) { delay = ms; return 1; },
     clearTimeout() {},
     onCleanup() {},
@@ -7645,7 +7651,7 @@ test('무료 Firestore 쓰기를 아끼도록 heartbeat는 60초 간격을 사�
   loadStageFunctions(['plStartSessionHeartbeat'], context);
 
   context.plStartSessionHeartbeat(state, owner, 1, 'allocation-token-123456');
-  assert.equal(delay, 60_000);
+  assert.equal(delay, 30_000);
 });
 
 test('Firestore 무료 사용량 초과는 원인과 재시도 안내를 보여준다', () => {
@@ -13629,7 +13635,9 @@ test('학생 queued 쓰기 실패는 live 문항이 바뀌어도 소유 revision
     },
     stRender() {}, toast(message) { notices.push(message); }, console: { error() {} }
   };
-  loadStageFunctions(['stQueueWrite', 'stSend'], context);
+  loadStageFunctions(
+    ['stQueueWrite', 'stSend', 'stSubmitFailureReason', 'stSubmitFailureText'], context
+  );
   const local = { answer: 0, revision: 1, submitted: true };
 
   const sending = context.stSend(
@@ -13644,7 +13652,42 @@ test('학생 queued 쓰기 실패는 live 문항이 바뀌어도 소유 revision
 
   assert.equal(context.st.myAnswers[0], undefined);
   assert.equal(context.st.submitted, false);
-  assert.deepEqual(notices, ['전송 실패 — 다시 시도해 주세요']);
+  // 이미 지나간 문항은 다시 시도해 봐야 소용없으므로 사유를 그대로 알린다.
+  assert.deepEqual(notices, ['다음 문항으로 넘어가 제출되지 않았습니다']);
+});
+
+test('열려 있는 문항의 제출 실패는 학생에게 알리기 전에 한 번 조용히 다시 보낸다', async () => {
+  const notices = [];
+  const attempts = [];
+  const context = {
+    st: {
+      sessionId: 'session1', authUid: 'student1', sid: 'student1',
+      live: { q: 0, revealed: false, limitSec: 0 },
+      myAnswers: {}, submitted: false, revision: 1, writeQueues: {}
+    },
+    store: {
+      writeStudentAnswer(sessionId, uid, index, payload) {
+        attempts.push(payload.revision);
+        return attempts.length === 1
+          ? Promise.reject(new Error('permission-denied'))
+          : Promise.resolve();
+      }
+    },
+    stRevealed() { return false; },
+    stLocked() { return false; },
+    setTimeout(callback) { return callback(); },
+    stRender() {}, toast(message) { notices.push(message); }, console: { error() {} }
+  };
+  loadStageFunctions(
+    ['stQueueWrite', 'stSend', 'stSubmitFailureReason', 'stSubmitFailureText'], context
+  );
+  const local = { answer: 0, revision: 1, submitted: true };
+
+  assert.equal(await context.stSend({ answer: 0, revision: 1, submitted: true }, local), true);
+  // 두 번째 시도는 revision을 올려 보내야 기존 답안 위에 덮어쓸 수 있다.
+  assert.deepEqual(attempts, [1, 2]);
+  assert.deepEqual(notices, []);
+  assert.equal(context.st.myAnswers[0], local);
 });
 
 test('겹친 관리자 조회는 최신 filter snapshot만 게시한다', async () => {
