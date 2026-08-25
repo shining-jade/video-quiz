@@ -177,21 +177,6 @@ textarea { resize: vertical; min-height: 62px; }
 .teacher-dashboard .plan-row .admin-identity { display: block; margin-top: 2px; color: var(--ink-2); font-size: 12px; font-weight: 500; }
 @media (max-width: 560px) { .teacher-dashboard .plan-row { grid-template-columns: 1fr auto; } .teacher-dashboard .plan-row .time { grid-column: 1 / -1; } }
 
-/* 공개 자료실 */
-.public-library-grid { display: grid; gap: 12px; }
-.public-library-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; }
-.public-library-card h2 { overflow-wrap: anywhere; }
-.public-library-meta { color: var(--ink-2); font-size: 13px; margin-top: 6px; }
-.public-library-actions { display: grid; grid-template-columns: repeat(2, max-content); gap: 8px; }
-.public-library-preview-card { width: min(760px, 100%); max-height: min(86vh, 820px); overflow: auto; }
-.public-library-preview-questions { margin: 12px 0 0; padding-left: 22px; color: var(--ink-2); }
-@media (max-width: 720px) {
-  .public-library-card { grid-template-columns: 1fr; }
-  .public-library-actions { grid-template-columns: 1fr; }
-  .public-library-actions .btn { width: 100%; }
-  .public-library-preview-card { max-height: calc(100vh - 24px); }
-}
-
 /* ══════════════════════════════════════════════════════════
    세트 제작
    ══════════════════════════════════════════════════════════ */
@@ -824,7 +809,6 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="playlist-core.js"></script>
 <script src="guest-quiz-share-core.js?v=20260825-schema"></script>
 <script src="public-author-label-core.js"></script>
-<script src="public-quiz-library-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
 <script src="firestore-store.js?v=20260825-admin"></script>
 <script src="choice-order-core.js"></script>
@@ -834,7 +818,6 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="teacher-stage.js"></script>
 <script src="auth-core.js?v=20260825-operator"></script>
 <script src="teacher-email-auth-core.js"></script>
-<script src="teacher-access-request-core.js"></script>
 <script src="teacher-deletion-core.js"></script>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script src="https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js"></script>
@@ -1376,8 +1359,6 @@ function normSet(raw) {
     lifecycleState: raw.lifecycleState || (raw.trashedAt ? 'trashed' : 'active'),
     collaboratorCount: Number.isInteger(raw.collaboratorCount) ? raw.collaboratorCount : 0,
     imageCount: Number.isInteger(raw.imageCount) ? raw.imageCount : 0,
-    publicationStatus: ['published', 'moderated'].includes(raw.publicationStatus)
-      ? raw.publicationStatus : 'private',
     collaboratorEmails: Array.isArray(raw.collaboratorEmails) ? raw.collaboratorEmails : [],
     settings: normSettings(raw.settings),
     videos: videos
@@ -1496,7 +1477,6 @@ let appliedTeacherState = AuthCore.teacherState(null, null);
 let trashMaintenance = null;
 let teacherRequestScreen = null;
 let teacherRequestReroute = null;
-let adminTeacherRequestScreen = null;
 let teacherDashboard = null;
 let teacherAuthDialogState = { mode: 'login', status: 'idle', email: '', message: '', error: '' };
 let teacherGoogleSignInFlight = null;
@@ -1512,8 +1492,6 @@ let teacherEmailAuthRequests = {
 };
 let classPlanningThresholds = ClassPlanningCore.normalizeThresholds();
 let teacherDeletionScreen = null;
-let publicQuizLibraryState = null;
-let publicLibraryRequestSerial = 0;
 
 function teacherStateFromAllowance(user, allowance) {
   const state = AuthCore.teacherState(user, allowance);
@@ -2268,7 +2246,6 @@ function rerenderEligibleTeacherHome(authGeneration, uid) {
 
 async function applyTeacherUser(user) {
   if (typeof clearTeacherAuthPasswords === 'function') clearTeacherAuthPasswords();
-  if (typeof clearPublicQuizLibraryScreen === 'function') clearPublicQuizLibraryScreen(true);
   const previousState = typeof appliedTeacherState !== 'undefined' && appliedTeacherState
     ? appliedTeacherState : teacherState;
   const previousUid = previousState && previousState.uid || '';
@@ -2599,7 +2576,7 @@ let authReady = false;
 function teacherRouteRequirement() {
   const name = location.hash.replace(/^#\/?/, '').split('/')[0] || 'home';
   if (name === 'admin') return 'admin';
-  return ['sets', 'library', 'make', 'play', 'live'].includes(name) ? 'teacher' : '';
+  return ['sets', 'make', 'play', 'live'].includes(name) ? 'teacher' : '';
 }
 
 function retractProtectedTeacherScreen() {
@@ -2664,7 +2641,6 @@ function router() {
   switch (name) {
     case 'home':  screenHome(); break;
     case 'sets':  requireTeacher(screenSetList); break;
-    case 'library': requireTeacher(screenPublicQuizLibrary); break;
     case 'trash': requireTeacher(screenTrash); break;
     case 'make':  requireTeacher(() => screenMake(arg)); break;
     case 'play':  requireTeacher(() => screenPlay(arg, parsePlayClassPlanRoute(routeQuery))); break;
@@ -2702,9 +2678,7 @@ function screenHome() {
   const canShowTeacherDashboard = AuthCore.isTeacher(teacherState);
   const canShowClassPlanningDashboard = canShowTeacherDashboard &&
     (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled);
-  const publicLibraryLink = canShowTeacherDashboard
-    ? '<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a>' : '';
-  APP().innerHTML = topbar(publicLibraryLink) + '<div class="wrap wide">' +
+  APP().innerHTML = topbar('') + '<div class="wrap wide">' +
     '<div class="home-hero">' +
       '<h1>영상 퀴즈 실시간 진행 도구</h1>' +
       '<p>영상 속 정해진 순간에 퀴즈가 뜨고, 학생들은 각자 폰으로 그 문제만 풉니다.</p>' +
@@ -3238,166 +3212,37 @@ function teacherRequestScreenIsCurrent(state) {
     teacherState.status === 'unapproved' && routeCurrent;
 }
 
+/* 교사 권한 신청은 더 이상 운영하지 않는다. 승인되지 않은 계정에는
+   세트 제작 대신 비로그인 진행 링크를 안내한다. */
 function renderTeacherRequest(state) {
   if (!state) return false;
-  const request = state.request || null;
-  const draft = state.draft || { displayName: state.displayName || '', organization: '', note: '' };
-  const busy = !!state.submitting || !!state.cancelling || !!state.refreshing;
-  const status = state.error
-    ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>'
-    : state.message ? '<div class="notice ok" role="status">' + esc(state.message) + '</div>' : '';
-  const identity = '<div class="card"><h2>교사 계정 확인</h2><div class="sub">이름과 이메일은 현재 교사 계정에서 가져오며 신청 내용으로 바꿀 수 없습니다.</div>' +
-    '<div><b>' + esc(draft.displayName) + '</b><br><span class="hint">' + esc(state.email) + '</span></div></div>';
-  let body = '';
-  if (!request) {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><p class="sub">공용 계정을 쓰지 않고, 지금 로그인한 교사 계정으로 권한을 신청합니다.</p>' + status +
-      '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
-      '<div class="field"><label class="f" for="teacher-request-organization">소속 (선택)</label><input id="teacher-request-organization" name="organization" maxlength="120" value="' + esc(draft.organization) + '"' + (busy ? ' disabled' : '') + '></div>' +
-      '<div class="field"><label class="f" for="teacher-request-note">메모 (선택)</label><textarea id="teacher-request-note" name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(draft.note) + '</textarea></div>' +
-      '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>' + (state.submitting ? '신청 저장 중…' : '교사 권한 신청') + '</button></form></div>';
-  } else if (request.status === 'pending') {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice info" role="status">승인 대기 중입니다. 관리자가 신청 내용을 검토한 뒤 알려드립니다.</div>' + status +
-      '<div class="row"><button class="btn" onclick="refreshTeacherRequestStatus()"' + (busy ? ' disabled' : '') + '>' + (state.refreshing ? '상태 확인 중…' : '승인 상태 새로고침') + '</button>' +
-      '<button class="btn danger" onclick="cancelTeacherRequest()"' + (busy ? ' disabled' : '') + '>' + (state.cancelling ? '신청 취소 중…' : '신청 취소') + '</button></div></div>';
-  } else if (request.status === 'rejected') {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice bad" role="status">신청이 승인되지 않았습니다.' +
-      (request.decisionReason ? ' 사유: ' + esc(request.decisionReason) : ' 관리자에게 문의해 주세요.') + '</div>' + status +
-      '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
-      '<div class="field"><label class="f">소속 (선택)<input name="organization" maxlength="120" value="' + esc(request.organization || '') + '"' + (busy ? ' disabled' : '') + '></label></div>' +
-      '<div class="field"><label class="f">메모 (선택)<textarea name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(request.note || '') + '</textarea></label></div>' +
-      '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>다시 신청</button></form></div>';
-  } else if (request.status === 'cancelled') {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice" role="status">신청이 취소되었습니다. 현재 교사 계정을 유지한 채 다시 신청할 수 있습니다.</div>' + status +
-      '<form id="teacher-request-form" onsubmit="submitTeacherRequestForm(event)">' +
-      '<div class="field"><label class="f">소속 (선택)<input name="organization" maxlength="120" value="' + esc(request.organization || '') + '"' + (busy ? ' disabled' : '') + '></label></div>' +
-      '<div class="field"><label class="f">메모 (선택)<textarea name="note" maxlength="500"' + (busy ? ' disabled' : '') + '>' + esc(request.note || '') + '</textarea></label></div>' +
-      '<button class="btn primary" type="submit"' + (busy ? ' disabled' : '') + '>다시 신청</button></form></div>';
-  } else {
-    body = '<div class="card"><h1 style="font-size:22px">교사 권한 신청</h1><div class="notice info" role="status">승인 상태를 서버에서 다시 확인해 주세요.</div>' + status +
-      '<button class="btn" onclick="refreshTeacherRequestStatus()"' + (busy ? ' disabled' : '') + '>승인 상태 새로고침</button></div>';
-  }
-  APP().innerHTML = topbar() + '<div class="wrap">' + identity + body + '</div>';
+  APP().innerHTML = topbar() +
+    '<div class="wrap"><div class="card">' +
+      '<h1 style="font-size:22px">퀴즈 세트를 만들 수 있는 계정이 아닙니다</h1>' +
+      '<div style="margin-top:8px"><b>' + esc(state.displayName || '') + '</b>' +
+        '<br><span class="hint">' + esc(state.email || '') + '</span></div>' +
+      '<div class="notice info" role="status" style="margin-top:14px">' +
+        '수업에 쓰실 분은 <b>로그인이 필요 없습니다.</b> 세트를 만든 선생님께 ' +
+        '<b>비로그인 진행 링크</b>를 받아서 그 링크만 여시면 됩니다. ' +
+        '링크를 열면 선생님 반 전용 QR이 새로 생기고, 그 QR로 들어온 학생만 함께 풉니다.' +
+      '</div>' +
+      '<button class="btn" onclick="signOutTeacher()">로그아웃</button>' +
+    '</div></div>';
   return true;
 }
 
 function screenTeacherRequest() {
   if (!teacherUser || !teacherState || teacherState.status !== 'unapproved') return false;
   const state = teacherRequestScreen = {
-    uid: teacherUser.uid, email: String(teacherUser.email || '').trim().toLowerCase(),
-    displayName: String(teacherUser.displayName || '').trim(), authGeneration: teacherAuthVersion,
-    request: null, submitting: false, cancelling: false, refreshing: false, message: '', error: '',
-    draft: { displayName: String(teacherUser.displayName || '').trim(), organization: '', note: '' }
+    uid: teacherUser.uid,
+    email: String(teacherUser.email || '').trim().toLowerCase(),
+    displayName: String(teacherUser.displayName || '').trim(),
+    authGeneration: teacherAuthVersion
   };
-  if (!state.uid || !state.email || !state.displayName) return false;
-  if (typeof onCleanup === 'function') onCleanup(() => { if (teacherRequestScreen === state) clearTeacherRequestScreen(false); });
-  renderTeacherRequest(state);
-  return store.getOwnTeacherRequest(state.uid).then(request => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.request = request || null;
-    renderTeacherRequest(state);
-    return true;
-  }).catch(error => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.error = '신청 상태를 불러오지 못했습니다. 다시 시도해 주세요.';
-    console.error(error);
-    renderTeacherRequest(state);
-    return false;
-  });
-}
-
-function submitTeacherRequestForm(event) {
-  if (event && typeof event.preventDefault === 'function') event.preventDefault();
-  const state = teacherRequestScreen;
-  const resubmitting = !!state.request && ['cancelled', 'rejected'].includes(state.request.status);
-  if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling ||
-      (state.request && !resubmitting)) return Promise.resolve(false);
-  const form = event && event.currentTarget;
-  const fields = form && form.elements ? form.elements : {};
-  state.draft = Object.assign({}, state.draft, {
-    organization: String(fields.organization ? fields.organization.value : ''),
-    note: String(fields.note ? fields.note.value : '')
-  });
-  let request;
-  try {
-    request = TeacherAccessRequestCore.buildRequest(teacherUser, {
-      organization: state.draft.organization, note: state.draft.note
-    }, Date.now());
-  } catch (error) {
-    state.error = error && error.message ? error.message : String(error);
-    renderTeacherRequest(state);
-    return Promise.resolve(false);
+  if (typeof onCleanup === 'function') {
+    onCleanup(() => { if (teacherRequestScreen === state) clearTeacherRequestScreen(false); });
   }
-  state.submitting = true; state.error = ''; state.message = '';
-  renderTeacherRequest(state);
-  const write = resubmitting
-    ? store.resubmitTeacherRequest(state.uid, state.request.revision, {
-        emailCanonical: request.emailCanonical, displayName: request.displayName,
-        organization: request.organization, note: request.note
-      })
-    : store.submitTeacherRequest(request);
-  return write.then(saved => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.request = saved || request;
-    state.submitting = false;
-    state.message = '신청을 저장했습니다. 관리자 승인을 기다려 주세요.';
-    renderTeacherRequest(state);
-    return true;
-  }).catch(error => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.submitting = false;
-    state.error = error && error.message ? error.message : '신청 저장에 실패했습니다. 다시 시도해 주세요.';
-    renderTeacherRequest(state);
-    return false;
-  });
-}
-
-function refreshTeacherRequestStatus() {
-  const state = teacherRequestScreen;
-  if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling || state.refreshing) return Promise.resolve(false);
-  state.refreshing = true; state.error = ''; state.message = '';
-  renderTeacherRequest(state);
-  return store.getOwnTeacherRequest(state.uid).then(async request => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    const allowance = await store.probeTeacherAllowance(state.email);
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.request = request || null;
-    state.refreshing = false;
-    if (request && request.status === 'approved' && allowance) {
-      if (typeof setTeacherAllowance === 'function') setTeacherAllowance(allowance);
-      if (typeof go === 'function') go('sets');
-      return true;
-    }
-    state.message = '승인 상태를 서버에서 다시 확인했습니다.';
-    renderTeacherRequest(state);
-    return true;
-  }).catch(error => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.refreshing = false;
-    state.error = error && error.message ? error.message : '승인 상태를 확인하지 못했습니다. 다시 시도해 주세요.';
-    renderTeacherRequest(state);
-    return false;
-  });
-}
-
-function cancelTeacherRequest() {
-  const state = teacherRequestScreen;
-  if (!teacherRequestScreenIsCurrent(state) || state.submitting || state.cancelling ||
-      !state.request || state.request.status !== 'pending' || !Number.isSafeInteger(state.request.revision)) return Promise.resolve(false);
-  state.cancelling = true; state.error = ''; state.message = '';
-  renderTeacherRequest(state);
-  return store.cancelTeacherRequest(state.uid, state.request.revision).then(request => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.request = request || Object.assign({}, state.request, { status: 'cancelled', revision: state.request.revision + 1 });
-    state.cancelling = false; state.message = '신청을 취소했습니다.';
-    renderTeacherRequest(state);
-    return true;
-  }).catch(error => {
-    if (!teacherRequestScreenIsCurrent(state)) return false;
-    state.cancelling = false;
-    state.error = error && error.message ? error.message : '신청 취소에 실패했습니다. 다시 시도해 주세요.';
-    renderTeacherRequest(state);
-    return false;
-  });
+  return renderTeacherRequest(state);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -3431,15 +3276,8 @@ function screenSetList() {
     }).sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
     state.trashCount = Array.isArray(trash) ? trash.length : 0;
     const checks = state.all.map(s => {
-      if (s.ownerUid && teacherState && s.ownerUid === teacherState.uid && store.getOwnedPublicationStatus) {
-        s.publicationStatus = 'checking';
+      if (s.ownerUid && teacherState && s.ownerUid === teacherState.uid) {
         s.guestShareStatus = 'checking';
-        const publicationCheck = store.getOwnedPublicationStatus(s.id).then(status => {
-          applyOwnedPublicationStatus(s, status);
-        }).catch(() => {
-          s.publicationStatus = 'unknown';
-          s.publicationRevision = '';
-        });
         const guestCheck = store.getOwnedGuestQuizShare
           ? store.getOwnedGuestQuizShare(s.id, teacherState).then(share => {
               s.guestShareStatus = share ? share.status : 'none';
@@ -3447,7 +3285,7 @@ function screenSetList() {
               s.guestShareRevision = share && share.revision || 0;
             }).catch(() => { s.guestShareStatus = 'unknown'; })
           : Promise.resolve().then(() => { s.guestShareStatus = 'unknown'; });
-        return Promise.all([publicationCheck, guestCheck]).then(() => s);
+        return guestCheck.then(() => s);
       }
       if (!s.ownerUid || !teacherState || !store.canEditQuizSet) return Promise.resolve(s);
       return store.canEditQuizSet(s.id, teacherState).then(ok => { s.isCollaborator = !!ok; return s; }).catch(() => s);
@@ -3470,7 +3308,7 @@ function renderSetList() {
     .filter(s => setList.showHidden ? true : !s.archived)
     .filter(s => !kw || (s.title + ' ' + (s.author || '')).toLowerCase().indexOf(kw) >= 0);
 
-  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/library">🌐 공개 자료실</a><a class="btn sm ghost" href="#/trash">🗑 휴지통' + (nTrash ? ' (' + nTrash + ')' : '') + '</a><a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
+  APP().innerHTML = topbar('<a class="btn sm ghost" href="#/trash">🗑 휴지통' + (nTrash ? ' (' + nTrash + ')' : '') + '</a><a class="btn sm primary" href="#/make">＋ 새 세트</a>') +
     '<div class="wrap">' +
       '<h1 style="font-size:22px;margin-bottom:4px">퀴즈 세트 목록</h1>' +
       '<p style="color:var(--ink-2);font-size:14px;margin-bottom:16px">' +
@@ -3517,9 +3355,6 @@ function setListRow(s) {
   const owner = !!(s.ownerUid && teacherState && s.ownerUid === teacherState.uid);
   const collaborationEnabled = typeof collaborationUiEnabled !== 'undefined' && collaborationUiEnabled;
   const collaborator = collaborationEnabled && !owner && editable;
-  const publicationStatus = owner && ['published', 'moderated', 'checking', 'unknown'].includes(s.publicationStatus)
-    ? s.publicationStatus : 'private';
-  const publicationBusy = !!s.publicationBusy;
   const guestShareBusy = !!s.guestShareBusy;
   const guestShareAction = owner
     ? '<button class="btn sm ghost" onclick="copyGuestRunLink(\'' + esc(s.id) + '\')"' +
@@ -3529,29 +3364,8 @@ function setListRow(s) {
           (guestShareBusy ? ' disabled' : '') + '>공유 링크 해제</button>' : '')
       + '<button class="btn sm ghost" onclick="go(\'guest-history/' + esc(s.id) + '\')">실행 기록</button>'
     : '';
-  const publicationBadge = owner
-    ? (publicationStatus === 'published'
-      ? '<span class="tag ok" style="margin-right:6px">공개 중</span>'
-      : publicationStatus === 'moderated'
-        ? '<span class="tag bad" style="margin-right:6px">관리자 공개 중지</span>'
-        : publicationStatus === 'checking'
-          ? '<span class="tag mute" style="margin-right:6px">게시 상태 확인 중</span>'
-          : publicationStatus === 'unknown'
-            ? '<span class="tag warn" style="margin-right:6px">게시 상태 확인 실패</span>'
-        : '<span class="tag mute" style="margin-right:6px">비공개</span>') : '';
-  const publicationAction = owner && !s.trashedAt && !s.purgeStartedAt
-    ? (publicationStatus === 'published'
-      ? '<button class="btn sm danger" onclick="withdrawQuizSetFromList(\'' + esc(s.id) + '\')"' +
-        (publicationBusy ? ' disabled' : '') + '>공개 철회</button>'
-      : publicationStatus === 'moderated'
-        ? ''
-        : publicationStatus === 'unknown'
-          ? '<button class="btn sm" onclick="retryOwnedPublicationStatusFromList(\'' + esc(s.id) + '\')"' +
-            (publicationBusy ? ' disabled' : '') + '>상태 다시 확인</button>'
-        : publicationStatus === 'checking'
-          ? ''
-        : '<button class="btn sm" onclick="publishQuizSetFromList(\'' + esc(s.id) + '\')"' +
-          (publicationBusy ? ' disabled' : '') + '>공개 자료실에 게시</button>') : '';
+  const guestShareBadge = owner && s.guestShareStatus === 'active'
+    ? '<span class="tag ok" style="margin-right:6px">공유 링크 사용 중</span>' : '';
   const startAndCopy =
     '<a class="btn sm primary" href="#/play/' + esc(s.id) + '">▶ 우리 반 시작하기</a>' +
     '<button class="btn sm" onclick="setDuplicate(\'' + esc(s.id) + '\')">⧉ 사본 만들기</button>';
@@ -3576,7 +3390,7 @@ function setListRow(s) {
           : '') +
         '<button class="btn sm" onclick="setExport(\'' + esc(s.id) + '\')" title="다른 프로젝트로 옮기거나 백업할 때">📤 파일</button>' +
         guestShareAction +
-        (owner ? publicationAction + '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
+        (owner ? '<button class="btn sm ghost" onclick="setArchive(\'' + esc(s.id) + '\', true)" title="목록에서 숨깁니다. 기록은 지워지지 않습니다.">🗂 숨기기</button>' +
           '<button class="btn sm danger" onclick="setMoveToTrash(\'' + esc(s.id) + '\')">🗑 휴지통</button>' : ''))
     : startAndCopy;
   return '<div class="card" style="padding:15px;margin-bottom:10px' + (s.archived ? ';opacity:.6' : '') + '">' +
@@ -3586,7 +3400,7 @@ function setListRow(s) {
           (s.archived ? '<span class="tag mute" style="margin-right:6px">숨김</span>' : '') +
           (trashed || purging ? '<span class="tag warn" style="margin-right:6px">' + (purging ? '정리 중' : '휴지통') + '</span>' : '') +
           (collaborator ? '<span class="tag ok" style="margin-right:6px">공동 편집</span>' : '') +
-          publicationBadge +
+          guestShareBadge +
           (!s.ownerUid ? '<span class="tag mute" style="margin-right:6px">읽기 전용</span>' : '') +
           esc(s.title) + '</div>' +
         '<div style="font-size:12.5px;color:var(--ink-2);margin-top:3px">' +
@@ -3604,366 +3418,6 @@ function setListRow(s) {
 
 function setCurrentListSet(id) {
   return setList && setList.all && setList.all.find(s => s.id === id);
-}
-
-function applyOwnedPublicationStatus(set, result) {
-  if (!set || !result || result.publicationId !== set.id ||
-      !['private', 'building', 'published', 'withdrawn', 'moderated'].includes(result.status)) {
-    if (set) {
-      set.publicationStatus = 'unknown';
-      set.publicationRevision = '';
-    }
-    return false;
-  }
-  set.publicationStatus = ['published', 'moderated'].includes(result.status)
-    ? result.status : 'private';
-  set.publicationRevision = typeof result.revision === 'string' ? result.revision : '';
-  return true;
-}
-
-function retryOwnedPublicationStatusFromList(setId) {
-  const current = setCurrentListSet(setId);
-  const listState = setList;
-  const uid = teacherState && teacherState.uid;
-  const authGeneration = teacherAuthVersion;
-  if (!current || !uid || current.ownerUid !== uid || current.publicationBusy ||
-      !store.getOwnedPublicationStatus) return Promise.resolve(false);
-  current.publicationBusy = true;
-  current.publicationStatus = 'checking';
-  renderSetList();
-  const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
-    teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
-  return store.getOwnedPublicationStatus(setId).then(result => {
-    if (!isCurrent()) return false;
-    current.publicationBusy = false;
-    const valid = applyOwnedPublicationStatus(current, result);
-    renderSetList();
-    return valid;
-  }).catch(() => {
-    if (!isCurrent()) return false;
-    current.publicationBusy = false;
-    current.publicationStatus = 'unknown';
-    current.publicationRevision = '';
-    renderSetList();
-    return false;
-  });
-}
-
-function publicLibraryActor() {
-  return Object.assign({}, teacherState || {}, {
-    uid: teacherState && teacherState.uid || teacherUser && teacherUser.uid || '',
-    email: teacherState && teacherState.email || teacherUser && teacherUser.email || '',
-    displayName: teacherUser && String(teacherUser.displayName || '').trim() || '',
-    authGeneration: teacherAuthVersion,
-    currentAuthGeneration: teacherAuthVersion
-  });
-}
-
-function publishQuizSetFromList(setId) {
-  const current = setCurrentListSet(setId);
-  const listState = setList;
-  const uid = teacherState && teacherState.uid;
-  const authGeneration = teacherAuthVersion;
-  if (!current || !uid || current.ownerUid !== uid || current.publicationBusy) {
-    toast('소유자만 공개 자료실 게시를 관리할 수 있습니다.');
-    return Promise.resolve(false);
-  }
-  const imageCount = Number.isSafeInteger(current.imageCount) ? current.imageCount : 0;
-  const actor = publicLibraryActor();
-  const authorValidation = PublicAuthorLabelCore.validate(actor.displayName, {
-    emailCanonical: actor.email,
-    uid: actor.uid
-  });
-  if (!authorValidation.ok) {
-    alert('이메일 또는 UID가 아닌 공개용 교사 표시 이름을 설정한 뒤 게시해 주세요.');
-    return Promise.resolve(false);
-  }
-  actor.displayName = authorValidation.value;
-  const authorDisplayName = authorValidation.value;
-  const notice = '다음 정보를 공개 자료실에 게시할까요?\n\n' +
-    '제목: ' + current.title + '\n' +
-    '설명: ' + (current.description || '설명 없음') + '\n' +
-    '제작자 표시명: ' + authorDisplayName + '\n' +
-    '포함 이미지: 이미지 ' + imageCount + '개\n\n' +
-    '저작권과 개인정보가 없는 자료인지 확인해 주세요.';
-  if (!confirm(notice)) return Promise.resolve(false);
-  current.publicationBusy = true;
-  renderSetList();
-  const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
-    teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
-  return store.publishQuizSet(setId, actor).then(() => {
-    if (!isCurrent()) return null;
-    return store.getOwnedPublicationStatus(setId);
-  }).then(status => {
-    if (!isCurrent()) return false;
-    current.publicationBusy = false;
-    const valid = applyOwnedPublicationStatus(current, status);
-    renderSetList();
-    if (!valid || status.status !== 'published') {
-      alert('게시 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
-      return false;
-    }
-    toast('공개 자료실 게시를 확인했습니다.');
-    return true;
-  }).catch(() => {
-    if (!isCurrent()) return false;
-    current.publicationBusy = false;
-    current.publicationStatus = 'unknown';
-    current.publicationRevision = '';
-    renderSetList();
-    alert('게시 상태를 서버에서 확인하지 못했습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
-    return false;
-  });
-}
-
-function withdrawQuizSetFromList(setId) {
-  const current = setCurrentListSet(setId);
-  const listState = setList;
-  const uid = teacherState && teacherState.uid;
-  const authGeneration = teacherAuthVersion;
-  if (!current || !uid || current.ownerUid !== uid || current.publicationStatus !== 'published' ||
-      current.publicationBusy) return Promise.resolve(false);
-  if (!confirm('「' + current.title + '」의 공개를 철회할까요?\n\n이미 완성된 다른 교사의 사본은 유지됩니다.')) {
-    return Promise.resolve(false);
-  }
-  current.publicationBusy = true;
-  renderSetList();
-  const isCurrent = () => setList === listState && teacherAuthVersion === authGeneration &&
-    teacherState && teacherState.uid === uid && AuthCore.isTeacher(teacherState);
-  return store.withdrawPublishedQuizSet(setId, publicLibraryActor()).then(() => {
-    if (!isCurrent()) return null;
-    return store.getOwnedPublicationStatus(setId);
-  }).then(status => {
-    if (!isCurrent()) return false;
-    current.publicationBusy = false;
-    const valid = applyOwnedPublicationStatus(current, status);
-    renderSetList();
-    if (!valid || status.status !== 'withdrawn') {
-      alert('공개 상태가 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
-      return false;
-    }
-    toast('공개 철회를 서버에서 확인했습니다.');
-    return true;
-  }).catch(() => {
-    if (!isCurrent()) return false;
-    current.publicationBusy = false;
-    current.publicationStatus = 'unknown';
-    current.publicationRevision = '';
-    renderSetList();
-    alert('공개 철회 상태를 확인하지 못했습니다. 최신 상태를 확인한 뒤 다시 시도해 주세요.');
-    return false;
-  });
-}
-
-function publicLibrarySafeSummary(value) {
-  const raw = value || {};
-  const publicationId = typeof raw.publicationId === 'string' ? raw.publicationId.trim() : '';
-  const title = typeof raw.title === 'string' ? raw.title.slice(0, 200) : '';
-  const description = typeof raw.description === 'string' ? raw.description.slice(0, 1000) : '';
-  const author = PublicAuthorLabelCore.validate(raw.authorDisplayName);
-  const authorDisplayName = author.value;
-  if (!publicationId || !title || !authorDisplayName || publicationId.includes('/') ||
-      !author.ok ||
-      !Number.isSafeInteger(raw.videoCount) || raw.videoCount < 0 ||
-      !Number.isSafeInteger(raw.questionCount) || raw.questionCount < 0) return null;
-  return {
-    publicationId, title, description, authorDisplayName,
-    videoCount: raw.videoCount, questionCount: raw.questionCount,
-    updatedAtMs: Number.isFinite(Number(raw.updatedAtMs)) ? Number(raw.updatedAtMs) : 0
-  };
-}
-
-function publicLibraryScreenIsCurrent(state, requestId) {
-  return publicQuizLibraryState === state && !!state && state.requestId === requestId &&
-    teacherAuthVersion === state.authGeneration && !!teacherUser && teacherUser.uid === state.uid &&
-    !!teacherState && teacherState.uid === state.uid && AuthCore.isTeacher(teacherState) &&
-    String(location.hash || '') === '#/library';
-}
-
-function clearPublicQuizLibraryScreen(clearDom) {
-  const state = publicQuizLibraryState;
-  if (state) state.requestId = ++publicLibraryRequestSerial;
-  publicQuizLibraryState = null;
-  if (typeof document !== 'undefined') {
-    const preview = document.getElementById('published-quiz-preview');
-    if (preview && typeof preview.remove === 'function') preview.remove();
-  }
-  if (clearDom && typeof location !== 'undefined' && String(location.hash || '') === '#/library' &&
-      typeof APP === 'function') APP().innerHTML = '';
-  return true;
-}
-
-function renderPublicQuizLibrary() {
-  const state = publicQuizLibraryState;
-  if (!state) return false;
-  const query = String(state.query || '').trim().toLowerCase().slice(0, 200);
-  const items = (state.items || []).filter(item => !query ||
-    (item.title + ' ' + item.description + ' ' + item.authorDisplayName).toLowerCase().includes(query));
-  const rows = items.length ? items.map(item =>
-    '<article class="card public-library-card">' +
-      '<div><h2>' + esc(item.title) + '</h2>' +
-      '<p class="sub">' + esc(item.description || '설명 없음') + '</p>' +
-      '<div class="public-library-meta">제작자 ' + esc(item.authorDisplayName) +
-        ' · 영상 ' + item.videoCount + '개 · 문항 ' + item.questionCount + '개' +
-        (item.updatedAtMs ? ' · 갱신 ' + esc(fmtDate(item.updatedAtMs)) : '') + '</div></div>' +
-      '<div class="public-library-actions">' +
-        '<button class="btn" onclick="openPublishedQuizPreview(\'' + esc(item.publicationId) + '\')">미리보기</button>' +
-        '<button class="btn primary" aria-label="내 세트로 복사" onclick="copyPublishedQuizSetFromLibrary(\'' + esc(item.publicationId) + '\')"' +
-          (state.copyingId ? ' disabled' : '') + '>' +
-          (state.copyingId === item.publicationId ? '복사 중…' : '내 세트로 복사') + '</button>' +
-      '</div></article>'
-  ).join('') : '<div class="card"><div class="empty">' +
-    (state.loading ? '공개 퀴즈를 불러오는 중…' : query ? '검색 결과가 없습니다.' : '게시된 공개 퀴즈가 없습니다.') +
-    '</div></div>';
-  const status = state.error ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>' : '';
-  const preview = state.preview ? '<div class="overlay" id="published-quiz-preview" role="dialog" aria-modal="true" aria-labelledby="published-preview-title">' +
-    '<div class="card public-library-preview-card"><div class="row" style="align-items:center;justify-content:space-between">' +
-      '<h2 id="published-preview-title">' + esc(state.preview.title) + '</h2>' +
-      '<button class="btn sm" aria-label="공개 퀴즈 미리보기 닫기" onclick="closePublishedQuizPreview()">닫기</button></div>' +
-    '<p class="sub">' + esc(state.preview.description || '설명 없음') + '</p>' +
-    '<div class="public-library-meta">제작자 ' + esc(state.preview.authorDisplayName) +
-      ' · 영상 ' + state.preview.videoCount + '개 · 문항 ' + state.preview.questionCount + '개</div>' +
-    (state.preview.questionTexts.length
-      ? '<ol class="public-library-preview-questions">' + state.preview.questionTexts.map(text => '<li>' + esc(text) + '</li>').join('') + '</ol>'
-      : '<div class="empty">표시할 문항 요약이 없습니다.</div>') +
-    '<div class="public-library-actions" style="margin-top:16px"><button class="btn primary" aria-label="내 세트로 복사" onclick="copyPublishedQuizSetFromLibrary(\'' + esc(state.preview.publicationId) + '\')">내 세트로 복사</button></div>' +
-    '</div></div>' : '';
-  APP().innerHTML = topbar('<a class="btn sm" href="#/sets">📚 내 세트</a>') +
-    '<main class="wrap"><h1 style="font-size:24px">공개 자료실</h1>' +
-    '<p class="sub">승인된 교사가 공개한 퀴즈를 확인하고 비공개 독립 사본으로 가져옵니다.</p>' +
-    '<div class="card"><label class="f" for="public-library-search">공개 자료 검색</label>' +
-      '<input id="public-library-search" type="text" maxlength="200" value="' + esc(state.query || '') +
-        '" placeholder="제목, 설명 또는 제작자 표시명" oninput="publicLibrarySearchChanged(this.value)"></div>' +
-    status + '<div class="public-library-grid">' + rows + '</div>' +
-    (state.nextCursor ? '<button class="btn block" style="margin-top:12px" onclick="publicLibraryNextPage()"' +
-      (state.loading ? ' disabled' : '') + '>다음 50개</button>' : '') + '</main>' + preview;
-  return true;
-}
-
-function loadPublicQuizLibraryPage(useCursor) {
-  const state = publicQuizLibraryState;
-  if (!state || state.loading) return Promise.resolve(false);
-  const requestId = ++publicLibraryRequestSerial;
-  state.requestId = requestId;
-  state.loading = true;
-  state.error = '';
-  renderPublicQuizLibrary();
-  return store.listPublishedQuizSets({ limit: 50, cursor: useCursor ? state.cursor : null }).then(result => {
-    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
-    state.items = (result && Array.isArray(result.items) ? result.items : [])
-      .map(publicLibrarySafeSummary).filter(Boolean).slice(0, 50);
-    state.cursor = result && result.nextCursor || null;
-    state.nextCursor = state.cursor;
-    state.loading = false;
-    renderPublicQuizLibrary();
-    return true;
-  }).catch(() => {
-    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
-    state.loading = false;
-    state.error = '공개 자료실을 불러오지 못했습니다. 다시 시도해 주세요.';
-    renderPublicQuizLibrary();
-    return false;
-  });
-}
-
-function screenPublicQuizLibrary() {
-  if (!teacherUser || !teacherState || !AuthCore.isTeacher(teacherState)) return Promise.resolve(false);
-  const state = publicQuizLibraryState = {
-    uid: teacherUser.uid, authGeneration: teacherAuthVersion,
-    requestId: ++publicLibraryRequestSerial, cursor: null,
-    nextCursor: null, items: [], query: '', loading: false,
-    preview: null, copyingId: '', error: ''
-  };
-  onCleanup(() => {
-    if (publicQuizLibraryState === state) clearPublicQuizLibraryScreen(false);
-  });
-  renderPublicQuizLibrary();
-  return loadPublicQuizLibraryPage(false);
-}
-
-function publicLibrarySearchChanged(value) {
-  const state = publicQuizLibraryState;
-  if (!state) return false;
-  state.query = String(value || '').slice(0, 200);
-  renderPublicQuizLibrary();
-  return true;
-}
-
-function publicLibraryNextPage() {
-  return loadPublicQuizLibraryPage(true);
-}
-
-function openPublishedQuizPreview(publicationId) {
-  const state = publicQuizLibraryState;
-  if (!state || state.loading) return Promise.resolve(false);
-  const item = (state.items || []).find(value => value.publicationId === publicationId);
-  if (!item) return Promise.resolve(false);
-  const requestId = ++publicLibraryRequestSerial;
-  state.requestId = requestId;
-  state.error = '';
-  return store.getPublishedQuizSet(publicationId).then(projection => {
-    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
-    if (!projection || projection.status !== 'published') {
-      state.items = (state.items || []).filter(value => value.publicationId !== publicationId);
-      if (state.preview && state.preview.publicationId === publicationId) state.preview = null;
-      state.error = '공개 미리보기를 찾을 수 없습니다. 게시 상태를 다시 확인해 주세요.';
-      renderPublicQuizLibrary();
-      return false;
-    }
-    const safe = publicLibrarySafeSummary(Object.assign({}, item, projection));
-    if (!safe) return false;
-    const questionTexts = [];
-    (Array.isArray(projection.videos) ? projection.videos : []).slice(0, 50).forEach(video => {
-      (Array.isArray(video.questions) ? video.questions : []).slice(0, 200).forEach(question => {
-        if (questionTexts.length < 500 && question && typeof question.text === 'string') {
-          questionTexts.push(question.text.slice(0, 2000));
-        }
-      });
-    });
-    state.preview = Object.assign({}, safe, { questionTexts });
-    renderPublicQuizLibrary();
-    return true;
-  }).catch(() => {
-    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
-    state.error = '공개 미리보기를 불러오지 못했습니다. 게시 상태를 다시 확인해 주세요.';
-    renderPublicQuizLibrary();
-    return false;
-  });
-}
-
-function closePublishedQuizPreview() {
-  if (!publicQuizLibraryState) return false;
-  publicQuizLibraryState.preview = null;
-  renderPublicQuizLibrary();
-  return true;
-}
-
-function copyPublishedQuizSetFromLibrary(publicationId) {
-  const state = publicQuizLibraryState;
-  if (!state || state.loading || state.copyingId ||
-      !(state.items || []).some(item => item.publicationId === publicationId)) return Promise.resolve(false);
-  const requestId = ++publicLibraryRequestSerial;
-  state.requestId = requestId;
-  state.copyingId = publicationId;
-  state.error = '';
-  renderPublicQuizLibrary();
-  const destinationId = rid(20);
-  return store.copyPublishedQuizSet(publicationId, destinationId, publicLibraryActor()).then(result => {
-    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
-    if (!result || result.id !== destinationId || result.visibility !== 'private') {
-      throw new Error('private copy readback mismatch');
-    }
-    state.copyingId = '';
-    toast('비공개 독립 사본을 만들었습니다.');
-    go('make/' + destinationId);
-    return true;
-  }).catch(() => {
-    if (!publicLibraryScreenIsCurrent(state, requestId)) return false;
-    state.copyingId = '';
-    state.error = '사본을 만들지 못했습니다. 게시 상태를 확인한 뒤 다시 시도해 주세요.';
-    renderPublicQuizLibrary();
-    return false;
-  });
 }
 
 function uiTrashMillis(value) {
@@ -8084,7 +7538,11 @@ async function plOpenQuestion(i) {
   }
   try {
     await store.setLive(state.sessionId, live);
-    if (pl !== state || state.pendingLiveQuestion !== i) return false;
+    // live 구독이 방금 쓴 문항을 먼저 반영하면 pendingLiveQuestion이 -1로 비워진다.
+    // liveToken이 우리가 쓴 값과 같으면 우리가 연 문항이므로 뒷정리를 건너뛰지 않는다.
+    // (건너뛰면 dueQuestions에 남아 계속 재생이 같은 문항을 다시 연다)
+    if (pl !== state || (state.pendingLiveQuestion !== i &&
+        String(state.live && state.live.liveToken || '') !== live.liveToken)) return false;
     state.openError = '';
     state.dueQuestions = (state.dueQuestions || []).filter(index => index !== i);
     if (state.quizTrigger && state.quizTrigger.open) state.quizTrigger.open(i);
@@ -9844,249 +9302,6 @@ function admTeacherAccounts() {
   });
 }
 
-function adminTeacherRequestScreenIsCurrent(state) {
-  const route = typeof location === 'undefined' ? '#/admin' : String(location.hash || '');
-  const body = typeof $ === 'function' ? $('#adm-body') : null;
-  return adminTeacherRequestScreen === state && !!state && adm === state.adm &&
-    teacherAuthVersion === state.authGeneration && !!teacherUser && teacherUser.uid === state.uid &&
-    AuthCore.isAdmin(teacherState) && route === '#/admin' && adm.tab === 'requests' && state.body === body;
-}
-
-function renderAdminTeacherRequests() {
-  if (!AuthCore.isAdmin(teacherState) || !adm || adm.tab !== 'requests') return false;
-  const body = $('#adm-body');
-  if (!body) return false;
-  let state = adminTeacherRequestScreen;
-  if (!adminTeacherRequestScreenIsCurrent(state)) {
-    state = adminTeacherRequestScreen = {
-      adm, body, uid: teacherUser && teacherUser.uid, authGeneration: teacherAuthVersion,
-      requests: null, deletions: null, loading: false, inFlight: null, message: '', error: '', loadError: ''
-    };
-    if (typeof onCleanup === 'function') onCleanup(() => { if (adminTeacherRequestScreen === state) adminTeacherRequestScreen = null; });
-  }
-  if ((!state.requests || state.deletions === null) && !state.loading) {
-    if (state.loadError) {
-      body.innerHTML = '<div class="card"><div class="notice bad" role="alert">' + esc(state.loadError) + '</div>' +
-        '<button class="btn" onclick="retryAdminTeacherRequests()">다시 시도</button></div>';
-      return true;
-    }
-    state.loading = true;
-    body.innerHTML = '<div class="empty">교사 권한 신청을 불러오는 중…</div>';
-    const actor = Object.assign({}, teacherState, { authGeneration: state.authGeneration, currentAuthGeneration: teacherAuthVersion });
-    Promise.all([
-      store.listPendingTeacherRequests(50, actor),
-      typeof store.listDeletionPendingTeachers === 'function'
-        ? store.listDeletionPendingTeachers(50, actor) : Promise.resolve({})
-    ]).then(([requests, deletions]) => {
-      if (!adminTeacherRequestScreenIsCurrent(state)) return;
-      state.loading = false;
-      state.requests = requests || {};
-      state.deletions = deletions || {};
-      renderAdminTeacherRequests();
-    }).catch(error => {
-      if (!adminTeacherRequestScreenIsCurrent(state)) return;
-      state.loading = false;
-      state.loadError = error && error.message ? error.message : '신청 목록을 불러오지 못했습니다.';
-      if (String(error && error.code || '').toLowerCase().indexOf('permission-denied') >= 0) {
-        if (typeof retractProtectedTeacherScreen === 'function') retractProtectedTeacherScreen();
-        if (typeof go === 'function') go('home');
-        return;
-      }
-      renderAdminTeacherRequests();
-    });
-    return true;
-  }
-  if (state.loading) return true;
-  const requests = Object.values(state.requests || {}).sort((a, b) =>
-    String(a.displayName || '').localeCompare(String(b.displayName || '')));
-  const status = state.error ? '<div class="notice bad" role="alert">' + esc(state.error) + '</div>' :
-    state.message ? '<div class="notice ok" role="status">' + esc(state.message) + '</div>' : '';
-  const rows = requests.map(request => {
-    const uid = String(request.uid || '');
-    const revision = Number(request.revision);
-    const locked = !!state.inFlight;
-    const callUid = esc(JSON.stringify(uid));
-    const disabled = locked ? ' disabled' : '';
-    return '<div class="card" data-admin-request-row="' + esc(uid) + '"><b>' + esc(request.displayName || '') + '</b>' +
-      '<div class="hint">' + esc(request.emailCanonical || '') + '</div>' +
-      (request.organization ? '<div class="sub">소속: ' + esc(request.organization) + '</div>' : '') +
-      (request.note ? '<div class="sub">메모: ' + esc(request.note) + '</div>' : '') +
-      '<label class="f">처리 사유 (선택)<input data-admin-request-reason maxlength="200"' + disabled + '></label>' +
-      '<div class="row"><button class="btn primary" onclick="adminDecideTeacherRequest(' + callUid + ',' + revision + ',\'approved\',this)"' + disabled + '>승인</button>' +
-      '<button class="btn danger" onclick="adminDecideTeacherRequest(' + callUid + ',' + revision + ',\'rejected\',this)"' + disabled + '>거절</button></div></div>';
-  }).join('');
-  const deletionRows = Object.values(state.deletions || {}).sort((a, b) =>
-    String(a.displayName || '').localeCompare(String(b.displayName || ''))).map(allowance => {
-    const uid = String(allowance.uid || '');
-    const revision = Number(allowance.revision);
-    const locked = !!state.inFlight;
-    return '<div class="card" data-admin-deletion-row="' + esc(uid) + '"><b>' +
-      esc(allowance.displayName || '') + '</b><div class="hint">' +
-      esc(allowance.emailCanonical || '') + '</div><div class="sub">탈퇴 대기 revision ' +
-      revision + (allowance.administrativeHold === true ? ' · 관리자 중지 유지' : '') + '</div>' +
-      '<button class="btn" onclick="adminCancelTeacherDeletionRequest(' + esc(JSON.stringify(uid)) +
-      ',' + revision + ',this)"' + (locked ? ' disabled' : '') + '>관리자 철회</button></div>';
-  }).join('');
-  body.innerHTML = '<div class="card"><h2>교사 권한 신청</h2><p class="sub">신청자의 이름·이메일·소속·메모는 승인 처리에만 사용합니다.</p>' + status +
-    (rows || '<div class="empty">승인 대기 중인 신청이 없습니다.</div>') + '</div>' +
-    '<div class="card"><h2>교사 탈퇴 대기</h2><p class="sub">30일 복구 기간 안에서만 정확한 UID와 revision으로 철회합니다. 별도 관리자 중지는 유지됩니다.</p>' +
-    (deletionRows || '<div class="empty">탈퇴 대기 중인 교사가 없습니다.</div>') + '</div>';
-  return true;
-}
-
-function adminCancelTeacherDeletionRequest(uid, revision) {
-  const state = adminTeacherRequestScreen;
-  if (!adminTeacherRequestScreenIsCurrent(state) || state.inFlight ||
-      !Number.isSafeInteger(revision) || revision < 1 || !state.deletions ||
-      !state.deletions[uid] || state.deletions[uid].uid !== uid ||
-      state.deletions[uid].revision !== revision ||
-      typeof store.adminCancelTeacherDeletion !== 'function') return Promise.resolve(false);
-  state.inFlight = { uid, revision, action: 'cancel-deletion' };
-  state.error = '';
-  state.message = '';
-  renderAdminTeacherRequests();
-  const actor = Object.assign({}, teacherState, {
-    authGeneration: state.authGeneration,
-    currentAuthGeneration: teacherAuthVersion
-  });
-  return store.adminCancelTeacherDeletion(uid, revision, actor).then(result => {
-    if (!adminTeacherRequestScreenIsCurrent(state)) return false;
-    delete state.deletions[uid];
-    state.inFlight = null;
-    state.message = result && result.status === 'suspended'
-      ? '탈퇴 요청을 철회했습니다. 별도 관리자 중지는 유지됩니다.'
-      : '탈퇴 요청을 철회하고 교사 권한을 복구했습니다.';
-    renderAdminTeacherRequests();
-    return true;
-  }).catch(error => {
-    if (!adminTeacherRequestScreenIsCurrent(state)) return false;
-    state.inFlight = null;
-    state.error = error && error.message ? error.message : '탈퇴 요청을 철회하지 못했습니다.';
-    renderAdminTeacherRequests();
-    return false;
-  });
-}
-
-function adminDecideTeacherRequest(uid, revision, decision, control) {
-  const state = adminTeacherRequestScreen;
-  if (!adminTeacherRequestScreenIsCurrent(state) || state.inFlight || !['approved', 'rejected'].includes(decision) ||
-      !Number.isSafeInteger(revision) || revision < 1 || !state.requests || !state.requests[uid] ||
-      state.requests[uid].revision !== revision) return Promise.resolve(false);
-  const row = control && typeof control.closest === 'function' ? control.closest('[data-admin-request-row]') : null;
-  const reasonInput = row && typeof row.querySelector === 'function' ? row.querySelector('[data-admin-request-reason]') : null;
-  const reason = String(reasonInput && reasonInput.value || '').trim();
-  if (reason.length > 200) {
-    state.error = '처리 사유는 200자 이하여야 합니다.';
-    renderAdminTeacherRequests();
-    return Promise.resolve(false);
-  }
-  state.inFlight = { uid, revision }; state.error = ''; state.message = '';
-  renderAdminTeacherRequests();
-  const actor = Object.assign({}, teacherState, { authGeneration: state.authGeneration, currentAuthGeneration: teacherAuthVersion });
-  return store.decideTeacherRequest(uid, revision, { status: decision, reason }, actor).then(async () => {
-    if (!adminTeacherRequestScreenIsCurrent(state)) return false;
-    delete state.requests[uid];
-    state.inFlight = null;
-    state.message = decision === 'approved' ? '교사 권한을 승인했습니다.' : '교사 권한 신청을 거절했습니다.';
-    renderAdminTeacherRequests();
-    return true;
-  }).catch(error => {
-    if (!adminTeacherRequestScreenIsCurrent(state)) return false;
-    state.inFlight = null;
-    state.error = error && error.message ? error.message : '신청 처리에 실패했습니다. 다시 시도해 주세요.';
-    if (String(error && error.code || '').toLowerCase().indexOf('permission-denied') >= 0) {
-      if (typeof retractProtectedTeacherScreen === 'function') retractProtectedTeacherScreen();
-      if (typeof go === 'function') go('home');
-      return false;
-    }
-    renderAdminTeacherRequests();
-    return false;
-  });
-}
-
-function retryAdminTeacherRequests() {
-  const state = adminTeacherRequestScreen;
-  if (!adminTeacherRequestScreenIsCurrent(state) || state.loading || state.inFlight) return false;
-  state.loadError = '';
-  state.error = '';
-  state.requests = null;
-  state.deletions = null;
-  return renderAdminTeacherRequests();
-}
-
-async function admSaveTeacherAllowance(uid, email, revision, role, enabled) {
-  if (!AuthCore.isAdmin(teacherState)) throw new Error('관리자 권한이 필요합니다.');
-  if (typeof uid !== 'string' || !uid || uid.includes('/') || uid.length > 128) throw new Error('유효한 UID가 필요합니다.');
-  const normalized = maintenanceCanonicalEmail(email);
-  if (!normalized || !normalized.includes('@')) throw new Error('유효한 이메일을 입력해 주세요.');
-  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('유효한 revision이 필요합니다.');
-  const row = adm && adm.allowances && adm.allowances[normalized];
-  if (!row || row.uid !== uid || row.emailCanonical !== normalized || row.revision !== revision) {
-    throw new Error('계정 행의 UID/email/revision이 변경되었습니다.');
-  }
-  const self = uid === teacherState.uid;
-  if (self && (enabled === false || role === 'teacher')) throw new Error('현재 관리자 계정은 자기 계정을 낮추거나 비활성화할 수 없습니다.');
-  if (enabled === false && adm && adm.allowances && adm.allowances[normalized] && adm.allowances[normalized].role === 'admin' &&
-      typeof confirm === 'function' && !confirm(normalized + ' 관리자 계정을 비활성화할까요?')) return false;
-  const adminState = adm;
-  const adminTab = adminState && adminState.tab;
-  const authGeneration = teacherAuthVersion;
-  const actorIdentity = teacherState;
-  const isCurrent = () => {
-    const route = typeof location === 'undefined' ? '#/admin' : String(location.hash || '');
-    return adm === adminState && adm && adm.tab === adminTab &&
-      teacherState === actorIdentity &&
-      teacherAuthVersion === authGeneration && AuthCore.isAdmin(teacherState) &&
-      route === '#/admin';
-  };
-  const actor = Object.assign({}, teacherState, {
-    authGeneration,
-    currentAuthGeneration: teacherAuthVersion,
-    isCurrent
-  });
-  if (!store.adminUpdateTeacherAllowance) throw new Error('authoritative allowance API를 사용할 수 없습니다.');
-  await store.adminUpdateTeacherAllowance({
-    uid, emailCanonical: normalized, expectedRevision: revision,
-    role: role === 'admin' ? 'admin' : 'teacher',
-    status: enabled === false ? 'suspended' : 'active',
-    reason: enabled === false ? '관리자 UI 중지' : ''
-  }, actor);
-  if (!isCurrent()) return false;
-  await admTeacherAccounts();
-  if (!isCurrent()) return false;
-  if (typeof admRenderBody === 'function') admRenderBody();
-  return true;
-}
-
-function admAccountsView() {
-  const state = adm;
-  const body = $('#adm-body');
-  if (!body) return;
-  body.innerHTML = '<div class="empty">계정을 불러오는 중…</div>';
-  return admTeacherAccounts().then(markup => {
-    if (adm !== state) return;
-    body.innerHTML = markup;
-    body.querySelectorAll('[data-teacher-save]').forEach(button => {
-      button.onclick = () => {
-        const row = button.closest('[data-teacher-uid]');
-        const roleSelect = row && row.querySelector('[data-teacher-role]');
-        return admSaveTeacherAllowance(row && row.dataset.teacherUid, row && row.dataset.teacherEmail,
-          Number(row && row.dataset.teacherRevision), roleSelect ? roleSelect.value : 'teacher', true)
-          .catch(error => alert(error.message));
-      };
-    });
-    body.querySelectorAll('[data-teacher-disable]').forEach(button => {
-      button.onclick = () => {
-        const row = button.closest('[data-teacher-uid]');
-        const roleSelect = row && row.querySelector('[data-teacher-role]');
-        return admSaveTeacherAllowance(row && row.dataset.teacherUid, row && row.dataset.teacherEmail,
-          Number(row && row.dataset.teacherRevision), roleSelect ? roleSelect.value : 'teacher', false)
-          .catch(error => alert(error.message));
-      };
-    });
-  }).catch(error => { body.innerHTML = '<div class="card"><div class="empty">계정 목록을 불러오지 못했습니다: ' + esc(error.message) + '</div></div>'; });
-}
-
 function screenAdmin() {
   adm = {
     sessions: {}, resp: {}, sets: {},
@@ -10100,178 +9315,6 @@ function screenAdmin() {
 }
 function admLogout() {
   signOutTeacher();
-}
-
-function adminPublishedScreenIsCurrent(state) {
-  return !!state && !!adm && adm.tab === 'publications' && adm.publicLibrary === state &&
-    teacherAuthVersion === state.authGeneration && !!teacherUser && teacherUser.uid === state.uid &&
-    !!teacherState && teacherState.uid === state.uid && AuthCore.isAdmin(teacherState);
-}
-
-function renderAdminPublishedQuizSets() {
-  const body = $('#adm-body');
-  if (!body || !adm) return false;
-  let state = adm.publicLibrary;
-  if (!state) {
-    state = adm.publicLibrary = {
-      uid: teacherUser && teacherUser.uid || '', authGeneration: teacherAuthVersion,
-      requestId: ++publicLibraryRequestSerial, cursor: null,
-      items: [], busyId: '', loading: false, error: ''
-    };
-    body.innerHTML = '<div class="empty">공개 세트를 불러오는 중…</div>';
-    loadAdminPublishedQuizSets(true);
-    return true;
-  }
-  const rows = (state.items || []).map(item => {
-    const id = String(item.publicationId || '');
-    const revision = String(item.revision || '');
-    const moderated = item.status === 'moderated';
-    const busy = state.busyId === id;
-    return '<div class="card" data-publication-id="' + esc(id) + '">' +
-      '<div class="row" style="align-items:center;justify-content:space-between"><div>' +
-        '<h2>' + esc(item.title || '제목 없음') + '</h2>' +
-        '<div class="public-library-meta">제작자 ' + esc(item.authorDisplayName || '') +
-          ' · 영상 ' + Number(item.videoCount || 0) + '개 · 문항 ' + Number(item.questionCount || 0) +
-          '개 · revision <span class="mono">' + esc(revision) + '</span></div></div>' +
-        (moderated ? '<span class="tag bad">관리자 공개 중지</span>' : '<span class="tag ok">공개 중</span>') + '</div>' +
-      (moderated
-        ? '<button class="btn" style="margin-top:12px" onclick="adminRestorePublishedQuizFromPanel(\'' + esc(id) + '\',\'' + esc(revision) + '\')"' + (busy ? ' disabled' : '') + '>공개 복구</button>'
-        : '<div class="field" style="margin-top:12px"><label class="f" for="admin-public-reason-' + esc(id) + '">공개 중지 사유</label>' +
-          '<textarea id="admin-public-reason-' + esc(id) + '" maxlength="200" placeholder="1~200자"' + (busy ? ' disabled' : '') + '></textarea></div>' +
-          '<button class="btn danger" onclick="adminModeratePublishedQuizFromPanel(\'' + esc(id) + '\',\'' + esc(revision) + '\')"' + (busy ? ' disabled' : '') + '>공개 중지</button>') +
-      '</div>';
-  }).join('');
-  body.innerHTML = (state.error ? '<div class="notice bad" role="alert">' + esc(state.error) +
-      ' <button class="btn sm" onclick="retryAdminPublishedQuizSets()"' +
-      (state.loading || state.busyId ? ' disabled' : '') + '>다시 조회</button></div>' : '') +
-    (state.loading ? '<div class="empty">공개 세트를 불러오는 중…</div>' :
-      (rows || '<div class="card"><div class="empty">현재 공개 또는 중지된 세트가 없습니다.</div></div>') +
-      (state.cursor ? '<button class="btn" onclick="adminPublishedQuizSetsNextPage()">다음 50개</button>' : ''));
-  return true;
-}
-
-function loadAdminPublishedQuizSets(reset) {
-  const state = adm && adm.publicLibrary;
-  if (!adminPublishedScreenIsCurrent(state) || state.loading || state.busyId ||
-      !store.listAdminPublishedQuizSets) return Promise.resolve(false);
-  const requestId = ++publicLibraryRequestSerial;
-  state.requestId = requestId;
-  state.loading = true;
-  state.error = '';
-  if (reset) {
-    state.items = [];
-    state.cursor = null;
-  }
-  const cursor = reset ? null : state.cursor;
-  renderAdminPublishedQuizSets();
-  return store.listAdminPublishedQuizSets({
-    limit: 50, cursor, admin: publicLibraryActor()
-  }).then(result => {
-    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-    const incoming = (result && Array.isArray(result.items) ? result.items : [])
-      .filter(item => item && ['published', 'moderated'].includes(item.status) &&
-        typeof item.publicationId === 'string' && typeof item.revision === 'string')
-      .slice(0, 50);
-    const previous = reset ? [] : state.items || [];
-    const byId = new Map(previous.map(item => [item.publicationId, item]));
-    incoming.forEach(item => byId.set(item.publicationId, item));
-    state.items = [...byId.values()];
-    state.cursor = result && result.nextCursor || null;
-    state.loading = false;
-    renderAdminPublishedQuizSets();
-    return true;
-  }).catch(() => {
-    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-    state.loading = false;
-    state.error = '공개 세트 목록을 불러오지 못했습니다. 다시 시도해 주세요.';
-    renderAdminPublishedQuizSets();
-    return false;
-  });
-}
-
-function retryAdminPublishedQuizSets() {
-  return loadAdminPublishedQuizSets(true);
-}
-
-function adminPublishedQuizSetsNextPage() {
-  const state = adm && adm.publicLibrary;
-  if (!state || !state.cursor) return Promise.resolve(false);
-  return loadAdminPublishedQuizSets(false);
-}
-
-function adminModeratePublishedQuizFromPanel(publicationId, expectedRevision, suppliedReason) {
-  const state = adm && adm.publicLibrary;
-  if (!adminPublishedScreenIsCurrent(state) || state.busyId) return Promise.resolve(false);
-  const item = (state.items || []).find(value => value.publicationId === publicationId);
-  if (!item || item.status !== 'published' || item.revision !== expectedRevision) return Promise.resolve(false);
-  const input = $('#admin-public-reason-' + publicationId);
-  const reason = String(suppliedReason === undefined ? input && input.value || '' : suppliedReason).trim();
-  if (reason.length < 1 || reason.length > 200) {
-    state.error = '공개 중지 사유를 1~200자로 입력해 주세요.';
-    renderAdminPublishedQuizSets();
-    return Promise.resolve(false);
-  }
-  const requestId = ++publicLibraryRequestSerial;
-  state.requestId = requestId;
-  state.busyId = publicationId;
-  state.error = '';
-  renderAdminPublishedQuizSets();
-  return store.adminModeratePublishedQuiz(
-    publicationId, expectedRevision, reason, publicLibraryActor()
-  ).then(projection => {
-    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-    if (!projection || projection.publicationId !== publicationId ||
-        projection.revision !== expectedRevision || projection.status !== 'moderated') {
-      state.busyId = '';
-      state.error = '공개 중지 결과가 변경되어 목록을 다시 조회합니다.';
-      renderAdminPublishedQuizSets();
-      return loadAdminPublishedQuizSets(true).then(() => false);
-    }
-    state.items = state.items.map(value => value.publicationId === publicationId ? projection : value);
-    state.busyId = '';
-    renderAdminPublishedQuizSets();
-    return true;
-  }).catch(() => {
-    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-    state.busyId = '';
-    state.error = '공개 중지 상태를 서버에서 확인하지 못했습니다. 다시 조회해 주세요.';
-    renderAdminPublishedQuizSets();
-    return loadAdminPublishedQuizSets(true).then(() => false);
-  });
-}
-
-function adminRestorePublishedQuizFromPanel(publicationId, expectedRevision) {
-  const state = adm && adm.publicLibrary;
-  if (!adminPublishedScreenIsCurrent(state) || state.busyId) return Promise.resolve(false);
-  const item = (state.items || []).find(value => value.publicationId === publicationId);
-  if (!item || item.status !== 'moderated' || item.revision !== expectedRevision) return Promise.resolve(false);
-  const requestId = ++publicLibraryRequestSerial;
-  state.requestId = requestId;
-  state.busyId = publicationId;
-  state.error = '';
-  renderAdminPublishedQuizSets();
-  return store.adminRestorePublishedQuiz(
-    publicationId, expectedRevision, publicLibraryActor()
-  ).then(projection => {
-    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-    if (!projection || projection.publicationId !== publicationId ||
-        projection.revision !== expectedRevision || projection.status !== 'published') {
-      state.busyId = '';
-      state.error = '공개 복구 결과가 변경되어 목록을 다시 조회합니다.';
-      renderAdminPublishedQuizSets();
-      return loadAdminPublishedQuizSets(true).then(() => false);
-    }
-    state.items = state.items.map(value => value.publicationId === publicationId ? projection : value);
-    state.busyId = '';
-    renderAdminPublishedQuizSets();
-    return true;
-  }).catch(() => {
-    if (!adminPublishedScreenIsCurrent(state) || state.requestId !== requestId) return false;
-    state.busyId = '';
-    state.error = '공개 복구 상태를 서버에서 확인하지 못했습니다. 다시 조회해 주세요.';
-    renderAdminPublishedQuizSets();
-    return loadAdminPublishedQuizSets(true).then(() => false);
-  });
 }
 
 function admRenderShell() {
@@ -10298,10 +9341,7 @@ function admRenderShell() {
           '<button class="btn sm" onclick="admTab(\'students\')">학생별 누적</button>' +
           '<button class="btn sm" onclick="admTab(\'classes\')">학년·반 집계</button>' +
           '<div style="flex:1"></div>' +
-          '<button class="btn sm ghost" onclick="admTab(\'accounts\')">👥 교사 계정</button>' +
-          '<button class="btn sm ghost" onclick="admTab(\'publications\')">🌐 공개 세트</button>' +
           '<button class="btn sm ghost" onclick="admTab(\'manage\')">⚙ 관리</button>' +
-          '<button class="btn sm ghost" onclick="admTab(\'requests\')">교사 신청</button>' +
         '</div>' +
       '</div>' +
       '<div id="adm-body"><div class="empty">기간을 정하고 [조회]를 누르세요.</div></div>' +
@@ -10316,16 +9356,6 @@ function admRenderShell() {
 }
 
 function admTab(t) {
-  if (t !== 'requests') adminTeacherRequestScreen = null;
-  if (adm.tab === 'publications' && t !== 'publications') {
-    const state = adm.publicLibrary;
-    if (state) {
-      state.requestId = ++publicLibraryRequestSerial;
-      state.loading = false;
-      state.busyId = '';
-    }
-    adm.publicLibrary = null;
-  }
   adm.tab = t;
   admRenderBody();
 }
@@ -10532,9 +9562,6 @@ function admCompute() {
 function admRenderBody() {
   const body = $('#adm-body');
   if (!body || adm.loading) return;
-  if (adm.tab === 'accounts') { admAccountsView(); return; }
-  if (adm.tab === 'requests') { renderAdminTeacherRequests(); return; }
-  if (adm.tab === 'publications') { renderAdminPublishedQuizSets(); return; }
   if (adm.rangeRejected) {
     adm.displayedSessionIds = [];
     body.innerHTML = '<div class="card"><div class="notice">기간에 포함된 진행 기록이 ' +

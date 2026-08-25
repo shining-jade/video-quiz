@@ -104,20 +104,6 @@ test('email authentication validation core loads before the application script',
   assert.ok(coreIndex < applicationIndex, 'email authentication validation core must load before inline application code');
 });
 
-test('public quiz library projection core loads after playlist normalization and before store and application scripts', () => {
-  const html = read('index.html');
-  const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
-  const coreIndex = html.indexOf('<script src="public-quiz-library-core.js"></script>');
-  const storeIndex = html.indexOf('<script src="firestore-store.js');
-  const applicationIndex = html.indexOf('<script>');
-
-  assert.ok(playlistIndex >= 0, 'playlist normalization core must be included');
-  assert.ok(coreIndex >= 0, 'public quiz library projection core must be included');
-  assert.ok(playlistIndex < coreIndex, 'playlist core must load before public projection core');
-  assert.ok(coreIndex < storeIndex, 'public projection core must load before firestore store');
-  assert.ok(storeIndex < applicationIndex, 'firestore store must load before inline application code');
-});
-
 test('operator authorization core is cache-busted in the static release', () => {
   const html = read('index.html');
 
@@ -180,14 +166,14 @@ test('모든 non-module inline script는 JavaScript로 파싱된다', () => {
   });
 });
 
-test('교사 신청과 관리자 승인 화면의 inline handlers are included in the parsed release script', () => {
+test('승인되지 않은 교사 계정에는 신청 폼 대신 비로그인 링크 안내를 보여 준다', () => {
   const html = read('index.html');
 
-  ['screenTeacherRequest', 'submitTeacherRequestForm', 'cancelTeacherRequest', 'refreshTeacherRequestStatus',
-    'renderAdminTeacherRequests', 'adminDecideTeacherRequest', 'retryAdminTeacherRequests'].forEach(name => {
-    assert.match(html, new RegExp('function ' + name + '\\('));
-  });
-  assert.match(html, /공용 계정을 쓰지 않고/);
+  assert.match(html, /function screenTeacherRequest\(/);
+  assert.match(html, /function renderTeacherRequest\(/);
+  assert.match(html, /퀴즈 세트를 만들 수 있는 계정이 아닙니다/);
+  assert.match(html, /비로그인 진행 링크<\/b>를 받아서/);
+  assert.doesNotMatch(html, /공용 계정을 쓰지 않고/);
 });
 
 test('교사 홈 현황판은 역할별 조회와 재시도 진입점을 포함한다', () => {
@@ -203,23 +189,25 @@ test('교사 홈 현황판은 역할별 조회와 재시도 진입점을 포함�
   assert.match(html, /혼잡도는 수업 운영을 돕는 안내/);
 });
 
-test('공개 자료실 route controls and mobile accessibility contract are present', () => {
+test('공개 자료실과 교사 승인 진입점은 릴리스에서 완전히 사라졌다', () => {
   const html = read('index.html');
 
   for (const name of [
     'screenPublicQuizLibrary', 'openPublishedQuizPreview',
     'publishQuizSetFromList', 'withdrawQuizSetFromList',
-    'copyPublishedQuizSetFromLibrary', 'renderAdminPublishedQuizSets'
+    'copyPublishedQuizSetFromLibrary', 'renderAdminPublishedQuizSets',
+    'submitTeacherRequestForm', 'cancelTeacherRequest', 'refreshTeacherRequestStatus',
+    'renderAdminTeacherRequests', 'adminDecideTeacherRequest'
   ]) {
-    assert.match(html, new RegExp('function ' + name + '\\('));
+    assert.doesNotMatch(html, new RegExp('function ' + name + '\\('),
+      name + ' must not survive in the guest-only release');
   }
-  assert.match(html, /case 'library':\s*requireTeacher\(screenPublicQuizLibrary\)/);
-  assert.match(html, /href="#\/library"[\s\S]{0,160}공개 자료실/);
-  assert.match(html, /<label[^>]*for="public-library-search"[^>]*>[^<]*공개 자료 검색/);
-  assert.match(html, /id="public-library-search"[^>]*maxlength="200"/);
-  assert.match(html, /aria-label="공개 퀴즈 미리보기 닫기"/);
-  assert.match(html, /aria-label="내 세트로 복사"/);
-  assert.match(html, /@media \(max-width:\s*720px\)[\s\S]*?\.public-library-actions\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.doesNotMatch(html, /href="#\/library"/, '공개 자료실 링크가 남아 있으면 안 된다');
+  assert.doesNotMatch(html, /case 'library':/, '공개 자료실 route가 남아 있으면 안 된다');
+  assert.doesNotMatch(html, /공개 자료실에 게시/, '게시 버튼이 남아 있으면 안 된다');
+  assert.doesNotMatch(html, /게시 상태 확인 실패/, '게시 상태 배지가 남아 있으면 안 된다');
+  assert.doesNotMatch(html, /public-quiz-library-core\.js/, '쓰지 않는 공개 자료실 코어를 싣지 않는다');
+  assert.doesNotMatch(html, /teacher-access-request-core\.js/, '쓰지 않는 교사 신청 코어를 싣지 않는다');
 });
 
 test('편집기 Ctrl+S는 브라우저 기본 동작 없이 현재 위치에서 저장 완료 알림을 표시한다', () => {

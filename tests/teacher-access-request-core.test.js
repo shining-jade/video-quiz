@@ -174,8 +174,3 @@ test('teacherStatus maps lifecycle allowance states and accepts legacy enabled',
   assert.equal(core.teacherStatus(null), 'unapproved');
   assert.equal(core.teacherStatus({ status: 'pending' }), 'unapproved');
 });
-
-test('index loads the browser core alongside local scripts', () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.match(html, /<script src="teacher-access-request-core\.js"><\/script>/);
-});
