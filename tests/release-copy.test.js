@@ -561,15 +561,21 @@ test('public library release gate documents lifecycle lock indexes legacy audit 
   assert.match(handoff, /safeToDeployPublicLibrary/);
 });
 
-test('guest run release gates fix provider, deployment, concurrency, redaction, revoke and rollback', () => {
+test('Spark guest release has no Functions deployment surface', () => {
   const pkg = JSON.parse(read('package.json'));
+  const firebaseConfig = JSON.parse(read('firebase.json'));
+  const readme = read('README.md');
   const runbook = read('docs/RELEASE-RUNBOOK.md');
-  assert.match(pkg.scripts['test:guest-functions'], /guest-share-service/);
+  assert.equal(firebaseConfig.functions, undefined);
+  assert.equal(pkg.scripts['test:guest-functions'], undefined);
   assert.match(pkg.scripts['test:guest'], /guest-quiz-share-core/);
-  for (const marker of [
-    'Anonymous provider', 'exchangeGuestQuizShare', 'asia-northeast3',
-    'enforceAppCheck: false', 'Functions → Rules/indexes → static app',
-    '격리된 브라우저 두 개', '서로 다른 6자리 반 코드',
-    'bearer secret', '새 링크 발급', '기존 세션·학생·응답은 삭제하지 않는다'
-  ]) assert.match(runbook, new RegExp(marker));
+  assert.doesNotMatch(read('pnpm-workspace.yaml'), /(?:^|\n)\s*-\s*functions\s*(?:\n|$)/);
+  assert.equal(fs.existsSync('functions/package.json'), false);
+  assert.match(readme, /교사 계정·비밀번호·로그인 화면 없이/);
+  assert.match(readme, /서로 다른 6자리 반 코드와 세션/);
+  assert.match(runbook, /Spark 요금제/);
+  assert.match(runbook, /indexes 완료 → Rules → static app/);
+  assert.match(runbook, /43자 공유 ID/);
+  assert.match(runbook, /서로 격리된 브라우저 두 개/);
+  assert.match(runbook, /기존 세션·학생·응답은 삭제하지 않는다/);
 });

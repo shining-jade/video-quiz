@@ -1,6 +1,3 @@
-packages:
-  - functions
-
 allowBuilds:
   '@firebase/util': false
   protobufjs: false

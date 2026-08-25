@@ -16,6 +16,17 @@ test('Firebase wires the exact public-library composite index', () => {
   ));
   assert.deepEqual(indexes.fieldOverrides, []);
   assert.deepEqual(indexes.indexes.filter(index =>
+    index.collectionGroup === 'sessions'), [{
+    collectionGroup: 'sessions',
+    queryScope: 'COLLECTION',
+    fields: [
+      { fieldPath: 'sourceOwnerUid', order: 'ASCENDING' },
+      { fieldPath: 'sourceSetId', order: 'ASCENDING' },
+      { fieldPath: 'createdAt', order: 'DESCENDING' },
+      { fieldPath: '__name__', order: 'DESCENDING' }
+    ]
+  }]);
+  assert.deepEqual(indexes.indexes.filter(index =>
     index.collectionGroup === 'published_quiz_sets'), [{
     collectionGroup: 'published_quiz_sets',
     queryScope: 'COLLECTION',

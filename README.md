@@ -8,6 +8,8 @@
 **콘텐츠(퀴즈 세트)와 진행(반 세션)이 분리**되어 있습니다.
 한 선생님이 만든 세트를 링크로 받은 다른 선생님이 각자 반에서 동시에 써도, 반 코드가 달라 응답이 섞이지 않습니다.
 
+세트를 만드는 운영자는 기존 승인 교사 계정으로 로그인합니다. 운영자가 발급한 43자 비로그인 진행 링크를 받은 선생님은 별도 교사 계정·비밀번호·로그인 화면 없이 바로 자기 반 진행을 시작할 수 있습니다. 같은 링크를 동시에 열어도 매번 서로 다른 6자리 반 코드와 세션이 만들어져 응답은 반별로 분리됩니다. 링크 자체가 진행 권한이므로 외부 공개는 피하고, 유출이 의심되면 운영자가 링크를 해제한 뒤 새로 발급합니다.
+
 정적 HTML과 JavaScript로 동작합니다. 설치나 빌드 과정은 없습니다.
 
 ## 저장과 응답 방식
@@ -45,7 +47,7 @@
 
 공개 퀴즈 자료실은 기존 세트를 자동 공개하지 않는 private by default 기능입니다. 소유자가 게시한 비식별 projection만 승인 교사에게 보이며, 다른 교사는 원본 권한이 아닌 독립 사본을 만듭니다. public child 목록은 exact `revision + schemaVersion == 1` query만 사용하고 legacy marker는 검증 없이 backfill하지 않습니다. 데이터 계약은 [`docs/PUBLIC-QUIZ-LIBRARY.md`](./docs/PUBLIC-QUIZ-LIBRARY.md), 전체 운영 릴리스 순서는 오직 [`docs/RELEASE-RUNBOOK.md`](./docs/RELEASE-RUNBOOK.md)를 따르세요. 운영 배포 전에는 새 출력 경로를 지정한 `pnpm audit:public-library -- --project <exact-project-id> --target-mode production --max-documents <bounded-count> --output <new-report>.json` read-only 감사가 gate/direct get까지 포함한 전체 예산 안에서 완전하고 안전해야 합니다.
 
-Firebase Console에서는 기존 **Google**(교사용)과 **익명(Anonymous)**(학생용)을 유지합니다. **Email/Password**(교사용)는 Firebase Password Policy 최소 길이 8·Enforcement `Require`와 통합 런북의 migration/audit, R10 strict Rules → R11 static app, same-generation verify, exact unlock을 모두 마친 R14에서만 활성화합니다. Google이나 Anonymous를 끄지 않습니다. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 교사 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
+Firebase Console에서는 기존 **Google**(운영자용)과 **익명(Anonymous)**(학생 및 비로그인 진행 교사용)을 유지합니다. 비로그인 진행 교사는 공유 링크를 열 때 화면에 표시되지 않는 익명 인증을 자동으로 사용합니다. **Email/Password**(운영자용)는 Firebase Password Policy 최소 길이 8·Enforcement `Require`와 통합 런북의 migration/audit, R10 strict Rules → R11 static app, same-generation verify, exact unlock을 모두 마친 R14에서만 활성화합니다. Google이나 Anonymous를 끄지 않습니다. 이메일 가입자는 이메일 인증과 관리자 승인까지 마쳐야 운영자 기능을 쓸 수 있고, 학생은 로그인 없이 기존 6자리 반 코드로 입장합니다. 승인된 도메인에는 `shining-jade.github.io`가 있어야 합니다.
 
 교사용 메뉴에서는 Google 로그인 또는 이메일 가입·로그인·비밀번호 재설정을 선택할 수 있습니다. Google과 Email/Password 모두 검증된 provider여야 하며, 미승인·비활성·이메일 미검증 계정은 신청 안내를 봅니다. 사용자가 신청하면 관리자가 승인 UI에서 현재 UID와 canonical 이메일에 결합된 `teacher_allowances`를 생성합니다. 운영자는 legacy email allowlist를 직접 만들거나 수정하지 않습니다. 같은 이메일의 provider 충돌은 계정을 자동 병합하거나 allowance를 복제하지 않고 기존 로그인 방식을 안내합니다. 같은 승인 계정으로 로그인하면 다른 컴퓨터에서도 Firestore에 정식 저장한 같은 세트를 이어서 편집할 수 있습니다. 로컬 자동 초안은 기기 사이에 동기화되지 않습니다. Console 설정, 한국어 이메일 템플릿, 인수와 롤백은 [`docs/EMAIL-TEACHER-AUTH.md`](./docs/EMAIL-TEACHER-AUTH.md)를 따르며, 비밀번호와 재설정 링크는 운영 기록에 남기지 않습니다.
 
@@ -97,7 +99,7 @@ pnpm migrate:lifecycle -- --project video-quiz-65798 --target-mode production --
 ### 수정한 내용을 반영하려면
 
 1. `node --test tests/*.test.js`로 자동 테스트를 통과시킵니다.
-2. `firestore.rules`를 Firebase 콘솔에 게시합니다.
+2. `firestore.indexes.json`의 index 완료를 확인한 뒤 `firestore.rules`를 Firebase 콘솔에 게시합니다. 이 기능에는 Cloud Functions 배포가 없습니다.
 3. 바탕화면 `영상퀴즈` 폴더에서 변경을 커밋하고 푸시합니다.
 
 ```bash

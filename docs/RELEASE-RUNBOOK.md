@@ -58,7 +58,7 @@ R2~R8의 restricted report 경로와 SHA-256, exact project/environment, 모든 
 
 ### R10 — strict Firestore Rules 배포
 
-비로그인 진행 링크를 포함한 릴리스에서는 먼저 `asia-northeast3`의 callable `exchangeGuestQuizShare` Cloud Function을 배포하고 정상 호출 증거를 기록한다. 그 다음 manifest에 기록한 **strict Rules release를 한 번 배포**하고 적용된 Rules hash/release time을 재확인한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다. 즉 새 기능의 고정 순서는 **Functions → Rules/indexes → static app**이다.
+비로그인 진행 링크를 포함한 릴리스도 Cloud Functions 없이 Spark 요금제에서 운영한다. R8의 index 완료를 확인한 뒤 manifest에 기록한 **strict Rules release를 한 번 배포**하고 적용된 Rules hash/release time을 재확인한다. 호환 head/staged Rules를 별도 순서로 선배포하거나 legacy fallback을 다시 열지 않는다. 즉 새 기능의 고정 순서는 **indexes 완료 → Rules → static app**이다.
 
 ### R11 — static app 배포
 
@@ -83,11 +83,12 @@ Password Policy·domain·template를 다시 확인하고, R10~R13 증거가 모�
 ## 비로그인 진행 링크 추가 게이트
 
 - Firebase Authentication의 Anonymous provider가 활성화되어 있어야 한다. 교사용 공유 실행에는 비밀번호나 로그인 화면을 추가하지 않는다.
-- callable 이름은 `exchangeGuestQuizShare`, 배포 region은 `asia-northeast3`이다. 이번 릴리스의 App Check 결정은 `enforceAppCheck: false`이며, App Check 강제 전환은 별도 호환성 릴리스로 진행한다.
-- `pnpm test:guest-functions`, `pnpm test:guest`, `pnpm test:rules`를 모두 통과시키고, 로그·스크린샷·보고서·shell history·지속 테스트 산출물에 실제 bearer secret, `tokenHash`, custom token이 남지 않았는지 확인한다.
+- 이 기능은 Spark 요금제의 Firestore, Anonymous Authentication, 정적 GitHub Pages만 사용한다. Cloud Functions, Cloud Build, Artifact Registry 배포를 만들지 않는다.
+- 43자 공유 ID가 포함된 URL 자체가 진행 권한이다. 공개 게시하거나 검색 가능한 곳에 남기지 않으며, 유출이 의심되면 즉시 링크를 해제하고 새 링크를 발급한다.
+- `pnpm test:guest`와 `pnpm test:rules`를 모두 통과시키고, 앱과 배포 설정에 Functions/custom token 교환 경로가 없는지 확인한다.
 - 서로 격리된 브라우저 두 개에서 같은 링크를 열어 로그인 안내가 없는지 확인한다. 각각 `3학년 1반`, `3학년 2반`으로 시작해 서로 다른 6자리 반 코드가 발급되고, 학생 한 명씩 서로 다른 답을 제출했을 때 각 실행 화면과 원본 교사의 실행 기록에 자기 반 응답만 나타나야 한다.
 - 링크를 해제한 뒤 세 번째 브라우저에는 `사용할 수 없는 진행 링크입니다. 만든 분에게 새 링크를 요청해 주세요.`가 표시되어야 한다. 이미 진행 중인 두 수업은 안전하게 종료할 수 있어야 한다. 새 링크 발급 후 이전 링크가 계속 거부되는지도 확인한다.
-- 롤백은 먼저 새 공유 링크 생성을 UI에서 비활성화하고 Functions/Rules/static을 직전 호환 release로 되돌린다. 기존 세션·학생·응답은 삭제하지 않는다.
+- 롤백은 먼저 새 공유 링크 생성을 UI에서 비활성화하고 Rules를 복원한 뒤 static app을 직전 호환 release로 되돌린다. 기존 세션·학생·응답은 삭제하지 않는다.
 
 ## 롤백
 
