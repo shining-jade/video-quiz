@@ -42,6 +42,16 @@ test('projection validates content bounds and supported question types', () => {
   assert.throws(() => Core.projectQuizSet(invalid, {}), /question type/i);
 });
 
+test('projection keeps an open-ended video shareable', () => {
+  const set = sampleSet();
+  set.videos[0].endSec = null;
+
+  const output = Core.projectQuizSet(set, {});
+
+  assert.equal(output.videos[0].endSec, null);
+  assert.equal(output.questions[0].t, 12);
+});
+
 test('random token has exact url-safe entropy', () => {
   const token = Core.randomToken(32, crypto);
   assert.match(token, /^[A-Za-z0-9_-]{43}$/);

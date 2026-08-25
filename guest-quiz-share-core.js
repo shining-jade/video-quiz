@@ -112,16 +112,20 @@
         videoId: text(video.videoId || video.id || '', 'videoId', 128, false),
         videoUrl: text(video.url || video.videoUrl || '', 'videoUrl', 2048, false),
         startSec: finite(Number(video.startSec || 0), 'video start', 0, 86400),
-        endSec: finite(Number(video.endSec), 'video end', 0.001, 86400),
+        endSec: video.endSec == null || video.endSec === ''
+          ? null : finite(Number(video.endSec), 'video end', 0.001, 86400),
         schemaVersion: 1
       };
-      if (projectedVideo.endSec <= projectedVideo.startSec) fail('video range is invalid');
+      if (projectedVideo.endSec != null && projectedVideo.endSec <= projectedVideo.startSec) {
+        fail('video range is invalid');
+      }
       videos.push(projectedVideo);
       const sourceQuestions = Array.isArray(video.questions) ? video.questions : [];
       if (sourceQuestions.length > 200) fail('questions are invalid');
       sourceQuestions.forEach((question, questionIndex) => {
         const projected = projectQuestion(question, videoKey, questionIndex, images);
-        if (projected.t < projectedVideo.startSec || projected.t > projectedVideo.endSec) {
+        if (projected.t < projectedVideo.startSec ||
+            (projectedVideo.endSec != null && projected.t > projectedVideo.endSec)) {
           fail('question time is outside video range');
         }
         questions.push(projected);

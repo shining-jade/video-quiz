@@ -125,6 +125,13 @@ test('operator authorization core is cache-busted in the static release', () => 
     'auth-core.js must carry a release version so browsers do not retain stale authorization logic');
 });
 
+test('guest share projection core is cache-busted in the static release', () => {
+  const html = read('index.html');
+
+  assert.match(html, /<script src="guest-quiz-share-core\.js\?v=[a-z0-9.-]+"><\/script>/,
+    'guest share projection changes must not be hidden by a stale browser cache');
+});
+
 test('collaboration identity core loads before the Firestore store captures it', () => {
   const html = read('index.html');
   const collaborationIndex = html.indexOf('<script src="collaboration-trash-core.js"></script>');
@@ -138,7 +145,7 @@ test('collaboration identity core loads before the Firestore store captures it',
 test('free passwordless guest route uses anonymous auth and never uses the teacher route guard', () => {
   const html = read('index.html');
   const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
-  const guestCoreIndex = html.indexOf('<script src="guest-quiz-share-core.js"></script>');
+  const guestCoreIndex = html.indexOf('<script src="guest-quiz-share-core.js');
   const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
   assert.ok(playlistIndex >= 0 && guestCoreIndex > playlistIndex && storeIndex > guestCoreIndex);
   assert.doesNotMatch(html, /firebase-functions-compat\.js/);
