@@ -62,6 +62,18 @@ test('anonymous and unverified accounts are not teachers', () => {
   );
 });
 
+test('the sole operator account is an admin without a teacher allowance', () => {
+  const state = core.teacherState({
+    uid: 'operator-uid', email: 'JBHealth17@gmail.com', emailVerified: true, isAnonymous: false,
+    providerData: [{ providerId: 'google.com' }]
+  }, null);
+
+  assert.deepEqual(state, {
+    status: 'admin', uid: 'operator-uid', email: 'JBHealth17@gmail.com', role: 'admin'
+  });
+  assert.equal(core.isAdmin(state), true);
+});
+
 test('student join does not require the Google teacher sign-in', () => {
   const html = readIndex();
   assert.match(html, /function ensureAnonymousStudent/);

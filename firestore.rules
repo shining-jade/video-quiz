@@ -29,9 +29,14 @@ service cloud.firestore {
         data.role in ['teacher', 'admin'];
     }
 
+    function isOperator() {
+      return verifiedEmail() && request.auth.token.email == 'jbhealth17@gmail.com';
+    }
+
     function isApprovedTeacher() {
-      return verifiedEmail() && exists(teacherAllowancePath()) &&
-        validActiveTeacherAllowance(get(teacherAllowancePath()).data);
+      return isOperator() ||
+        (verifiedEmail() && exists(teacherAllowancePath()) &&
+          validActiveTeacherAllowance(get(teacherAllowancePath()).data));
     }
 
     function isDeletionPendingTeacher() {
@@ -60,8 +65,9 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isApprovedTeacher() &&
-        get(teacherAllowancePath()).data.role == 'admin';
+      return isOperator() ||
+        (isApprovedTeacher() && exists(teacherAllowancePath()) &&
+          get(teacherAllowancePath()).data.role == 'admin');
     }
 
     function canonicalAllowanceId(email) {

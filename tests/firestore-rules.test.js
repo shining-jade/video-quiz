@@ -5726,6 +5726,18 @@ rulesTest('세트 소유자는 최초 비로그인 링크 생성 전에 없는 �
   )));
 });
 
+rulesTest('운영자 계정은 teacher allowance 없이 자기 세트와 비로그인 공유 매핑을 사용한다', async () => {
+  await adminWrite('quiz_sets/operator-set', {
+    ownerUid: 'operator-uid', ownerEmail: 'jbhealth17@gmail.com', lifecycleState: 'active',
+    collaboratorCount: 0, imageCount: 0
+  });
+  const operator = googleContext('operator-uid', 'jbhealth17@gmail.com');
+
+  await assertSucceeds(getDoc(doc(operator, 'quiz_sets/operator-set')));
+  await assertSucceeds(getDoc(doc(operator, 'guest_quiz_share_sources/operator-set')));
+  await assertFails(getDoc(doc(googleContext('stranger-uid', 'stranger@gmail.com'), 'quiz_sets/operator-set')));
+});
+
 rulesTest('guest capability는 정확한 활성 share revision만 읽고 private 원본은 읽지 못한다', async () => {
   await adminWrite('guest_quiz_shares/' + FREE_SHARE_ID, {
     shareId: FREE_SHARE_ID, sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',

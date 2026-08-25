@@ -3,6 +3,8 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AuthCore = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  const OPERATOR_EMAIL = 'jbhealth17@gmail.com';
+
   function isGoogleSignIn(tokenResult) {
     const firebaseClaims = tokenResult && tokenResult.claims && tokenResult.claims.firebase;
     return !!firebaseClaims && firebaseClaims.sign_in_provider === 'google.com';
@@ -16,6 +18,9 @@
   function teacherState(user, allowance) {
     if (!user || user.isAnonymous) return { status: 'signed-out', uid: '', email: '', role: '' };
     if (!user.emailVerified) return { status: 'unverified', uid: user.uid, email: user.email || '', role: '' };
+    if (String(user.email || '').trim().toLowerCase() === OPERATOR_EMAIL) {
+      return { status: 'admin', uid: user.uid, email: user.email || '', role: 'admin' };
+    }
     if (!allowance || allowance.enabled !== true) return { status: 'unapproved', uid: user.uid, email: user.email || '', role: '' };
     const role = allowance.role === 'admin' ? 'admin' : 'teacher';
     return { status: role, uid: user.uid, email: user.email || '', role };
