@@ -26,8 +26,9 @@
       const currentTime = Number(value.currentTime);
       const rearmed = [];
       const enqueue = [];
+      const skipped = [];
       if (!Number.isInteger(videoIndex) || !finite(previousTime) || !finite(currentTime)) {
-        return { state: snapshot(), enqueue, rearmed };
+        return { state: snapshot(), enqueue, rearmed, skipped };
       }
 
       matching(videoIndex).forEach(question => {
@@ -45,16 +46,25 @@
       }
 
       if (previousTime < currentTime) {
-        matching(videoIndex).filter(question => {
+        const passed = matching(videoIndex).filter(question => {
           const status = statuses[question.index];
           return (status === 'upcoming' || status === 'rearmed') &&
             previousTime < question.t && question.t <= currentTime;
-        }).sort((left, right) => left.t - right.t || left.index - right.index).forEach(question => {
+        }).sort((left, right) => left.t - right.t || left.index - right.index);
+        // 앞으로 건너뛴 구간의 문항은 열지 않고 지나간 것으로 둔다. 재생으로 지나간
+        // 것이 아니라 교사가 영상을 옮긴 것이므로, 그 사이 문항을 1번부터 차례로
+        // 띄우면 안 된다. 다시 앞으로 되감으면 rearm 규칙이 그대로 되살린다.
+        passed.forEach(question => {
+          if (value.event === 'seek') {
+            statuses[question.index] = 'completed';
+            skipped.push(question.index);
+            return;
+          }
           statuses[question.index] = 'queued';
           enqueue.push(question.index);
         });
       }
-      return { state: snapshot(), enqueue, rearmed };
+      return { state: snapshot(), enqueue, rearmed, skipped };
     }
 
     function open(index) {

@@ -6155,7 +6155,7 @@ test('다음 영상은 같은 플레이어에 시작 시각으로 로드된다',
 
 test('다음 영상 로드 중에는 이전 영상 시각으로 문항이나 전환을 실행하지 않는다', () => {
   let reads = 0, opened = 0, transitioned = 0;
-  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       playerLoading: true, videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 20, fired: [false], live: { q: -1 },
@@ -6199,7 +6199,7 @@ test('영상 진행 인터페이스는 다음 영상을 로드하고 마지막�
 test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다', () => {
   const loaded = [];
   let rendered = 0;
-  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [], live: { q: -1 }, flatQuestions: [],
@@ -6233,7 +6233,7 @@ test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다',
 
 test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문항 종료 뒤 다시 센다', () => {
   const loaded = [];
-  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 4000, playlistDone: false,
       playerLoading: false, pendingLiveQuestion: -1,
@@ -6265,7 +6265,7 @@ test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문�
 
 test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간다', () => {
   let completed = 0, paused = 0;
-  const ctx = loadStageFunctions(['plCompletePlaylist', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plCompletePlaylist', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 49, fired: [], live: { q: -1 }, flatQuestions: [],
@@ -6292,7 +6292,7 @@ test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간�
 
 test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 보류한다', () => {
   let paused = 0;
-  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [], live: { q: 1 }, flatQuestions: [],
@@ -6322,7 +6322,7 @@ test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 
 
 test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스를 쓴다', () => {
   const opened = [];
-  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false, false], live: { q: -1 },
@@ -6354,7 +6354,7 @@ test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스
 
 test('종료 시각 문항의 live 반영이 늦어도 영상 전환을 시작하지 않는다', () => {
   let paused = 0;
-  const ctx = loadStageFunctions(['plOpenQuestion', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plOpenQuestion', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       sessionId: 'session-a', videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false], live: { q: -1 }, pendingLiveQuestion: -1,
@@ -8482,7 +8482,7 @@ test('교사 화면 cleanup은 전체화면 잠금과 이벤트를 함께 정리
 
 test('학생 목록 렌더링은 열린 QR 버블의 참여 수도 함께 갱신한다', () => {
   let rendered = 0;
-  const ctx = loadStageFunctions(['plRenderStudents'], {
+  const ctx = loadStageFunctions(['plRoster', 'plRenderStudents'], {
     pl: { set: { questions: [] } },
     $() { return null; },
     plScoreboard() { return []; },
@@ -9163,7 +9163,7 @@ test('rewind and jump rebuild marker states once only when fired changes', () =>
     getDuration() { return 100; },
     seekTo() {}, playVideo() {}
   };
-  const ctx = loadStageFunctions(['plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plJumpTo'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plJumpTo'], {
     pl: {
       videoIndex: 0, lastT: 50, fired: [true], playlistDone: false,
       playerLoading: false, playerError: null, playbackEnded: false,
@@ -9572,6 +9572,8 @@ test('학생 입장 흐름은 익명 Auth UID 문서로 참여하고 본인 답�
     stStartWatching() { calls.push(['watch']); },
     console
   };
+  vm.runInNewContext(extractFunction(html, 'stJoinRetryable'), context);
+  vm.runInNewContext(extractFunction(html, 'stJoinWithRetry'), context);
   vm.runInNewContext(extractFunction(html, 'stJoin'), context);
 
   await context.stJoin();
@@ -13038,7 +13040,7 @@ test('같은 tick에 지난 문항은 모두 queue에 남고 첫 문항만 연�
     plRenderTransition() {}, plCompletePlaylist() {}, plEffectiveEnd() { return 100; },
     $() { return null; }, document: { getElementById() { return null; } }, Date, fmtTime() { return ''; }
   };
-  loadStageFunctions(['plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], context);
+  loadStageFunctions(['plDetectSeek', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], context);
 
   context.plTick();
 
@@ -13077,7 +13079,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
     plRenderTransition() {}, plCompletePlaylist() {}, plEffectiveEnd() { return 100; },
     $() { return null; }, document: { getElementById() { return null; } }, Date, fmtTime() { return ''; }
   };
-  loadStageFunctions(['plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plCloseQuestion'], context);
+  loadStageFunctions(['plDetectSeek', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plCloseQuestion'], context);
 
   context.plTick();
   assert.deepEqual(context.pl.dueQuestions, [1]);
@@ -13428,7 +13430,7 @@ test('YouTube가 PLAYING을 순간 보고해도 재생 시간이 전진하지 �
 
 test('player tick은 quiz trigger가 준 문항만 queue하고 완료 직후 같은 시각을 다시 넣지 않는다', () => {
   const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
-  const ctx = loadStageFunctions(['plQueueDueQuestions'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plQueueDueQuestions'], {
     pl: {
       videoIndex: 0, dueQuestions: [], fired: [false], quizTrigger: trigger,
       flatQuestions: [{ t: 174, videoIndex: 0 }]
@@ -15804,4 +15806,82 @@ test('guest session preparation pins share provenance and uses the ordinary allo
   assert.equal(session.sourceRevision, 2);
   assert.equal(session.setId, 'set1');
   assert.equal(session.setSnapshot.title, '공유 세트');
+});
+
+test('옆 패널 학생 명단은 순위가 아니라 번호 순으로 보여 준다', () => {
+  const rows = [];
+  const ctx = loadStageFunctions(['plRoster', 'plRenderStudents'], {
+    pl: { flatQuestions: [{}, {}] },
+    $(selector) {
+      if (selector === '#pl-nstu') return { set textContent(value) { rows.push('count:' + value); } };
+      if (selector === '#pl-stulist') return { set innerHTML(value) { rows.push(value); } };
+      return null;
+    },
+    plScoreboard() {
+      return [
+        { sid: 'c', name: '박세', grade: 2, klass: 3, num: 11, correct: 2, answered: 2, graded: 2, rank: 1 },
+        { sid: 'a', name: '김일', grade: 2, klass: 3, num: 2, correct: 0, answered: 1, graded: 1, rank: 3 },
+        { sid: 'b', name: '이이', grade: 2, klass: 3, num: 7, correct: 1, answered: 1, graded: 1, rank: 2 }
+      ];
+    },
+    plRenderQrBubble() {},
+    esc(value) { return String(value); }
+  });
+
+  ctx.plRenderStudents();
+
+  assert.equal(rows[0], 'count:3');
+  const html = rows[1];
+  // 등수(1등 박세)가 아니라 번호 순(2 → 7 → 11)으로 나와야 출석 확인이 된다.
+  assert.ok(html.indexOf('김일') < html.indexOf('이이'));
+  assert.ok(html.indexOf('이이') < html.indexOf('박세'));
+  assert.match(html, /2-3-2/);
+});
+
+test('동시 입장 경합으로 튕긴 학생은 간격을 벌려 다시 시도한다', async () => {
+  const waits = [];
+  let calls = 0;
+  const ctx = loadStageFunctions(['stJoinRetryable', 'stJoinWithRetry'], {
+    store: {
+      async joinStudent() {
+        calls += 1;
+        if (calls < 3) {
+          const error = new Error('aborted');
+          error.code = 'aborted';
+          throw error;
+        }
+        return true;
+      }
+    },
+    Math, setTimeout
+  });
+
+  const result = await ctx.stJoinWithRetry('s1', 'stu-1', { num: 1 }, ms => {
+    waits.push(ms);
+    return Promise.resolve();
+  });
+
+  assert.equal(result, true);
+  assert.equal(calls, 3);
+  assert.equal(waits.length, 2);
+  // 한꺼번에 다시 몰리지 않도록 간격이 점점 벌어져야 한다.
+  assert.ok(waits[0] >= 200 && waits[1] >= 400 && waits[1] > waits[0] - 400);
+});
+
+test('권한 거부처럼 다시 시도해도 소용없는 실패는 곧바로 알린다', async () => {
+  let calls = 0;
+  const ctx = loadStageFunctions(['stJoinRetryable', 'stJoinWithRetry'], {
+    store: {
+      async joinStudent() {
+        calls += 1;
+        const error = new Error('permission-denied');
+        error.code = 'permission-denied';
+        throw error;
+      }
+    },
+    Math, setTimeout
+  });
+
+  await assert.rejects(() => ctx.stJoinWithRetry('s1', 'stu-1', { num: 1 }, () => Promise.resolve()));
+  assert.equal(calls, 1);
 });

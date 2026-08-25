@@ -813,7 +813,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="firestore-store.js?v=20260825-clock"></script>
 <script src="choice-order-core.js"></script>
 <script src="image-lightbox-core.js"></script>
-<script src="quiz-trigger-core.js"></script>
+<script src="quiz-trigger-core.js?v=20260825-seek"></script>
 <script src="quiz-preview-core.js"></script>
 <script src="teacher-stage.js"></script>
 <script src="auth-core.js?v=20260825-operator"></script>
@@ -6638,12 +6638,12 @@ function renderPlayRun() {
         '</div>' +
         '<div class="card" style="margin-top:14px">' +
           '<div class="row" style="align-items:center;margin-bottom:8px">' +
-            '<h2 style="font-size:14px">실시간 순위</h2>' +
+            '<h2 style="font-size:14px">접속한 학생 <span id="pl-nstu">0</span>명</h2>' +
             '<div style="flex:1"></div>' +
-            '<button class="btn sm" onclick="plToggleBoard()" title="교실 화면에 크게 띄웁니다">🏆 크게 보기</button>' +
+            '<button class="btn sm" onclick="plToggleBoard()" title="교실 화면에 순위를 크게 띄웁니다">🏆 순위 크게 보기</button>' +
           '</div>' +
-          '<div id="pl-stulist" style="max-height:300px;overflow:auto"></div>' +
-          '<div class="hint" style="margin-top:6px">숫자는 맞힌 개수입니다. 서술형은 채점 전까지 빠집니다.</div>' +
+          '<div id="pl-stulist" style="max-height:340px;overflow:auto"></div>' +
+          '<div class="hint" style="margin-top:6px">번호 순으로 보입니다. 오른쪽 숫자는 제출한 문항 수와 맞힌 개수입니다.</div>' +
         '</div>' +
       '</div>' +
 
@@ -7357,11 +7357,29 @@ function plHandlePlayerError(event) {
   plRenderPlayerError();
 }
 
+/**
+ * 영상 시각이 실제 흐른 시간보다 훨씬 많이 움직였으면 교사가 영상을 옮긴 것이다.
+ * 탭을 잠깐 가려 tick이 밀린 경우에는 영상 시각도 그만큼만 흐르므로 구분된다.
+ */
+function plDetectSeek(prev, now, wallElapsedSec, playbackRate) {
+  if (now < prev - 2) return true;
+  const rate = Number(playbackRate) > 0 ? Number(playbackRate) : 1;
+  const elapsed = Number.isFinite(wallElapsedSec) && wallElapsedSec >= 0 ? wallElapsedSec : 0;
+  return now - prev > elapsed * rate + 2;
+}
+
 function plQueueDueQuestions(prev, now) {
   if (!pl) return false;
   if (!Array.isArray(pl.dueQuestions)) pl.dueQuestions = [];
   if (pl.quizTrigger && pl.quizTrigger.advance) {
-    const triggerEvent = now < prev - 2 ? 'seek' : 'tick';
+    const tickAt = Date.now();
+    const wallElapsedSec = pl.lastTickAt ? (tickAt - pl.lastTickAt) / 1000 : 0;
+    pl.lastTickAt = tickAt;
+    let playbackRate = 1;
+    try {
+      if (pl.player && pl.player.getPlaybackRate) playbackRate = pl.player.getPlaybackRate();
+    } catch (e) {}
+    const triggerEvent = plDetectSeek(prev, now, wallElapsedSec, playbackRate) ? 'seek' : 'tick';
     const result = pl.quizTrigger.advance({
       videoIndex: pl.videoIndex,
       previousTime: prev,
@@ -7369,12 +7387,18 @@ function plQueueDueQuestions(prev, now) {
       event: triggerEvent
     });
     (result.rearmed || []).forEach(index => { pl.fired[index] = false; });
+    // 건너뛴 문항은 지나간 것으로 표시하고, 대기열에 남아 있으면 뺀다.
+    (result.skipped || []).forEach(index => {
+      pl.fired[index] = true;
+      pl.dueQuestions = pl.dueQuestions.filter(due => due !== index);
+    });
     (result.enqueue || []).forEach(index => {
       if (Number(pl.live && pl.live.q) === Number(index) ||
           Number(pl.pendingLiveQuestion) === Number(index)) return;
       if (pl.dueQuestions.indexOf(index) < 0) pl.dueQuestions.push(index);
     });
-    return !!((result.rearmed && result.rearmed.length) || (result.enqueue && result.enqueue.length));
+    return !!((result.rearmed && result.rearmed.length) || (result.enqueue && result.enqueue.length) ||
+      (result.skipped && result.skipped.length));
   }
   let markerStateChanged = false;
   pl.flatQuestions.forEach((q, i) => {
@@ -7941,24 +7965,45 @@ function plPushBoard() {
   return store.writeBoard(pl.sessionId, board, studentScores);
 }
 
+/**
+ * 교사가 가장 자주 확인하는 것은 순위가 아니라 "몇 명이, 누가 들어왔는가"다.
+ * 그래서 옆 패널은 번호 순 출석 명단으로 보여 준다. 순위는 [순위 크게 보기]에 있다.
+ */
+function plRoster() {
+  const numberOf = value => {
+    const parsed = Number(String(value === undefined || value === null ? '' : value).trim());
+    return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+  };
+  return plScoreboard().slice().sort((left, right) =>
+    numberOf(left.grade) - numberOf(right.grade) ||
+    numberOf(left.klass) - numberOf(right.klass) ||
+    numberOf(left.num) - numberOf(right.num) ||
+    String(left.name || '').localeCompare(String(right.name || ''), 'ko'));
+}
+
 function plRenderStudents() {
   const list = $('#pl-stulist'), n = $('#pl-nstu');
-  const rows = plScoreboard();
+  const rows = plRoster();
   if (n) n.textContent = rows.length;
   if (!list) { plRenderQrBubble(); return; }
   if (!rows.length) {
-    list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">아직 입장한 학생이 없습니다.</div>';
+    list.innerHTML = '<div style="padding:8px 0;color:var(--ink-3)">' +
+      '아직 입장한 학생이 없습니다. 위 QR이나 반 코드를 학생에게 보여 주세요.</div>';
     plRenderQrBubble();
     return;
   }
   const total = pl.flatQuestions.length;
-  list.innerHTML = rows.map(r =>
-    '<div class="rank-row' + (r.rank <= 3 ? ' top' + r.rank : '') + '">' +
-      '<span class="rk">' + r.rank + '</span>' +
-      '<span class="nm">' + esc(r.name) + ' <span style="color:var(--ink-3);font-size:11px">' + r.num + '번</span></span>' +
+  list.innerHTML = rows.map(r => {
+    const label = [r.grade, r.klass, r.num].every(part => part !== undefined && part !== null && part !== '')
+      ? esc(r.grade) + '-' + esc(r.klass) + '-' + esc(r.num)
+      : esc(r.num !== undefined && r.num !== null && r.num !== '' ? r.num + '번' : '—');
+    return '<div class="rank-row">' +
+      '<span class="rk" style="font-size:11px;font-weight:600">' + label + '</span>' +
+      '<span class="nm">' + esc(r.name) + '</span>' +
       '<span class="prog">' + r.answered + '/' + total + '</span>' +
       '<span class="sc">' + r.correct + '</span>' +
-    '</div>').join('');
+    '</div>';
+  }).join('');
   plRenderQrBubble();
 }
 
@@ -8419,6 +8464,31 @@ function stRenderIdentityForm(err) {
   $('#st-name').onkeydown = e => { if (e.key === 'Enter') stJoin(); };
 }
 
+/**
+ * 한 반이 QR을 동시에 찍으면 입장 처리가 같은 세션 문서 하나에 몰린다.
+ * Firestore는 이런 경합을 aborted/unavailable로 되돌려 보내므로, 학생에게
+ * "입장 실패"를 보이는 대신 조금씩 시간을 벌려 다시 시도한다.
+ */
+function stJoinRetryable(error) {
+  const code = String(error && error.code || '').toLowerCase();
+  return ['aborted', 'unavailable', 'deadline-exceeded', 'internal', 'resource-exhausted']
+    .some(retryable => code.indexOf(retryable) >= 0);
+}
+
+async function stJoinWithRetry(sessionId, authUid, profile, wait) {
+  const pause = wait || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const maxAttempts = 5;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await store.joinStudent(sessionId, authUid, profile);
+    } catch (error) {
+      if (attempt >= maxAttempts - 1 || !stJoinRetryable(error)) throw error;
+      // 같은 순간에 튕긴 학생들이 다시 한꺼번에 몰리지 않도록 간격을 흩뜨린다.
+      await pause(200 * Math.pow(2, attempt) + Math.floor(Math.random() * 400));
+    }
+  }
+}
+
 async function stJoin() {
   const state = st;
   if (!state) return;
@@ -8435,7 +8505,7 @@ async function stJoin() {
   lsSet('vq_student', JSON.stringify(me));
 
   try {
-    await store.joinStudent(state.sessionId, authUid, me);
+    await stJoinWithRetry(state.sessionId, authUid, me);
     if (st !== state) return;
     state.sid = authUid;
     state.me = me;
