@@ -1196,7 +1196,7 @@ rulesTest('teacher-access: admin approval rejects stale, wrong-email, and non-pe
   assert.equal(await adminRead('teacher_allowances/already-rejected'), undefined);
 });
 
-rulesTest('teacher-access: admin approval lifecycle alone may suspend and restore while authoritative status overrides legacy fallback', async () => {
+rulesTest('teacher-access: admin approval lifecycle alone may suspend and restore while authoritative status always overrides legacy mirror', async () => {
   const adminStore = emulatorStore(actorFirestore('admin'));
   const ownerStore = emulatorStore(actorFirestore('owner'));
   const owner = actorFirestore('owner');
@@ -1231,7 +1231,7 @@ rulesTest('teacher-access: admin approval lifecycle alone may suspend and restor
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
 
   await adminWrite('teacher_allowances/owner-uid', undefined);
-  await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
+  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
 });
 
 rulesTest('teacher-access: exact UID email revision admin mutation changes authoritative role atomically', async () => {
@@ -1269,7 +1269,7 @@ rulesTest('teacher-access: active migration lock blocks both legacy and UID allo
   }));
 });
 
-rulesTest('teacher-access: completed exact gate permanently disables fallback and legacy-only writes after unlock', async () => {
+rulesTest('teacher-access: strict UID allowance permanently disables fallback before and after exact gate completion', async () => {
   const legacyUid = 'legacy-only-uid';
   const legacyEmail = 'legacy-only@school.kr';
   await adminWrite(`teacher_allowlist/${legacyEmail}`, { enabled: true, role: 'teacher' });
@@ -1278,7 +1278,7 @@ rulesTest('teacher-access: completed exact gate permanently disables fallback an
     collaboratorCount: 0, imageCount: 0
   });
   const legacy = googleContext(legacyUid, legacyEmail);
-  await assertSucceeds(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
+  await assertFails(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
   const admin = actorFirestore('admin');
   await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/precomplete@school.kr'), {
     enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'

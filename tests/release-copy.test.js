@@ -589,3 +589,38 @@ test('Spark guest release has no Functions deployment surface', () => {
   assert.match(runbook, /서로 격리된 브라우저 두 개/);
   assert.match(runbook, /기존 세션·학생·응답은 삭제하지 않는다/);
 });
+
+test('strict teacher access uses only the authoritative UID allowance on every hot authorization path', () => {
+  const rules = read('firestore.rules');
+  const approved = rules.match(/function isApprovedTeacher\(\)\s*\{([\s\S]*?)\n\s*\}/)?.[1] || '';
+  const admin = rules.match(/function isAdmin\(\)\s*\{([\s\S]*?)\n\s*\}/)?.[1] || '';
+
+  assert.match(approved, /verifiedEmail\(\)/);
+  assert.match(approved, /validActiveTeacherAllowance\(get\(teacherAllowancePath\(\)\)\.data\)/);
+  assert.doesNotMatch(approved, /teacherAccessMigrationComplete|validLegacyTeacherAllowance|legacyAllowancePath/);
+  assert.match(admin, /isApprovedTeacher\(\)/);
+  assert.match(admin, /get\(teacherAllowancePath\(\)\)\.data\.role\s*==\s*'admin'/);
+  assert.doesNotMatch(admin, /teacherAccessMigrationComplete|validLegacyTeacherAllowance|legacyAllowancePath/);
+});
+
+test('Spark rules retire client-side teacher account request migration and lifecycle writes', () => {
+  const rules = read('firestore.rules');
+
+  assert.doesNotMatch(rules, /match \/teacher_access_requests\/\{uid\}/);
+  assert.doesNotMatch(rules, /match \/migration_gates\/teacher_access_status/);
+  assert.match(rules, /match \/teacher_allowances\/\{uid\}[\s\S]*?allow create, update, delete: if false;/);
+  assert.match(rules, /match \/teacher_allowlist\/\{email\}[\s\S]*?allow read, write: if false;/);
+  assert.doesNotMatch(rules, /function validAdminRequestDecision|function validTeacherAllowanceUpdate/);
+});
+
+test('Spark guest-first rules close the public library deployment surface', () => {
+  const rules = read('firestore.rules');
+
+  assert.doesNotMatch(rules, /match \/published_quiz_sets\/\{setId\}/);
+  assert.doesNotMatch(rules, /match \/published_quiz_audits\/\{setId\}/);
+  assert.doesNotMatch(rules, /match \/publication_lifecycle_(?:locks|gates)/);
+  assert.doesNotMatch(rules, /function publicationPath|function validPrivateCopyStart/);
+  assert.doesNotMatch(rules, /allow create: if validPrivateCopyStart/);
+  assert.match(rules, /match \/guest_quiz_shares\/\{shareId\}/);
+  assert.match(rules, /match \/guest_quiz_share_sources\/\{setId\}/);
+});
