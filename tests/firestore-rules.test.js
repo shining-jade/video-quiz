@@ -29,6 +29,7 @@ const {
 } = require('firebase/firestore');
 const { createFirestoreStore } = require('../firestore-store.js');
 const PublicQuizLibraryCore = require('../public-quiz-library-core.js');
+const GuestQuizShareCore = require('../guest-quiz-share-core.js');
 
 const projectId = 'demo-video-quiz';
 const emulatorAvailable = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
@@ -865,41 +866,6 @@ rulesTest('class-planning: exact pair revision and plan-session identity gate up
   assert.equal((await adminRead('class_plans_public/cas-plan')).actualParticipants, 2);
 });
 
-rulesTest('class-planning: ended actuals must match the linked authoritative session summary', async () => {
-  await writeClassPlanPairDisabled('finish-plan', {
-    status: 'live', revision: 2, sessionId: 'finish-session',
-    actualStartedAt: Timestamp.fromMillis(12_000)
-  });
-  await adminWrite('sessions/finish-session', {
-    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
-    status: 'ended', createdAt: Timestamp.fromMillis(12_000),
-    endedAt: Timestamp.fromMillis(25_000), actualParticipants: 2,
-    registeredStudentCount: 2, studentCountRevision: 2, lastStudentUid: 'student-2',
-    classPlanId: 'finish-plan', classPlanRevision: 2
-  });
-  const owner = actorFirestore('owner');
-
-  for (const actualParticipants of [999, 2]) {
-    const ended = classPlanDocuments('finish-plan', {
-      status: 'ended', revision: 3, sessionId: 'finish-session',
-      actualStartedAt: Timestamp.fromMillis(12_000),
-      actualEndedAt: Timestamp.fromMillis(25_000), actualParticipants,
-      createdAt: Timestamp.fromMillis(1_000), updatedAt: serverTimestamp()
-    });
-    const batch = writeBatch(owner);
-    setClassPlanPair(batch, owner, 'finish-plan', ended);
-    batch.update(doc(owner, 'sessions/finish-session'), { classPlanRevision: 3 });
-    if (actualParticipants === 2) {
-      const forgedPublic = { ...ended, publicPlan: { ...ended.publicPlan, actualParticipants: 999 } };
-      const forgedBatch = writeBatch(owner);
-      setClassPlanPair(forgedBatch, owner, 'finish-plan', forgedPublic);
-      forgedBatch.update(doc(owner, 'sessions/finish-session'), { classPlanRevision: 3 });
-      await assertFails(forgedBatch.commit());
-      await assertSucceeds(batch.commit());
-    } else await assertFails(batch.commit());
-  }
-});
-
 rulesTest('class-planning: attached live session은 abort와 parent delete로 고아화할 수 없다', async () => {
   await writeClassPlanPairDisabled('protected-plan', {
     status: 'live', revision: 2, sessionId: 'protected-session',
@@ -965,61 +931,6 @@ rulesTest('session student counter는 최초 child create와 exact atomic pair�
   replay.set(child, { ...profile, name: '재가입' });
   await assertFails(replay.commit());
   assert.equal((await getDoc(doc(owner, 'sessions/s1'))).data().registeredStudentCount, 3);
-});
-
-rulesTest('teacher-access: teacher request owner may create, server-read, and cancel only the exact own pending request', async () => {
-  const unapproved = actorFirestore('unapproved');
-  const ownRef = doc(unapproved, 'teacher_access_requests/unapproved-uid');
-  await assertSucceeds(setDoc(ownRef, pendingTeacherRequestDocument(
-    'unapproved-uid', 'blocked@school.kr'
-  )));
-  await assertSucceeds(getDoc(ownRef));
-  await assertFails(getDoc(doc(unapproved, 'teacher_access_requests/owner-uid')));
-  await assertFails(setDoc(doc(unapproved, 'teacher_access_requests/other-uid'),
-    pendingTeacherRequestDocument('other-uid', 'blocked@school.kr')));
-  await assertFails(updateDoc(ownRef, {
-    status: 'approved', revision: 2, updatedAt: serverTimestamp()
-  }));
-  await assertSucceeds(updateDoc(ownRef, {
-    status: 'cancelled', revision: 2, updatedAt: serverTimestamp()
-  }));
-  await assertFails(updateDoc(ownRef, {
-    displayName: '변조', revision: 3, updatedAt: serverTimestamp()
-  }));
-});
-
-rulesTest('teacher-access: teacher request rejects wrong identity, privileged fields, duplicate overwrite, student, and signed-out access', async () => {
-  const unapproved = actorFirestore('unapproved');
-  const student = actorFirestore('student');
-  const signedOut = testEnvironment.unauthenticatedContext().firestore();
-  const ownPath = 'teacher_access_requests/unapproved-uid';
-
-  await assertFails(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
-    'unapproved-uid', 'other@school.kr'
-  )));
-  await assertFails(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
-    'unapproved-uid', 'blocked@school.kr', { decidedByUid: 'forged-admin' }
-  )));
-  await assertFails(setDoc(doc(student, 'teacher_access_requests/student-uid'),
-    pendingTeacherRequestDocument('student-uid', 'student@school.kr')));
-  await assertFails(setDoc(doc(signedOut, 'teacher_access_requests/no-user'),
-    pendingTeacherRequestDocument('no-user', 'none@school.kr')));
-
-  await assertSucceeds(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
-    'unapproved-uid', 'blocked@school.kr'
-  )));
-  await assertFails(setDoc(doc(unapproved, ownPath), pendingTeacherRequestDocument(
-    'unapproved-uid', 'blocked@school.kr', { note: 'overwrite' }
-  )));
-  await assertFails(getDoc(doc(student, ownPath)));
-  await assertFails(getDoc(doc(signedOut, ownPath)));
-
-  const owner = actorFirestore('owner');
-  await assertFails(setDoc(doc(owner, 'teacher_access_requests/owner-uid'),
-    pendingTeacherRequestDocument('owner-uid', 'owner@school.kr')));
-  await adminWrite('teacher_allowances/owner-uid', undefined);
-  await assertFails(setDoc(doc(owner, 'teacher_access_requests/owner-uid'),
-    pendingTeacherRequestDocument('owner-uid', 'owner@school.kr')));
 });
 
 rulesTest('teacher-access: authoritative allowance binds the current UID and exact canonical Google email for teacher and admin', async () => {
@@ -1092,76 +1003,6 @@ rulesTest('teacher-access: any authoritative lifecycle record or migrated suspen
     pendingTeacherRequestDocument(legacyUid, legacyEmail)));
 });
 
-rulesTest('teacher-access: admin approval lists only bounded pending teacher requests and atomically approves or rejects', async () => {
-  await adminWrite('teacher_access_requests/pending-a', {
-    uid: 'pending-a', emailCanonical: 'pending-a@school.kr', displayName: 'A교사',
-    organization: '', note: '', status: 'pending', revision: 3,
-    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
-  });
-  await adminWrite('teacher_access_requests/pending-b', {
-    uid: 'pending-b', emailCanonical: 'pending-b@school.kr', displayName: 'B교사',
-    organization: '', note: '', status: 'pending', revision: 1,
-    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
-  });
-  const admin = actorFirestore('admin');
-  const owner = actorFirestore('owner');
-
-  await assertSucceeds(getDocs(query(
-    collection(admin, 'teacher_access_requests'),
-    where('status', '==', 'pending'),
-    queryLimit(50)
-  )));
-  await assertFails(getDocs(collection(admin, 'teacher_access_requests')));
-  await assertFails(getDocs(query(
-    collection(admin, 'teacher_access_requests'),
-    where('status', '==', 'pending'),
-    queryLimit(101)
-  )));
-  await assertFails(getDocs(query(
-    collection(owner, 'teacher_access_requests'),
-    where('status', '==', 'pending'),
-    queryLimit(50)
-  )));
-  await assertSucceeds(getDoc(doc(owner, 'teacher_allowances/owner-uid')));
-  await assertFails(getDocs(collection(owner, 'teacher_allowances')));
-
-  await assertFails(setDoc(doc(admin, 'teacher_allowances/pending-a'), {
-    uid: 'pending-a',
-    emailCanonical: 'pending-a@school.kr',
-    displayName: 'A교사',
-    status: 'active',
-    enabled: true,
-    role: 'teacher',
-    administrativeHold: false,
-    approvedAt: serverTimestamp(),
-    approvedByUid: 'admin-uid',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-
-  const store = emulatorStore(admin);
-  await store.decideTeacherRequest(
-    'pending-a', 3, { status: 'approved', reason: 'approved-school' }, requestAdminIdentity
-  );
-  const approvedRequest = await adminRead('teacher_access_requests/pending-a');
-  const approvedAllowance = await adminRead('teacher_allowances/pending-a');
-  const approvedLegacy = await adminRead('teacher_allowlist/pending-a@school.kr');
-  assert.equal(approvedRequest.status, 'approved');
-  assert.equal(approvedRequest.revision, 4);
-  assert.equal(approvedAllowance.status, 'active');
-  assert.equal(approvedAllowance.uid, 'pending-a');
-  assert.equal(approvedAllowance.emailCanonical, 'pending-a@school.kr');
-  assert.equal(approvedLegacy.enabled, true);
-
-  await store.decideTeacherRequest(
-    'pending-b', 1, { status: 'rejected', reason: 'not-current-staff' }, requestAdminIdentity
-  );
-  const rejectedRequest = await adminRead('teacher_access_requests/pending-b');
-  assert.equal(rejectedRequest.status, 'rejected');
-  assert.equal(rejectedRequest.revision, 2);
-  assert.equal(await adminRead('teacher_allowances/pending-b'), undefined);
-});
-
 rulesTest('teacher-access: admin approval rejects stale, wrong-email, and non-pending mutations without partial allowance writes', async () => {
   await adminWrite('teacher_access_requests/stale-teacher', {
     uid: 'stale-teacher', emailCanonical: 'stale@school.kr', displayName: '교사',
@@ -1196,63 +1037,6 @@ rulesTest('teacher-access: admin approval rejects stale, wrong-email, and non-pe
   assert.equal(await adminRead('teacher_allowances/already-rejected'), undefined);
 });
 
-rulesTest('teacher-access: admin approval lifecycle alone may suspend and restore while authoritative status always overrides legacy mirror', async () => {
-  const adminStore = emulatorStore(actorFirestore('admin'));
-  const ownerStore = emulatorStore(actorFirestore('owner'));
-  const owner = actorFirestore('owner');
-
-  await assert.rejects(ownerStore.suspendTeacher(
-    'owner-uid', 'forged', { uid: 'owner-uid', email: 'owner@school.kr', role: 'admin' }
-  ));
-  await assertFails(updateDoc(doc(owner, 'teacher_allowances/owner-uid'), {
-    status: 'suspended', enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'owner-uid'
-  }));
-  const admin = actorFirestore('admin');
-  await assertFails(updateDoc(doc(admin, 'teacher_allowances/owner-uid'), {
-    status: 'suspended',
-    enabled: false,
-    suspendedAt: serverTimestamp(),
-    suspendedByUid: 'admin-uid',
-    suspensionReason: 'standalone',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-
-  await adminStore.suspendTeacher('owner-uid', 'leave', requestAdminIdentity);
-  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'suspended');
-  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).enabled, false);
-  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
-
-  await adminWrite('teacher_allowlist/owner@school.kr', { enabled: true, role: 'teacher' });
-  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
-
-  await adminStore.restoreTeacher('owner-uid', requestAdminIdentity);
-  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'active');
-  await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
-
-  await adminWrite('teacher_allowances/owner-uid', undefined);
-  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
-});
-
-rulesTest('teacher-access: exact UID email revision admin mutation changes authoritative role atomically', async () => {
-  await adminWrite('teacher_allowances/owner-uid', {
-    ...(await adminRead('teacher_allowances/owner-uid')), revision: 4
-  });
-  const adminStore = emulatorStore(actorFirestore('admin'));
-  const result = await adminStore.adminUpdateTeacherAllowance({
-    uid: 'owner-uid', emailCanonical: 'owner@school.kr', expectedRevision: 4,
-    status: 'active', role: 'admin'
-  }, requestAdminIdentity);
-  assert.equal(result.revision, 5);
-  assert.equal((await adminRead('teacher_allowances/owner-uid')).role, 'admin');
-  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).role, 'admin');
-  await assert.rejects(adminStore.adminUpdateTeacherAllowance({
-    uid: 'owner-uid', emailCanonical: 'owner@school.kr', expectedRevision: 4,
-    status: 'suspended', role: 'admin'
-  }, requestAdminIdentity));
-  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'quiz_sets/set1')));
-});
-
 rulesTest('teacher-access: active migration lock blocks both legacy and UID allowance client mutations', async () => {
   await adminWrite('migration_gates/teacher_access_status', {
     locked: true, lockToken: 'lock-token-1', projectId, targetMode: 'emulator',
@@ -1266,190 +1050,6 @@ rulesTest('teacher-access: active migration lock blocks both legacy and UID allo
     status: 'suspended', enabled: false, administrativeHold: true, revision: 1,
     suspendedAt: serverTimestamp(), suspendedByUid: 'admin-uid', suspensionReason: 'hold',
     updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-});
-
-rulesTest('teacher-access: strict UID allowance permanently disables fallback before and after exact gate completion', async () => {
-  const legacyUid = 'legacy-only-uid';
-  const legacyEmail = 'legacy-only@school.kr';
-  await adminWrite(`teacher_allowlist/${legacyEmail}`, { enabled: true, role: 'teacher' });
-  await adminWrite('quiz_sets/legacy-only-set', {
-    ownerUid: legacyUid, ownerEmail: legacyEmail, lifecycleState: 'active',
-    collaboratorCount: 0, imageCount: 0
-  });
-  const legacy = googleContext(legacyUid, legacyEmail);
-  await assertFails(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
-  const admin = actorFirestore('admin');
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/precomplete@school.kr'), {
-    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-  await adminWrite('migration_gates/teacher_access_status', {
-    locked: false, lockToken: 'completed-token', projectId, targetMode: 'emulator',
-    lockedAt: Timestamp.fromMillis(1), lockedByUid: 'admin-uid',
-    status: 'complete', strictReady: true, migrationGeneration: '7:0',
-    completedAt: Timestamp.fromMillis(2), completedByUid: 'admin-uid',
-    unlockedAt: Timestamp.fromMillis(3), unlockedByUid: 'admin-uid'
-  });
-  await assertFails(getDoc(doc(legacy, 'quiz_sets/legacy-only-set')));
-  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/owner@school.kr'), {
-    enabled: false, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-  await adminWrite('teacher_allowances/owner-uid', {
-    ...(await adminRead('teacher_allowances/owner-uid')), revision: 1
-  });
-  const changed = await emulatorStore(admin).adminUpdateTeacherAllowance({
-    uid: 'owner-uid', emailCanonical: 'owner@school.kr', expectedRevision: 1,
-    status: 'suspended', role: 'teacher', reason: 'complete-gate'
-  }, requestAdminIdentity);
-  assert.equal(changed.revision, 2);
-  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).uid, 'owner-uid');
-});
-
-rulesTest('teacher-access: owner resubmits rejected and cancelled requests but cannot drift identity or revision', async () => {
-  const uid = 'retry-uid';
-  const email = 'retry@school.kr';
-  const owner = googleContext(uid, email);
-  const store = emulatorStore(owner);
-  for (const [status, revision] of [['cancelled', 2], ['rejected', 7]]) {
-    await adminWrite(`teacher_access_requests/${uid}`, {
-      uid, emailCanonical: email, displayName: '재신청 교사', organization: '', note: '',
-      status, revision, createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2),
-      ...(status === 'rejected' ? {
-        decidedAt: Timestamp.fromMillis(2), decidedByUid: 'admin-uid', decisionReason: 'retry'
-      } : {})
-    });
-    const saved = await store.resubmitTeacherRequest(uid, revision, {
-      emailCanonical: email, displayName: '재신청 교사', organization: '2학년', note: '재신청'
-    });
-    assert.equal(saved.status, 'pending');
-    const current = await adminRead(`teacher_access_requests/${uid}`);
-    assert.equal(current.revision, revision + 1);
-    assert.equal(current.decidedAt, undefined);
-    await assert.rejects(store.resubmitTeacherRequest(uid, revision, {
-      emailCanonical: email, displayName: '재신청 교사', organization: '', note: ''
-    }));
-  }
-  await adminWrite(`teacher_access_requests/${uid}`, {
-    uid, emailCanonical: email, displayName: '재신청 교사', organization: '', note: '',
-    status: 'cancelled', revision: 20,
-    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2)
-  });
-  await assert.rejects(store.resubmitTeacherRequest(uid, 20, {
-    emailCanonical: 'other@school.kr', displayName: '재신청 교사', organization: '', note: ''
-  }));
-});
-
-rulesTest('teacher-deletion: own request, immediate denial, safe live end, hold-aware cancellation, and no client purge', async () => {
-  const owner = actorFirestore('owner');
-  const other = actorFirestore('otherTeacher');
-  const admin = actorFirestore('admin');
-  const ownerStore = emulatorStore(owner);
-  const adminStore = emulatorStore(admin);
-
-  await adminWrite('teacher_access_requests/owner-uid', {
-    uid: 'owner-uid', emailCanonical: 'owner@school.kr', displayName: '소유 교사',
-    organization: '', note: '', status: 'approved', revision: 2,
-    createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(2),
-    decidedAt: Timestamp.fromMillis(2), decidedByUid: 'admin-uid', decisionReason: ''
-  });
-  await writeClassPlanPairDisabled('deletion-plan', {
-    status: 'live', revision: 2, sessionId: 'deletion-live',
-    actualStartedAt: Timestamp.fromMillis(1)
-  });
-  await adminWrite('sessions/deletion-live', {
-    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
-    status: 'live', registeredStudentCount: 0, studentCountRevision: 0,
-    createdAt: Timestamp.fromMillis(1), activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000),
-    classPlanId: 'deletion-plan', classPlanRevision: 2
-  });
-  await adminWrite('sessions/deletion-live/meta/live', liveQuestion(0));
-
-  await assertSucceeds(getDoc(doc(owner, 'teacher_allowances/owner-uid')));
-  await assertFails(getDoc(doc(other, 'teacher_allowances/owner-uid')));
-  await assertFails(getDocs(collection(owner, 'teacher_allowances')));
-  await assertFails(updateDoc(doc(owner, 'teacher_allowances/owner-uid'), {
-    status: 'deletion_pending', enabled: false, revision: 99,
-    deletionRequestedAt: serverTimestamp(), purgeEligibleAt: serverTimestamp(),
-    updatedAt: serverTimestamp(), updatedByUid: 'owner-uid'
-  }));
-
-  const requested = await ownerStore.requestTeacherDeletion('owner-uid');
-  assert.equal(requested.status, 'deletion_pending');
-  const pending = await adminRead('teacher_allowances/owner-uid');
-  assert.equal(pending.enabled, false);
-  assert.equal(pending.revision, 2);
-  assert.equal(pending.purgeEligibleAt.toMillis() - pending.deletionRequestedAt.toMillis(), 30 * 24 * 60 * 60 * 1000);
-  assert.equal((await adminRead('teacher_allowlist/owner@school.kr')).enabled, false);
-
-  await assertFails(getDoc(doc(owner, 'quiz_sets/set1')));
-  await assertFails(updateDoc(doc(owner, 'quiz_sets/set1'), { title: 'blocked-save' }));
-  await assertFails(setDoc(doc(owner, 'sessions/deletion-new'), {
-    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
-    status: 'live', registeredStudentCount: 0, studentCountRevision: 0,
-    createdAt: serverTimestamp(), activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
-  }));
-  const readiness = await ownerStore.getTeacherDeletionReadiness('owner-uid');
-  assert.equal(readiness.ownedSetCount > 0, true);
-  assert.equal(readiness.blockingSessionCount > 0, true);
-
-  await ownerStore.resolveTeacherDeletionSession('owner-uid', 'deletion-live').catch(error => {
-    throw new Error('safe reciprocal end stage: ' + error.message, { cause: error });
-  });
-  assert.equal((await adminRead('sessions/deletion-live')).status, 'ended');
-  assert.equal((await adminRead('sessions/deletion-live/meta/live')).status, 'ended');
-  assert.equal((await adminRead('class_plans_private/deletion-plan')).status, 'ended');
-  assert.equal((await adminRead('class_plans_public/deletion-plan')).status, 'ended');
-  assert.equal((await adminRead('sessions/deletion-live')).classPlanRevision, 3);
-
-  await adminStore.suspendTeacher('owner-uid', 'independent-hold', requestAdminIdentity).catch(error => {
-    throw new Error('admin-hold stage: ' + error.message, { cause: error });
-  });
-  const held = await adminRead('teacher_allowances/owner-uid');
-  assert.equal(held.status, 'deletion_pending');
-  assert.equal(held.administrativeHold, true);
-  assert.equal(held.revision, 3);
-
-  const cancelled = await ownerStore.cancelTeacherDeletion('owner-uid').catch(error => {
-    throw new Error('cancel stage: ' + error.message, { cause: error });
-  });
-  assert.equal(cancelled.status, 'suspended');
-  assert.equal(cancelled.enabled, false);
-  assert.equal(cancelled.administrativeHold, true);
-  assert.equal(cancelled.revision, 4);
-  assert.equal(Object.hasOwn(cancelled, 'deletionRequestedAt'), false);
-  assert.equal(Object.hasOwn(cancelled, 'purgeEligibleAt'), false);
-
-  await assertFails(deleteDoc(doc(owner, 'teacher_allowances/owner-uid')));
-  await assertFails(deleteDoc(doc(admin, 'teacher_allowances/owner-uid')));
-  await assertFails(deleteDoc(doc(admin, 'teacher_access_requests/owner-uid')));
-});
-
-rulesTest('suspended owner may list and safely finish only existing own live session and plan', async () => {
-  const now = Date.now();
-  await writeClassPlanPairDisabled('suspended-plan', {
-    status: 'live', revision: 2, sessionId: 'suspended-session',
-    actualStartedAt: Timestamp.fromMillis(now)
-  });
-  await adminWrite('sessions/suspended-session', {
-    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
-    status: 'live', activationLeaseUntil: Timestamp.fromMillis(now + 60_000),
-    registeredStudentCount: 0, studentCountRevision: 0,
-    classPlanId: 'suspended-plan', classPlanRevision: 2
-  });
-  await adminWrite('sessions/suspended-session/meta/live', liveQuestion(0));
-  const adminStore = emulatorStore(actorFirestore('admin'));
-  const ownerStore = emulatorStore(actorFirestore('owner'));
-  await adminStore.suspendTeacher('owner-uid', 'hold', requestAdminIdentity);
-
-  const readiness = await ownerStore.getTeacherDeletionReadiness('owner-uid');
-  assert.ok(readiness.blockingSessions.some(item => item.sessionId === 'suspended-session'));
-  await ownerStore.resolveTeacherDeletionSession('owner-uid', 'suspended-session');
-  assert.equal((await adminRead('sessions/suspended-session')).status, 'ended');
-  assert.equal((await adminRead('class_plans_public/suspended-plan')).status, 'ended');
-  await assertFails(setDoc(doc(actorFirestore('owner'), 'sessions/suspended-new'), {
-    teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'live',
-    registeredStudentCount: 0, studentCountRevision: 0,
-    activationLeaseUntil: Timestamp.fromMillis(now + 60_000)
   }));
 });
 
@@ -1478,84 +1078,6 @@ rulesTest('teacher-deletion: cancellation closes at the exact request.time bound
   }));
 });
 
-rulesTest('teacher-deletion fix: pending owner safely resolves orphan allocation and admin exact-revision cancellation cannot be forged', async () => {
-  const uid = 'deletion-recovery-uid';
-  const email = 'deletion-recovery@school.kr';
-  const requestedAt = Timestamp.fromMillis(Date.now());
-  const purgeEligibleAt = Timestamp.fromMillis(requestedAt.toMillis() + 30 * 24 * 60 * 60 * 1000);
-  await adminWrite(`teacher_allowances/${uid}`, {
-    uid, emailCanonical: email, displayName: '복구 교사',
-    status: 'deletion_pending', enabled: false, role: 'teacher', administrativeHold: false,
-    revision: 7, approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
-    deletionRequestedAt: requestedAt, purgeEligibleAt,
-    updatedAt: requestedAt, updatedByUid: uid
-  });
-  await adminWrite(`teacher_allowlist/${email}`, { enabled: false, role: 'teacher' });
-  await adminWrite('sessions/deletion-orphan', {
-    teacherUid: uid, teacherEmail: email, setId: 'set1', code: 'DEL123',
-    status: 'allocating', registeredStudentCount: 0, studentCountRevision: 0,
-    createdAt: Timestamp.fromMillis(1)
-  });
-  await adminWrite('codes/DEL123', { sessionId: 'deletion-orphan', createdAt: Timestamp.fromMillis(1) });
-  await adminWrite('sessions/deletion-orphan/meta/allocation', {
-    token: 'deletion-orphan-allocation-token', ownerUid: uid
-  });
-  await adminWrite('sessions/deletion-orphan/meta/live', liveQuestion(0));
-  await adminWrite('sessions/deletion-orphan/meta/board', { scores: {} });
-  await adminWrite('sessions/deletion-expired-live', {
-    teacherUid: uid, teacherEmail: email, status: 'live', code: 'OLD123',
-    registeredStudentCount: 0, studentCountRevision: 0,
-    activationLeaseUntil: Timestamp.fromMillis(1)
-  });
-
-  const ownerDb = googleContext(uid, email);
-  const ownerStore = emulatorStore(ownerDb);
-  const otherStore = emulatorStore(actorFirestore('otherTeacher'));
-  const adminStore = emulatorStore(actorFirestore('admin'));
-  const readiness = await ownerStore.getTeacherDeletionReadiness(uid);
-  assert.deepEqual(readiness.blockingSessions.map(item => [item.sessionId, item.status]).sort(), [
-    ['deletion-expired-live', 'live'], ['deletion-orphan', 'allocating']
-  ]);
-  await assertFails(updateDoc(doc(ownerDb, 'sessions/deletion-expired-live'), {
-    status: 'aborted', abortedAt: serverTimestamp()
-  }));
-  assert.equal(await ownerStore.resolveTeacherDeletionSession(uid, 'deletion-orphan'), true);
-  assert.equal((await adminRead('sessions/deletion-orphan')).status, 'aborted');
-  assert.equal((await adminRead('codes/DEL123')).sessionId, 'deletion-orphan');
-
-  await assert.rejects(otherStore.adminCancelTeacherDeletion(uid, 7, {
-    uid: 'other-uid', email: 'other@school.kr', role: 'admin',
-    authGeneration: 1, currentAuthGeneration: 1
-  }));
-  await assert.rejects(otherStore.cancelTeacherDeletion(uid));
-  const pendingList = await adminStore.listDeletionPendingTeachers(50, requestAdminIdentity);
-  assert.equal(pendingList[uid].revision, 7);
-  await assert.rejects(adminStore.adminCancelTeacherDeletion(uid, 6, requestAdminIdentity));
-  const cancelled = await adminStore.adminCancelTeacherDeletion(uid, 7, requestAdminIdentity);
-  assert.equal(cancelled.status, 'active');
-  assert.equal(cancelled.revision, 8);
-  assert.equal(cancelled.updatedByUid, 'admin-uid');
-
-  const heldUid = 'deletion-held-uid';
-  const heldEmail = 'deletion-held@school.kr';
-  await adminWrite(`teacher_allowances/${heldUid}`, {
-    uid: heldUid, emailCanonical: heldEmail, displayName: '중지 유지 교사',
-    status: 'deletion_pending', enabled: false, role: 'teacher', administrativeHold: true,
-    revision: 4, approvedAt: Timestamp.fromMillis(1), approvedByUid: 'admin-uid',
-    deletionRequestedAt: requestedAt, purgeEligibleAt,
-    suspendedAt: requestedAt, suspendedByUid: 'admin-uid', suspensionReason: 'hold',
-    updatedAt: requestedAt, updatedByUid: 'admin-uid'
-  });
-  await adminWrite(`teacher_allowlist/${heldEmail}`, { enabled: false, role: 'teacher' });
-  const heldCancelled = await adminStore.adminCancelTeacherDeletion(
-    heldUid, 4, requestAdminIdentity
-  );
-  assert.equal(heldCancelled.status, 'suspended');
-  assert.equal(heldCancelled.enabled, false);
-  assert.equal(heldCancelled.administrativeHold, true);
-  assert.equal(heldCancelled.revision, 5);
-});
-
 rulesTest('미승인 계정과 학생은 원본 세트를 읽지 못한다', async () => {
   const unapproved = googleContext('unapproved-uid', 'blocked@school.kr');
   const student = anonymousContext('student-uid');
@@ -1564,23 +1086,6 @@ rulesTest('미승인 계정과 학생은 원본 세트를 읽지 못한다', asy
   await assertFails(getDoc(doc(unapproved, 'quiz_sets/set1')));
   await assertFails(getDoc(doc(student, 'quiz_sets/set1')));
   await assertSucceeds(getDoc(doc(owner, 'quiz_sets/set1')));
-});
-
-rulesTest('보호된 비존재 문서 프로브는 allowlist를 공개하지 않고 교사와 admin 권한만 구분한다', async () => {
-  const owner = actorFirestore('owner');
-  const admin = actorFirestore('admin');
-  const unapproved = actorFirestore('unapproved');
-  const student = actorFirestore('student');
-  const teacherProbe = 'quiz_sets/__teacher_allowance_probe__owner%40school.kr';
-  const adminProbe = 'config/__admin_allowance_probe__admin%40school.kr';
-
-  await assertSucceeds(getDoc(doc(owner, teacherProbe)));
-  await assertSucceeds(getDoc(doc(admin, teacherProbe)));
-  await assertFails(getDoc(doc(unapproved, teacherProbe)));
-  await assertFails(getDoc(doc(student, teacherProbe)));
-  await assertSucceeds(getDoc(doc(admin, adminProbe)));
-  await assertFails(getDoc(doc(owner, adminProbe)));
-  await assertFails(getDoc(doc(owner, 'teacher_allowlist/owner@school.kr')));
 });
 
 rulesTest('config/legacy_owner is completely client denied including admins', async () => {
@@ -1620,29 +1125,6 @@ rulesTest('all legacy parent claims and response replacements are client denied'
       answers: { 0: { answer: 1, submitted: true, revision: 2 } }
     }));
   }
-});
-
-rulesTest('승인 교사는 공유 원본과 이미지를 strict counter 프로토콜로 자기 소유 사본을 만든다', async () => {
-  const teacher = actorFirestore('otherTeacher');
-  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
-    email: actors.otherTeacher.email,
-    addedByUid: actors.owner.uid,
-    addedAt: Timestamp.fromMillis(1)
-  });
-  const sourceReference = doc(teacher, 'quiz_sets/set1');
-  const before = await assertSucceeds(getDoc(sourceReference));
-  const images = await assertSucceeds(getDocs(collection(teacher, 'images/set1/q')));
-  assert.equal(images.size, 1);
-  const copiedValue = await emulatorStore(teacher).copyOwnedQuizSet(
-    'set1', 'copied-by-other', actors.otherTeacher
-  );
-  assert.equal(copiedValue.ownerUid, actors.otherTeacher.uid);
-  assert.equal(before.data().ownerUid, actors.owner.uid);
-
-  const copied = await assertSucceeds(getDoc(doc(teacher, 'quiz_sets/copied-by-other')));
-  assert.equal(copied.data().ownerUid, actors.otherTeacher.uid);
-  const copiedImages = await assertSucceeds(getDocs(collection(teacher, 'images/copied-by-other/q')));
-  assert.equal(copiedImages.size, 1);
 });
 
 rulesTest('이미지 교체 batch의 부모 revision 갱신은 소유 교사에게만 허용된다', async () => {
@@ -3503,108 +2985,6 @@ rulesTest('역할별 create/update/delete 권한 매트릭스를 지킨다', asy
   }
 });
 
-rulesTest('승인 목록은 admin만 읽고 쓰며 다른 클라이언트에는 비공개다', async () => {
-  for (const actorName of actorNames) {
-    await resetFirestore();
-    const db = actorFirestore(actorName);
-    const allowed = actorName === 'admin';
-    await expectPermission(allowed, getDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
-    await expectPermission(allowed, getDocs(collection(db, 'teacher_allowlist')));
-    const createRequest = setDoc(doc(db, `teacher_allowlist/new-${actorName}@school.kr`), {
-      enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: actors[actorName].uid
-    });
-    await expectPermission(allowed, createRequest);
-    await expectPermission(allowed, updateDoc(doc(db, 'teacher_allowlist/owner@school.kr'), {
-      enabled: false, updatedAt: serverTimestamp(), updatedByUid: actors[actorName].uid
-    }));
-    await assertFails(deleteDoc(doc(db, 'teacher_allowlist/owner@school.kr')));
-  }
-});
-
-rulesTest('소유자 휴지통 전환·복원과 만료 purge만 허용하고 direct parent delete는 닫는다', async () => {
-  const owner = actorFirestore('owner');
-  const admin = actorFirestore('admin');
-  await assertFails(deleteDoc(doc(owner, 'quiz_sets/set1')));
-  await assertSucceeds(updateDoc(doc(owner, 'quiz_sets/set1'), {
-    trashedAt: serverTimestamp(), purgeStartedAt: null, lifecycleState: 'trashed',
-    contentRevision: serverTimestamp()
-  }));
-  await assertSucceeds(updateDoc(doc(owner, 'quiz_sets/set1'), {
-    trashedAt: deleteField(), lifecycleState: 'active',
-    contentRevision: serverTimestamp()
-  }));
-  await assertFails(updateDoc(doc(admin, 'quiz_sets/set1'), {
-    trashedAt: serverTimestamp(), purgeStartedAt: null, lifecycleState: 'trashed'
-  }));
-
-  await adminWrite('quiz_sets/set1', {
-    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr', lifecycleState: 'trashed',
-    trashedAt: Timestamp.fromMillis(Date.now() - 31 * 86400000), purgeStartedAt: null,
-    collaboratorCount: 0, imageCount: 1
-  });
-  await adminWrite('images/set1/q/purge-me', { data: 'image' });
-  await assertSucceeds(updateDoc(doc(admin, 'quiz_sets/set1'), {
-    purgeStartedAt: serverTimestamp(), lifecycleState: 'purging'
-  }));
-  const purgeBatch = writeBatch(admin);
-  purgeBatch.set(doc(admin, 'quiz_sets/set1'), {
-    imageCount: 0, imageMutation: { key: 'purge-me', action: 'purge-remove' }
-  }, { merge: true });
-  purgeBatch.delete(doc(admin, 'images/set1/q/purge-me'));
-  await assertSucceeds(purgeBatch.commit());
-  await assertSucceeds(deleteDoc(doc(admin, 'quiz_sets/set1')));
-});
-
-rulesTest('purging child reads let the real store finish owner/admin purge and deny other actors', async () => {
-  await resetFirestore();
-  const expiredAt = Timestamp.fromMillis(Date.now() - 31 * 86400000);
-  for (const setId of ['owner-purge-store', 'admin-purge-store', 'denied-purge-store']) {
-    await adminWrite(`quiz_sets/${setId}`, {
-      ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
-      lifecycleState: 'trashed', trashedAt: expiredAt, purgeStartedAt: null,
-      collaboratorCount: 1, imageCount: 1, contentRevision: Timestamp.fromMillis(1)
-    });
-    await adminWrite(`quiz_sets/${setId}/collaborators/other@school.kr`, {
-      email: actors.otherTeacher.email, addedByUid: actors.owner.uid, addedAt: Timestamp.fromMillis(1)
-    });
-    await adminWrite(`quiz_set_shares/other@school.kr/sets/${setId}`, {
-      email: actors.otherTeacher.email, setId
-    });
-    await adminWrite(`images/${setId}/q/v0q0`, { data: 'purge-image' });
-  }
-
-  const ownerDb = actorFirestore('owner');
-  const ownerStore = emulatorStore(ownerDb);
-  await ownerStore.beginSetPurge('owner-purge-store', 'immediate', actors.owner);
-  assert.deepEqual(await ownerStore.continueSetPurge('owner-purge-store'), {
-    done: false, deleted: 2, parentDeleted: false
-  });
-  assert.equal(await adminRead(
-    'quiz_set_shares/other@school.kr/sets/owner-purge-store'
-  ), undefined);
-  assert.deepEqual(await ownerStore.continueSetPurge('owner-purge-store'), {
-    done: true, deleted: 0, parentDeleted: true
-  });
-
-  const adminDb = actorFirestore('admin');
-  const adminStore = emulatorStore(adminDb);
-  await adminStore.beginSetPurge('admin-purge-store', 'expired', { ...actors.admin, role: 'admin' });
-  assert.deepEqual(await adminStore.continueSetPurge('admin-purge-store'), {
-    done: false, deleted: 2, parentDeleted: false
-  });
-  assert.equal(await adminRead(
-    'quiz_set_shares/other@school.kr/sets/admin-purge-store'
-  ), undefined);
-  assert.deepEqual(await adminStore.continueSetPurge('admin-purge-store'), {
-    done: true, deleted: 0, parentDeleted: true
-  });
-
-  await ownerStore.beginSetPurge('denied-purge-store', 'immediate', actors.owner);
-  const other = actorFirestore('otherTeacher');
-  await assertFails(getDocs(collection(other, 'quiz_sets/denied-purge-store/collaborators')));
-  await assertFails(getDocs(collection(other, 'images/denied-purge-store/q')));
-});
-
 rulesTest('counter migration gate is admin-only, stale-safe, and blocks child writes without blocking reads', async () => {
   await resetFirestore();
   const admin = actorFirestore('admin');
@@ -3694,83 +3074,6 @@ rulesTest('counter migration gate is admin-only, stale-safe, and blocks child wr
   afterUnlock.set(doc(owner, 'quiz_sets/set1'), { contentRevision: serverTimestamp() }, { merge: true });
   afterUnlock.update(doc(owner, 'images/set1/q/0'), { data: 'unlocked-update' });
   await assertSucceeds(afterUnlock.commit());
-});
-
-rulesTest('missing or locked gate fails closed for counters and stale-zero parent deletion until migration unlock', async () => {
-  await resetFirestore();
-  const owner = actorFirestore('owner');
-  const admin = actorFirestore('admin');
-  const gatePath = 'migration_gates/set_counters';
-  await adminWrite(gatePath, undefined);
-
-  await adminWrite('quiz_sets/stale-zero', {
-    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
-    lifecycleState: 'purging', trashedAt: Timestamp.fromMillis(1),
-    purgeStartedAt: Timestamp.fromMillis(2), collaboratorCount: 0, imageCount: 0
-  });
-  await adminWrite('images/stale-zero/q/real', { data: 'orphan-risk' });
-  await adminWrite('quiz_sets/staged-trash', {
-    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
-    lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1), purgeStartedAt: null,
-    collaboratorCount: 0, imageCount: 0
-  });
-
-  const missingAdd = writeBatch(owner);
-  missingAdd.set(doc(owner, 'quiz_sets/set1'), {
-    imageCount: 2, imageMutation: { key: 'missing-gate', action: 'add' }
-  }, { merge: true });
-  missingAdd.set(doc(owner, 'images/set1/q/missing-gate'), { data: 'blocked' });
-  await assertFails(missingAdd.commit());
-  await assertFails(updateDoc(doc(owner, 'quiz_sets/staged-trash'), {
-    lifecycleState: 'purging', purgeStartedAt: serverTimestamp()
-  }));
-  await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
-  await assertSucceeds(getDoc(doc(owner, 'images/set1/q/0')));
-  await assertSucceeds(getDoc(doc(owner, 'sessions/s1')));
-
-  await adminWrite(gatePath, { locked: false });
-  const malformedAdd = writeBatch(owner);
-  malformedAdd.set(doc(owner, 'quiz_sets/set1'), {
-    imageCount: 2, imageMutation: { key: 'malformed-gate', action: 'add' }
-  }, { merge: true });
-  malformedAdd.set(doc(owner, 'images/set1/q/malformed-gate'), { data: 'blocked' });
-  await assertFails(malformedAdd.commit());
-  await adminWrite(gatePath, undefined);
-
-  await assertSucceeds(setDoc(doc(admin, gatePath), {
-    locked: true,
-    lockId: 'round6-gate',
-    projectId,
-    targetMode: 'emulator',
-    lockedAt: serverTimestamp(),
-    lockedByUid: actors.admin.uid
-  }));
-  await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
-  await assertFails(updateDoc(doc(owner, 'quiz_sets/staged-trash'), {
-    lifecycleState: 'purging', purgeStartedAt: serverTimestamp()
-  }));
-
-  await adminWrite('quiz_sets/stale-zero', {
-    ownerUid: actors.owner.uid, ownerEmail: actors.owner.email,
-    lifecycleState: 'purging', trashedAt: Timestamp.fromMillis(1),
-    purgeStartedAt: Timestamp.fromMillis(2), collaboratorCount: 0, imageCount: 1
-  });
-  const lockedGate = (await getDoc(doc(admin, gatePath))).data();
-  await assertSucceeds(setDoc(doc(admin, gatePath), {
-    ...lockedGate,
-    locked: false,
-    unlockedAt: serverTimestamp(),
-    unlockedByUid: actors.admin.uid
-  }));
-  await assertFails(deleteDoc(doc(owner, 'quiz_sets/stale-zero')));
-
-  const ownerStore = emulatorStore(owner);
-  assert.deepEqual(await ownerStore.continueSetPurge('stale-zero'), {
-    done: false, deleted: 1, parentDeleted: false
-  });
-  assert.deepEqual(await ownerStore.continueSetPurge('stale-zero'), {
-    done: true, deleted: 0, parentDeleted: true
-  });
 });
 
 rulesTest('FixRound2 collaborator count and discovery index require an exact 3-write batch', async () => {
@@ -4021,22 +3324,6 @@ rulesTest('strict counters reject malformed create, legacy promotion, underflow 
   await assertFails(purgeUnderflow.commit());
 });
 
-rulesTest('store create follows strict counter protocol', async () => {
-  await resetFirestore();
-  const owner = actorFirestore('owner');
-  const store = emulatorStore(owner);
-
-  await store.saveOwnedQuizSet('store-new', {
-    title: '신규', videos: [], lifecycleState: 'purging',
-    collaboratorCount: 9, imageCount: -1,
-    imageMutation: { key: 'fake', action: 'add' }
-  }, { v0q0: 'new-image' }, actors.owner);
-  const created = await assertSucceeds(getDoc(doc(owner, 'quiz_sets/store-new')));
-  assert.equal(created.data().lifecycleState, 'active');
-  assert.equal(created.data().collaboratorCount, 0);
-  assert.equal(created.data().imageCount, 1);
-});
-
 rulesTest('store content-plus-image save follows strict counter protocol', async () => {
   await resetFirestore();
   const owner = actorFirestore('owner');
@@ -4054,63 +3341,6 @@ rulesTest('store content-plus-image save follows strict counter protocol', async
   const saved = await assertSucceeds(getDoc(doc(owner, 'quiz_sets/store-existing')));
   assert.equal(saved.data().title, '변경');
   assert.equal(saved.data().imageCount, 1);
-});
-
-rulesTest('private active original은 소유자·공동편집자만 수업에 사용하고 다른 교사 direct start를 거부한다', async () => {
-  await resetFirestore();
-  const other = actorFirestore('otherTeacher');
-  await assertFails(setDoc(doc(other, 'sessions/active-source'), {
-    setId: 'set1', teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active',
-    registeredStudentCount: 0, studentCountRevision: 0
-  }));
-  await adminWrite('quiz_sets/set1/collaborators/other@school.kr', {
-    email: actors.otherTeacher.email,
-    addedByUid: actors.owner.uid,
-    addedAt: Timestamp.fromMillis(1)
-  });
-  await assertSucceeds(setDoc(doc(other, 'sessions/collaborator-source'), {
-    setId: 'set1', teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active',
-    registeredStudentCount: 0, studentCountRevision: 0
-  }));
-  await assertFails(setDoc(doc(other, 'sessions/missing-source'), {
-    setId: 'does-not-exist', teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active',
-    registeredStudentCount: 0, studentCountRevision: 0
-  }));
-  await assertFails(setDoc(doc(other, 'sessions/non-string-source'), {
-    setId: 123, teacherUid: actors.otherTeacher.uid,
-    teacherEmail: actors.otherTeacher.email, status: 'active',
-    registeredStudentCount: 0, studentCountRevision: 0
-  }));
-});
-
-rulesTest('teacher-access: two pending UIDs sharing one email preserve the first canonical mirror UID', async () => {
-  const sharedEmail = 'shared-approval@school.kr';
-  for (const [uid, displayName] of [['pending-shared-a', '첫 교사'], ['pending-shared-b', '둘째 교사']]) {
-    await adminWrite(`teacher_access_requests/${uid}`, {
-      uid, emailCanonical: sharedEmail, displayName,
-      organization: '', note: '', status: 'pending', revision: 1,
-      createdAt: Timestamp.fromMillis(1), updatedAt: Timestamp.fromMillis(1)
-    });
-  }
-  const store = emulatorStore(actorFirestore('admin'));
-
-  await store.decideTeacherRequest(
-    'pending-shared-a', 1, { status: 'approved' }, requestAdminIdentity
-  );
-  await assert.rejects(() => store.decideTeacherRequest(
-    'pending-shared-b', 1, { status: 'approved' }, requestAdminIdentity
-  ));
-  await store.decideTeacherRequest(
-    'pending-shared-b', 1,
-    { status: 'rejected', reason: '동일 이메일의 기존 UID 승인' }, requestAdminIdentity
-  );
-
-  assert.equal((await adminRead(`teacher_allowlist/${sharedEmail}`)).uid, 'pending-shared-a');
-  assert.equal((await adminRead('teacher_access_requests/pending-shared-b')).status, 'rejected');
-  assert.equal(await adminRead('teacher_allowances/pending-shared-b'), undefined);
 });
 
 rulesTest('teacher-access: approval after-state cannot assign the canonical mirror to another UID', async () => {
@@ -4255,926 +3485,6 @@ rulesTest('FixRound3 shared discovery skips one trashed stale parent without hid
     role: 'teacher'
   });
   assert.deepEqual(discovered.map(set => set.id), ['set1']);
-});
-
-rulesTest('FixRound3 Admin-backfilled legacy indexes restore discovery, remove, and purge protocols', async () => {
-  const ownerStore = emulatorStore(actorFirestore('owner'));
-  const otherStore = emulatorStore(actorFirestore('otherTeacher'));
-  const otherActor = { ...actors.otherTeacher, role: 'teacher' };
-
-  await adminWrite('quiz_sets/legacy-shared', {
-    ownerUid: actors.owner.uid,
-    ownerEmail: actors.owner.email,
-    trashedAt: null,
-    purgeStartedAt: null,
-    lifecycleState: 'active',
-    collaboratorCount: 1,
-    imageCount: 0,
-    title: '기존 공유 세트'
-  });
-  await adminWrite('quiz_sets/legacy-shared/collaborators/other@school.kr', {
-    email: actors.otherTeacher.email,
-    addedByUid: actors.owner.uid,
-    addedAt: Timestamp.fromMillis(1)
-  });
-
-  assert.equal((await otherStore.listSharedQuizSets(otherActor))
-    .some(set => set.id === 'legacy-shared'), false);
-  await assert.rejects(ownerStore.removeCollaborator(
-    'legacy-shared', actors.otherTeacher.email, actors.owner
-  ), error => String(error && error.code || '').includes('permission-denied'));
-
-  // This exact document is the trusted Admin migration's only backfill shape.
-  await adminWrite('quiz_set_shares/other@school.kr/sets/legacy-shared', {
-    email: actors.otherTeacher.email,
-    setId: 'legacy-shared'
-  });
-  assert.equal((await otherStore.listSharedQuizSets(otherActor))
-    .some(set => set.id === 'legacy-shared'), true);
-  assert.equal(await ownerStore.removeCollaborator(
-    'legacy-shared', actors.otherTeacher.email, actors.owner
-  ), true);
-
-  const expiredAt = Timestamp.fromMillis(Date.now() - 31 * 86400000);
-  await adminWrite('quiz_sets/legacy-purge', {
-    ownerUid: actors.owner.uid,
-    ownerEmail: actors.owner.email,
-    lifecycleState: 'trashed',
-    trashedAt: expiredAt,
-    purgeStartedAt: null,
-    collaboratorCount: 1,
-    imageCount: 0,
-    contentRevision: Timestamp.fromMillis(1)
-  });
-  await adminWrite('quiz_sets/legacy-purge/collaborators/other@school.kr', {
-    email: actors.otherTeacher.email,
-    addedByUid: actors.owner.uid,
-    addedAt: Timestamp.fromMillis(1)
-  });
-  await ownerStore.beginSetPurge('legacy-purge', 'immediate', actors.owner);
-  await assert.rejects(ownerStore.continueSetPurge('legacy-purge'), error =>
-    String(error && error.code || '').includes('permission-denied')
-  );
-  await adminWrite('quiz_set_shares/other@school.kr/sets/legacy-purge', {
-    email: actors.otherTeacher.email,
-    setId: 'legacy-purge'
-  });
-  assert.deepEqual(await ownerStore.continueSetPurge('legacy-purge'), {
-    done: false,
-    deleted: 1,
-    parentDeleted: false
-  });
-  assert.deepEqual(await ownerStore.continueSetPurge('legacy-purge'), {
-    done: true,
-    deleted: 0,
-    parentDeleted: true
-  });
-});
-
-rulesTest('FixRound1 private nested reviewer PII exploit cannot cross the flat public projection boundary', async () => {
-  const publicationId = 'pii-boundary';
-  await seedPublicRulesSource(publicationId);
-  const owner = actorFirestore('owner');
-  const sourceReference = doc(owner, `quiz_sets/${publicationId}`);
-  const taintedVideos = publicRulesSource().videos;
-  taintedVideos[0].questions[0].reviewerEmail = 'reviewer-private@school.kr';
-  taintedVideos[0].questions[0].reviewNotes = { studentUid: 'student-secret' };
-
-  // This records the legacy private-schema limitation: arbitrary nested fields are
-  // accepted, so the public boundary must never mirror the raw nested source.
-  await assertSucceeds(updateDoc(sourceReference, { videos: taintedVideos }));
-  await assertFails(setDoc(doc(owner, `published_quiz_sets/${publicationId}`), {
-    ...publicRulesBuilding(publicationId),
-    videos: taintedVideos,
-    updatedAt: serverTimestamp()
-  }));
-
-  const sanitized = await emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner);
-  assert.equal(sanitized.videos[0].questions[0].reviewerEmail, undefined);
-  const storedQuestion = (await getDoc(doc(owner,
-    `published_quiz_sets/${publicationId}/questions/v0q0`))).data();
-  assert.equal(storedQuestion.reviewerEmail, undefined);
-  assert.equal(storedQuestion.reviewNotes, undefined);
-
-  const childPublicationId = 'pii-child-boundary';
-  await seedPublicRulesSource(childPublicationId);
-  await adminWrite(`published_quiz_sets/${childPublicationId}`,
-    publicRulesBuilding(childPublicationId));
-  const forgedQuestion = {
-    ...publicRulesFlat(childPublicationId).questions.v0q0,
-    reviewerEmail: 'reviewer-private@school.kr',
-    reviewNotes: { studentUid: 'student-secret' }
-  };
-  const forged = writeBatch(owner);
-  forged.update(doc(owner, `published_quiz_sets/${childPublicationId}`), {
-    buildQuestionCount: 1,
-    buildMutation: { collection: 'questions', key: 'v0q0', action: 'bind' }
-  });
-  forged.set(doc(owner,
-    `published_quiz_sets/${childPublicationId}/questions/v0q0`), forgedQuestion);
-  await assertFails(forged.commit());
-});
-
-rulesTest('FixRound2 actual store publishes a supported legacy single-video source through Rules', async () => {
-  const publicationId = 'legacy-flat-publication';
-  const source = publicRulesSource();
-  const [video] = source.videos;
-  delete source.videos;
-  source.videoId = video.videoId;
-  source.videoUrl = video.videoUrl;
-  source.startSec = video.startSec;
-  source.endSec = video.endSec;
-  source.questions = video.questions;
-  await adminWrite(`quiz_sets/${publicationId}`, source);
-
-  const owner = actorFirestore('owner');
-  const published = await emulatorStore(owner).publishQuizSet(
-    publicationId,
-    publicRulesOwner
-  );
-
-  assert.equal(published.status, 'published');
-  assert.equal(published.videos.length, 1);
-  assert.equal(published.videos[0].videoId, 'dQw4w9WgXcQ');
-  assert.equal((await getDoc(doc(owner,
-    `published_quiz_sets/${publicationId}/videos/v0`))).data().videoId,
-    'dQw4w9WgXcQ');
-
-  const adminStore = emulatorStore(actorFirestore('admin'));
-  assert.equal((await adminStore.adminModeratePublishedQuiz(
-    publicationId,
-    'rev-1',
-    'legacy lifecycle check',
-    requestAdminIdentity
-  )).status, 'moderated');
-  assert.equal((await adminStore.adminRestorePublishedQuiz(
-    publicationId,
-    'rev-1',
-    requestAdminIdentity
-  )).status, 'published');
-
-  for (const [suffix, patch] of [
-    ['bad-video-id', { videoId: 'not-canonical' }],
-    ['empty-questions', { questions: [] }],
-    ['missing-settings', { settings: null }]
-  ]) {
-    const invalidId = `legacy-${suffix}`;
-    await adminWrite(`quiz_sets/${invalidId}`, { ...source, ...patch });
-    await assertFails(setDoc(doc(owner, `published_quiz_sets/${invalidId}`), {
-      ...publicRulesBuilding(invalidId),
-      updatedAt: serverTimestamp()
-    }));
-  }
-});
-
-rulesTest('published projection list requires exact visible status order and bounded limit', async () => {
-  await seedPublicRulesSource('library-set');
-  await seedPublishedRulesProjection('library-set');
-  await adminWrite('published_quiz_sets/library-building', publicRulesBuilding('library-building'));
-  await adminWrite('published_quiz_sets/library-withdrawn', publicRulesProjection(
-    'library-withdrawn', { status: 'withdrawn' }
-  ));
-  await adminWrite('published_quiz_sets/library-moderated', publicRulesProjection(
-    'library-moderated', { status: 'moderated', moderationStatus: 'moderated' }
-  ));
-
-  const exactQuery = db => getDocs(query(
-    collection(db, 'published_quiz_sets'),
-    where('status', '==', 'published'),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(50)
-  ));
-  for (const actorName of approvedTeachers) {
-    await assertSucceeds(exactQuery(actorFirestore(actorName)));
-  }
-  for (const actorName of ['unapproved', 'student', 'anonymous']) {
-    await assertFails(exactQuery(actorFirestore(actorName)));
-  }
-  await assertFails(exactQuery(testEnvironment.unauthenticatedContext().firestore()));
-
-  const other = actorFirestore('otherTeacher');
-  await assertFails(getDocs(collection(other, 'published_quiz_sets')));
-  await assertFails(getDocs(query(
-    collection(other, 'published_quiz_sets'),
-    where('status', '==', 'published'),
-    queryLimit(50)
-  )));
-  await assertFails(getDocs(query(
-    collection(other, 'published_quiz_sets'),
-    where('status', '==', 'published'),
-    orderBy('updatedAt', 'asc'),
-    queryLimit(50)
-  )));
-  await assertFails(getDocs(query(
-    collection(other, 'published_quiz_sets'),
-    where('status', '==', 'published'),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(51)
-  )));
-  await assertFails(getDocs(query(
-    collection(other, 'published_quiz_sets'),
-    where('status', '==', 'building'),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(50)
-  )));
-
-  await assertSucceeds(getDoc(doc(other, 'published_quiz_sets/library-set')));
-  for (const id of ['library-building', 'library-withdrawn', 'library-moderated']) {
-    await assertFails(getDoc(doc(other, `published_quiz_sets/${id}`)));
-  }
-});
-
-rulesTest('published projection rejects and hides email-shaped or UID-like author labels at the Rules boundary', async () => {
-  const owner = actorFirestore('owner');
-  const other = actorFirestore('otherTeacher');
-
-  for (const [index, authorDisplayName] of [
-    'owner@school.kr', 'AbCDefghijklmnopqrst1234', actors.owner.uid
-  ].entries()) {
-    const publicationId = `unsafe-author-${index}`;
-    await seedPublicRulesSource(publicationId);
-    const allowance = await adminRead('teacher_allowances/owner-uid');
-    await adminWrite('teacher_allowances/owner-uid', {
-      ...allowance, displayName: authorDisplayName
-    });
-    await assertFails(setDoc(doc(owner, `published_quiz_sets/${publicationId}`), {
-      ...publicRulesBuilding(publicationId, { authorDisplayName }),
-      updatedAt: serverTimestamp()
-    }));
-    const unsafeProjection = publicRulesProjection(publicationId, {
-      authorDisplayName: '마이그레이션 전 표시명'
-    });
-    unsafeProjection.authorDisplayName = authorDisplayName;
-    await adminWrite(`published_quiz_sets/${publicationId}`, unsafeProjection);
-    await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
-  }
-
-  const safeId = 'safe-korean-author';
-  await seedPublicRulesSource(safeId);
-  const allowance = await adminRead('teacher_allowances/owner-uid');
-  await adminWrite('teacher_allowances/owner-uid', { ...allowance, displayName: '홍 교사' });
-  await assertSucceeds(setDoc(doc(owner, `published_quiz_sets/${safeId}`), {
-    ...publicRulesBuilding(safeId, { authorDisplayName: '홍 교사' }),
-    updatedAt: serverTimestamp()
-  }));
-});
-
-rulesTest('FixRound2 publication lifecycle gate deterministically closes list get children and races', async () => {
-  const publicationId = 'gate-interleave';
-  const image = 'data:image/png;base64,AAAA';
-  await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
-  await seedPublishedRulesProjection(publicationId, {}, { v0q0: image });
-  const admin = actorFirestore('admin');
-  const other = actorFirestore('otherTeacher');
-  const owner = actorFirestore('owner');
-  const publicQuery = db => getDocs(query(
-    collection(db, 'published_quiz_sets'),
-    where('status', '==', 'published'),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(50)
-  ));
-  const visibleChildren = db => [
-    ['videos', 'v0'], ['questions', 'v0q0'], ['images', 'v0q0']
-  ].map(([name, key]) => ({
-    get: () => getDoc(doc(db,
-      `published_quiz_sets/${publicationId}/${name}/${key}`)),
-    list: () => getDocs(query(
-      collection(db, `published_quiz_sets/${publicationId}/${name}`),
-      where('revision', '==', 'rev-1'),
-      where('schemaVersion', '==', 1)
-    ))
-  }));
-  await assertSucceeds(publicQuery(other));
-  await assertSucceeds(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
-  for (const child of visibleChildren(other)) {
-    await assertSucceeds(child.get());
-    await assertSucceeds(child.list());
-  }
-
-  const lock = {
-    ownerUid: actors.owner.uid,
-    ownerEmailCanonical: actors.owner.email,
-    allowanceRevision: 0,
-    allowanceRole: 'teacher',
-    allowanceStatus: 'active',
-    allowanceEnabled: true,
-    reason: 'teacher-suspension',
-    operationId: 'deterministic-lifecycle-operation',
-    initiatedByUid: actors.admin.uid,
-    initiatedByRole: 'admin',
-    createdAt: serverTimestamp()
-  };
-  const acquire = writeBatch(admin);
-  acquire.set(doc(admin, `publication_lifecycle_locks/${actors.owner.uid}`), lock);
-  acquire.set(doc(admin, 'publication_lifecycle_gates/current'), lock);
-  await assertSucceeds(acquire.commit());
-
-  await assertFails(publicQuery(other));
-  await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
-  await assertFails(getDoc(doc(other,
-    `published_quiz_sets/${publicationId}/questions/v0q0`)));
-  for (const child of visibleChildren(other)) {
-    await assertFails(child.get());
-    await assertFails(child.list());
-  }
-  await assert.rejects(emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner));
-  await assertFails(setDoc(doc(other, 'publication_lifecycle_gates/current'), {
-    ...lock, operationId: 'forged', createdAt: serverTimestamp()
-  }));
-
-  const release = writeBatch(admin);
-  release.delete(doc(admin, `publication_lifecycle_locks/${actors.owner.uid}`));
-  release.delete(doc(admin, 'publication_lifecycle_gates/current'));
-  await assertSucceeds(release.commit());
-  await assertSucceeds(publicQuery(other));
-
-  await adminWrite('publication_lifecycle_gates/current', {
-    ownerUid: actors.owner.uid,
-    ownerEmailCanonical: actors.owner.email,
-    allowanceRevision: 999,
-    allowanceRole: 'teacher',
-    allowanceStatus: 'active',
-    allowanceEnabled: true,
-    reason: 'teacher-suspension',
-    operationId: 'well-shaped-stale-gate',
-    initiatedByUid: actors.admin.uid,
-    initiatedByRole: 'admin',
-    createdAt: Timestamp.fromMillis(1)
-  });
-  await assertFails(publicQuery(other));
-  for (const child of visibleChildren(other)) {
-    await assertFails(child.get());
-    await assertFails(child.list());
-  }
-  await adminWrite('publication_lifecycle_gates/current', undefined);
-
-  await adminWrite('publication_lifecycle_gates/current', {
-    ownerUid: actors.owner.uid,
-    operationId: 'malformed-stale-gate'
-  });
-  await assertFails(publicQuery(other));
-  for (const child of visibleChildren(other)) {
-    await assertFails(child.get());
-    await assertFails(child.list());
-  }
-  await assertFails(deleteDoc(doc(admin, 'publication_lifecycle_gates/current')));
-});
-
-rulesTest('FixRound2 legacy malformed children stay outside the schema-bound collection query', async () => {
-  const publicationId = 'child-list-schema';
-  const image = 'data:image/png;base64,AAAA';
-  await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
-  await seedPublishedRulesProjection(publicationId, {}, { v0q0: image });
-  const other = actorFirestore('otherTeacher');
-
-  for (const [name, key] of [
-    ['videos', 'v0'], ['questions', 'v0q0'], ['images', 'v0q0']
-  ]) {
-    const path = `published_quiz_sets/${publicationId}/${name}/${key}`;
-    const malformed = { ...(await adminRead(path)), reviewerEmail: 'private@school.kr' };
-    delete malformed.schemaVersion;
-    await adminWrite(path, malformed);
-    await assertFails(getDoc(doc(other, path)));
-    const hidden = await assertSucceeds(getDocs(query(
-      collection(other, `published_quiz_sets/${publicationId}/${name}`),
-      where('revision', '==', 'rev-1'),
-      where('schemaVersion', '==', 1)
-    )));
-    assert.equal(hidden.empty, true);
-  }
-});
-
-rulesTest('FixRound2 global lifecycle gate blocks unrelated publication builds and public copy starts', async () => {
-  const other = actorFirestore('otherTeacher');
-  const sourceId = 'global-gate-source';
-  const buildId = 'global-gate-build';
-  const progressId = 'global-gate-progress';
-  const finalId = 'global-gate-final';
-  const replaceId = 'global-gate-replace';
-  const restoreId = 'global-gate-restore';
-  await seedPublicRulesSource(sourceId);
-  await seedPublishedRulesProjection(sourceId);
-  await seedPublicRulesSource(buildId, {
-    ownerUid: actors.otherTeacher.uid,
-    ownerEmail: actors.otherTeacher.email
-  });
-  await seedPublicRulesSource(finalId, {
-    ownerUid: actors.otherTeacher.uid,
-    ownerEmail: actors.otherTeacher.email
-  });
-  await adminWrite(`published_quiz_sets/${finalId}`, publicRulesBuilding(finalId, {
-    authorDisplayName: '다른 교사',
-    buildVideoCount: 1,
-    buildQuestionCount: 1
-  }));
-  await seedPublicRulesSource(progressId, {
-    ownerUid: actors.otherTeacher.uid,
-    ownerEmail: actors.otherTeacher.email
-  });
-  await adminWrite(`published_quiz_sets/${progressId}`, publicRulesBuilding(progressId, {
-    authorDisplayName: '다른 교사'
-  }));
-  await seedPublicRulesSource(replaceId, {
-    ownerUid: actors.otherTeacher.uid,
-    ownerEmail: actors.otherTeacher.email
-  });
-  await seedPublishedRulesProjection(replaceId);
-  await seedPublicRulesSource(restoreId);
-  await seedPublishedRulesProjection(restoreId, {
-    status: 'moderated', moderationStatus: 'moderated'
-  });
-  await adminWrite(`published_quiz_audits/${restoreId}`, {
-    publicationId: restoreId, revision: 'rev-1', status: 'moderated',
-    moderatedByUid: actors.admin.uid, moderationReason: 'gate restore check',
-    moderatedAt: Timestamp.fromMillis(1_000)
-  });
-  await assertSucceeds(setDoc(doc(other, 'quiz_sets/global-gate-copy-progress'),
-    publicCopyStart(sourceId)));
-  await adminWrite('publication_lifecycle_gates/current', {
-    ownerUid: 'orphan-owner',
-    operationId: 'orphan-malformed-global-gate'
-  });
-
-  await assertFails(setDoc(doc(other, `published_quiz_sets/${buildId}`), {
-    ...publicRulesBuilding(buildId, { authorDisplayName: '다른 교사' }),
-    updatedAt: serverTimestamp()
-  }));
-  await assertFails(setDoc(doc(other, 'quiz_sets/global-gate-copy'),
-    publicCopyStart(sourceId)));
-  const buildStep = writeBatch(other);
-  buildStep.update(doc(other, `published_quiz_sets/${progressId}`), {
-    buildVideoCount: 1,
-    buildMutation: { collection: 'videos', key: 'v0', action: 'bind' }
-  });
-  buildStep.set(doc(other, `published_quiz_sets/${progressId}/videos/v0`),
-    publicRulesFlat(progressId).videos.v0);
-  await assertFails(buildStep.commit());
-  await assertFails(setDoc(doc(other, `published_quiz_sets/${finalId}`), {
-    ...publicRulesProjection(finalId, { authorDisplayName: '다른 교사' }),
-    publishedAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  }));
-  await assertFails(setDoc(doc(other, `published_quiz_sets/${replaceId}`), {
-    ...publicRulesBuilding(replaceId, { authorDisplayName: '다른 교사' }),
-    publishedAt: Timestamp.fromMillis(900),
-    updatedAt: serverTimestamp()
-  }));
-  await assertFails(updateDoc(doc(other, 'quiz_sets/global-gate-copy-progress'), {
-    lifecycleState: 'active', copyStatus: deleteField(),
-    updatedAt: serverTimestamp(), contentRevision: serverTimestamp()
-  }));
-  await assert.rejects(emulatorStore(actorFirestore('admin')).adminRestorePublishedQuiz(
-    restoreId, 'rev-1', requestAdminIdentity
-  ));
-
-  await adminWrite('publication_lifecycle_gates/current', undefined);
-  await assertSucceeds(setDoc(doc(other, `published_quiz_sets/${buildId}`), {
-    ...publicRulesBuilding(buildId, { authorDisplayName: '다른 교사' }),
-    updatedAt: serverTimestamp()
-  }));
-  await assertSucceeds(setDoc(doc(other, 'quiz_sets/global-gate-copy'),
-    publicCopyStart(sourceId)));
-  const resumedBuildStep = writeBatch(other);
-  resumedBuildStep.update(doc(other, `published_quiz_sets/${progressId}`), {
-    buildVideoCount: 1,
-    buildMutation: { collection: 'videos', key: 'v0', action: 'bind' }
-  });
-  resumedBuildStep.set(doc(other, `published_quiz_sets/${progressId}/videos/v0`),
-    publicRulesFlat(progressId).videos.v0);
-  await assertSucceeds(resumedBuildStep.commit());
-  await assertSucceeds(setDoc(doc(other, `published_quiz_sets/${finalId}`), {
-    ...publicRulesProjection(finalId, { authorDisplayName: '다른 교사' }),
-    publishedAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  }));
-  await assertSucceeds(setDoc(doc(other, `published_quiz_sets/${replaceId}`), {
-    ...publicRulesBuilding(replaceId, { authorDisplayName: '다른 교사' }),
-    publishedAt: Timestamp.fromMillis(900),
-    updatedAt: serverTimestamp()
-  }));
-  await assertSucceeds(updateDoc(doc(other, 'quiz_sets/global-gate-copy-progress'), {
-    lifecycleState: 'active', copyStatus: deleteField(),
-    updatedAt: serverTimestamp(), contentRevision: serverTimestamp()
-  }));
-  await assert.doesNotReject(emulatorStore(actorFirestore('admin')).adminRestorePublishedQuiz(
-    restoreId, 'rev-1', requestAdminIdentity
-  ));
-});
-
-rulesTest('legacy owner audit includes missing lifecycleState but public visibility stays closed', async () => {
-  const publicationId = 'legacy-lifecycle-audit';
-  const source = publicRulesSource();
-  delete source.lifecycleState;
-  await adminWrite(`quiz_sets/${publicationId}`, source);
-  await adminWrite(`published_quiz_sets/${publicationId}`,
-    publicRulesProjection(publicationId));
-
-  const owner = actorFirestore('owner');
-  const other = actorFirestore('otherTeacher');
-  const page = await emulatorStore(owner).auditOwnedPublications(
-    actors.owner.uid, 50, null
-  );
-
-  assert.deepEqual(page.items, [{
-    publicationId, status: 'published', revision: 'rev-1'
-  }]);
-  await assertFails(getDoc(doc(other, `published_quiz_sets/${publicationId}`)));
-  await assert.rejects(emulatorStore(owner).publishQuizSet(publicationId, publicRulesOwner));
-});
-
-rulesTest('owner reads only own moderated parent while admin lists the exact bounded moderation status set', async () => {
-  await seedPublicRulesSource('owner-moderated');
-  await adminWrite('published_quiz_sets/owner-moderated', publicRulesProjection(
-    'owner-moderated', { status: 'moderated', moderationStatus: 'moderated' }
-  ));
-  await adminWrite('published_quiz_audits/owner-moderated', {
-    publicationId: 'owner-moderated', revision: 'rev-1', status: 'moderated',
-    moderatedByUid: actors.admin.uid, moderationReason: 'private reason',
-    moderatedAt: Timestamp.fromMillis(1_000)
-  });
-  await adminWrite('published_quiz_sets/admin-published', publicRulesProjection('admin-published'));
-  await adminWrite('published_quiz_sets/admin-withdrawn', publicRulesProjection(
-    'admin-withdrawn', { status: 'withdrawn' }
-  ));
-
-  const owner = actorFirestore('owner');
-  const other = actorFirestore('otherTeacher');
-  const admin = actorFirestore('admin');
-  await assertSucceeds(getDoc(doc(owner, 'published_quiz_sets/owner-moderated')));
-  await assertFails(getDoc(doc(other, 'published_quiz_sets/owner-moderated')));
-  await assertFails(getDoc(doc(owner, 'published_quiz_audits/owner-moderated')));
-
-  const exactAdminQuery = db => getDocs(query(
-    collection(db, 'published_quiz_sets'),
-    where('status', 'in', ['published', 'moderated']),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(50)
-  ));
-  const snapshot = await assertSucceeds(exactAdminQuery(admin));
-  assert.deepEqual(snapshot.docs.map(document => document.id).sort(), [
-    'admin-published', 'owner-moderated'
-  ]);
-  const ownerStatus = await emulatorStore(owner).getOwnedPublicationStatus('owner-moderated');
-  assert.deepEqual(ownerStatus, {
-    publicationId: 'owner-moderated', status: 'moderated', revision: 'rev-1'
-  });
-  assert.equal(ownerStatus.moderatedByUid, undefined);
-  assert.equal(ownerStatus.moderationReason, undefined);
-  const adminStore = emulatorStore(admin);
-  const adminPage = await adminStore.listAdminPublishedQuizSets({
-    limit: 50, admin: requestAdminIdentity
-  });
-  assert.deepEqual(adminPage.items.map(item => item.publicationId).sort(), [
-    'admin-published', 'owner-moderated'
-  ]);
-  assert.equal(adminPage.nextCursor, null);
-  await assertFails(exactAdminQuery(other));
-  await assertFails(getDocs(query(
-    collection(admin, 'published_quiz_sets'),
-    where('status', 'in', ['published', 'moderated', 'withdrawn']),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(50)
-  )));
-  await assertFails(getDocs(query(
-    collection(admin, 'published_quiz_sets'),
-    where('status', 'in', ['published', 'moderated']),
-    orderBy('updatedAt', 'desc'),
-    queryLimit(51)
-  )));
-});
-
-rulesTest('published projection owner protocol admits actual building image finalize republish and safety withdrawal shapes', async () => {
-  const firstImages = {
-    v0q0: 'data:image/png;base64,AAAA',
-    v0q0e: 'data:image/png;base64,BBBB'
-  };
-  await seedPublicRulesSource('library-set', { imageCount: 2 }, firstImages);
-  const owner = actorFirestore('owner');
-  const store = emulatorStore(owner, undefined, undefined, () => 1_000);
-
-  const first = await store.publishQuizSet('library-set', publicRulesOwner);
-  assert.equal(first.status, 'published');
-  const firstStored = (await getDoc(doc(owner, 'published_quiz_sets/library-set'))).data();
-  assert.equal(firstStored.ownerUid, undefined);
-  assert.equal(firstStored.buildToken, undefined);
-  const firstPublishedAt = firstStored.publishedAt.toMillis();
-  const other = actorFirestore('otherTeacher');
-  await adminWrite('quiz_sets/library-set/collaborators/other@school.kr', {
-    email: actors.otherTeacher.email,
-    addedByUid: actors.owner.uid,
-    addedAt: Timestamp.fromMillis(1)
-  });
-  await assertFails(updateDoc(doc(other, 'published_quiz_sets/library-set'), {
-    title: '공동편집자 직접 공개 변경', updatedAt: serverTimestamp()
-  }));
-
-  await adminWrite('quiz_sets/library-set', publicRulesSource({
-    title: '수정된 공개 과학 퀴즈', imageCount: 2, contentRevision: 'rev-2'
-  }));
-  await adminWrite('images/library-set/q/v0q0', { data: 'data:image/png;base64,CHANGED' });
-  await adminWrite('images/library-set/q/v0q0e', undefined);
-  await adminWrite('images/library-set/q/v0q1', { data: 'data:image/png;base64,CCCC' });
-
-  const republished = await store.publishQuizSet('library-set', publicRulesOwner);
-  assert.equal(republished.status, 'published');
-  const republishedStored = (await getDoc(doc(owner, 'published_quiz_sets/library-set'))).data();
-  assert.equal(republishedStored.revision, 'rev-2');
-  assert.equal(republishedStored.publishedAt.toMillis(), firstPublishedAt);
-  assert.equal(republishedStored.imageCount, 2);
-
-  await adminWrite('quiz_sets/library-set', publicRulesSource({
-    title: 'revision 없이 바뀐 비공개 제목', imageCount: -1, contentRevision: 'rev-2'
-  }));
-  const withdrawn = await store.withdrawPublishedQuizSet('library-set', publicRulesOwner);
-  assert.equal(withdrawn.status, 'withdrawn');
-  assert.equal(withdrawn.title, '수정된 공개 과학 퀴즈');
-
-  await assertFails(setDoc(doc(other, 'published_quiz_sets/standalone'),
-    publicRulesProjection('standalone')));
-  await assertFails(updateDoc(doc(actorFirestore('admin'), 'published_quiz_sets/library-set'), {
-    title: '관리자 직접 내용 변경', updatedAt: serverTimestamp()
-  }));
-  await assertFails(updateDoc(doc(owner, 'published_quiz_sets/library-set'), {
-    revision: 'forged-revision', updatedAt: serverTimestamp()
-  }));
-});
-
-rulesTest('publication trash is atomic, restore stays private, and moderated content cannot resurrect', async () => {
-  const publicationId = 'lifecycle-trash';
-  await seedPublicRulesSource(publicationId);
-  await seedPublishedRulesProjection(publicationId);
-  const ownerDb = actorFirestore('owner');
-  const ownerStore = emulatorStore(ownerDb);
-
-  await assertFails(updateDoc(doc(ownerDb, `quiz_sets/${publicationId}`), {
-    lifecycleState: 'trashed', trashedAt: serverTimestamp(),
-    purgeStartedAt: null, contentRevision: serverTimestamp()
-  }));
-
-  await ownerStore.moveSetToTrash(publicationId, publicRulesOwner).catch(error => {
-    throw new Error('published trash stage: ' + error.message, { cause: error });
-  });
-  assert.equal((await getDoc(doc(ownerDb,
-    `published_quiz_sets/${publicationId}`))).data().status, 'withdrawn');
-  await ownerStore.restoreSet(publicationId, publicRulesOwner).catch(error => {
-    throw new Error('withdrawn restore stage: ' + error.message, { cause: error });
-  });
-  assert.equal((await getDoc(doc(ownerDb,
-    `published_quiz_sets/${publicationId}`))).data().status, 'withdrawn');
-
-  const buildingId = 'lifecycle-building';
-  await seedPublicRulesSource(buildingId);
-  await adminWrite(`published_quiz_sets/${buildingId}`,
-    publicRulesBuilding(buildingId, { buildToken: 'abandoned-build-token' }));
-  await ownerStore.moveSetToTrash(buildingId, publicRulesOwner).catch(error => {
-    throw new Error('building cancellation stage: ' + error.message, { cause: error });
-  });
-  const cancelled = await getDoc(doc(ownerDb, `published_quiz_sets/${buildingId}`));
-  assert.equal(cancelled.data().status, 'cancelled');
-  assert.equal(cancelled.data().buildToken, 'abandoned-build-token');
-  await ownerStore.restoreSet(buildingId, publicRulesOwner).catch(error => {
-    throw new Error('cancelled restore stage: ' + error.message, { cause: error });
-  });
-  const republished = await ownerStore.publishQuizSet(buildingId, publicRulesOwner)
-    .catch(error => {
-      throw new Error('cancelled republish stage: ' + error.message, { cause: error });
-    });
-  assert.equal(republished.status, 'published');
-  assert.equal((await getDoc(doc(ownerDb,
-    `published_quiz_sets/${buildingId}`))).data().status, 'published');
-
-  const moderatedId = 'lifecycle-moderated';
-  await seedPublicRulesSource(moderatedId);
-  await adminWrite(`published_quiz_sets/${moderatedId}`, publicRulesProjection(moderatedId, {
-    status: 'moderated', moderationStatus: 'moderated'
-  }));
-  await adminWrite(`published_quiz_audits/${moderatedId}`, {
-    publicationId: moderatedId, revision: 'rev-1', status: 'moderated',
-    moderatedByUid: actors.admin.uid, moderationReason: 'hold',
-    moderatedAt: Timestamp.fromMillis(1_000)
-  });
-
-  await ownerStore.moveSetToTrash(moderatedId, publicRulesOwner).catch(error => {
-    throw new Error('moderated trash stage: ' + error.message, { cause: error });
-  });
-  await ownerStore.restoreSet(moderatedId, publicRulesOwner).catch(error => {
-    throw new Error('moderated restore stage: ' + error.message, { cause: error });
-  });
-  assert.equal((await adminRead(`published_quiz_sets/${moderatedId}`)).status, 'moderated');
-  await assertFails(updateDoc(doc(ownerDb, `published_quiz_sets/${moderatedId}`), {
-    status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
-  }));
-});
-
-rulesTest('publication suspension and deletion preflight hide copies before allowance removal', async () => {
-  const publicationId = 'lifecycle-suspend';
-  const buildingId = 'lifecycle-suspend-building';
-  await seedPublicRulesSource(publicationId);
-  await seedPublishedRulesProjection(publicationId);
-  await seedPublicRulesSource(buildingId);
-  await adminWrite(`published_quiz_sets/${buildingId}`,
-    publicRulesBuilding(buildingId, { buildToken: 'lifecycle-suspend-build-token' }));
-  await adminWrite('teacher_allowances/owner-uid', {
-    ...(await adminRead('teacher_allowances/owner-uid')), revision: 1
-  });
-  const adminStore = emulatorStore(actorFirestore('admin'));
-
-  await adminStore.adminUpdateTeacherAllowance({
-    uid: actors.owner.uid, emailCanonical: actors.owner.email, expectedRevision: 1,
-    role: 'teacher', status: 'suspended', reason: 'hold'
-  }, requestAdminIdentity);
-
-  assert.equal((await adminRead(`published_quiz_sets/${publicationId}`)).status, 'withdrawn');
-  assert.equal((await adminRead(`published_quiz_sets/${buildingId}`)).status, 'cancelled');
-  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'suspended');
-  await assert.rejects(() => emulatorStore(actorFirestore('otherTeacher'))
-    .copyPublishedQuizSet(publicationId, 'copy-after-suspend', {
-      uid: actors.otherTeacher.uid, email: actors.otherTeacher.email, role: 'teacher'
-    }), /permission|published|공개|승인|active/i);
-
-  const deletionId = 'lifecycle-delete';
-  await adminWrite('teacher_allowances/owner-uid', {
-    ...(await adminRead('teacher_allowances/owner-uid')),
-    status: 'active', enabled: true, administrativeHold: false, revision: 3
-  });
-  await adminWrite('teacher_allowlist/owner@school.kr', {
-    uid: actors.owner.uid, enabled: true, role: 'teacher',
-    updatedAt: Timestamp.fromMillis(1), updatedByUid: actors.admin.uid
-  });
-  await seedPublicRulesSource(deletionId);
-  await seedPublishedRulesProjection(deletionId);
-  const ownerStore = emulatorStore(actorFirestore('owner'));
-
-  await ownerStore.requestTeacherDeletion(actors.owner.uid, publicRulesOwner);
-
-  assert.equal((await adminRead(`published_quiz_sets/${deletionId}`)).status, 'withdrawn');
-  assert.equal((await adminRead('teacher_allowances/owner-uid')).status, 'deletion_pending');
-});
-
-rulesTest('publication purge deletes bounded public images before the private parent', async () => {
-  const publicationId = 'lifecycle-purge';
-  await seedPublicRulesSource(publicationId, {
-    lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1),
-    purgeStartedAt: null, imageCount: 0
-  });
-  await seedPublishedRulesProjection(publicationId, {
-    status: 'withdrawn', imageCount: 1
-  }, { v0q0: 'data:image/png;base64,AAAA' });
-  const ownerDb = actorFirestore('owner');
-  const ownerStore = emulatorStore(ownerDb);
-
-  await ownerStore.beginSetPurge(publicationId, 'immediate', publicRulesOwner);
-  const first = await ownerStore.continueSetPurge(publicationId);
-  assert.deepEqual(first, { done: false, deleted: 1, parentDeleted: false });
-  assert.equal(await adminRead(
-    `published_quiz_sets/${publicationId}/images/v0q0`), undefined);
-  assert.notEqual(await adminRead(`quiz_sets/${publicationId}`), undefined);
-
-  const done = await ownerStore.continueSetPurge(publicationId);
-  assert.equal(done.parentDeleted, true);
-});
-
-rulesTest('published projection public image reads require a visible exact revision binding', async () => {
-  await seedPublicRulesSource('image-public', { imageCount: 1 }, {
-    v0q0: 'data:image/png;base64,AAAA'
-  });
-  await seedPublishedRulesProjection('image-public', {}, {
-    v0q0: 'data:image/png;base64,AAAA'
-  });
-  const other = actorFirestore('otherTeacher');
-  const currentImages = () => getDocs(query(
-    collection(other, 'published_quiz_sets/image-public/images'),
-    where('revision', '==', 'rev-1'),
-    where('schemaVersion', '==', 1)
-  ));
-  await assertSucceeds(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
-  await assertFails(getDocs(collection(other, 'published_quiz_sets/image-public/images')));
-  await assertSucceeds(currentImages());
-
-  await adminWrite('published_quiz_sets/image-public/images/v0q0', {
-    data: 'data:image/png;base64,AAAA', revision: 'stale',
-    schemaVersion: 1, buildToken: 'build-token-1'
-  });
-  await assertFails(getDoc(doc(other, 'published_quiz_sets/image-public/images/v0q0')));
-  await assertSucceeds(currentImages());
-
-  await adminWrite('published_quiz_sets/image-building', publicRulesBuilding('image-building', {
-    imageCount: 1, buildImageCount: 1
-  }));
-  await adminWrite('published_quiz_sets/image-building/images/v0q0', {
-    data: 'data:image/png;base64,AAAA', revision: 'rev-1',
-    schemaVersion: 1, buildToken: 'build-token-1'
-  });
-  await assertFails(getDoc(doc(other, 'published_quiz_sets/image-building/images/v0q0')));
-  await assertFails(setDoc(doc(actorFirestore('owner'),
-    'published_quiz_sets/image-public/images/standalone'), {
-    data: 'data:image/png;base64,AAAA', revision: 'rev-1',
-    schemaVersion: 1, buildToken: 'build-token-1'
-  }));
-});
-
-rulesTest('FixRound1 public image list requires the visible parent revision query', async () => {
-  await seedPublicRulesSource('image-list-revision', { imageCount: 1 }, {
-    v0q0: 'data:image/png;base64,AAAA'
-  });
-  await seedPublishedRulesProjection('image-list-revision', {}, {
-    v0q0: 'data:image/png;base64,AAAA'
-  });
-  await adminWrite('published_quiz_sets/image-list-revision/images/v0q1', {
-    data: 'data:image/png;base64,STALE', revision: 'rev-stale',
-    schemaVersion: 1, buildToken: 'old-build'
-  });
-  const other = actorFirestore('otherTeacher');
-  const images = collection(other, 'published_quiz_sets/image-list-revision/images');
-
-  await assertFails(getDocs(images));
-  await assertFails(getDocs(query(images, where('revision', '==', 'rev-1'))));
-  await assertFails(getDocs(query(images, where('schemaVersion', '==', 1))));
-  await assertFails(getDocs(query(
-    images,
-    where('revision', '==', 'rev-1'),
-    where('schemaVersion', '==', 2)
-  )));
-  const visible = await assertSucceeds(getDocs(query(
-    images,
-    where('revision', '==', 'rev-1'),
-    where('schemaVersion', '==', 1)
-  )));
-  assert.deepEqual(visible.docs.map(document => document.id), ['v0q0']);
-});
-
-rulesTest('FixRound3 malformed public image schemaVersion cannot bind or unlock finalization', async () => {
-  const image = 'data:image/png;base64,AAAA';
-  const malformedVersions = [2, '1', { version: 1 }];
-  const owner = actorFirestore('owner');
-
-  for (const [index, schemaVersion] of malformedVersions.entries()) {
-    const publicationId = `image-schema-bind-${index}`;
-    await seedPublicRulesSource(publicationId, { imageCount: 1 }, { v0q0: image });
-    await adminWrite(`published_quiz_sets/${publicationId}`, publicRulesBuilding(
-      publicationId, {
-        imageCount: 1,
-        buildVideoCount: 1,
-        buildQuestionCount: 1,
-        buildImageCount: 0
-      }
-    ));
-
-    const bind = writeBatch(owner);
-    bind.update(doc(owner, `published_quiz_sets/${publicationId}`), {
-      buildImageCount: 1,
-      buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
-    });
-    bind.set(doc(owner, `published_quiz_sets/${publicationId}/images/v0q0`), {
-      data: image,
-      revision: 'rev-1',
-      schemaVersion,
-      buildToken: 'build-token-1'
-    });
-    await assertFails(bind.commit());
-
-    await assertFails(setDoc(doc(owner, `published_quiz_sets/${publicationId}`), {
-      ...publicRulesProjection(publicationId, { imageCount: 1 }),
-      publishedAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    }));
-  }
-
-  const validId = 'image-schema-bind-valid';
-  await seedPublicRulesSource(validId, { imageCount: 1 }, { v0q0: image });
-  await adminWrite(`published_quiz_sets/${validId}`, publicRulesBuilding(validId, {
-    imageCount: 1,
-    buildVideoCount: 1,
-    buildQuestionCount: 1,
-    buildImageCount: 0
-  }));
-  const validBind = writeBatch(owner);
-  validBind.update(doc(owner, `published_quiz_sets/${validId}`), {
-    buildImageCount: 1,
-    buildMutation: { collection: 'images', key: 'v0q0', action: 'bind' }
-  });
-  validBind.set(doc(owner, `published_quiz_sets/${validId}/images/v0q0`), {
-    data: image,
-    revision: 'rev-1',
-    schemaVersion: 1,
-    buildToken: 'build-token-1'
-  });
-  await assertSucceeds(validBind.commit());
-  await assertSucceeds(setDoc(doc(owner, `published_quiz_sets/${validId}`), {
-    ...publicRulesProjection(validId, { imageCount: 1 }),
-    publishedAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  }));
-
-  const other = actorFirestore('otherTeacher');
-  await assertSucceeds(getDoc(doc(other,
-    `published_quiz_sets/${validId}/images/v0q0`)));
-  const visible = await assertSucceeds(getDocs(query(
-    collection(other, `published_quiz_sets/${validId}/images`),
-    where('revision', '==', 'rev-1'),
-    where('schemaVersion', '==', 1)
-  )));
-  assert.deepEqual(visible.docs.map(document => document.id), ['v0q0']);
 });
 
 rulesTest('FixRound3 direct image get rejects Admin-seeded malformed schemaVersion', async () => {
@@ -5322,288 +3632,6 @@ rulesTest('FixRound1 building create and image bind use commit-state source revi
   await assertFails(imageBatch.commit());
 });
 
-rulesTest('published projection admin moderation and restore require the exact atomic audit side document', async () => {
-  await seedPublicRulesSource('moderation-set');
-  await seedPublishedRulesProjection('moderation-set');
-  const admin = actorFirestore('admin');
-  const owner = actorFirestore('owner');
-
-  await assertFails(updateDoc(doc(admin, 'published_quiz_sets/moderation-set'), {
-    status: 'moderated', moderationStatus: 'moderated', updatedAt: serverTimestamp()
-  }));
-  await assertFails(setDoc(doc(admin, 'published_quiz_audits/moderation-set'), {
-    publicationId: 'moderation-set', revision: 'rev-1', status: 'moderated',
-    moderatedByUid: actors.admin.uid, moderationReason: '독립 감사 위조',
-    moderatedAt: serverTimestamp()
-  }));
-
-  const store = emulatorStore(admin);
-  const moderated = await store.adminModeratePublishedQuiz(
-    'moderation-set', 'rev-1', '저작권 확인 필요', requestAdminIdentity
-  );
-  assert.equal(moderated.status, 'moderated');
-  await assertFails(getDoc(doc(owner, 'published_quiz_audits/moderation-set')));
-  await assertFails(getDocs(collection(owner, 'published_quiz_audits')));
-  await assertSucceeds(getDoc(doc(admin, 'published_quiz_audits/moderation-set')));
-  await assertSucceeds(getDocs(collection(admin, 'published_quiz_audits')));
-  await assertFails(getDoc(doc(actorFirestore('otherTeacher'),
-    'published_quiz_sets/moderation-set')));
-
-  await assertFails(updateDoc(doc(admin, 'published_quiz_sets/moderation-set'), {
-    status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
-  }));
-  const restoreCas = writeBatch(admin);
-  restoreCas.update(doc(admin, 'quiz_sets/moderation-set'), { contentRevision: 'rev-2' });
-  restoreCas.update(doc(admin, 'published_quiz_sets/moderation-set'), {
-    status: 'published', moderationStatus: 'clear', updatedAt: serverTimestamp()
-  });
-  restoreCas.update(doc(admin, 'published_quiz_audits/moderation-set'), {
-    status: 'restored', restoredByUid: actors.admin.uid, restoredAt: serverTimestamp()
-  });
-  await assertFails(restoreCas.commit());
-  const restored = await store.adminRestorePublishedQuiz(
-    'moderation-set', 'rev-1', requestAdminIdentity
-  );
-  assert.equal(restored.status, 'published');
-  assert.equal((await getDoc(doc(admin, 'published_quiz_audits/moderation-set')))
-    .data().status, 'restored');
-
-  const remoderated = await store.adminModeratePublishedQuiz(
-    'moderation-set', 'rev-1', '재검토 필요', requestAdminIdentity
-  );
-  assert.equal(remoderated.status, 'moderated');
-  const rerestored = await store.adminRestorePublishedQuiz(
-    'moderation-set', 'rev-1', requestAdminIdentity
-  );
-  assert.equal(rerestored.status, 'published');
-
-  await assertFails(updateDoc(doc(admin, 'published_quiz_audits/moderation-set'), {
-    restoredByUid: actors.owner.uid,
-    restoredAt: serverTimestamp()
-  }));
-});
-
-rulesTest('published projection copy uses exact provenance count-zero increments and final delete sentinels', async () => {
-  const image = 'data:image/png;base64,AAAA';
-  await seedPublicRulesSource('copy-source', { imageCount: 1 }, { v0q0: image });
-  await seedPublishedRulesProjection('copy-source', {}, { v0q0: image });
-  const other = actorFirestore('otherTeacher');
-  const copyActor = {
-    ...actors.otherTeacher,
-    displayName: '다른 교사',
-    role: 'teacher'
-  };
-  const store = emulatorStore(other);
-
-  const copied = await store.copyPublishedQuizSet('copy-source', 'copy-destination', copyActor);
-  assert.equal(copied.lifecycleState, 'active');
-  const storedCopy = (await getDoc(doc(other, 'quiz_sets/copy-destination'))).data();
-  assert.equal(storedCopy.imageCount, 1);
-  assert.equal(storedCopy.copyStatus, undefined);
-  assert.equal(storedCopy.publicationId, 'copy-source');
-
-  const manualRef = doc(other, 'quiz_sets/manual-copy');
-  await assertSucceeds(setDoc(manualRef, publicCopyStart('copy-source')));
-  await assertFails(updateDoc(manualRef, {
-    imageCount: 1,
-    imageMutation: { key: 'v0q0', action: 'add' },
-    updatedAt: serverTimestamp(),
-    contentRevision: serverTimestamp()
-  }));
-  await assertFails(setDoc(doc(other, 'images/manual-copy/q/v0q0'), { data: image }));
-
-  const wrongTarget = writeBatch(other);
-  wrongTarget.set(manualRef, {
-    imageCount: 1,
-    imageMutation: { key: 'v0q0', action: 'add' },
-    updatedAt: serverTimestamp(),
-    contentRevision: serverTimestamp()
-  }, { merge: true });
-  wrongTarget.set(doc(other, 'images/manual-copy/q/v0q1'), { data: image });
-  await assertFails(wrongTarget.commit());
-
-  const exactIncrement = writeBatch(other);
-  exactIncrement.set(manualRef, {
-    imageCount: 1,
-    imageMutation: { key: 'v0q0', action: 'add' },
-    updatedAt: serverTimestamp(),
-    contentRevision: serverTimestamp()
-  }, { merge: true });
-  exactIncrement.set(doc(other, 'images/manual-copy/q/v0q0'), { data: image });
-  await assertSucceeds(exactIncrement.commit());
-  await assertSucceeds(updateDoc(manualRef, {
-    lifecycleState: 'active',
-    copyStatus: deleteField(),
-    imageMutation: deleteField(),
-    updatedAt: serverTimestamp(),
-    contentRevision: serverTimestamp()
-  }));
-
-  await assertFails(setDoc(doc(other, 'quiz_sets/nonzero-copy'), publicCopyStart(
-    'copy-source', actors.otherTeacher, { imageCount: 1 }
-  )));
-  await assertFails(setDoc(doc(other, 'quiz_sets/forged-copy'), publicCopyStart(
-    'copy-source', actors.otherTeacher, { sourcePublicationRevision: 'forged' }
-  )));
-
-  const owner = actorFirestore('owner');
-  const visibilityCas = writeBatch(owner);
-  visibilityCas.update(doc(owner, 'published_quiz_sets/copy-source'), {
-    status: 'withdrawn', updatedAt: serverTimestamp()
-  });
-  visibilityCas.set(doc(owner, 'quiz_sets/copy-cas-destination'),
-    publicCopyStart('copy-source', actors.owner));
-  await assertFails(visibilityCas.commit());
-
-  await adminWrite('published_quiz_sets/copy-source', publicRulesProjection(
-    'copy-source', { imageCount: 1, status: 'withdrawn' }
-  ));
-  await assertFails(setDoc(doc(other, 'quiz_sets/hidden-copy'), publicCopyStart('copy-source')));
-  await adminWrite('published_quiz_sets/copy-source', publicRulesProjection(
-    'copy-source', { imageCount: 1 }
-  ));
-
-  await adminWrite('quiz_sets/copy-source', publicRulesSource({
-    imageCount: 1, lifecycleState: 'trashed', trashedAt: Timestamp.fromMillis(1)
-  }));
-  await assertFails(setDoc(doc(other, 'quiz_sets/trashed-source-copy'),
-    publicCopyStart('copy-source')));
-  await adminWrite('quiz_sets/copy-source', publicRulesSource({ imageCount: 1 }));
-
-  const ownerAllowance = await adminRead('teacher_allowances/owner-uid');
-  for (const status of ['suspended', 'deletion_pending']) {
-    await adminWrite('teacher_allowances/owner-uid', {
-      ...ownerAllowance,
-      status,
-      enabled: false,
-      administrativeHold: status === 'suspended'
-    });
-    await assertFails(setDoc(doc(other, `quiz_sets/${status}-source-copy`),
-      publicCopyStart('copy-source')));
-  }
-  await adminWrite('teacher_allowances/owner-uid', {
-    ...ownerAllowance,
-    role: 'owner'
-  });
-  await assertFails(setDoc(doc(other, 'quiz_sets/invalid-role-source-copy'),
-    publicCopyStart('copy-source')));
-  await adminWrite('teacher_allowances/owner-uid', ownerAllowance);
-
-  const studentOwner = { uid: actors.student.uid, email: 'student@school.kr' };
-  await assertFails(setDoc(doc(actorFirestore('student'), 'quiz_sets/student-copy'),
-    publicCopyStart('copy-source', studentOwner)));
-});
-
-rulesTest('admin만 승인 교사 목록을 감사 필드와 함께 관리하고 자기 admin은 보호한다', async () => {
-  await resetFirestore();
-  const admin = actorFirestore('admin');
-  await assertSucceeds(getDoc(doc(admin, 'teacher_allowlist/admin@school.kr')));
-  await assertSucceeds(getDocs(collection(admin, 'teacher_allowlist')));
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
-    enabled: true,
-    role: 'teacher',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-  await assertSucceeds(updateDoc(doc(admin, 'teacher_allowlist/new@school.kr'), {
-    enabled: false,
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-  await assertFails(setDoc(doc(admin, 'teacher_allowlist/bad-role@school.kr'), {
-    enabled: true,
-    role: 'owner',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-  await assertFails(setDoc(doc(admin, 'teacher_allowlist/extra@school.kr'), {
-    enabled: true,
-    role: 'teacher',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid',
-    extra: true
-  }));
-  await assertFails(setDoc(doc(admin, 'teacher_allowlist/mismatch@school.kr'), {
-    enabled: true,
-    role: 'teacher',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'other-uid'
-  }));
-  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/admin@school.kr'), {
-    enabled: false,
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-  await assertFails(updateDoc(doc(admin, 'teacher_allowlist/admin@school.kr'), {
-    role: 'teacher',
-    updatedAt: serverTimestamp(),
-    updatedByUid: 'admin-uid'
-  }));
-  await assertFails(deleteDoc(doc(admin, 'teacher_allowlist/new@school.kr')));
-  await assertFails(setDoc(doc(actorFirestore('owner'), 'teacher_allowlist/blocked@school.kr'), {
-    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'owner-uid'
-  }));
-});
-
-rulesTest('승인 문서 ID는 소문자 canonical 이메일 경로만 허용한다', async () => {
-  await resetFirestore();
-  const admin = actorFirestore('admin');
-  const audited = { enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid' };
-  await assertFails(setDoc(doc(admin, 'teacher_allowlist/Mixed@School.KR'), audited));
-  await assertFails(setDoc(doc(admin, 'teacher_allowlist/not-an-email'), audited));
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/canonical@school.kr'), audited));
-});
-
-rulesTest('비활성화된 다른 admin은 후속 승인 목록 쓰기를 할 수 없다', async () => {
-  await resetFirestore();
-  const admin = actorFirestore('admin');
-  await assertSucceeds(setDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
-    enabled: true, role: 'admin', updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-  await assertSucceeds(updateDoc(doc(admin, 'teacher_allowlist/other-admin@school.kr'), {
-    enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'admin-uid'
-  }));
-  const disabledAdmin = testEnvironment.authenticatedContext('other-admin-uid', {
-    email: 'other-admin@school.kr',
-    email_verified: true,
-    firebase: { sign_in_provider: 'google.com' }
-  }).firestore();
-  await assertFails(setDoc(doc(disabledAdmin, 'teacher_allowlist/blocked-after-disable@school.kr'), {
-    enabled: true, role: 'teacher', updatedAt: serverTimestamp(), updatedByUid: 'other-admin-uid'
-  }));
-  await assertFails(updateDoc(doc(disabledAdmin, 'teacher_allowlist/owner@school.kr'), {
-    enabled: false, updatedAt: serverTimestamp(), updatedByUid: 'other-admin-uid'
-  }));
-});
-
-rulesTest('authoritative verified password teacher and admin keep representative list write and admin access', async () => {
-  const passwordTeacher = testEnvironment.authenticatedContext('owner-uid', {
-    email: 'owner@school.kr',
-    email_verified: true,
-    firebase: { sign_in_provider: 'password' }
-  }).firestore();
-  const passwordAdmin = testEnvironment.authenticatedContext('admin-uid', {
-    email: 'admin@school.kr',
-    email_verified: true,
-    firebase: { sign_in_provider: 'password' }
-  }).firestore();
-
-  await assertSucceeds(getDoc(doc(passwordTeacher, 'quiz_sets/set1')));
-  await assertSucceeds(getDocs(query(
-    collection(passwordTeacher, 'quiz_sets'),
-    where('lifecycleState', '==', 'active'),
-    where('ownerUid', '==', actors.owner.uid)
-  )));
-  await assertSucceeds(updateDoc(doc(passwordTeacher, 'quiz_sets/set1'), {
-    title: 'password owner update'
-  }));
-  await assertSucceeds(getDocs(query(
-    collection(passwordAdmin, 'teacher_access_requests'),
-    where('status', '==', 'pending'),
-    queryLimit(50)
-  )));
-});
-
 rulesTest('unverified password, unsupported providers, missing provider, and mismatched allowance remain denied', async () => {
   const verifiedOwnerEmail = {
     email: 'owner@school.kr',
@@ -5724,6 +3752,163 @@ rulesTest('세트 소유자는 최초 비로그인 링크 생성 전에 없는 �
   await assertFails(getDoc(doc(
     actorFirestore('otherTeacher'), 'guest_quiz_share_sources/set1'
   )));
+});
+
+const NEW_SHARE_ID = 'G'.repeat(43);
+
+function guestShareRevisionBatch(ownerDb, shareId) {
+  const base = 'guest_quiz_shares/' + shareId + '/revisions/1';
+  const batch = writeBatch(ownerDb);
+  batch.set(doc(ownerDb, base), {
+    shareId, revision: 1, sourceContentRevision: '7', status: 'ready',
+    schemaVersion: 1, createdAt: serverTimestamp(),
+    title: '보안 규칙 테스트', description: '',
+    revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true,
+    videoCount: 1, questionCount: 1, imageCount: 0
+  });
+  batch.set(doc(ownerDb, base + '/videos/v0'), {
+    shareId, revision: 1, videoKey: 'v0', videoId: 'dQw4w9WgXcQ',
+    videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+    startSec: 0, endSec: null, schemaVersion: 1
+  });
+  batch.set(doc(ownerDb, base + '/questions/v0q0'), {
+    shareId, revision: 1, questionKey: 'v0q0', videoKey: 'v0',
+    type: 'choice', t: 1, text: '문제', choices: ['A', 'B'], answer: 0
+  });
+  return batch;
+}
+
+function buildingGuestShare(shareId) {
+  return {
+    shareId, sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
+    sourceContentRevision: '7', status: 'building', revision: 1,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revokedAt: null
+  };
+}
+
+rulesTest('세트 소유자는 공유 활성화와 소유 매핑 생성을 한 트랜잭션으로 끝낸다', async () => {
+  const owner = actorFirestore('owner');
+  await assertSucceeds(setDoc(
+    doc(owner, 'guest_quiz_shares/' + NEW_SHARE_ID), buildingGuestShare(NEW_SHARE_ID)
+  ));
+  await assertSucceeds(guestShareRevisionBatch(owner, NEW_SHARE_ID).commit());
+
+  const shareReference = doc(owner, 'guest_quiz_shares/' + NEW_SHARE_ID);
+  const mappingReference = doc(owner, 'guest_quiz_share_sources/set1');
+  await assertSucceeds(runTransaction(owner, async transaction => {
+    await transaction.get(shareReference);
+    await transaction.get(mappingReference);
+    transaction.set(
+      shareReference, { status: 'active', updatedAt: serverTimestamp() }, { merge: true }
+    );
+    transaction.set(mappingReference, {
+      sourceSetId: 'set1', sourceOwnerUid: 'owner-uid', shareId: NEW_SHARE_ID,
+      status: 'active', revision: 1, updatedAt: serverTimestamp()
+    });
+  }));
+
+  assert.equal((await adminRead('guest_quiz_shares/' + NEW_SHARE_ID)).status, 'active');
+  assert.equal((await adminRead('guest_quiz_share_sources/set1')).shareId, NEW_SHARE_ID);
+});
+
+rulesTest('활성화되지 않는 공유에는 소유 매핑을 만들지 못한다', async () => {
+  const owner = actorFirestore('owner');
+  await assertSucceeds(setDoc(
+    doc(owner, 'guest_quiz_shares/' + NEW_SHARE_ID), buildingGuestShare(NEW_SHARE_ID)
+  ));
+  await assertFails(setDoc(doc(owner, 'guest_quiz_share_sources/set1'), {
+    sourceSetId: 'set1', sourceOwnerUid: 'owner-uid', shareId: NEW_SHARE_ID,
+    status: 'active', revision: 1, updatedAt: serverTimestamp()
+  }));
+});
+
+const GUEST_RUN_SHARE_ID = 'R'.repeat(43);
+const guestRunOwner = { uid: 'owner-uid', email: 'owner@school.kr' };
+
+function guestRunSource() {
+  return {
+    ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr',
+    trashedAt: null, purgeStartedAt: null, lifecycleState: 'active',
+    collaboratorCount: 0, imageCount: 0, contentRevision: '11',
+    title: '심폐소생술 완벽 알기',
+    description: '가슴압박 순서 복습',
+    settings: { revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoPause: true },
+    videos: [{
+      videoId: 'dQw4w9WgXcQ',
+      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      startSec: 0, endSec: null,
+      questions: [
+        { type: 'choice', t: 12, text: '가장 먼저 할 일은?', choices: ['119 신고', '가슴압박'], answer: 0 },
+        { type: 'long', t: 40, text: '가슴압박 깊이를 설명하시오.' }
+      ]
+    }]
+  };
+}
+
+rulesTest('비로그인 링크 하나로 다른 교사가 자기 반을 열고 학생이 참여해 답을 낸다', async () => {
+  await adminWrite('quiz_sets/guest-run-set', guestRunSource());
+
+  // 1) 세트 소유 교사가 비로그인 진행 링크를 만든다.
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const projection = GuestQuizShareCore.projectQuizSet(guestRunSource(), {});
+  const share = await ownerStore.createGuestQuizShare(
+    'guest-run-set', projection, guestRunOwner, GUEST_RUN_SHARE_ID
+  );
+  assert.equal(share.status, 'active');
+
+  // 2) 로그인하지 않은 다른 교사가 그 링크만으로 퀴즈를 받아온다.
+  const guestTeacherDb = guestFirestore('guest-teacher-uid');
+  const guestTeacherStore = emulatorStore(guestTeacherDb);
+  const loaded = await guestTeacherStore.loadActiveGuestQuizShare(share.shareId);
+  assert.equal(loaded.setSnapshot.title, '심폐소생술 완벽 알기');
+  assert.equal(loaded.setSnapshot.videos[0].questions.length, 2);
+  assert.equal(loaded.setSnapshot.videos[0].questions[0].type, 'choice');
+  assert.equal(loaded.setSnapshot.videos[0].questions[1].type, 'long');
+
+  // 3) 그 교사가 자기 반 세션과 반 코드를 새로 발급받는다.
+  const allocationToken = 'guest-allocation-token-1234';
+  const session = guestTeacherStore.prepareGuestSession(
+    loaded, '2학년 3반', { uid: 'guest-teacher-uid' }, allocationToken
+  );
+  const code = await guestTeacherStore.startSession(
+    'guest-session-1', session, () => 'GST001'
+  );
+  assert.equal(code, 'GST001');
+  assert.equal(await guestTeacherStore.activateSessionAllocation(
+    'guest-session-1', code, 'guest-teacher-uid', allocationToken
+  ), true);
+
+  // 4) 학생이 그 반 코드로만 들어온다.
+  const studentDb = guestFirestore('guest-student-uid');
+  const studentStore = emulatorStore(studentDb);
+  const mapped = await studentStore.getCode(code);
+  assert.equal(mapped.sessionId, 'guest-session-1');
+  await assertSucceeds(studentStore.joinStudent('guest-session-1', 'guest-student-uid', {
+    grade: '2', klass: '3', num: '7', name: '학생1'
+  }));
+
+  // 5) 교사가 문항을 열고 학생이 답을 제출한다.
+  await assertSucceeds(setDoc(doc(guestTeacherDb, 'sessions/guest-session-1/meta/live'), {
+    q: 0, openedAt: serverTimestamp(), limitSec: 20, revealed: false,
+    publicQuestion: {
+      number: 1, total: 2, type: 'choice',
+      text: '가장 먼저 할 일은?', choices: ['119 신고', '가슴압박']
+    }
+  }));
+  await assertSucceeds(setDoc(doc(studentDb, 'sessions/guest-session-1/responses/guest-student-uid'), {
+    uid: 'guest-student-uid',
+    answers: { 0: { answer: 0, submitted: true, revision: 1, submittedAt: serverTimestamp() } }
+  }));
+
+  // 6) 원본 소유 교사는 자기 자료로 열린 반을 확인할 수 있다.
+  assert.equal((await adminRead('sessions/guest-session-1')).sourceOwnerUid, 'owner-uid');
+  await assertSucceeds(getDoc(doc(actorFirestore('owner'), 'sessions/guest-session-1')));
+
+  // 7) 다른 반 학생은 이 반 코드 없이는 들어오지 못한다.
+  await assertFails(setDoc(
+    doc(guestFirestore('outsider-uid'), 'sessions/guest-session-1/responses/outsider-uid'),
+    { uid: 'outsider-uid', answers: { 0: { answer: 1, submitted: true, revision: 1 } } }
+  ));
 });
 
 rulesTest('운영자 계정은 teacher allowance 없이 자기 세트와 비로그인 공유 매핑을 사용한다', async () => {

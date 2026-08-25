@@ -646,29 +646,13 @@ service cloud.firestore {
         validNumberList(value);
     }
 
+    // Rules는 요청당 1,000개 표현식만 평가한다. 인정답안 20개를 하나씩 펼쳐 검사하면
+    // 세션 live 쓰기가 그 한도를 넘어 통째로 거부된다(단답형 정답 공개가 막힌다).
+    // join()은 문자열이 아닌 항목에서 실패해 타입 검사를 겸하므로 한 번에 검사하고,
+    // 길이는 항목 수 기준 총량(항목당 100자)으로 묶는다.
     function validAcceptList(values) {
-      return values is list &&
-        values.size() <= 20 &&
-        values[0] is string && values[0].size() <= 100 &&
-        (values.size() < 2 || (values[1] is string && values[1].size() <= 100)) &&
-        (values.size() < 3 || (values[2] is string && values[2].size() <= 100)) &&
-        (values.size() < 4 || (values[3] is string && values[3].size() <= 100)) &&
-        (values.size() < 5 || (values[4] is string && values[4].size() <= 100)) &&
-        (values.size() < 6 || (values[5] is string && values[5].size() <= 100)) &&
-        (values.size() < 7 || (values[6] is string && values[6].size() <= 100)) &&
-        (values.size() < 8 || (values[7] is string && values[7].size() <= 100)) &&
-        (values.size() < 9 || (values[8] is string && values[8].size() <= 100)) &&
-        (values.size() < 10 || (values[9] is string && values[9].size() <= 100)) &&
-        (values.size() < 11 || (values[10] is string && values[10].size() <= 100)) &&
-        (values.size() < 12 || (values[11] is string && values[11].size() <= 100)) &&
-        (values.size() < 13 || (values[12] is string && values[12].size() <= 100)) &&
-        (values.size() < 14 || (values[13] is string && values[13].size() <= 100)) &&
-        (values.size() < 15 || (values[14] is string && values[14].size() <= 100)) &&
-        (values.size() < 16 || (values[15] is string && values[15].size() <= 100)) &&
-        (values.size() < 17 || (values[16] is string && values[16].size() <= 100)) &&
-        (values.size() < 18 || (values[17] is string && values[17].size() <= 100)) &&
-        (values.size() < 19 || (values[18] is string && values[18].size() <= 100)) &&
-        (values.size() < 20 || (values[19] is string && values[19].size() <= 100));
+      return values is list && values.size() >= 1 && values.size() <= 20 &&
+        values.join(' ').size() <= values.size() * 101 - 1;
     }
 
     function validAnswer(answer) {
@@ -1528,9 +1512,11 @@ service cloud.firestore {
     }
 
     match /guest_quiz_shares/{shareId} {
-      allow get: if (guestIdentity() && shareId.matches('^[A-Za-z0-9_-]{43}$') &&
-          resource.data.shareId == shareId && resource.data.status == 'active') ||
-        (isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid);
+      allow get: if resource == null
+        ? isApprovedTeacher()
+        : ((guestIdentity() && shareId.matches('^[A-Za-z0-9_-]{43}$') &&
+              resource.data.shareId == shareId && resource.data.status == 'active') ||
+          (isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid));
       allow list: if false;
       allow create: if validGuestShareParentCreate(shareId);
       allow update: if validGuestShareParentUpdate(shareId);
@@ -1594,7 +1580,7 @@ service cloud.firestore {
       allow create: if isApprovedTeacher() && request.resource.data.sourceOwnerUid == request.auth.uid &&
         request.resource.data.sourceSetId == setId && request.resource.data.status == 'active' &&
         request.resource.data.revision == 1 && request.resource.data.updatedAt == request.time &&
-        get(/databases/$(database)/documents/guest_quiz_shares/$(request.resource.data.shareId)).data.status == 'active';
+        getAfter(/databases/$(database)/documents/guest_quiz_shares/$(request.resource.data.shareId)).data.status == 'active';
       allow update: if isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid &&
         request.resource.data.sourceOwnerUid == resource.data.sourceOwnerUid &&
         request.resource.data.sourceSetId == resource.data.sourceSetId &&
