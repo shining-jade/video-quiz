@@ -108,7 +108,7 @@ test('public quiz library projection core loads after playlist normalization and
   const html = read('index.html');
   const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
   const coreIndex = html.indexOf('<script src="public-quiz-library-core.js"></script>');
-  const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
+  const storeIndex = html.indexOf('<script src="firestore-store.js');
   const applicationIndex = html.indexOf('<script>');
 
   assert.ok(playlistIndex >= 0, 'playlist normalization core must be included');
@@ -132,10 +132,18 @@ test('guest share projection core is cache-busted in the static release', () => 
     'guest share projection changes must not be hidden by a stale browser cache');
 });
 
+test('changed browser runtime cores are cache-busted in the static release', () => {
+  const html = read('index.html');
+
+  for (const name of ['editor-history-core', 'firestore-store']) {
+    assert.match(html, new RegExp('<script src="' + name + '\\.js\\?v=[a-z0-9.-]+"><\\/script>'));
+  }
+});
+
 test('collaboration identity core loads before the Firestore store captures it', () => {
   const html = read('index.html');
   const collaborationIndex = html.indexOf('<script src="collaboration-trash-core.js"></script>');
-  const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
+  const storeIndex = html.indexOf('<script src="firestore-store.js');
 
   assert.ok(collaborationIndex >= 0, 'collaboration identity core must be included');
   assert.ok(collaborationIndex < storeIndex,
@@ -146,7 +154,7 @@ test('free passwordless guest route uses anonymous auth and never uses the teach
   const html = read('index.html');
   const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
   const guestCoreIndex = html.indexOf('<script src="guest-quiz-share-core.js');
-  const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
+  const storeIndex = html.indexOf('<script src="firestore-store.js');
   assert.ok(playlistIndex >= 0 && guestCoreIndex > playlistIndex && storeIndex > guestCoreIndex);
   assert.doesNotMatch(html, /firebase-functions-compat\.js/);
   assert.match(html, /case 'guest-play':\s*screenGuestPlay/);

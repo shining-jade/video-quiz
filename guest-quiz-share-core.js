@@ -6,7 +6,7 @@
   'use strict';
 
   const SHARE_ID = /^[A-Za-z0-9_-]{43}$/;
-  const QUESTION_TYPES = new Set(['mc', 'multi', 'short', 'essay', 'ox']);
+  const QUESTION_TYPES = new Set(['choice', 'multi', 'short', 'long', 'ox']);
 
   function fail(message) { throw new Error('Guest quiz share ' + message); }
   function text(value, name, maximum, allowEmpty) {
@@ -56,7 +56,7 @@
       t: finite(Number(question.t), 'question time', 0, 86400),
       text: text(question.text, 'question text', 4000, false)
     };
-    if (question.type === 'mc' || question.type === 'multi' || question.type === 'ox') {
+    if (question.type === 'choice' || question.type === 'multi' || question.type === 'ox') {
       if (!Array.isArray(question.choices) || question.choices.length < 2 || question.choices.length > 12) {
         fail('question choices are invalid');
       }
@@ -70,13 +70,13 @@
       const accepts = Array.isArray(question.accept) ? question.accept : [];
       output.accept = accepts.map(answer => text(answer, 'accepted answer', 1000, false));
       if (typeof question.answer === 'string') output.answer = text(question.answer, 'answer', 1000, true);
-    } else if (question.type !== 'essay') {
+    } else if (question.type !== 'long') {
       output.answer = integer(question.answer, 'question answer', 0, output.choices.length - 1);
     }
     if (typeof question.explain === 'string' && question.explain.trim()) {
       output.explain = text(question.explain, 'explanation', 8000, true);
     }
-    if (Number.isFinite(question.limitSec)) output.limitSec = finite(question.limitSec, 'question limit', 1, 3600);
+    if (Number.isFinite(question.limitSec)) output.limitSec = finite(question.limitSec, 'question limit', 0, 600);
     if (question.imgUp && typeof images[key] === 'string') output.imageKey = key;
     const explainKey = key + 'e';
     if (question.explainImgUp && typeof images[explainKey] === 'string') output.explainImageKey = explainKey;
@@ -85,14 +85,14 @@
 
   function projectQuizSet(set, sourceImages) {
     if (!set || typeof set !== 'object') fail('set is invalid');
-    if (!Array.isArray(set.videos) || !set.videos.length || set.videos.length > 20) fail('videos are invalid');
+    if (!Array.isArray(set.videos) || !set.videos.length || set.videos.length > 50) fail('videos are invalid');
     const images = sourceImages && typeof sourceImages === 'object' ? sourceImages : {};
     const settings = set.settings && typeof set.settings === 'object' ? set.settings : {};
     const parent = {
       title: text(set.title, 'title', 200, false),
       description: text(typeof set.description === 'string' ? set.description : '', 'description', 2000, true),
-      revealMode: ['manual', 'timer', 'instant'].includes(settings.revealMode) ? settings.revealMode : 'manual',
-      limitSec: Number.isFinite(settings.limitSec) ? finite(settings.limitSec, 'limitSec', 1, 3600) : 20,
+      revealMode: ['manual', 'timer', 'instant', 'never'].includes(settings.revealMode) ? settings.revealMode : 'manual',
+      limitSec: Number.isFinite(settings.limitSec) ? finite(settings.limitSec, 'limitSec', 0, 600) : 20,
       revealDelaySec: Number.isFinite(settings.revealDelaySec)
         ? finite(settings.revealDelaySec, 'revealDelaySec', 0, 3600) : 0,
       autoPause: settings.autoPause !== false,

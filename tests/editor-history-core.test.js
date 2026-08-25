@@ -1,6 +1,19 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
 const EditorHistoryCore = require('../editor-history-core');
+
+test('편집 이력 코어는 module 전역이 없는 브라우저에서도 로드된다', () => {
+  const context = {};
+  context.self = context;
+
+  vm.runInNewContext(fs.readFileSync('editor-history-core.js', 'utf8'), context, {
+    filename: 'editor-history-core.js'
+  });
+
+  assert.equal(typeof context.EditorHistoryCore.create, 'function');
+});
 
 test('편집 이력은 50단계 undo/redo와 저장 기준점 reset을 지킨다', () => {
   const history = EditorHistoryCore.create({ title: '0' }, { limit: 50 });

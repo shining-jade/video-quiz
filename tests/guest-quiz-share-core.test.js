@@ -10,7 +10,7 @@ function sampleSet(patch = {}) {
     settings: { revealMode: 'timer', limitSec: 20, revealDelaySec: 2, autoPause: true },
     videos: [{ id: 'v1', url: 'https://youtu.be/abcdefghijk', videoId: 'abcdefghijk',
       startSec: 0, endSec: 90, questions: [
-        { type: 'mc', t: 12, text: '문제', choices: ['A', 'B'], answer: 1,
+        { type: 'choice', t: 12, text: '문제', choices: ['A', 'B'], answer: 1,
           explain: '해설', imgUp: true, explainImgUp: true }
       ] }],
     ...patch
@@ -50,6 +50,39 @@ test('projection keeps an open-ended video shareable', () => {
 
   assert.equal(output.videos[0].endSec, null);
   assert.equal(output.questions[0].t, 12);
+});
+
+test('projection preserves the application question and setting schema', () => {
+  const set = sampleSet({
+    settings: { revealMode: 'never', limitSec: 0, revealDelaySec: 0, autoPause: true },
+    videos: [{
+      id: 'v1', url: 'https://youtu.be/abcdefghijk', videoId: 'abcdefghijk',
+      startSec: 0, endSec: 90, questions: [
+        { type: 'choice', t: 12, text: '객관식', choices: ['A', 'B'], answer: 1, limitSec: 0 },
+        { type: 'long', t: 20, text: '서술형', choices: [], answer: 0, limitSec: 0 }
+      ]
+    }]
+  });
+
+  const output = Core.projectQuizSet(set, {});
+
+  assert.equal(output.parent.revealMode, 'never');
+  assert.equal(output.parent.limitSec, 0);
+  assert.deepEqual(output.questions.map(question => question.type), ['choice', 'long']);
+  assert.equal(output.questions[0].limitSec, 0);
+  assert.equal(output.questions[1].limitSec, 0);
+  assert.equal(Object.hasOwn(output.questions[1], 'answer'), false);
+});
+
+test('projection accepts the application share limit of fifty videos', () => {
+  const base = sampleSet().videos[0];
+  const set = sampleSet({ videos: Array.from({ length: 50 }, (_, index) => ({
+    ...base,
+    videoId: 'video-' + index,
+    questions: []
+  })) });
+
+  assert.equal(Core.projectQuizSet(set, {}).videos.length, 50);
 });
 
 test('random token has exact url-safe entropy', () => {

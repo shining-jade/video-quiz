@@ -1,3 +1,8 @@
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.EditorHistoryCore = api;
+})(typeof self !== 'undefined' ? self : this, function () {
 'use strict';
 
 /**
@@ -87,4 +92,5 @@ function create(initial, { limit = 50 } = {}) {
   };
 }
 
-module.exports = { create };
+return { create };
+});

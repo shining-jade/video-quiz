@@ -6,9 +6,25 @@ const path = require('node:path');
 const vm = require('node:vm');
 const core = require('../firestore-core.js');
 
+test('operator can load an admin allowance without entering teacher-only deletion flow', async () => {
+  const fake = makeFirestoreFake({
+    'teacher_allowances/operator-uid': {
+      uid: 'operator-uid', emailCanonical: 'operator@example.com',
+      role: 'admin', status: 'active', enabled: true
+    }
+  });
+  const store = createStore(fake);
+
+  const allowance = await store.getOwnTeacherAllowance('operator-uid');
+
+  assert.equal(allowance.role, 'admin');
+  assert.equal(allowance.emailCanonical, 'operator@example.com');
+});
+
 test('browser script order exposes class planning thresholds before firestore store captures the core', async () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  const scripts = [...html.matchAll(/<script src="([^"]+\.js)"/g)].map(match => match[1]);
+  const scripts = [...html.matchAll(/<script src="([^"]+\.js(?:\?[^"]*)?)"/g)]
+    .map(match => match[1].split('?')[0]);
   assert.ok(scripts.indexOf('class-planning-core.js') < scripts.indexOf('firestore-store.js'));
   const context = {
     console, TextEncoder, Date, Math,
@@ -16869,7 +16885,7 @@ function guestShareProjection() {
     settings: { revealMode: 'manual', limitSec: 20, revealDelaySec: 0, autoPause: true },
     videos: [{ id: 'abcdefghijk', videoId: 'abcdefghijk',
       url: 'https://youtu.be/abcdefghijk', startSec: 0, endSec: 60,
-      questions: [{ type: 'mc', t: 10, text: '문제', choices: ['A', 'B'], answer: 0 }] }]
+      questions: [{ type: 'choice', t: 10, text: '문제', choices: ['A', 'B'], answer: 0 }] }]
   }, {});
 }
 

@@ -724,7 +724,7 @@
       const allowance = snapshot.data() || {};
       if (allowance.uid !== uid ||
           allowance.emailCanonical !== canonicalTeacherEmail(allowance.emailCanonical) ||
-          !allowance.emailCanonical || allowance.role !== 'teacher') {
+          !allowance.emailCanonical || !['teacher', 'admin'].includes(allowance.role)) {
         throw new Error('teacher allowance identity 신원이 일치하지 않습니다.');
       }
       return allowance;
@@ -771,7 +771,7 @@
       const exactUid = assertUid(uid);
       const snapshot = await db.doc('teacher_allowances/' + exactUid).get({ source: 'server' });
       if (!snapshot.exists) return null;
-      assertDeletionTeacherAllowance(snapshot, exactUid);
+      assertAllowanceIdentity(snapshot, exactUid);
       return teacherAllowanceValue(snapshot);
     }
 
