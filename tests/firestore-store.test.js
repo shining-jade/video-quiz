@@ -16076,3 +16076,26 @@ test('실행 기록 삭제는 취소하면 아무것도 지우지 않는다', as
   assert.equal(await context.deleteGuestRunSession('set-1', 'sess-1', 'ABC123', 3), false);
   assert.equal(deleteCalls, 0);
 });
+
+test('비로그인 진행 안내는 다섯 단계와 주의사항을 갖추고 열고 닫힌다', () => {
+  let open = false;
+  const dialog = {
+    showModal() { open = true; },
+    close() { open = false; }
+  };
+  const ctx = loadStageFunctions(
+    ['plGuestGuideSteps', 'plGuestGuideTips', 'plGuestGuideDialog', 'plOpenGuestGuide', 'plCloseGuestGuide'],
+    { $(selector) { return selector === '#pl-guest-guide' ? dialog : null; }, esc(v) { return String(v); } }
+  );
+
+  assert.equal(ctx.plGuestGuideSteps().length, 5);
+  assert.ok(ctx.plGuestGuideTips().length >= 3);
+  const html = ctx.plGuestGuideDialog();
+  assert.match(html, /id="pl-guest-guide"/);
+  assert.match(html, /비로그인 수업 진행 방법/);
+
+  assert.equal(ctx.plOpenGuestGuide(), true);
+  assert.equal(open, true);
+  assert.equal(ctx.plCloseGuestGuide(), true);
+  assert.equal(open, false);
+});

@@ -645,3 +645,18 @@ test('진행 화면의 id는 겹치지 않는다', () => {
   // 같은 id가 둘이면 $()가 첫 번째만 잡아 나머지가 조용히 갱신되지 않는다.
   assert.deepEqual(duplicated, []);
 });
+
+test('비로그인 진행 화면에는 시작 버튼 옆에 진행 방법 안내가 있다', () => {
+  const html = read('index.html');
+
+  assert.match(html, /onclick="plOpenGuestGuide\(\)">📖 진행 방법/);
+  for (const name of ['plGuestGuideDialog', 'plOpenGuestGuide', 'plCloseGuestGuide']) {
+    assert.ok(html.includes('function ' + name + '('), name + ' must exist');
+  }
+  // 수업 흐름 다섯 단계와 주의사항이 실제로 들어 있어야 한다.
+  for (const step of ['반 열기', '학생 입장시키기', '영상 재생하기', '정답 공개하기', '수업 마치기']) {
+    assert.match(html, new RegExp(step));
+  }
+  assert.match(html, /새로고침해도 괜찮습니다/);
+  assert.match(html, /다른 선생님과 섞이지 않습니다/);
+});

@@ -5865,6 +5865,80 @@ function screenPlay(setId, routeClassPlan, guestLoad) {
   });
 }
 
+/**
+ * 비로그인으로 진행하는 선생님은 안내를 받을 데가 없다. 시작 버튼 옆에서
+ * 수업 흐름과 주의할 점을 한 화면으로 보여 준다.
+ */
+function plGuestGuideSteps() {
+  return [
+    { n: '1', t: '반 열기',
+      d: '<b>[우리 반 시작하기]</b>를 누르면 이 반만의 <b>반 코드</b>와 QR이 나옵니다. ' +
+         '반 이름은 나중에 기록에서 알아보기 쉬우라고 적는 것이라 비워 두어도 됩니다.' },
+    { n: '2', t: '학생 입장시키기',
+      d: '화면의 <b>QR을 교실에 띄우거나</b> <b>[학생 참여 링크 복사]</b>로 링크를 보내 주세요. ' +
+         '학생은 학년·반·번호·이름을 넣고 들어옵니다. 들어온 학생은 오른쪽 ' +
+         '<b>[접속한 학생]</b>에 번호 순으로 쌓입니다.' },
+    { n: '3', t: '영상 재생하기',
+      d: '영상을 재생하면 <b>정해진 시각에 퀴즈가 자동으로 뜹니다.</b> ' +
+         '아래 <b>[문항]</b> 목록에서 <b>[열기]</b>로 직접 열 수도 있습니다.' },
+    { n: '4', t: '정답 공개하기',
+      d: '제한 시간이 끝나면 정답이 자동으로 공개됩니다. 공개된 뒤 <b>[계속 재생]</b>을 누르면 ' +
+         '영상이 이어집니다. 서술형은 나중에 선생님이 직접 채점합니다.' },
+    { n: '5', t: '수업 마치기',
+      d: '오른쪽 위 <b>[진행 종료]</b>를 누르면 학생 화면이 결과 화면으로 바뀝니다. ' +
+         '기록은 이 퀴즈를 만든 선생님에게 저장됩니다.' }
+  ];
+}
+
+function plGuestGuideTips() {
+  return [
+    '<b>새로고침해도 괜찮습니다.</b> 같은 브라우저에서 링크를 다시 열면 진행 중이던 반으로 돌아옵니다. ' +
+      '다만 다른 기기나 다른 브라우저에서는 이어서 열 수 없습니다.',
+    '<b>다른 선생님과 섞이지 않습니다.</b> 같은 링크를 써도 반 코드가 따로 발급되어 응답이 분리됩니다.',
+    '<b>영상을 앞으로 넘기면</b> 그 사이 문항은 건너뜁니다. 되감으면 다시 살아납니다.',
+    '<b>진행 화면 탭은 앞에 두세요.</b> 다른 탭에 오래 가려 두면 학생 접속 유지가 늦어질 수 있습니다.'
+  ];
+}
+
+function plGuestGuideDialog() {
+  const steps = plGuestGuideSteps().map(step =>
+    '<li style="margin-bottom:14px"><b>' + esc(step.n) + '. ' + esc(step.t) + '</b>' +
+    '<div style="color:var(--ink-2);font-size:14px;line-height:1.7;margin-top:3px">' + step.d + '</div></li>'
+  ).join('');
+  const tips = plGuestGuideTips().map(tip =>
+    '<li style="margin-bottom:8px;color:var(--ink-2);font-size:13.5px;line-height:1.7">' + tip + '</li>'
+  ).join('');
+  return '<dialog id="pl-guest-guide" style="width:min(92vw,600px);border:0;border-radius:14px;padding:0;box-shadow:var(--shadow)">' +
+    '<div style="padding:24px;text-align:left">' +
+      '<h2 style="margin-bottom:4px">비로그인 수업 진행 방법</h2>' +
+      '<p class="sub">로그인 없이, 이 링크만으로 우리 반 수업을 진행합니다.</p>' +
+      '<ol style="margin:16px 0 0;padding-left:20px">' + steps + '</ol>' +
+      '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line)">' +
+        '<b style="font-size:14px">알아두면 좋은 것</b>' +
+        '<ul style="margin:10px 0 0;padding-left:20px">' + tips + '</ul>' +
+      '</div>' +
+      '<div style="margin-top:20px;text-align:right">' +
+        '<button class="btn primary" onclick="plCloseGuestGuide()">닫기</button>' +
+      '</div>' +
+    '</div></dialog>';
+}
+
+function plOpenGuestGuide() {
+  const dialog = $('#pl-guest-guide');
+  if (!dialog) return false;
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.open = true;
+  return true;
+}
+
+function plCloseGuestGuide() {
+  const dialog = $('#pl-guest-guide');
+  if (!dialog) return false;
+  if (typeof dialog.close === 'function') dialog.close();
+  else dialog.open = false;
+  return true;
+}
+
 /** 반을 시작하기 전 — 세트 내용 확인 화면 */
 function renderPlayIntro() {
   const s = pl.set;
@@ -5892,7 +5966,10 @@ function renderPlayIntro() {
           : '<div class="field" style="max-width:420px;margin:0 auto 14px;text-align:left">' +
               '<label class="f" for="pl-label">반 이름 (선택)</label>' +
               '<input type="text" id="pl-label" maxlength="80" placeholder="학년반을 입력해 주세요" value=""></div>' +
-            '<button class="btn primary lg" onclick="plStartSession()">🚀 우리 반 시작하기</button>') +
+            '<button class="btn primary lg" onclick="plStartSession()">🚀 우리 반 시작하기</button>' +
+            (guestMode ? '<button class="btn lg" style="margin-left:8px" ' +
+              'onclick="plOpenGuestGuide()">📖 진행 방법</button>' : '')) +
+        (guestMode ? plGuestGuideDialog() : '') +
         '<dialog id="pl-plan-dialog" style="width:min(92vw,560px);border:0;border-radius:14px;padding:0;box-shadow:var(--shadow)">' +
           '<form style="padding:22px" onsubmit="plConfirmClassPlan(event)">' +
             '<h2 style="margin-bottom:4px">수업계획 확인</h2>' +
