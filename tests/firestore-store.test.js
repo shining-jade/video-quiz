@@ -4297,7 +4297,11 @@ test('공유 세트 진행 화면은 시작·사본만 제공하고 소유자에
     esc(value) { return String(value); }, REVEAL_LABEL: { timer: '타이머' },
     lsGet() { return ''; }, fmtTime() { return '00:01'; }, LETTERS: ['A']
   };
-  loadStageFunctions(['canEditSet', 'renderPlayIntro'], context);
+  loadStageFunctions([
+    'canEditSet', 'plGuestTourSample', 'plGuestTourStartMock', 'plGuestTourCodeMock', 'plGuestTourRunMock',
+    'plGuestTourRosterMock', 'plGuestTourStageMock', 'plGuestTourQuizMock', 'plGuestTourEndMock',
+    'plGuestTourSteps', 'plGuestTourTips', 'plGuestGuideDialog', 'renderPlayIntro'
+  ], context);
 
   context.renderPlayIntro();
   assert.match(app.innerHTML, /우리 반 시작하기/);
@@ -16077,28 +16081,6 @@ test('실행 기록 삭제는 취소하면 아무것도 지우지 않는다', as
   assert.equal(deleteCalls, 0);
 });
 
-test('비로그인 진행 안내는 다섯 단계와 주의사항을 갖추고 열고 닫힌다', () => {
-  let open = false;
-  const dialog = {
-    showModal() { open = true; },
-    close() { open = false; }
-  };
-  const ctx = loadStageFunctions(
-    ['plGuestGuideSteps', 'plGuestGuideTips', 'plGuestGuideDialog', 'plOpenGuestGuide', 'plCloseGuestGuide'],
-    { $(selector) { return selector === '#pl-guest-guide' ? dialog : null; }, esc(v) { return String(v); } }
-  );
-
-  assert.equal(ctx.plGuestGuideSteps().length, 5);
-  assert.ok(ctx.plGuestGuideTips().length >= 3);
-  const html = ctx.plGuestGuideDialog();
-  assert.match(html, /id="pl-guest-guide"/);
-  assert.match(html, /비로그인 수업 진행 방법/);
-
-  assert.equal(ctx.plOpenGuestGuide(), true);
-  assert.equal(open, true);
-  assert.equal(ctx.plCloseGuestGuide(), true);
-  assert.equal(open, false);
-});
 
 function autoResumeContext(settings, live, patch) {
   const state = Object.assign({
@@ -16164,4 +16146,74 @@ test('문항이 바뀌면 자동 재생 시각을 새로 잡는다', () => {
   ctx.now += 3000;
   ctx.pl.live = { q: 1, revealed: true, publicAnswer: { answer: 1 } };
   assert.equal(ctx.plAutoResumeRemainingMs(), 5000);
+});
+
+function guestTourContext() {
+  let open = false;
+  const nodes = {};
+  const make = () => ({ innerHTML: '', textContent: '', disabled: false });
+  ['#tour-body', '#tour-count', '#tour-dots', '#tour-prev', '#tour-next'].forEach(id => {
+    nodes[id] = make();
+  });
+  const dialog = { showModal() { open = true; }, close() { open = false; } };
+  const context = {
+    $(selector) { return selector === '#pl-guest-guide' ? dialog : (nodes[selector] || null); },
+    document: { getElementById() { return null; } },
+    esc(value) { return String(value); },
+    Array, Math, Object, String, Number
+  };
+  loadStageFunctions([
+    'plGuestTourSample', 'plGuestTourStartMock', 'plGuestTourCodeMock', 'plGuestTourRunMock', 'plGuestTourRosterMock',
+    'plGuestTourStageMock', 'plGuestTourQuizMock', 'plGuestTourEndMock',
+    'plGuestTourSteps', 'plGuestTourTips', 'plGuestGuideDialog',
+    'plRenderGuestTour', 'plRenderGuestTourQr', 'plGuestTourGo',
+    'plOpenGuestGuide', 'plCloseGuestGuide'
+  ], context);
+  context.guestTourIndex = 0;
+  context.nodes = nodes;
+  context.isOpen = () => open;
+  return context;
+}
+
+test('비로그인 튜토리얼은 여섯 단계를 그림과 함께 차례로 보여 준다', () => {
+  const ctx = guestTourContext();
+
+  assert.equal(ctx.plGuestTourSteps().length, 6);
+  assert.ok(ctx.plGuestTourTips().length >= 3);
+  ctx.plGuestTourSteps().forEach(step => {
+    assert.ok(step.title && step.hint && step.mock, '모든 단계에 제목·설명·그림이 있어야 한다');
+  });
+
+  const html = ctx.plGuestGuideDialog();
+  assert.match(html, /id="pl-guest-guide"/);
+  assert.match(html, /비로그인 수업 진행 방법/);
+});
+
+test('2단계는 실제 화면처럼 영상과 QR을 나란히 보여 주고 예시임을 밝힌다', () => {
+  const ctx = guestTourContext();
+  const step = ctx.plGuestTourSteps()[1];
+
+  // 선생님이 튜토리얼 QR을 진짜 반 QR로 오해하면 안 된다.
+  assert.match(step.mock, /tour-run/);
+  assert.match(step.mock, /tour-run-main/);
+  assert.match(step.mock, /tour-video/);
+  assert.match(step.mock, /tour-example">예시/);
+  assert.match(step.hint, /예시/);
+  assert.match(step.title, /영상.*QR/);
+});
+
+test('튜토리얼은 앞뒤로 넘기고 마지막에서 닫힌다', () => {
+  const ctx = guestTourContext();
+
+  assert.equal(ctx.plOpenGuestGuide(), true);
+  assert.equal(ctx.isOpen(), true);
+  assert.equal(ctx.nodes['#tour-prev'].disabled, true, '첫 단계에서는 이전이 잠긴다');
+  assert.match(ctx.nodes['#tour-count'].textContent, /1 \/ 6단계/);
+
+  for (let step = 0; step < 6; step += 1) ctx.plGuestTourGo(1);
+  assert.match(ctx.nodes['#tour-count'].textContent, /알아두면 좋은 것/);
+  assert.equal(ctx.nodes['#tour-next'].textContent, '닫기');
+
+  ctx.plGuestTourGo(1);
+  assert.equal(ctx.isOpen(), false);
 });

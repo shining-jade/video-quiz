@@ -646,17 +646,23 @@ test('진행 화면의 id는 겹치지 않는다', () => {
   assert.deepEqual(duplicated, []);
 });
 
-test('비로그인 진행 화면에는 시작 버튼 옆에 진행 방법 안내가 있다', () => {
+test('진행 시작 화면에는 누구에게나 단계별 진행 방법 안내가 있다', () => {
   const html = read('index.html');
 
   assert.match(html, /onclick="plOpenGuestGuide\(\)">📖 진행 방법/);
-  for (const name of ['plGuestGuideDialog', 'plOpenGuestGuide', 'plCloseGuestGuide']) {
+  for (const name of [
+    'plGuestTourSample', 'plGuestTourSteps', 'plGuestTourTips', 'plGuestGuideDialog',
+    'plRenderGuestTour', 'plGuestTourGo', 'plOpenGuestGuide', 'plCloseGuestGuide'
+  ]) {
     assert.ok(html.includes('function ' + name + '('), name + ' must exist');
   }
-  // 수업 흐름 다섯 단계와 주의사항이 실제로 들어 있어야 한다.
-  for (const step of ['반 열기', '학생 입장시키기', '영상 재생하기', '정답 공개하기', '수업 마치기']) {
-    assert.match(html, new RegExp(step));
+  // 세트를 만든 선생님도 안내를 볼 수 있어야 하므로 guestMode로 감추지 않는다.
+  assert.doesNotMatch(html, /guestMode \? plGuestGuideDialog\(\) : ''/);
+  // 글만 있는 안내가 아니라 실제 화면을 흉내 낸 그림이 함께 있어야 한다.
+  for (const marker of ['tour-run', 'tour-video', 'tour-code-value', 'tour-student', 'tour-quiz']) {
+    assert.match(html, new RegExp(marker));
   }
+  assert.match(html, /tour-example">예시/);
   assert.match(html, /새로고침해도 괜찮습니다/);
   assert.match(html, /다른 선생님과 섞이지 않습니다/);
 });
