@@ -5717,6 +5717,15 @@ rulesTest('clock과 알 수 없는 경로도 소유 범위 또는 기본 거부�
   await assertFails(getDoc(doc(student, 'unknown/path')));
 });
 
+rulesTest('세트 소유자는 최초 비로그인 링크 생성 전에 없는 매핑을 안전하게 확인한다', async () => {
+  await assertSucceeds(getDoc(doc(
+    actorFirestore('owner'), 'guest_quiz_share_sources/set1'
+  )));
+  await assertFails(getDoc(doc(
+    actorFirestore('otherTeacher'), 'guest_quiz_share_sources/set1'
+  )));
+});
+
 rulesTest('guest capability는 정확한 활성 share revision만 읽고 private 원본은 읽지 못한다', async () => {
   await adminWrite('guest_quiz_shares/' + FREE_SHARE_ID, {
     shareId: FREE_SHARE_ID, sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',

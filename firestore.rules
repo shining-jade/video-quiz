@@ -3324,8 +3324,9 @@ service cloud.firestore {
     }
 
     match /guest_quiz_share_sources/{setId} {
-      allow get: if isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid &&
-        resource.data.sourceSetId == setId;
+      allow get: if isApprovedTeacher() &&
+        exists(/databases/$(database)/documents/quiz_sets/$(setId)) &&
+        get(/databases/$(database)/documents/quiz_sets/$(setId)).data.ownerUid == request.auth.uid;
       allow list: if false;
       allow create: if isApprovedTeacher() && request.resource.data.sourceOwnerUid == request.auth.uid &&
         request.resource.data.sourceSetId == setId && request.resource.data.status == 'active' &&
