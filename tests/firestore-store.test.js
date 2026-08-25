@@ -6155,7 +6155,7 @@ test('다음 영상은 같은 플레이어에 시작 시각으로 로드된다',
 
 test('다음 영상 로드 중에는 이전 영상 시각으로 문항이나 전환을 실행하지 않는다', () => {
   let reads = 0, opened = 0, transitioned = 0;
-  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       playerLoading: true, videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 20, fired: [false], live: { q: -1 },
@@ -6199,7 +6199,7 @@ test('영상 진행 인터페이스는 다음 영상을 로드하고 마지막�
 test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다', () => {
   const loaded = [];
   let rendered = 0;
-  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [], live: { q: -1 }, flatQuestions: [],
@@ -6233,7 +6233,7 @@ test('영상 종료 후 3초 안내를 거쳐 다음 영상으로 이동한다',
 
 test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문항 종료 뒤 다시 센다', () => {
   const loaded = [];
-  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 4000, playlistDone: false,
       playerLoading: false, pendingLiveQuestion: -1,
@@ -6265,7 +6265,7 @@ test('전환 카운트다운 중 문항이 열리면 이동을 취소하고 문�
 
 test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간다', () => {
   let completed = 0, paused = 0;
-  const ctx = loadStageFunctions(['plDetectSeek', 'plCompletePlaylist', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plCompletePlaylist', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 49, fired: [], live: { q: -1 }, flatQuestions: [],
@@ -6292,7 +6292,7 @@ test('마지막 영상 종료 시 3초 전환 없이 완료 메뉴로 들어간�
 
 test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 보류한다', () => {
   let paused = 0;
-  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [], live: { q: 1 }, flatQuestions: [],
@@ -6322,7 +6322,7 @@ test('열린 문항이 있으면 종료 시각에 도달해도 영상 전환을 
 
 test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스를 쓴다', () => {
   const opened = [];
-  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       videoIndex: 1, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false, false], live: { q: -1 },
@@ -6354,7 +6354,7 @@ test('현재 영상의 문항만 자동으로 열고 live에는 전역 인덱스
 
 test('종료 시각 문항의 live 반영이 늦어도 영상 전환을 시작하지 않는다', () => {
   let paused = 0;
-  const ctx = loadStageFunctions(['plDetectSeek', 'plOpenQuestion', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plOpenQuestion', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], {
     pl: {
       sessionId: 'session-a', videoIndex: 0, transitionUntil: 0, playlistDone: false,
       lastT: 39, fired: [false], live: { q: -1 }, pendingLiveQuestion: -1,
@@ -9163,7 +9163,7 @@ test('rewind and jump rebuild marker states once only when fired changes', () =>
     getDuration() { return 100; },
     seekTo() {}, playVideo() {}
   };
-  const ctx = loadStageFunctions(['plDetectSeek', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plJumpTo'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plEffectiveEnd', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plJumpTo'], {
     pl: {
       videoIndex: 0, lastT: 50, fired: [true], playlistDone: false,
       playerLoading: false, playerError: null, playbackEnded: false,
@@ -13040,7 +13040,7 @@ test('같은 tick에 지난 문항은 모두 queue에 남고 첫 문항만 연�
     plRenderTransition() {}, plCompletePlaylist() {}, plEffectiveEnd() { return 100; },
     $() { return null; }, document: { getElementById() { return null; } }, Date, fmtTime() { return ''; }
   };
-  loadStageFunctions(['plDetectSeek', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], context);
+  loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick'], context);
 
   context.plTick();
 
@@ -13079,7 +13079,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
     plRenderTransition() {}, plCompletePlaylist() {}, plEffectiveEnd() { return 100; },
     $() { return null; }, document: { getElementById() { return null; } }, Date, fmtTime() { return ''; }
   };
-  loadStageFunctions(['plDetectSeek', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plCloseQuestion'], context);
+  loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plQueueDueQuestions', 'plOpenNextDueQuestion', 'plTick', 'plCloseQuestion'], context);
 
   context.plTick();
   assert.deepEqual(context.pl.dueQuestions, [1]);
@@ -13430,7 +13430,7 @@ test('YouTube가 PLAYING을 순간 보고해도 재생 시간이 전진하지 �
 
 test('player tick은 quiz trigger가 준 문항만 queue하고 완료 직후 같은 시각을 다시 넣지 않는다', () => {
   const trigger = require('../quiz-trigger-core.js').create([{ t: 174, videoIndex: 0 }]);
-  const ctx = loadStageFunctions(['plDetectSeek', 'plQueueDueQuestions'], {
+  const ctx = loadStageFunctions(['plDetectSeek', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plQueueDueQuestions'], {
     pl: {
       videoIndex: 0, dueQuestions: [], fired: [false], quizTrigger: trigger,
       flatQuestions: [{ t: 174, videoIndex: 0 }]
@@ -16098,4 +16098,70 @@ test('비로그인 진행 안내는 다섯 단계와 주의사항을 갖추고 �
   assert.equal(open, true);
   assert.equal(ctx.plCloseGuestGuide(), true);
   assert.equal(open, false);
+});
+
+function autoResumeContext(settings, live, patch) {
+  const state = Object.assign({
+    set: { settings: Object.assign({ revealMode: 'timer', autoResumeSec: 5 }, settings) },
+    live: Object.assign({ q: 0, revealed: true, publicAnswer: { answer: 0 } }, live),
+    closeFlight: null
+  }, patch || {});
+  const context = {
+    pl: state,
+    serverNow() { return context.now; },
+    now: 1_000_000,
+    Number, Math, Date
+  };
+  loadStageFunctions(['plAutoResumeRemainingMs', 'plAutoResumeDue'], context);
+  return context;
+}
+
+test('정답 공개 뒤 설정한 시간이 지나면 자동으로 계속 재생한다', () => {
+  const ctx = autoResumeContext();
+
+  assert.equal(ctx.plAutoResumeRemainingMs(), 5000);
+  assert.equal(ctx.plAutoResumeDue(), false);
+
+  ctx.now += 4000;
+  assert.equal(ctx.plAutoResumeRemainingMs(), 1000);
+  assert.equal(ctx.plAutoResumeDue(), false);
+
+  ctx.now += 1000;
+  assert.equal(ctx.plAutoResumeDue(), true);
+});
+
+test('0초로 두면 교사가 누를 때까지 기다린다', () => {
+  const ctx = autoResumeContext({ autoResumeSec: 0 });
+
+  assert.equal(ctx.plAutoResumeRemainingMs(), null);
+  ctx.now += 600_000;
+  assert.equal(ctx.plAutoResumeDue(), false);
+});
+
+test('정답이 공개되기 전에는 자동으로 넘어가지 않는다', () => {
+  const ctx = autoResumeContext(undefined, { revealed: false, publicAnswer: undefined });
+
+  assert.equal(ctx.plAutoResumeRemainingMs(), null);
+  ctx.now += 600_000;
+  assert.equal(ctx.plAutoResumeDue(), false);
+});
+
+test('학생 제출 마감이 안 끝났으면 시간이 지나도 기다린다', () => {
+  const ctx = autoResumeContext(undefined, { accepting: true, submitGraceUntil: 1_010_000 });
+
+  ctx.plAutoResumeRemainingMs();
+  ctx.now += 5000;
+  assert.equal(ctx.plAutoResumeDue(), false);
+
+  ctx.now = 1_010_001;
+  assert.equal(ctx.plAutoResumeDue(), true);
+});
+
+test('문항이 바뀌면 자동 재생 시각을 새로 잡는다', () => {
+  const ctx = autoResumeContext();
+
+  assert.equal(ctx.plAutoResumeRemainingMs(), 5000);
+  ctx.now += 3000;
+  ctx.pl.live = { q: 1, revealed: true, publicAnswer: { answer: 1 } };
+  assert.equal(ctx.plAutoResumeRemainingMs(), 5000);
 });

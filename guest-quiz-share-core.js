@@ -95,6 +95,8 @@
       limitSec: Number.isFinite(settings.limitSec) ? finite(settings.limitSec, 'limitSec', 0, 600) : 20,
       revealDelaySec: Number.isFinite(settings.revealDelaySec)
         ? finite(settings.revealDelaySec, 'revealDelaySec', 0, 3600) : 0,
+      autoResumeSec: Number.isFinite(settings.autoResumeSec)
+        ? finite(settings.autoResumeSec, 'autoResumeSec', 0, 60) : 0,
       autoPause: settings.autoPause !== false,
       videoCount: set.videos.length,
       questionCount: 0,

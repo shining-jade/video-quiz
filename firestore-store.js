@@ -4419,6 +4419,7 @@
           revealMode: parent.revealMode,
           limitSec: parent.limitSec,
           revealDelaySec: parent.revealDelaySec,
+          autoResumeSec: Number(parent.autoResumeSec) || 0,
           autoPause: parent.autoPause
         },
         videos: playlist

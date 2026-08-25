@@ -807,10 +807,10 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="editor-draft.js"></script>
 <script src="editor-history-core.js?v=20260825-browser"></script>
 <script src="playlist-core.js"></script>
-<script src="guest-quiz-share-core.js?v=20260825-schema"></script>
+<script src="guest-quiz-share-core.js?v=20260826-resume"></script>
 <script src="public-author-label-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
-<script src="firestore-store.js?v=20260825-runs"></script>
+<script src="firestore-store.js?v=20260826-resume"></script>
 <script src="choice-order-core.js"></script>
 <script src="image-lightbox-core.js"></script>
 <script src="quiz-trigger-core.js?v=20260825-seek"></script>
@@ -1240,7 +1240,8 @@ const DEFAULT_SETTINGS = {
   revealMode: 'timer',    // instant | timer | manual | never
   limitSec: 20,           // 문항당 응답 제한 시간 (0 = 무제한, 교사가 닫을 때까지)
   revealDelaySec: 5,      // revealMode='timer' 일 때 오픈 후 정답 공개까지
-  autoPause: true         // 퀴즈가 뜰 때 영상 자동 일시정지
+  autoResumeSec: 0,       // 정답 공개 후 자동으로 계속 재생까지 (0 = 교사가 직접)
+  autoPause: true         // 퀴즈가 뜨면 영상은 항상 멈춘다 (설정 없음, 저장 형식 유지용)
 };
 const REVEAL_LABEL = {
   instant: '제출 즉시 공개',
@@ -1254,7 +1255,9 @@ function normSettings(s) {
   if (!REVEAL_LABEL[o.revealMode]) o.revealMode = DEFAULT_SETTINGS.revealMode;
   o.limitSec = Math.max(0, Math.min(600, Number(o.limitSec) || 0));
   o.revealDelaySec = Math.max(0, Math.min(600, Number(o.revealDelaySec) || 0));
-  o.autoPause = o.autoPause !== false;
+  o.autoResumeSec = Math.max(0, Math.min(60, Number(o.autoResumeSec) || 0));
+  // 퀴즈가 뜨면 영상은 항상 멈춘다. 예전 세트에 false가 남아 있어도 무시한다.
+  o.autoPause = true;
   return o;
 }
 /* ── 문항 유형 ──────────────────────────────────────────────────────── */
@@ -4510,7 +4513,7 @@ function mkSettingsSummary() {
     REVEAL_LABEL[s.revealMode],
     s.limitSec ? '제한 ' + s.limitSec + '초' : '시간 제한 없음',
     (s.revealMode === 'timer' ? s.revealDelaySec + '초 뒤 공개' : null),
-    s.autoPause ? '퀴즈 뜨면 일시정지' : '퀴즈 떠도 계속 재생'
+    s.autoResumeSec ? '공개 후 ' + s.autoResumeSec + '초 뒤 계속 재생' : '계속 재생은 교사가'
   ].filter(Boolean).join(' · ');
 }
 
@@ -4553,18 +4556,20 @@ function mkRenderSettings() {
       '<div class="field" id="mk-delay-field"><label class="f">정답 자동 공개까지</label>' +
         '<div class="unit-wrap"><input type="number" id="mk-delay" min="0" max="600" value="' + mk.settings.revealDelaySec + '"><span class="unit">초</span></div>' +
         '<div class="hint">퀴즈가 뜬 뒤 이만큼 지나면 학생 화면에 정답·해설이 뜹니다.</div></div>' +
-      '<div class="field"><label class="f">퀴즈가 뜰 때 영상</label>' +
-        '<select id="mk-pause">' +
-          '<option value="1"' + (mk.settings.autoPause ? ' selected' : '') + '>자동으로 일시정지</option>' +
-          '<option value="0"' + (!mk.settings.autoPause ? ' selected' : '') + '>계속 재생</option>' +
-        '</select>' +
-        '<div class="hint">보통은 일시정지가 편합니다.</div></div>' +
+      '<div class="field"><label class="f">정답 공개 후 계속 재생</label>' +
+        '<div class="unit-wrap"><input type="number" id="mk-resume" min="0" max="60" ' +
+          'value="' + mk.settings.autoResumeSec + '"><span class="unit">초</span></div>' +
+        '<div class="hint">정답·해설이 뜬 뒤 이만큼 지나면 퀴즈창이 닫히고 영상이 이어집니다. ' +
+          '<b>0</b>을 넣으면 교사가 [계속 재생]을 누를 때까지 기다립니다.</div></div>' +
     '</div>';
 
   $('#mk-reveal').onchange = e => { mk.settings.revealMode = e.target.value; mkRevealHint(); mkMarkDirty(); };
   $('#mk-limit').oninput = e => { mk.settings.limitSec = Math.max(0, Number(e.target.value) || 0); mkMarkDirty(); };
   $('#mk-delay').oninput = e => { mk.settings.revealDelaySec = Math.max(0, Number(e.target.value) || 0); mkMarkDirty(); };
-  $('#mk-pause').onchange = e => { mk.settings.autoPause = e.target.value === '1'; mkMarkDirty(); };
+  $('#mk-resume').oninput = e => {
+    mk.settings.autoResumeSec = Math.max(0, Math.min(60, Number(e.target.value) || 0));
+    mkMarkDirty();
+  };
   mkRevealHint();
 }
 
@@ -7680,6 +7685,7 @@ function plTick() {
     if (reachedEnd) {
       try { if (pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
     }
+    if (plAutoResumeDue()) plCloseQuestion().catch(() => {});
     return;
   }
 
@@ -7881,9 +7887,48 @@ async function plContinuePlayback(state) {
   }
 }
 
+/**
+ * 정답이 공개된 뒤 설정한 시간이 지나면 교사가 누르지 않아도 영상을 이어 간다.
+ * 정답을 아예 공개하지 않는 세트(never)는 교사가 직접 넘기도록 그대로 둔다.
+ */
+function plAutoResumeRemainingMs() {
+  const state = pl;
+  if (!state || !state.live || !state.set) return null;
+  const seconds = Number(state.set.settings && state.set.settings.autoResumeSec) || 0;
+  const questionIndex = Number(state.live.q);
+  const revealed = !!(state.live.revealed && state.live.publicAnswer);
+  if (seconds <= 0 || questionIndex < 0 || !revealed) {
+    state.autoResumeAt = 0;
+    state.autoResumeQuestion = -1;
+    return null;
+  }
+  const now = typeof serverNow === 'function' ? serverNow() : Date.now();
+  if (state.autoResumeQuestion !== questionIndex || !state.autoResumeAt) {
+    state.autoResumeQuestion = questionIndex;
+    state.autoResumeAt = now + seconds * 1000;
+  }
+  return Math.max(0, state.autoResumeAt - now);
+}
+
+function plAutoResumeDue() {
+  const state = pl;
+  const remaining = plAutoResumeRemainingMs();
+  if (remaining === null || remaining > 0) return false;
+  // 학생 제출 마감이 아직 안 끝났으면 계속 재생이 거부된다. 끝난 뒤에 넘긴다.
+  const graceUntil = Number(state.live.submitGraceUntil);
+  const now = typeof serverNow === 'function' ? serverNow() : Date.now();
+  if (state.live.accepting !== false && Number.isFinite(graceUntil) && now < graceUntil) return false;
+  if (state.closeFlight) return false;
+  state.autoResumeAt = 0;
+  state.autoResumeQuestion = -1;
+  return true;
+}
+
 function plCloseQuestion() {
   const state = pl;
   if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
+  state.autoResumeAt = 0;
+  state.autoResumeQuestion = -1;
   const submitGraceUntil = Number(state.live.submitGraceUntil);
   const closeNow = typeof serverNow === 'function' ? serverNow() : Date.now();
   if (state.live.accepting !== false &&
@@ -8303,6 +8348,8 @@ function plRenderOverlay() {
   const closeWaiting = pl.live.accepting !== false && closeWaitMs > 0;
   const overlayRevealed = !!(pl.live.revealed && pl.live.publicAnswer);
   const canContinue = mode === 'never' || overlayRevealed;
+  const autoResumeLeft = typeof plAutoResumeRemainingMs === 'function'
+    ? plAutoResumeRemainingMs() : null;
 
   if (!ov) {
     ov = document.createElement('div');
@@ -8347,7 +8394,9 @@ function plRenderOverlay() {
         (!canContinue ? ' style="display:none"' : '') + '>' +
         (closeBusy ? '저장 중…' : closeWaiting
           ? '제출 정리 중…'
-          : '▶ 계속 재생') + '</button>' +
+          : autoResumeLeft !== null
+            ? '▶ 계속 재생 (' + Math.ceil(autoResumeLeft / 1000) + '초)'
+            : '▶ 계속 재생') + '</button>' +
       '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
     '</div>' +
   '</div>';
@@ -8521,7 +8570,11 @@ function plTimerTick() {
     if (closeButton.style) {
       closeButton.style.display = (revealMode === 'never' || plRevealed()) && waitMs === 0 ? '' : 'none';
     }
-    closeButton.textContent = '▶ 계속 재생';
+    const autoResumeLeft = typeof plAutoResumeRemainingMs === 'function'
+      ? plAutoResumeRemainingMs() : null;
+    closeButton.textContent = autoResumeLeft === null
+      ? '▶ 계속 재생'
+      : '▶ 계속 재생 (' + Math.ceil(autoResumeLeft / 1000) + '초)';
   }
   if (revealButton && !plRevealed()) {
     const revealMode = pl.set && pl.set.settings ? pl.set.settings.revealMode : 'timer';

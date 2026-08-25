@@ -108,3 +108,29 @@ test('share lifecycle never revives a revoked identity', () => {
   assert.throws(() => Core.nextShareState(revoked, { type: 'refresh', revision: 2 }, 30), /revoked/i);
   assert.throws(() => Core.nextShareState(revoked, { type: 'create', shareId }, 30), /new share/i);
 });
+
+test('공유 링크에도 정답 공개 후 자동 재생 설정이 따라간다', () => {
+  const set = {
+    title: '자동 재생 세트',
+    settings: { revealMode: 'timer', limitSec: 20, revealDelaySec: 5, autoResumeSec: 7 },
+    videos: [{
+      videoId: 'abcdefghijk', url: 'https://youtu.be/abcdefghijk', startSec: 0, endSec: null,
+      questions: [{ type: 'choice', t: 10, text: '문제', choices: ['A', 'B'], answer: 0 }]
+    }]
+  };
+
+  assert.equal(Core.projectQuizSet(set, {}).parent.autoResumeSec, 7);
+});
+
+test('자동 재생 설정이 없으면 교사가 직접 넘기는 0으로 둔다', () => {
+  const set = {
+    title: '기본 세트',
+    settings: { revealMode: 'timer' },
+    videos: [{
+      videoId: 'abcdefghijk', url: 'https://youtu.be/abcdefghijk', startSec: 0, endSec: null,
+      questions: [{ type: 'choice', t: 10, text: '문제', choices: ['A', 'B'], answer: 0 }]
+    }]
+  };
+
+  assert.equal(Core.projectQuizSet(set, {}).parent.autoResumeSec, 0);
+});
