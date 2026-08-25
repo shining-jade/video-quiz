@@ -817,7 +817,6 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-functions-compat.js"></script>
 <script src="firestore-core.js"></script>
 <script src="class-planning-core.js"></script>
 <script src="editor-draft.js"></script>
@@ -859,8 +858,6 @@ const firebaseConfig = {
 };
 if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
-const functions = typeof firebase.app === 'function' && typeof firebase.app().functions === 'function'
-  ? firebase.app().functions('asia-northeast3') : null;
 const store = FirestoreStore.createFirestoreStore(db, firebase.firestore.FieldValue, () => Date.now());
 const SV_TS = firebase.firestore.FieldValue.serverTimestamp();
 
@@ -5436,12 +5433,8 @@ function mkExplanationField(q, videoIndex, questionIndex) {
     '</div>';
 }
 
-function guestOwnerTokenKey(ownerUid, shareId) {
-  return 'vq_guest_share_token:' + String(ownerUid || '') + ':' + String(shareId || '');
-}
-
-function guestShareUrl(shareId, token) {
-  return linkTo('guest-play/' + encodeURIComponent(shareId) + '?token=' + encodeURIComponent(token));
+function guestShareUrl(shareId) {
+  return linkTo('guest-play/' + encodeURIComponent(shareId));
 }
 
 async function copyGuestRunLink(setId) {
@@ -5453,26 +5446,16 @@ async function copyGuestRunLink(setId) {
   renderSetList();
   try {
     let share = await store.getOwnedGuestQuizShare(setId, actor);
-    let token = share && share.status === 'active'
-      ? lsGet(guestOwnerTokenKey(actor.uid, share.shareId)) : '';
-    if (share && share.status === 'active' && !token) {
-      if (!confirm('이 기기에는 기존 링크의 비밀값이 없습니다. 기존 링크를 해제하고 새 링크를 발급할까요?')) return;
-      await store.revokeGuestQuizShare(setId, actor);
-      share = null;
-    }
     if (!share || share.status !== 'active') {
       const snapshot = await store.getQuizSetSnapshot(setId);
       if (!snapshot || !snapshot.setSnapshot) throw new Error('공유할 원본 세트를 찾을 수 없습니다.');
-      token = GuestQuizShareCore.randomToken(32, window.crypto);
-      const tokenHash = await GuestQuizShareCore.sha256Hex(token, window.crypto);
       const projection = GuestQuizShareCore.projectQuizSet(
         snapshot.setSnapshot, snapshot.snapshotImages || {}
       );
       const shareId = GuestQuizShareCore.randomToken(32, window.crypto);
-      share = await store.createGuestQuizShare(setId, tokenHash, projection, actor, shareId);
-      lsSet(guestOwnerTokenKey(actor.uid, share.shareId), token);
+      share = await store.createGuestQuizShare(setId, projection, actor, shareId);
     }
-    copyText(guestShareUrl(share.shareId, token));
+    copyText(guestShareUrl(share.shareId));
     item.guestShareStatus = 'active';
     item.guestShareId = share.shareId;
     item.guestShareRevision = share.revision;
@@ -5498,7 +5481,6 @@ async function revokeGuestRunLink(setId) {
   renderSetList();
   try {
     const result = await store.revokeGuestQuizShare(setId, actor);
-    lsDel(guestOwnerTokenKey(actor.uid, result.shareId));
     item.guestShareStatus = 'revoked';
     item.guestShareId = result.shareId;
     toast('비로그인 진행 링크를 해제했습니다');
@@ -6253,45 +6235,15 @@ function guestLinkUnavailable(error) {
     '<p>' + esc(message.replace('사용할 수 없는 진행 링크입니다. ', '')) + '</p></div></div></div>';
 }
 
-async function ensureGuestCapability(route) {
+async function loadFreeGuestShare(route) {
   const auth = firebase.auth();
   let current = auth.currentUser;
-  if (current && typeof current.getIdTokenResult === 'function') {
-    const tokenResult = await current.getIdTokenResult();
-    const claims = tokenResult && tokenResult.claims || {};
-    if (GuestQuizShareCore.guestClaimsValid(
-      claims, route.shareId, claims.guestShareRevision, Math.floor(Date.now() / 1000)
-    )) {
-      const cached = {
-        user: current,
-        shareId: route.shareId,
-        revision: claims.guestShareRevision,
-        sourceSetId: lsGet('vq_guest_source_set:' + current.uid + ':' + route.shareId),
-        sourceOwnerUid: lsGet('vq_guest_source_owner:' + current.uid + ':' + route.shareId)
-      };
-      if (cached.sourceSetId && cached.sourceOwnerUid) return cached;
-    }
-  }
   if (current && !current.isAnonymous) await auth.signOut();
   current = auth.currentUser;
-  const anonymous = current && current.isAnonymous
+  const user = current && current.isAnonymous
     ? current : (await auth.signInAnonymously()).user;
-  if (!functions) throw new Error('비로그인 진행 서비스를 불러오지 못했습니다.');
-  const callable = functions.httpsCallable('exchangeGuestQuizShare');
-  const response = await callable({ shareId: route.shareId, token: route.token });
-  const capability = response && response.data || {};
-  if (!capability.customToken || capability.shareId !== route.shareId ||
-      !Number.isSafeInteger(capability.revision) || !capability.sourceSetId || !capability.sourceOwnerUid) {
-    throw new Error('guest capability 응답이 유효하지 않습니다.');
-  }
-  const credential = await auth.signInWithCustomToken(capability.customToken);
-  const tokenResult = await credential.user.getIdTokenResult(true);
-  if (!GuestQuizShareCore.guestClaimsValid(
-    tokenResult.claims, route.shareId, capability.revision, Math.floor(Date.now() / 1000)
-  )) throw new Error('guest capability claim이 일치하지 않습니다.');
-  lsSet('vq_guest_source_set:' + credential.user.uid + ':' + route.shareId, capability.sourceSetId);
-  lsSet('vq_guest_source_owner:' + credential.user.uid + ':' + route.shareId, capability.sourceOwnerUid);
-  return { ...capability, user: credential.user };
+  const loaded = await store.loadActiveGuestQuizShare(route.shareId);
+  return { ...loaded, guestUser: user };
 }
 
 function screenGuestPlay(shareId, queryString) {
@@ -6300,15 +6252,9 @@ function screenGuestPlay(shareId, queryString) {
   const request = { cancelled: false };
   onCleanup(() => { request.cancelled = true; });
   APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="empty">공유받은 퀴즈를 준비하는 중…</div></div>';
-  ensureGuestCapability(route).then(async capability => {
+  loadFreeGuestShare(route).then(loaded => {
     if (request.cancelled) return;
-    if (!capability.sourceSetId || !capability.sourceOwnerUid) throw new Error('공유 출처 정보가 없습니다.');
-    const loaded = await store.loadGuestQuizRevision(
-      capability.shareId, capability.revision,
-      { sourceSetId: capability.sourceSetId, sourceOwnerUid: capability.sourceOwnerUid }
-    );
-    if (request.cancelled) return;
-    screenPlay(capability.sourceSetId, null, { ...loaded, guestUser: capability.user });
+    screenPlay(loaded.sourceSetId, null, loaded);
   }).catch(error => { if (!request.cancelled) guestLinkUnavailable(error); });
 }
 

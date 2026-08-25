@@ -118,16 +118,19 @@ test('public quiz library projection core loads after playlist normalization and
   assert.ok(storeIndex < applicationIndex, 'firestore store must load before inline application code');
 });
 
-test('passwordless guest route loads capability dependencies and never uses the teacher route guard', () => {
+test('free passwordless guest route uses anonymous auth and never uses the teacher route guard', () => {
   const html = read('index.html');
   const playlistIndex = html.indexOf('<script src="playlist-core.js"></script>');
   const guestCoreIndex = html.indexOf('<script src="guest-quiz-share-core.js"></script>');
   const storeIndex = html.indexOf('<script src="firestore-store.js"></script>');
   assert.ok(playlistIndex >= 0 && guestCoreIndex > playlistIndex && storeIndex > guestCoreIndex);
-  assert.match(html, /firebase-functions-compat\.js/);
+  assert.doesNotMatch(html, /firebase-functions-compat\.js/);
   assert.match(html, /case 'guest-play':\s*screenGuestPlay/);
   assert.doesNotMatch(html, /case 'guest-play':\s*requireTeacher/);
-  assert.match(html, /exchangeGuestQuizShare/);
+  assert.match(html, /signInAnonymously/);
+  assert.match(html, /loadActiveGuestQuizShare/);
+  assert.doesNotMatch(html, /exchangeGuestQuizShare|signInWithCustomToken|guestOwnerTokenKey/);
+  assert.doesNotMatch(html, /guest-play\/[^'"\s]+\?token=/);
   assert.match(html, /비로그인 진행 링크/);
   assert.match(html, /사용할 수 없는 진행 링크입니다\. 만든 분에게 새 링크를 요청해 주세요/);
   assert.match(html, /case 'play':\s*requireTeacher/);
