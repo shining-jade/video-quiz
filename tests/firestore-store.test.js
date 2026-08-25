@@ -15885,3 +15885,113 @@ test('권한 거부처럼 다시 시도해도 소용없는 실패는 곧바로 �
   await assert.rejects(() => ctx.stJoinWithRetry('s1', 'stu-1', { num: 1 }, () => Promise.resolve()));
   assert.equal(calls, 1);
 });
+
+/* ── 비로그인 진행 반 복구 ─────────────────────────────────────────── */
+function guestResumeContext(overrides) {
+  const options = overrides || {};
+  const store = Object.assign({
+    async getSession() { return options.session; },
+    async activateSessionAllocation() { return options.activated !== false; }
+  }, options.store || {});
+  const state = {
+    guestLoad: {
+      guestUser: { uid: 'guest-1' },
+      shareId: 'S'.repeat(43),
+      setSnapshot: { videos: [{ questions: [{ t: 1, text: 'Q' }] }] },
+      snapshotImages: {}
+    },
+    setId: 'set-1'
+  };
+  const stored = options.stored === undefined ? {
+    sessionId: 'sess-1', code: 'ABC123',
+    allocationToken: 'allocation-token-1234', sourceSetId: 'set-1'
+  } : options.stored;
+  const removed = [];
+  const context = {
+    pl: state,
+    store,
+    imgCache: {},
+    PlaylistCore: require('../playlist-core.js'),
+    lsGet() { return stored === null ? '' : JSON.stringify(stored); },
+    lsDel(key) { removed.push(key); },
+    plStartSessionHeartbeat() { context.heartbeatStarted = true; },
+    renderPlayRun() { context.rendered = true; },
+    toast(message) { context.notice = message; },
+    console: { error() {} },
+    JSON, Object, String, Number, Array
+  };
+  context.state = state;
+  context.removed = removed;
+  loadStageFunctions([
+    'guestActiveSessionKey', 'readGuestActiveSession', 'clearGuestActiveSession',
+    'guestSessionIsResumable', 'plResumeGuestSession'
+  ], context);
+  return context;
+}
+
+test('새로고침해도 진행 중이던 비로그인 반에 같은 코드로 다시 붙는다', async () => {
+  const ctx = guestResumeContext({
+    session: {
+      teacherUid: 'guest-1', status: 'live', sourceShareId: 'S'.repeat(43)
+    }
+  });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), true);
+  assert.equal(ctx.state.sessionId, 'sess-1');
+  assert.equal(ctx.state.code, 'ABC123');
+  assert.equal(ctx.state.allocationToken, 'allocation-token-1234');
+  assert.equal(ctx.heartbeatStarted, true);
+  assert.equal(ctx.rendered, true);
+  assert.match(ctx.notice, /ABC123/);
+});
+
+test('이미 끝난 반에는 다시 붙지 않고 저장 정보를 지운다', async () => {
+  const ctx = guestResumeContext({
+    session: { teacherUid: 'guest-1', status: 'ended', sourceShareId: 'S'.repeat(43) }
+  });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
+  assert.equal(ctx.removed.length, 1);
+  assert.equal(ctx.rendered, undefined);
+});
+
+test('다른 사람이 연 반에는 붙지 않는다', async () => {
+  const ctx = guestResumeContext({
+    session: { teacherUid: 'someone-else', status: 'live', sourceShareId: 'S'.repeat(43) }
+  });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
+  assert.equal(ctx.removed.length, 1);
+});
+
+test('다른 공유 링크의 반에는 붙지 않는다', async () => {
+  const ctx = guestResumeContext({
+    session: { teacherUid: 'guest-1', status: 'live', sourceShareId: 'X'.repeat(43) }
+  });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
+});
+
+test('활성화 토큰이 맞지 않으면 붙지 않고 저장 정보를 지운다', async () => {
+  const ctx = guestResumeContext({
+    session: { teacherUid: 'guest-1', status: 'live', sourceShareId: 'S'.repeat(43) },
+    activated: false
+  });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
+  assert.equal(ctx.removed.length, 1);
+  assert.equal(ctx.rendered, undefined);
+});
+
+test('저장된 반이 없으면 조용히 시작 화면으로 간다', async () => {
+  const ctx = guestResumeContext({ stored: null });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
+  assert.equal(ctx.removed.length, 0);
+});
+
+test('저장 정보가 깨져 있으면 복구를 시도하지 않는다', async () => {
+  const ctx = guestResumeContext({ stored: { sessionId: 'sess-1', code: '', allocationToken: 'x' } });
+
+  assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
+});

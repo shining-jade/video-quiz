@@ -5815,6 +5815,9 @@ function screenPlay(setId, routeClassPlan, guestLoad) {
       const selected = await plLoadSelectedClassPlan(state, state.routeClassPlan);
       if (!selected || pl !== state) return;
     }
+    // 비로그인 진행은 새로고침해도 학생에게 알려준 반 코드를 잃지 않도록 먼저 이어붙인다.
+    if (guestLoad && await plResumeGuestSession(state)) return;
+    if (pl !== state) return;
     renderPlayIntro();
     if (state.routeClassPlan && state.routeClassPlan.mode === 'edit') plOpenClassPlanDialog();
     if (state.routeClassPlan && state.routeClassPlan.mode === 'start') plStartSession();
@@ -6471,6 +6474,81 @@ function plStartSession() {
   }).finally(() => { if (pl === state) state.startingSession = false; });
 }
 
+/* ── 비로그인 진행 중이던 반 복구 ─────────────────────────────────────
+   수업 중 새로고침하거나 브라우저가 죽어도 학생에게 알려준 반 코드를 잃지 않도록,
+   시작할 때 저장해 둔 정보로 같은 반에 다시 붙는다. 서버에서 그 반이 아직 내
+   것이고 끝나지 않았음을 확인한 뒤에만 복구한다. */
+function guestActiveSessionKey(uid, shareId) {
+  return 'vq_guest_active_session:' + uid + ':' + shareId;
+}
+
+function readGuestActiveSession(uid, shareId) {
+  if (!uid || !shareId) return null;
+  let parsed = null;
+  try { parsed = JSON.parse(lsGet(guestActiveSessionKey(uid, shareId)) || 'null'); } catch (e) { return null; }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const sessionId = String(parsed.sessionId || '');
+  const code = String(parsed.code || '');
+  const allocationToken = String(parsed.allocationToken || '');
+  if (!sessionId || !code || allocationToken.length < 16) return null;
+  return { sessionId, code, allocationToken, sourceSetId: String(parsed.sourceSetId || '') };
+}
+
+function clearGuestActiveSession(uid, shareId) {
+  lsDel(guestActiveSessionKey(uid, shareId));
+}
+
+/** 저장된 반이 지금도 이어서 진행할 수 있는 상태인지 서버 기록으로 확인한다. */
+function guestSessionIsResumable(session, uid, shareId) {
+  return !!session && session.teacherUid === uid &&
+    String(session.sourceShareId || '') === String(shareId) &&
+    ['active', 'live'].includes(String(session.status || ''));
+}
+
+async function plResumeGuestSession(state) {
+  if (!state || pl !== state || !state.guestLoad) return false;
+  const uid = state.guestLoad.guestUser && state.guestLoad.guestUser.uid;
+  const shareId = state.guestLoad.shareId;
+  const saved = readGuestActiveSession(uid, shareId);
+  if (!saved) return false;
+  try {
+    const session = await store.getSession(saved.sessionId);
+    if (pl !== state) return false;
+    if (!guestSessionIsResumable(session, uid, shareId)) {
+      clearGuestActiveSession(uid, shareId);
+      return false;
+    }
+    // 활성화를 다시 걸어 학생 접속 유지 시간을 되살린다. 토큰이 다르면 내 반이 아니다.
+    const activated = await store.activateSessionAllocation(
+      saved.sessionId, saved.code, uid, saved.allocationToken
+    );
+    if (pl !== state) return false;
+    if (activated !== true) {
+      clearGuestActiveSession(uid, shareId);
+      return false;
+    }
+    Object.assign(state, {
+      sessionId: saved.sessionId,
+      code: saved.code,
+      allocationToken: saved.allocationToken,
+      snapshotVersion: 1,
+      set: state.guestLoad.setSnapshot,
+      videos: state.guestLoad.setSnapshot.videos,
+      flatQuestions: PlaylistCore.flattenQuestions(state.guestLoad.setSnapshot.videos)
+    });
+    Object.entries(state.guestLoad.snapshotImages || {}).forEach(([key, data]) => {
+      imgCache[saved.sessionId + '/' + key] = data;
+    });
+    plStartSessionHeartbeat(state, { uid, email: '' }, null, saved.allocationToken);
+    renderPlayRun();
+    toast('진행 중이던 반 ' + saved.code + '에 다시 연결했습니다');
+    return true;
+  } catch (error) {
+    console.error('guest session resume failed', error && error.code || 'error');
+    return false;
+  }
+}
+
 async function plStartGuestSession(state) {
   if (!state || pl !== state || state.startingSession || !state.guestLoad) return null;
   const current = firebase.auth().currentUser;
@@ -6513,7 +6591,7 @@ async function plStartGuestSession(state) {
     Object.entries(state.guestLoad.snapshotImages || {}).forEach(([key, data]) => {
       imgCache[sessionId + '/' + key] = data;
     });
-    lsSet('vq_guest_active_session:' + current.uid + ':' + state.guestLoad.shareId, JSON.stringify({
+    lsSet(guestActiveSessionKey(current.uid, state.guestLoad.shareId), JSON.stringify({
       sessionId, code, allocationToken, sourceSetId: state.setId
     }));
     plStartSessionHeartbeat(state, { uid: current.uid, email: '' }, null, allocationToken);
@@ -7888,6 +7966,10 @@ async function plEndSession() {
   toast('진행을 종료했습니다');
   if (state.actorType === 'guest') {
     if (typeof state.stopActivationHeartbeat === 'function') state.stopActivationHeartbeat();
+    // 끝낸 반은 복구 대상이 아니다. 남겨 두면 다음 방문 때 끝난 반에 붙으려 한다.
+    if (state.guestLoad && state.guestLoad.guestUser) {
+      clearGuestActiveSession(state.guestLoad.guestUser.uid, state.guestLoad.shareId);
+    }
     APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="card"><div class="empty">' +
       '<h2 style="margin-bottom:10px">수업 진행을 종료했습니다</h2>' +
       '<p>학생 응답과 결과는 운영자에게 안전하게 저장되었습니다.</p></div></div></div>';
