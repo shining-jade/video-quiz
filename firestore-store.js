@@ -4733,6 +4733,25 @@
       );
     }
 
+    /**
+     * 실행 기록에서 반 하나를 지운다. 지우기 전에 그 반이 정말 이 세트로 진행된
+     * 내 반인지 서버 기록으로 확인해, 잘못된 id로 남의 반을 지우는 일을 막는다.
+     */
+    async function deleteOwnedDerivedSession(setId, sessionId, actor) {
+      const id = canonicalPublicationId(setId, 'setId');
+      const target = canonicalPublicationId(sessionId, 'sessionId');
+      const current = actor || {};
+      const source = await db.doc('quiz_sets/' + id).get().then(snapshotValue);
+      requireGuestShareOwner(source, current);
+      const session = await db.doc('sessions/' + target).get().then(sessionValue);
+      if (!session || session.sessionActorType !== 'guest' ||
+          session.sourceOwnerUid !== current.uid || session.sourceSetId !== id) {
+        throw new Error('이 세트로 진행한 반이 아닙니다.');
+      }
+      await purgeSessions([target]);
+      return true;
+    }
+
     async function purgeSessions(sessionIds) {
       const references = [];
       for (const sessionId of [...new Set(sessionIds || [])]) {
@@ -5564,6 +5583,7 @@
       gradeAnswer,
       listSessions,
       listOwnedDerivedSessions,
+      deleteOwnedDerivedSession,
       purgeSessions,
       getBoard,
       getOwnScore,

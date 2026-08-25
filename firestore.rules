@@ -1819,10 +1819,14 @@ service cloud.firestore {
           sessionIsJoinable(sessionId) &&
           validStudent(studentId) &&
           request.resource.data.uid == resource.data.uid;
+        // 진행 중인 반에서 학생만 지우면 registeredStudentCount가 어긋난다. 다만 반
+        // 문서까지 같은 요청에서 함께 지우는 정리(purge)라면 셀 대상 자체가 사라지므로
+        // 상태와 무관하게 허용한다. 진행 중으로 멈춰 남은 반을 지울 길이 이것뿐이다.
         allow delete: if sessionCounterMigrationUnlocked() &&
           (isAdmin() || ownsSession(sessionId)) &&
-          get(/databases/$(database)/documents/sessions/$(sessionId)).data.status in
-            ['ended', 'aborted'];
+          (get(/databases/$(database)/documents/sessions/$(sessionId)).data.status in
+              ['ended', 'aborted'] ||
+            !existsAfter(/databases/$(database)/documents/sessions/$(sessionId)));
         allow read, write: if false;
       }
 

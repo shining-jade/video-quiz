@@ -810,7 +810,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="guest-quiz-share-core.js?v=20260825-schema"></script>
 <script src="public-author-label-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
-<script src="firestore-store.js?v=20260825-guestend"></script>
+<script src="firestore-store.js?v=20260825-runs"></script>
 <script src="choice-order-core.js"></script>
 <script src="image-lightbox-core.js"></script>
 <script src="quiz-trigger-core.js?v=20260825-seek"></script>
@@ -4978,12 +4978,16 @@ function screenGuestRunHistory(setId) {
       // 그동안 화면에서 들어갈 길이 없어 확인이 불가능했다.
       const resultLink = session.id && session.status !== 'aborted'
         ? '<a class="btn sm" href="#/live/' + esc(session.id) + '">📊 결과 보기</a>' : '';
-      return '<div class="card" style="margin-bottom:12px"><div class="row" style="align-items:center">' +
+      const removeButton = session.id
+        ? '<button class="btn sm danger" onclick="deleteGuestRunSession(\'' + esc(setId) + '\', \'' +
+          esc(session.id) + '\', \'' + esc(session.code || '') + '\', ' + count + ')">🗑 삭제</button>' : '';
+      return '<div class="card" style="margin-bottom:12px" data-guest-run="' + esc(session.id || '') + '">' +
+        '<div class="row" style="align-items:center">' +
         '<div><h2 style="margin-bottom:5px">' + esc(session.label || '이름 없는 반') + '</h2>' +
         '<div class="sub">반 코드 <b class="mono">' + esc(session.code || '-') + '</b> · ' + status +
         ' · 참여 ' + count + '명 · 공유본 ' + Number(session.sourceRevision || 0) + '판' +
         (session.createdAt ? ' · ' + esc(fmtDate(session.createdAt)) : '') + '</div></div>' +
-        '<div class="spacer" style="flex:1"></div>' + resultLink + '</div></div>';
+        '<div class="spacer" style="flex:1"></div>' + resultLink + removeButton + '</div></div>';
     }).join('');
   }).catch(error => {
     if (request.cancelled) return;
@@ -4991,6 +4995,34 @@ function screenGuestRunHistory(setId) {
     const body = $('#guest-run-history');
     if (body) body.innerHTML = '<div class="card"><div class="empty">실행 기록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.</div></div>';
   });
+}
+
+/** 실행 기록에서 반 하나를 지운다. 학생 응답·점수까지 함께 지워지므로 되돌릴 수 없다. */
+async function deleteGuestRunSession(setId, sessionId, code, studentCount) {
+  if (!setId || !sessionId || !store.deleteOwnedDerivedSession) return false;
+  const label = code ? '반 코드 ' + code : '이 반';
+  if (!confirm(label + '의 실행 기록을 지울까요?\n\n' +
+      '참여 학생 ' + (Number(studentCount) || 0) + '명의 응답과 점수도 함께 지워지며 되돌릴 수 없습니다.')) {
+    return false;
+  }
+  const card = document.querySelector('[data-guest-run="' + sessionId + '"]');
+  const buttons = card ? card.querySelectorAll('button, a') : [];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    await store.deleteOwnedDerivedSession(setId, sessionId, teacherState);
+    if (card && card.remove) card.remove();
+    toast('실행 기록을 지웠습니다');
+    const body = $('#guest-run-history');
+    if (body && !body.querySelector('[data-guest-run]')) {
+      body.innerHTML = '<div class="card"><div class="empty">아직 이 링크로 시작한 수업이 없습니다.</div></div>';
+    }
+    return true;
+  } catch (error) {
+    console.error('guest run delete failed', error && error.code || 'error');
+    buttons.forEach(button => { button.disabled = false; });
+    alert('실행 기록을 지우지 못했습니다: ' + (error && error.message ? error.message : String(error)));
+    return false;
+  }
 }
 
 async function refreshActiveGuestRunLinkAfterSave(setId, actor) {
@@ -6706,6 +6738,8 @@ function renderPlayRun() {
           '<div class="code">' + esc(pl.code) + '</div>' +
           '<div class="url">' + esc(joinUrl.replace(/^https?:\/\//, '')) + '</div>' +
           '<div class="qr" id="pl-qr"></div>' +
+          '<button class="btn sm block" style="margin-top:12px" ' +
+            'onclick="copyText(\'' + esc(joinUrl) + '\')">🔗 학생 참여 링크 복사</button>' +
         '</div>' +
         '<div class="card" style="margin-top:14px">' +
           '<div style="font-size:13px;color:var(--ink-2);line-height:1.8">' +

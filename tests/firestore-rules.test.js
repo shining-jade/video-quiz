@@ -3936,6 +3936,72 @@ for (const skewSeconds of [0, 20]) {
   });
 }
 
+rulesTest('운영자는 진행 중으로 멈춘 비로그인 반까지 실행 기록에서 지울 수 있다', async () => {
+  const setId = 'guest-purge-set';
+  const shareId = 'P'.repeat(43);
+  const source = realisticGuestRunSource(0);
+  await adminWrite('quiz_sets/' + setId, { ...source, ownerUid: 'operator-uid', ownerEmail: 'jbhealth17@gmail.com' });
+
+  const operator = googleContext('operator-uid', 'jbhealth17@gmail.com');
+  const operatorStore = emulatorStore(operator);
+  const share = await operatorStore.createGuestQuizShare(
+    setId, GuestQuizShareCore.projectQuizSet(source, {}),
+    { uid: 'operator-uid', email: 'jbhealth17@gmail.com' }, shareId
+  );
+
+  const guestUid = 'guest-purge-teacher';
+  const guestStore = emulatorStore(guestFirestore(guestUid));
+  const loaded = await guestStore.loadActiveGuestQuizShare(share.shareId);
+  const session = guestStore.prepareGuestSession(
+    loaded, '1반', { uid: guestUid }, 'purge-alloc-token-abcdef'
+  );
+  const sessionId = 'guest-purge-session';
+  const code = await guestStore.startSession(sessionId, session, () => 'PGX001');
+  await guestStore.activateSessionAllocation(sessionId, code, guestUid, 'purge-alloc-token-abcdef');
+  await emulatorStore(guestFirestore('guest-purge-student'))
+    .joinStudent(sessionId, 'guest-purge-student', { grade: 1, klass: 1, num: 4, name: '학생' });
+
+  // 진행 중(live)으로 멈춘 반이어도 정리할 수 있어야 한다. 끝낼 수 있는 사람이
+  // 링크를 받은 쪽뿐이라, 못 지우면 영원히 목록에 남는다.
+  assert.equal((await adminRead('sessions/' + sessionId)).status, 'live');
+  await assertSucceeds(operatorStore.deleteOwnedDerivedSession(
+    setId, sessionId, { uid: 'operator-uid', email: 'jbhealth17@gmail.com' }
+  ));
+
+  assert.equal(await adminRead('sessions/' + sessionId), undefined);
+  assert.equal(await adminRead('sessions/' + sessionId + '/students/guest-purge-student'), undefined);
+  assert.equal(await adminRead('codes/' + code), undefined);
+});
+
+rulesTest('남의 세트로 진행된 반은 실행 기록에서 지울 수 없다', async () => {
+  const setId = 'guest-purge-set2';
+  const shareId = 'Q'.repeat(43);
+  const source = realisticGuestRunSource(0);
+  await adminWrite('quiz_sets/' + setId, source);
+
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const share = await ownerStore.createGuestQuizShare(
+    setId, GuestQuizShareCore.projectQuizSet(source, {}), guestRunOwner, shareId
+  );
+  const guestUid = 'guest-purge-teacher2';
+  const guestStore = emulatorStore(guestFirestore(guestUid));
+  const loaded = await guestStore.loadActiveGuestQuizShare(share.shareId);
+  const sessionId = 'guest-purge-session2';
+  const code = await guestStore.startSession(
+    sessionId,
+    guestStore.prepareGuestSession(loaded, '1반', { uid: guestUid }, 'purge2-alloc-token-abc'),
+    () => 'PGX002'
+  );
+  await guestStore.activateSessionAllocation(sessionId, code, guestUid, 'purge2-alloc-token-abc');
+
+  // 세트 주인이 아닌 교사는 이 반을 지울 수 없다.
+  const strangerStore = emulatorStore(actorFirestore('otherTeacher'));
+  await assert.rejects(() => strangerStore.deleteOwnedDerivedSession(
+    setId, sessionId, { uid: actors.otherTeacher.uid, email: actors.otherTeacher.email }
+  ));
+  assert.notEqual(await adminRead('sessions/' + sessionId), undefined);
+});
+
 rulesTest('세트 주인은 남이 비로그인으로 진행한 반의 학생 응답과 점수를 볼 수 있다', async () => {
   const setId = 'guest-read-set';
   const shareId = 'V'.repeat(43);

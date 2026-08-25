@@ -16033,3 +16033,46 @@ test('비로그인 실행 기록은 반마다 결과 보기로 들어갈 수 있
   // 취소된 반은 볼 결과가 없다.
   assert.doesNotMatch(body.innerHTML, /href="#\/live\/sess-aborted"/);
 });
+
+test('실행 기록 삭제는 확인을 받고 그 행만 없앤다', async () => {
+  const removed = [];
+  const calls = [];
+  const card = {
+    removed: false,
+    querySelectorAll() { return [{ disabled: false }]; },
+    remove() { this.removed = true; removed.push('card'); }
+  };
+  const context = {
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher', status: 'teacher' },
+    store: {
+      async deleteOwnedDerivedSession(...args) { calls.push(args); return true; }
+    },
+    document: { querySelector() { return card; } },
+    $() { return { querySelector() { return null; }, set innerHTML(value) {} }; },
+    confirm(message) { calls.push(['confirm', message]); return true; },
+    alert() {}, toast() {}, console: { error() {} }, Number
+  };
+  loadStageFunctions(['deleteGuestRunSession'], context);
+
+  assert.equal(await context.deleteGuestRunSession('set-1', 'sess-1', 'ABC123', 3), true);
+  assert.match(calls[0][1], /ABC123/);
+  assert.match(calls[0][1], /3명/);
+  assert.deepEqual(calls[1], ['set-1', 'sess-1', context.teacherState]);
+  assert.equal(card.removed, true);
+});
+
+test('실행 기록 삭제는 취소하면 아무것도 지우지 않는다', async () => {
+  let deleteCalls = 0;
+  const context = {
+    teacherState: { uid: 'owner-1' },
+    store: { async deleteOwnedDerivedSession() { deleteCalls += 1; return true; } },
+    document: { querySelector() { return null; } },
+    $() { return null; },
+    confirm() { return false; },
+    alert() {}, toast() {}, console: { error() {} }, Number
+  };
+  loadStageFunctions(['deleteGuestRunSession'], context);
+
+  assert.equal(await context.deleteGuestRunSession('set-1', 'sess-1', 'ABC123', 3), false);
+  assert.equal(deleteCalls, 0);
+});
