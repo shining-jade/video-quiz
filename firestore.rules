@@ -94,7 +94,7 @@ service cloud.firestore {
         !(label in [email, uid]);
     }
 
-    function validAllowanceDocument(email) {
+    function validAllowanceDocument() {
       return request.resource.data.keys().hasOnly([
           'enabled', 'role', 'updatedAt', 'updatedByUid'
         ]) &&
@@ -882,11 +882,6 @@ service cloud.firestore {
     function canStartSet(setId) {
       return isApprovedTeacher() && activeSet(setId) &&
         (ownsSet(setId) || isSetCollaborator(setId));
-    }
-
-    function canStartSetAfter(setId) {
-      return activeSetAfter(setId) &&
-        (ownsSetAfter(setId) || isSetCollaboratorAfter(setId));
     }
 
     function validCollaboratorData(email) {
@@ -3063,11 +3058,11 @@ service cloud.firestore {
       allow create: if canonicalAllowanceId(email) &&
         (validAuthoritativeLegacyMirror(email) ||
           (!teacherAccessMigrationComplete() && teacherAccessMigrationUnlocked() && isAdmin() &&
-            validAllowanceDocument(email)));
+            validAllowanceDocument()));
       allow update: if validOwnTeacherDeletionLegacyAllowance(email) ||
         validAuthoritativeLegacyMirror(email) ||
         (!teacherAccessMigrationComplete() && teacherAccessMigrationUnlocked() && isAdmin() &&
-          canonicalAllowanceId(email) && validAllowanceDocument(email) && !protectsCurrentAdmin(email));
+          canonicalAllowanceId(email) && validAllowanceDocument() && !protectsCurrentAdmin(email));
       allow delete: if false;
       allow read, write: if false;
     }
