@@ -2155,21 +2155,13 @@ service cloud.firestore {
     }
 
     function guestIdentity() {
-      return signedIn() &&
-        request.auth.token.firebase.sign_in_provider == 'custom' &&
-        request.auth.token.get('guestShareId', '') is string &&
-        request.auth.token.get('guestShareId', '').matches('^[A-Za-z0-9_-]{1,128}$') &&
-        request.auth.token.get('guestShareRevision', 0) is int &&
-        request.auth.token.get('guestShareRevision', 0) > 0;
+      return anonymousStudent();
     }
 
     function guestCapabilityActive(shareId, revision) {
       let sharePath = /databases/$(database)/documents/guest_quiz_shares/$(shareId);
       return guestIdentity() &&
-        request.auth.token.guestShareId == shareId &&
-        request.auth.token.guestShareRevision == revision &&
-        request.auth.token.get('guestCapabilityExpiresAt', 0) is int &&
-        request.auth.token.get('guestCapabilityExpiresAt', 0) * 1000 > request.time.toMillis() &&
+        shareId.matches('^[A-Za-z0-9_-]{43}$') &&
         exists(sharePath) && get(sharePath).data.status == 'active' &&
         get(sharePath).data.revision == revision;
     }
@@ -2177,7 +2169,7 @@ service cloud.firestore {
     function guestOwnsSessionData(data) {
       return guestIdentity() && data.get('sessionActorType', '') == 'guest' &&
         data.teacherUid == request.auth.uid && data.get('teacherEmail', '') == '' &&
-        data.get('sourceShareId', '') == request.auth.token.guestShareId &&
+        data.get('sourceShareId', '').matches('^[A-Za-z0-9_-]{43}$') &&
         data.get('sourceRevision', 0) is int && data.get('sourceRevision', 0) > 0;
     }
 
@@ -3227,11 +3219,11 @@ service cloud.firestore {
       let data = request.resource.data;
       return data.keys().hasOnly([
           'shareId', 'sourceSetId', 'sourceOwnerUid', 'sourceContentRevision',
-          'status', 'tokenHash', 'revision', 'createdAt', 'updatedAt', 'revokedAt'
+          'status', 'revision', 'createdAt', 'updatedAt', 'revokedAt'
         ]) && data.shareId == shareId && ownsGuestShareSource(data) &&
+        shareId.matches('^[A-Za-z0-9_-]{43}$') &&
         data.sourceContentRevision is string && data.sourceContentRevision.size() > 0 &&
         data.sourceContentRevision.size() <= 200 && data.status == 'building' &&
-        data.tokenHash is string && data.tokenHash.matches('^[a-f0-9]{64}$') &&
         data.revision == 1 && data.createdAt == request.time && data.updatedAt == request.time &&
         data.revokedAt == null;
     }
@@ -3241,7 +3233,7 @@ service cloud.firestore {
       let after = request.resource.data;
       let stable = after.shareId == shareId && after.shareId == before.shareId &&
         after.sourceSetId == before.sourceSetId && after.sourceOwnerUid == before.sourceOwnerUid &&
-        after.tokenHash == before.tokenHash && after.createdAt == before.createdAt &&
+        after.createdAt == before.createdAt &&
         ownsGuestShareSource(before) && after.updatedAt == request.time;
       return stable && (
         (before.status == 'building' && after.status == 'active' &&
@@ -3278,7 +3270,9 @@ service cloud.firestore {
     }
 
     match /guest_quiz_shares/{shareId} {
-      allow get: if isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid;
+      allow get: if (guestIdentity() && shareId.matches('^[A-Za-z0-9_-]{43}$') &&
+          resource.data.shareId == shareId && resource.data.status == 'active') ||
+        (isApprovedTeacher() && resource.data.sourceOwnerUid == request.auth.uid);
       allow list: if false;
       allow create: if validGuestShareParentCreate(shareId);
       allow update: if validGuestShareParentUpdate(shareId);
