@@ -15996,3 +15996,40 @@ test('저장 정보가 깨져 있으면 복구를 시도하지 않는다', async
 
   assert.equal(await ctx.plResumeGuestSession(ctx.state), false);
 });
+
+test('비로그인 실행 기록은 반마다 결과 보기로 들어갈 수 있다', async () => {
+  const body = { innerHTML: '' };
+  const context = {
+    teacherState: { uid: 'owner-1', email: 'owner@school.kr', role: 'teacher', status: 'teacher' },
+    store: {
+      async listOwnedDerivedSessions() {
+        return [
+          { id: 'sess-live', label: '1학년 1반', code: 'AAA111', status: 'live',
+            registeredStudentCount: 3, sourceRevision: 1, createdAt: 0 },
+          { id: 'sess-ended', label: '2학년 5반', code: 'BBB222', status: 'ended',
+            registeredStudentCount: 2, sourceRevision: 1, createdAt: 0 },
+          { id: 'sess-aborted', label: '취소된 반', code: 'CCC333', status: 'aborted',
+            registeredStudentCount: 0, sourceRevision: 1, createdAt: 0 }
+        ];
+      }
+    },
+    APP() { return { set innerHTML(value) {} }; },
+    $(selector) { return selector === '#guest-run-history' ? body : null; },
+    topbar() { return ''; },
+    onCleanup() {},
+    go() {},
+    esc(value) { return String(value); },
+    fmtDate() { return '2026-08-25'; },
+    Number, console
+  };
+  loadStageFunctions(['screenGuestRunHistory'], context);
+
+  context.screenGuestRunHistory('set-1');
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.match(body.innerHTML, /href="#\/live\/sess-live"/);
+  assert.match(body.innerHTML, /href="#\/live\/sess-ended"/);
+  // 취소된 반은 볼 결과가 없다.
+  assert.doesNotMatch(body.innerHTML, /href="#\/live\/sess-aborted"/);
+});

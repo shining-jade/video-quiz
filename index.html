@@ -4974,11 +4974,16 @@ function screenGuestRunHistory(setId) {
     body.innerHTML = sessions.map(session => {
       const count = Number(session.registeredStudentCount || session.studentCount || 0);
       const status = session.status === 'ended' ? '종료' : session.status === 'aborted' ? '취소' : '진행 중';
+      // 세트를 만든 사람은 남이 진행한 반의 학생 응답과 점수도 볼 수 있다.
+      // 그동안 화면에서 들어갈 길이 없어 확인이 불가능했다.
+      const resultLink = session.id && session.status !== 'aborted'
+        ? '<a class="btn sm" href="#/live/' + esc(session.id) + '">📊 결과 보기</a>' : '';
       return '<div class="card" style="margin-bottom:12px"><div class="row" style="align-items:center">' +
         '<div><h2 style="margin-bottom:5px">' + esc(session.label || '이름 없는 반') + '</h2>' +
         '<div class="sub">반 코드 <b class="mono">' + esc(session.code || '-') + '</b> · ' + status +
         ' · 참여 ' + count + '명 · 공유본 ' + Number(session.sourceRevision || 0) + '판' +
-        (session.createdAt ? ' · ' + esc(fmtDate(session.createdAt)) : '') + '</div></div></div></div>';
+        (session.createdAt ? ' · ' + esc(fmtDate(session.createdAt)) : '') + '</div></div>' +
+        '<div class="spacer" style="flex:1"></div>' + resultLink + '</div></div>';
     }).join('');
   }).catch(error => {
     if (request.cancelled) return;

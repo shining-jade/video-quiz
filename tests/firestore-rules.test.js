@@ -3936,6 +3936,50 @@ for (const skewSeconds of [0, 20]) {
   });
 }
 
+rulesTest('세트 주인은 남이 비로그인으로 진행한 반의 학생 응답과 점수를 볼 수 있다', async () => {
+  const setId = 'guest-read-set';
+  const shareId = 'V'.repeat(43);
+  const source = realisticGuestRunSource(0);
+  await adminWrite('quiz_sets/' + setId, source);
+
+  const ownerStore = emulatorStore(actorFirestore('owner'));
+  const share = await ownerStore.createGuestQuizShare(
+    setId, GuestQuizShareCore.projectQuizSet(source, {}), guestRunOwner, shareId
+  );
+
+  // 링크를 받은 다른 선생님(로그인 없음)이 자기 반을 진행한다.
+  const guestUid = 'guest-read-teacher';
+  const guestStore = emulatorStore(guestFirestore(guestUid));
+  const loaded = await guestStore.loadActiveGuestQuizShare(share.shareId);
+  const session = guestStore.prepareGuestSession(
+    loaded, '3학년 2반', { uid: guestUid }, 'read-alloc-token-abcdef'
+  );
+  const sessionId = 'guest-read-session';
+  const code = await guestStore.startSession(sessionId, session, () => 'RDX001');
+  await guestStore.activateSessionAllocation(sessionId, code, guestUid, 'read-alloc-token-abcdef');
+
+  const studentStore = emulatorStore(guestFirestore('guest-read-student'));
+  await studentStore.joinStudent(sessionId, 'guest-read-student', {
+    grade: 3, klass: 2, num: 8, name: '학생'
+  });
+  await adminWrite('sessions/' + sessionId + '/grades/guest-read-student__0', {
+    uid: 'guest-read-student', questionIndex: 0, revision: 1, ok: true
+  });
+
+  // 세트를 만든 선생님은 자기 자료로 열린 반의 참여자·응답·채점을 모두 볼 수 있어야 한다.
+  const owner = actorFirestore('owner');
+  await assertSucceeds(getDoc(doc(owner, 'sessions/' + sessionId)));
+  await assertSucceeds(getDocs(collection(owner, 'sessions/' + sessionId + '/students')));
+  await assertSucceeds(getDocs(collection(owner, 'sessions/' + sessionId + '/responses')));
+  await assertSucceeds(getDocs(collection(owner, 'sessions/' + sessionId + '/grades')));
+  await assertSucceeds(getDocs(collection(owner, 'sessions/' + sessionId + '/student_scores')));
+
+  // 무관한 다른 교사에게는 닫혀 있어야 한다.
+  const stranger = actorFirestore('otherTeacher');
+  await assertFails(getDoc(doc(stranger, 'sessions/' + sessionId)));
+  await assertFails(getDocs(collection(stranger, 'sessions/' + sessionId + '/responses')));
+});
+
 rulesTest('비로그인 교사는 학생이 참여한 자기 반을 직접 종료할 수 있다', async () => {
   const setId = 'guest-end-set';
   const shareId = 'E'.repeat(43);
