@@ -810,7 +810,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="guest-quiz-share-core.js?v=20260825-schema"></script>
 <script src="public-author-label-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
-<script src="firestore-store.js?v=20260825-lease"></script>
+<script src="firestore-store.js?v=20260825-clock"></script>
 <script src="choice-order-core.js"></script>
 <script src="image-lightbox-core.js"></script>
 <script src="quiz-trigger-core.js"></script>
@@ -5696,6 +5696,9 @@ async function loadFreeGuestShare(route) {
   current = auth.currentUser;
   const user = current && current.isAnonymous
     ? current : (await auth.signInAnonymously()).user;
+  // 반 활성화 리스는 서버 시각 기준으로 검사된다. 보정을 건너뛰면 기기 시계 오차가
+  // 그대로 드러나 반 시작이 거부되므로, 교사·학생 경로와 똑같이 먼저 맞춘다.
+  try { await ensureClock(user); } catch (error) { console.error('guest clock sync failed', error); }
   const loaded = await store.loadActiveGuestQuizShare(route.shareId);
   return { ...loaded, guestUser: user };
 }
