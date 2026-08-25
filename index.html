@@ -5850,9 +5850,6 @@ function renderPlayIntro() {
         '<p style="color:var(--ink-2);font-size:14px;margin-bottom:18px">' +
           '누르면 이 반만의 <b>새 반 코드</b>가 발급됩니다.<br>' +
           '다른 선생님이 같은 세트를 동시에 써도 응답은 반 코드별로 따로 저장됩니다.</p>' +
-        (guestMode ? '<div class="notice info" style="max-width:620px;margin:0 auto 16px">' +
-          '로그인 없이 진행됩니다. 이 브라우저의 저장 공간을 지우거나 다른 기기로 옮기면 현재 수업을 다시 제어할 수 없습니다. ' +
-          '아래에서 발급되는 학생 참여 링크만 학생에게 보내 주세요.</div>' : '') +
         (!guestMode && (typeof classPlanningUiEnabled === 'undefined' || classPlanningUiEnabled)
           ? '<button class="btn primary lg" onclick="plOpenClassPlanDialog()">🚀 우리 반 시작하기</button>'
           : '<div class="field" style="max-width:420px;margin:0 auto 14px;text-align:left">' +
