@@ -4298,7 +4298,7 @@ test('공유 세트 진행 화면은 시작·사본만 제공하고 소유자에
     lsGet() { return ''; }, fmtTime() { return '00:01'; }, LETTERS: ['A']
   };
   loadStageFunctions([
-    'canEditSet', 'plGuestTourSample', 'plGuestTourStartMock', 'plGuestTourCodeMock', 'plGuestTourRunMock',
+    'canEditSet', 'plGuestResumeNotice', 'plGuestTourSample', 'plGuestTourStartMock', 'plGuestTourCodeMock', 'plGuestTourRunMock',
     'plGuestTourRosterMock', 'plGuestTourStageMock', 'plGuestTourQuizMock', 'plGuestTourEndMock',
     'plGuestTourSteps', 'plGuestTourTips', 'plGuestGuideDialog', 'renderPlayIntro'
   ], context);
@@ -16279,4 +16279,72 @@ test('정답 공개에 성공하면 남아 있던 경고를 지운다', async ()
   assert.equal(ctx.pl.revealError, '');
   assert.equal(ctx.pl.revealFailures, 0);
   assert.equal(ctx.pl.revealFatal, false);
+});
+
+function guestResumeChoiceContext(session) {
+  const state = {
+    guestLoad: { guestUser: { uid: 'g1' }, shareId: 'S'.repeat(43),
+      setSnapshot: { videos: [] }, snapshotImages: {} },
+    setId: 'set-1'
+  };
+  const removed = [];
+  const context = {
+    pl: state,
+    store: { async getSession() { return session; } },
+    lsGet() { return JSON.stringify({
+      sessionId: 'sess-1', code: 'ABC123', allocationToken: 'allocation-token-1234'
+    }); },
+    lsDel(key) { removed.push(key); },
+    renderPlayIntro() { context.introRendered = (context.introRendered || 0) + 1; },
+    esc(v) { return String(v); },
+    console: { error() {} },
+    JSON, Number, String, Object
+  };
+  context.state = state;
+  context.removed = removed;
+  loadStageFunctions([
+    'guestActiveSessionKey', 'readGuestActiveSession', 'clearGuestActiveSession',
+    'guestSessionIsResumable', 'plFindResumableGuestRun', 'plDiscardGuestRun',
+    'plGuestResumeNotice'
+  ], context);
+  return context;
+}
+
+test('링크를 열면 바로 들어가지 않고 이어서 할지 새로 열지 고르게 한다', async () => {
+  const ctx = guestResumeChoiceContext({
+    teacherUid: 'g1', status: 'live', sourceShareId: 'S'.repeat(43),
+    label: '2학년 3반', registeredStudentCount: 4
+  });
+
+  const run = await ctx.plFindResumableGuestRun(ctx.state);
+  assert.equal(run.code, 'ABC123');
+  assert.equal(run.studentCount, 4);
+
+  ctx.pl.resumableGuestRun = run;
+  const notice = ctx.plGuestResumeNotice();
+  assert.match(notice, /진행 중이던 반이 있습니다/);
+  assert.match(notice, /ABC123/);
+  assert.match(notice, /2학년 3반/);
+  assert.match(notice, /학생 4명/);
+  assert.match(notice, /이어서 진행/);
+  assert.match(notice, /새 반 열기/);
+});
+
+test('진행 중이던 반이 없으면 시작 화면에 아무 안내도 띄우지 않는다', async () => {
+  const ctx = guestResumeChoiceContext({ teacherUid: 'g1', status: 'ended', sourceShareId: 'S'.repeat(43) });
+
+  assert.equal(await ctx.plFindResumableGuestRun(ctx.state), null);
+  assert.equal(ctx.removed.length, 1, '끝난 반 기록은 지운다');
+  ctx.pl.resumableGuestRun = null;
+  assert.equal(ctx.plGuestResumeNotice(), '');
+});
+
+test('새 반 열기를 고르면 지난 반 기록만 지우고 시작 화면으로 돌아간다', () => {
+  const ctx = guestResumeChoiceContext({ teacherUid: 'g1', status: 'live', sourceShareId: 'S'.repeat(43) });
+  ctx.pl.resumableGuestRun = { sessionId: 'sess-1', code: 'ABC123', studentCount: 0, label: '' };
+
+  assert.equal(ctx.plDiscardGuestRun(), true);
+  assert.equal(ctx.pl.resumableGuestRun, null);
+  assert.equal(ctx.removed.length, 1);
+  assert.equal(ctx.introRendered, 1);
 });
