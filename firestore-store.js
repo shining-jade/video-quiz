@@ -4426,6 +4426,26 @@
       };
     }
 
+    async function loadActiveGuestQuizShare(shareIdValue) {
+      const shareId = guestShareId(shareIdValue);
+      if (!/^[A-Za-z0-9_-]{43}$/.test(shareId)) {
+        throw new Error('사용할 수 없는 진행 링크입니다.');
+      }
+      const snapshot = await db.doc('guest_quiz_shares/' + shareId).get({ source: 'server' });
+      if (!snapshot.exists) throw new Error('사용할 수 없는 진행 링크입니다.');
+      const share = snapshot.data() || {};
+      if (share.shareId !== shareId || share.status !== 'active' ||
+          !Number.isSafeInteger(share.revision) || share.revision < 1 ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(share.sourceSetId || '') ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(share.sourceOwnerUid || '')) {
+        throw new Error('사용할 수 없는 진행 링크입니다.');
+      }
+      return loadGuestQuizRevision(shareId, share.revision, {
+        sourceSetId: share.sourceSetId,
+        sourceOwnerUid: share.sourceOwnerUid
+      });
+    }
+
     function prepareGuestSession(loaded, labelValue, guest, allocationToken) {
       const value = loaded || {};
       const current = guest || {};
@@ -5316,14 +5336,14 @@
       return { ...share };
     }
 
-    async function createGuestQuizShare(setId, tokenHash, projection, actor, requestedShareId) {
+    async function createGuestQuizShare(setId, projection, actor, requestedShareId) {
       const id = canonicalPublicationId(setId, 'setId');
-      if (!/^[a-f0-9]{64}$/.test(String(tokenHash || ''))) {
-        throw new Error('비로그인 진행 링크 token hash가 유효하지 않습니다.');
-      }
       const source = requireGuestShareOwner(await getQuizSet(id), actor);
       const sourceRevision = requireContentRevision(source);
       const shareId = guestShareId(requestedShareId || createLiveToken());
+      if (!/^[A-Za-z0-9_-]{43}$/.test(shareId)) {
+        throw new Error('비로그인 진행 링크 식별자가 유효하지 않습니다.');
+      }
       const projectionValue = requireGuestShareProjection(projection);
       const shareRef = db.doc('guest_quiz_shares/' + shareId);
       const mappingRef = db.doc('guest_quiz_share_sources/' + id);
@@ -5335,7 +5355,7 @@
       }
       await shareRef.set({
         shareId, sourceSetId: id, sourceOwnerUid: source.ownerUid,
-        sourceContentRevision: sourceRevision, status: 'building', tokenHash,
+        sourceContentRevision: sourceRevision, status: 'building',
         revision: 1, createdAt: fieldValue.serverTimestamp(),
         updatedAt: fieldValue.serverTimestamp(), revokedAt: null
       });
@@ -5349,8 +5369,9 @@
         if (requireContentRevision(latestSource) !== sourceRevision || latestMappingSnapshot.exists ||
             !latestShareSnapshot.exists) throw new Error('공유 활성화 전 원본 또는 매핑이 변경되었습니다.');
         const latestShare = latestShareSnapshot.data() || {};
-        if (latestShare.status !== 'building' || latestShare.tokenHash !== tokenHash ||
-            latestShare.revision !== 1) throw new Error('공유 활성화 상태가 변경되었습니다.');
+        if (latestShare.status !== 'building' || latestShare.revision !== 1) {
+          throw new Error('공유 활성화 상태가 변경되었습니다.');
+        }
         transaction.set(shareRef, { status: 'active', updatedAt: fieldValue.serverTimestamp() }, { merge: true });
         transaction.set(mappingRef, {
           sourceSetId: id, sourceOwnerUid: source.ownerUid, shareId,
@@ -5507,6 +5528,7 @@
       getPublishedQuizSet,
       copyPublishedQuizSet,
       loadGuestQuizRevision,
+      loadActiveGuestQuizShare,
       prepareGuestSession,
       startSession,
       activateSessionAllocation,

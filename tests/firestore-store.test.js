@@ -16874,6 +16874,7 @@ function guestShareProjection() {
 }
 
 test('guest quiz share publishes a ready revision before activating its owner mapping', async () => {
+  const shareId = 'A'.repeat(43);
   const fake = makeFirestoreFake({
     'quiz_sets/set1': {
       title: '공유 세트', ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr',
@@ -16882,28 +16883,31 @@ test('guest quiz share publishes a ready revision before activating its owner ma
   });
   const store = createStore(fake);
   const result = await store.createGuestQuizShare(
-    'set1', 'a'.repeat(64), guestShareProjection(),
-    { uid: 'owner-uid', email: 'owner@school.kr' }, 'share-fixed'
+    'set1', guestShareProjection(),
+    { uid: 'owner-uid', email: 'owner@school.kr' }, shareId
   );
-  assert.deepEqual(result, { shareId: 'share-fixed', revision: 1, status: 'active' });
-  assert.equal(fake.value('guest_quiz_shares/share-fixed').status, 'active');
-  assert.equal(fake.value('guest_quiz_shares/share-fixed/revisions/1').status, 'ready');
-  assert.equal(fake.value('guest_quiz_share_sources/set1').shareId, 'share-fixed');
-  assert.equal(JSON.stringify(fake.value('guest_quiz_shares/share-fixed')).includes('owner@school.kr'), false);
+  assert.deepEqual(result, { shareId, revision: 1, status: 'active' });
+  assert.equal(fake.value('guest_quiz_shares/' + shareId).status, 'active');
+  assert.equal(fake.value('guest_quiz_shares/' + shareId + '/revisions/1').status, 'ready');
+  assert.equal(fake.value('guest_quiz_share_sources/set1').shareId, shareId);
+  const parent = fake.value('guest_quiz_shares/' + shareId);
+  assert.equal(JSON.stringify(parent).includes('owner@school.kr'), false);
+  assert.equal(Object.hasOwn(parent, 'tokenHash'), false);
 });
 
 test('guest quiz share refresh pins a new revision and revoke never reactivates it', async () => {
+  const shareId = 'B'.repeat(43);
   const initial = {
     'quiz_sets/set1': {
       title: '공유 세트', ownerUid: 'owner-uid', ownerEmail: 'owner@school.kr',
       lifecycleState: 'active', contentRevision: 4, videos: []
     },
     'guest_quiz_share_sources/set1': {
-      sourceSetId: 'set1', sourceOwnerUid: 'owner-uid', shareId: 'share-fixed', status: 'active', revision: 1
+      sourceSetId: 'set1', sourceOwnerUid: 'owner-uid', shareId, status: 'active', revision: 1
     },
-    'guest_quiz_shares/share-fixed': {
-      shareId: 'share-fixed', sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
-      status: 'active', tokenHash: 'a'.repeat(64), revision: 1, sourceContentRevision: 3
+    ['guest_quiz_shares/' + shareId]: {
+      shareId, sourceSetId: 'set1', sourceOwnerUid: 'owner-uid',
+      status: 'active', revision: 1, sourceContentRevision: 3
     }
   };
   const fake = makeFirestoreFake(initial);
@@ -16912,7 +16916,7 @@ test('guest quiz share refresh pins a new revision and revoke never reactivates 
     'set1', guestShareProjection(), { uid: 'owner-uid', email: 'owner@school.kr' }
   );
   assert.equal(refreshed.revision, 2);
-  assert.equal(fake.value('guest_quiz_shares/share-fixed/revisions/2').status, 'ready');
+  assert.equal(fake.value('guest_quiz_shares/' + shareId + '/revisions/2').status, 'ready');
   const revoked = await store.revokeGuestQuizShare(
     'set1', { uid: 'owner-uid', email: 'owner@school.kr' }
   );
@@ -16920,6 +16924,17 @@ test('guest quiz share refresh pins a new revision and revoke never reactivates 
   await assert.rejects(() => store.refreshGuestQuizShare(
     'set1', guestShareProjection(), { uid: 'owner-uid', email: 'owner@school.kr' }
   ), /활성.*공유/);
+});
+
+test('active share loader rejects revoked parent before reading children', async () => {
+  const shareId = 'C'.repeat(43);
+  const fake = makeFirestoreFake({
+    ['guest_quiz_shares/' + shareId]: {
+      shareId, sourceSetId: 'set1', sourceOwnerUid: 'owner-uid', status: 'revoked', revision: 1
+    }
+  });
+  await assert.rejects(() => createStore(fake).loadActiveGuestQuizShare(shareId), /사용할 수 없는/);
+  assert.equal(fake.calls().some(call => call.path.includes('/revisions/')), false);
 });
 
 test('guest revision loader assembles playlist data without reading the private source set', async () => {
