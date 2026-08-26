@@ -960,10 +960,18 @@ function ensureGuestAnonymousUser(auth) {
     const ready = current => {
       if (handled) return;
       handled = true;
-      Promise.resolve(current && current.isAnonymous
-        ? current
-        : auth.signInAnonymously().then(result => result.user)
-      ).then(user => {
+      const signInIfNeeded = () => {
+        const synced = auth.currentUser;
+        return synced && synced.isAnonymous
+          ? synced
+          : auth.signInAnonymously().then(result => result.user);
+      };
+      const userReady = current && current.isAnonymous
+        ? Promise.resolve(current)
+        : (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request
+          ? navigator.locks.request('video-quiz-guest-auth', signInIfNeeded)
+          : Promise.resolve().then(signInIfNeeded));
+      Promise.resolve(userReady).then(user => {
         stop();
         resolve(user);
       }, error => {

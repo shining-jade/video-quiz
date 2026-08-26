@@ -16058,6 +16058,48 @@ test('동시에 게스트 링크를 준비해도 익명 인증 초기화는 한 
   assert.equal(signIns, 1);
 });
 
+test('서로 다른 두 탭의 최초 게스트 인증은 브라우저 잠금으로 한 번만 생성된다', async () => {
+  const guest = { uid: 'guest-shared', isAnonymous: true };
+  let signIns = 0;
+  let lockTail = Promise.resolve();
+  const locks = {
+    request(name, task) {
+      assert.equal(name, 'video-quiz-guest-auth');
+      const run = lockTail.then(task);
+      lockTail = run.catch(() => {});
+      return run;
+    }
+  };
+  const auths = [0, 1].map(() => ({
+    currentUser: null,
+    onAuthStateChanged(next) {
+      const initialUser = this.currentUser;
+      queueMicrotask(() => next(initialUser));
+      return () => {};
+    },
+    async signInAnonymously() {
+      signIns += 1;
+      auths.forEach(auth => { auth.currentUser = guest; });
+      return { user: guest };
+    }
+  }));
+  const contexts = auths.map(() => ({
+    guestAuthReadyPromise: null,
+    navigator: { locks },
+    queueMicrotask,
+    Promise
+  }));
+  contexts.forEach(context => loadStageFunctions(['ensureGuestAnonymousUser'], context));
+
+  const users = await Promise.all(contexts.map((context, index) =>
+    context.ensureGuestAnonymousUser(auths[index])
+  ));
+
+  assert.equal(users[0], guest);
+  assert.equal(users[1], guest);
+  assert.equal(signIns, 1);
+});
+
 test('비로그인 링크는 교사 기본 인증을 유지하고 분리된 익명 인증과 저장소를 사용한다', async () => {
   let primarySignOuts = 0;
   let guestSignIns = 0;
