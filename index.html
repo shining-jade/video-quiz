@@ -923,6 +923,63 @@ if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const store = FirestoreStore.createFirestoreStore(db, firebase.firestore.FieldValue, () => Date.now());
 const SV_TS = firebase.firestore.FieldValue.serverTimestamp();
+let guestServices = null;
+let guestAuthReadyPromise = null;
+
+/** 게스트 진행은 기본 교사 인증과 분리된 Firebase 앱을 사용한다. */
+function guestFirebaseServices() {
+  if (guestServices) return guestServices;
+  const appName = 'video-quiz-guest';
+  const guestApp = firebase.apps.find(app => app.name === appName) ||
+    firebase.initializeApp(firebaseConfig, appName);
+  const auth = guestApp.auth();
+  const guestDb = guestApp.firestore();
+  guestServices = {
+    auth,
+    store: FirestoreStore.createFirestoreStore(
+      guestDb, firebase.firestore.FieldValue, () => Date.now()
+    )
+  };
+  return guestServices;
+}
+
+/** 같은 프로필의 여러 탭이 동시에 열려도 Firebase 인증 복원이 끝난 뒤 한 번만 로그인한다. */
+function ensureGuestAnonymousUser(auth) {
+  if (guestAuthReadyPromise) return guestAuthReadyPromise;
+  let attempt;
+  attempt = new Promise((resolve, reject) => {
+    let handled = false;
+    let unsubscribe = null;
+    const stop = () => { if (unsubscribe) unsubscribe(); };
+    const fail = error => {
+      if (handled) return;
+      handled = true;
+      stop();
+      reject(error);
+    };
+    const ready = current => {
+      if (handled) return;
+      handled = true;
+      Promise.resolve(current && current.isAnonymous
+        ? current
+        : auth.signInAnonymously().then(result => result.user)
+      ).then(user => {
+        stop();
+        resolve(user);
+      }, error => {
+        stop();
+        reject(error);
+      });
+    };
+    unsubscribe = auth.onAuthStateChanged(ready, fail);
+    if (handled) stop();
+  }).catch(error => {
+    if (guestAuthReadyPromise === attempt) guestAuthReadyPromise = null;
+    throw error;
+  });
+  guestAuthReadyPromise = attempt;
+  return attempt;
+}
 
 /* 서버 시각 보정 — 인증 뒤 고유 clock 문서로 동기화한다. */
 function serverNow() { return store.serverNow(); }
@@ -1511,18 +1568,19 @@ async function prepareImage(file) {
 
 /** 문항 이미지를 그때그때 받아 캐시한다 (교사 재생 화면과 학생 화면 공용) */
 const imgCache = {};
-function loadQuestionImage(setId, i, sessionId, snapshotVersion) {
+function loadQuestionImage(setId, i, sessionId, snapshotVersion, targetStore) {
   const key = (sessionId || setId) + '/' + i;
   if (imgCache[key] !== undefined) return Promise.resolve(imgCache[key]);
-  const loading = sessionId && store.getSessionQuestionImage
-    ? store.getSessionQuestionImage(
+  const imageStore = targetStore || store;
+  const loading = sessionId && imageStore.getSessionQuestionImage
+    ? imageStore.getSessionQuestionImage(
         snapshotVersion === undefined
           ? sessionId
           : { id: sessionId, setId: setId, snapshotVersion: snapshotVersion },
         snapshotVersion === undefined ? setId : i,
         snapshotVersion === undefined ? i : undefined
       )
-    : store.getQuestionImage(setId, i);
+    : imageStore.getQuestionImage(setId, i);
   return loading
     .then(src => { imgCache[key] = src || ''; return imgCache[key]; })
     .catch(error => {
@@ -2514,11 +2572,12 @@ function showTeacherAuthError(error) {
   toast('교사 로그인에 실패했습니다. 다시 시도해 주세요.');
 }
 
-function ensureClock(user) {
+function ensureClock(user, targetStore) {
   if (!user) return Promise.reject(new Error('인증 계정을 찾을 수 없습니다.'));
+  const clockStore = targetStore || store;
   if (clockUserId === user.uid) return Promise.resolve();
   if (clockPromise && clockPromiseUid === user.uid) return clockPromise;
-  const pending = store.syncClock('clock/' + user.uid + '-' + rid(8))
+  const pending = clockStore.syncClock('clock/' + user.uid + '-' + rid(8))
     .then(() => {
       if (clockPromise === pending) clockUserId = user.uid;
     })
@@ -5807,6 +5866,22 @@ function guestTopbar(extraHTML) {
     (extraHTML || '') + '</div>';
 }
 
+function playStore(state) {
+  return state && state.actorType === 'guest' && state.guestLoad && state.guestLoad.guestStore
+    ? state.guestLoad.guestStore : store;
+}
+
+function playAuth(state) {
+  return state && state.actorType === 'guest' && state.guestLoad && state.guestLoad.guestAuth
+    ? state.guestLoad.guestAuth : firebase.auth();
+}
+
+function playServerNow(state) {
+  const activeStore = playStore(state);
+  return activeStore && typeof activeStore.serverNow === 'function'
+    ? activeStore.serverNow() : serverNow();
+}
+
 function guestLinkUnavailable(error) {
   if (error) console.error('guest link unavailable', error && error.code || 'error');
   const message = '사용할 수 없는 진행 링크입니다. 만든 분에게 새 링크를 요청해 주세요.';
@@ -5816,17 +5891,14 @@ function guestLinkUnavailable(error) {
 }
 
 async function loadFreeGuestShare(route) {
-  const auth = firebase.auth();
-  let current = auth.currentUser;
-  if (current && !current.isAnonymous) await auth.signOut();
-  current = auth.currentUser;
-  const user = current && current.isAnonymous
-    ? current : (await auth.signInAnonymously()).user;
+  const services = guestFirebaseServices();
+  const auth = services.auth;
+  const user = await ensureGuestAnonymousUser(auth);
   // 반 활성화 리스는 서버 시각 기준으로 검사된다. 보정을 건너뛰면 기기 시계 오차가
   // 그대로 드러나 반 시작이 거부되므로, 교사·학생 경로와 똑같이 먼저 맞춘다.
-  try { await ensureClock(user); } catch (error) { console.error('guest clock sync failed', error); }
-  const loaded = await store.loadActiveGuestQuizShare(route.shareId);
-  return { ...loaded, guestUser: user };
+  try { await ensureClock(user, services.store); } catch (error) { console.error('guest clock sync failed', error); }
+  const loaded = await services.store.loadActiveGuestQuizShare(route.shareId);
+  return { ...loaded, guestUser: user, guestAuth: auth, guestStore: services.store };
 }
 
 function screenGuestPlay(shareId, queryString) {
@@ -6516,7 +6588,11 @@ async function plConfirmClassPlan(event) {
 
 /** 새 세션(반) 생성 — 반 코드가 겹치지 않을 때까지 재시도 */
 function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) {
-  if (!store.renewSessionActivationLease) return null;
+  const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+  const activeAuth = state.actorType === 'guest'
+    ? (typeof playAuth === 'function' ? playAuth(state) : firebase.auth())
+    : null;
+  if (!activeStore.renewSessionActivationLease) return null;
   if (typeof state.stopActivationHeartbeat === 'function') {
     state.stopActivationHeartbeat();
   }
@@ -6524,7 +6600,7 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
   let inFlight = false;
   let stopped = false;
   const isCurrent = () => pl === state && (state.actorType === 'guest'
-    ? !!firebase.auth().currentUser && firebase.auth().currentUser.uid === owner.uid
+    ? !!activeAuth.currentUser && activeAuth.currentUser.uid === owner.uid
     : AuthCore.isTeacher(teacherState) && teacherState.uid === owner.uid &&
       teacherState.email === owner.email &&
       (authGeneration === null || teacherAuthVersion === authGeneration));
@@ -6553,7 +6629,7 @@ function plStartSessionHeartbeat(state, owner, authGeneration, allocationToken) 
     if (inFlight) return false;
     inFlight = true;
     try {
-      const renewed = await store.renewSessionActivationLease(
+      const renewed = await activeStore.renewSessionActivationLease(
         state.sessionId, state.code, owner.uid, allocationToken
       );
       if (!isCurrent()) {
@@ -6879,18 +6955,35 @@ function guestActiveSessionKey(uid, shareId) {
 
 function readGuestActiveSession(uid, shareId) {
   if (!uid || !shareId) return null;
+  const key = guestActiveSessionKey(uid, shareId);
+  const tabValue = ssGet(key);
+  const raw = tabValue === null ? lsGet(key) : tabValue;
   let parsed = null;
-  try { parsed = JSON.parse(lsGet(guestActiveSessionKey(uid, shareId)) || 'null'); } catch (e) { return null; }
+  try { parsed = JSON.parse(raw || 'null'); } catch (e) { return null; }
   if (!parsed || typeof parsed !== 'object') return null;
   const sessionId = String(parsed.sessionId || '');
   const code = String(parsed.code || '');
   const allocationToken = String(parsed.allocationToken || '');
   if (!sessionId || !code || allocationToken.length < 16) return null;
-  return { sessionId, code, allocationToken, sourceSetId: String(parsed.sourceSetId || '') };
+  const saved = { sessionId, code, allocationToken, sourceSetId: String(parsed.sourceSetId || '') };
+  if (tabValue === null) {
+    ssSet(key, JSON.stringify(saved));
+    lsDel(key);
+  }
+  return saved;
+}
+
+function writeGuestActiveSession(uid, shareId, saved) {
+  if (!uid || !shareId || !saved) return false;
+  ssSet(guestActiveSessionKey(uid, shareId), JSON.stringify(saved));
+  return true;
 }
 
 function clearGuestActiveSession(uid, shareId) {
-  lsDel(guestActiveSessionKey(uid, shareId));
+  const key = guestActiveSessionKey(uid, shareId);
+  const hadTabValue = ssGet(key) !== null;
+  ssDel(key);
+  if (!hadTabValue) lsDel(key);
 }
 
 /** 저장된 반이 지금도 이어서 진행할 수 있는 상태인지 서버 기록으로 확인한다. */
@@ -6911,7 +7004,8 @@ async function plFindResumableGuestRun(state) {
   const saved = readGuestActiveSession(uid, shareId);
   if (!saved) return null;
   try {
-    const session = await store.getSession(saved.sessionId);
+    const guestStore = state.guestLoad.guestStore || store;
+    const session = await guestStore.getSession(saved.sessionId);
     if (pl !== state) return null;
     if (!guestSessionIsResumable(session, uid, shareId)) {
       clearGuestActiveSession(uid, shareId);
@@ -6948,7 +7042,8 @@ async function plResumeGuestSession(state) {
   const saved = state.resumableGuestRun || readGuestActiveSession(uid, shareId);
   if (!saved) return false;
   try {
-    const session = await store.getSession(saved.sessionId);
+    const guestStore = state.guestLoad.guestStore || store;
+    const session = await guestStore.getSession(saved.sessionId);
     if (pl !== state) return false;
     if (!guestSessionIsResumable(session, uid, shareId)) {
       clearGuestActiveSession(uid, shareId);
@@ -6957,7 +7052,7 @@ async function plResumeGuestSession(state) {
       return false;
     }
     // 활성화를 다시 걸어 학생 접속 유지 시간을 되살린다. 토큰이 다르면 내 반이 아니다.
-    const activated = await store.activateSessionAllocation(
+    const activated = await guestStore.activateSessionAllocation(
       saved.sessionId, saved.code, uid, saved.allocationToken
     );
     if (pl !== state) return false;
@@ -6992,7 +7087,9 @@ async function plResumeGuestSession(state) {
 
 async function plStartGuestSession(state) {
   if (!state || pl !== state || state.startingSession || !state.guestLoad) return null;
-  const current = firebase.auth().currentUser;
+  const guestAuth = state.guestLoad.guestAuth;
+  const guestStore = state.guestLoad.guestStore;
+  const current = guestAuth && guestAuth.currentUser;
   if (!current || current.uid !== state.guestLoad.guestUser.uid) {
     guestLinkUnavailable(new Error('guest identity changed'));
     return null;
@@ -7005,19 +7102,19 @@ async function plStartGuestSession(state) {
   const allocationToken = rid(24);
   let code = '';
   try {
-    const session = store.prepareGuestSession(
+    const session = guestStore.prepareGuestSession(
       state.guestLoad, label, { uid: current.uid }, allocationToken
     );
-    code = await store.startSession(sessionId, session, () => rid(6));
-    if (!code || pl !== state || firebase.auth().currentUser?.uid !== current.uid) {
-      if (code) await store.abortSessionAllocation(sessionId, code, current.uid, allocationToken);
+    code = await guestStore.startSession(sessionId, session, () => rid(6));
+    if (!code || pl !== state || guestAuth.currentUser?.uid !== current.uid) {
+      if (code) await guestStore.abortSessionAllocation(sessionId, code, current.uid, allocationToken);
       return null;
     }
-    const activated = await store.activateSessionAllocation(
+    const activated = await guestStore.activateSessionAllocation(
       sessionId, code, current.uid, allocationToken
     );
     if (activated !== true) {
-      await store.abortSessionAllocation(sessionId, code, current.uid, allocationToken);
+      await guestStore.abortSessionAllocation(sessionId, code, current.uid, allocationToken);
       throw new Error('생성된 반 세션을 활성화하지 못했습니다.');
     }
     Object.assign(state, {
@@ -7032,9 +7129,9 @@ async function plStartGuestSession(state) {
     Object.entries(state.guestLoad.snapshotImages || {}).forEach(([key, data]) => {
       imgCache[sessionId + '/' + key] = data;
     });
-    lsSet(guestActiveSessionKey(current.uid, state.guestLoad.shareId), JSON.stringify({
+    writeGuestActiveSession(current.uid, state.guestLoad.shareId, {
       sessionId, code, allocationToken, sourceSetId: state.setId
-    }));
+    });
     plStartSessionHeartbeat(state, { uid: current.uid, email: '' }, null, allocationToken);
     renderPlayRun();
     return true;
@@ -7072,7 +7169,8 @@ function plGradeCurrentResponses(state, requestedQuestionIndex) {
         delete state.gradeWrites[key];
         return false;
       }
-      return store.gradeAnswer(
+      const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+      return activeStore.gradeAnswer(
         state.sessionId, studentId, questionIndex, response.revision, ok
       ).then(graded => {
         if (graded !== true) throw new Error('현재 제출 revision을 채점하지 못했습니다.');
@@ -7181,14 +7279,15 @@ function renderPlayRun() {
   plRenderStageControls();
 
   // 실시간 구독 — 참여자, 응답, live 상태
-  onCleanup(store.subscribeStudents(state.sessionId, students => {
+  const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+  onCleanup(activeStore.subscribeStudents(state.sessionId, students => {
     if (pl !== state) return;
     state.students = students || {};
     plRenderStudents();
     plRenderBoardOverlay();
     plRenderStageControls();
   }, e => { if (pl === state) console.error(e); }));
-  onCleanup(store.subscribeResponses(state.sessionId, responseDocs => {
+  onCleanup(activeStore.subscribeResponses(state.sessionId, responseDocs => {
     if (pl !== state) return;
     state.responseDocs = responseDocs || {};
     state.responses = FirestoreCore.responseDocsToQuestionMaps(
@@ -7202,7 +7301,7 @@ function renderPlayRun() {
     plRenderStudents();
     plRenderBoardOverlay();
   }, e => { if (pl === state) console.error(e); }));
-  onCleanup(store.subscribeGrades(state.sessionId, gradeDocs => {
+  onCleanup(activeStore.subscribeGrades(state.sessionId, gradeDocs => {
     if (pl !== state) return;
     state.gradeDocs = gradeDocs || {};
     state.responses = FirestoreCore.responseDocsToQuestionMaps(
@@ -7213,7 +7312,7 @@ function renderPlayRun() {
     plRenderStudents();
     plRenderBoardOverlay();
   }, e => { if (pl === state) console.error(e); }));
-  onCleanup(store.subscribeLive(state.sessionId, live => {
+  onCleanup(activeStore.subscribeLive(state.sessionId, live => {
     if (pl !== state) return;
     const nextLive = Object.assign(
       { q: -1, openedAt: 0, revealed: false, limitSec: 0 }, live || {}
@@ -8046,14 +8145,16 @@ async function plOpenQuestion(i) {
   if (state.closeFlight && state.live && Number(state.live.q) >= 0) return false;
   const graceUntil = Number(state.live && state.live.submitGraceUntil);
   if (state.live && Number(state.live.q) >= 0 && state.live.accepting !== false &&
-      Number.isFinite(graceUntil) && serverNow() < graceUntil) return false;
+      Number.isFinite(graceUntil) &&
+      (typeof playServerNow === 'function' ? playServerNow(state) : serverNow()) < graceUntil) return false;
   if (pl.set.settings.autoPause) { try { pl.player.pauseVideo(); } catch (e) {} }
   pl.pendingLiveQuestion = i;
   let image = '';
   try {
     if (question.imgUrl) image = question.imgUrl;
     else if (question.imgUp) image = await loadQuestionImage(
-      state.setId, question.key || i, state.sessionId, state.snapshotVersion
+      state.setId, question.key || i, state.sessionId, state.snapshotVersion,
+      typeof playStore === 'function' ? playStore(state) : store
     );
   } catch (e) {
     if (pl === state && state.pendingLiveQuestion === i) {
@@ -8081,7 +8182,7 @@ async function plOpenQuestion(i) {
     )
   };
   if (mode === 'timer') {
-    const openedMillis = serverNow();
+    const openedMillis = typeof playServerNow === 'function' ? playServerNow(state) : serverNow();
     const revealDelay = Math.max(0, Number(state.set.settings.revealDelaySec) || 0);
     liveLimit = configuredLimit > 0 ? Math.min(configuredLimit, revealDelay) : revealDelay;
     const closesAt = openedMillis + liveLimit * 1000;
@@ -8097,7 +8198,8 @@ async function plOpenQuestion(i) {
     live.publicAnswer = FirestoreStore.publicAnswer(question, explainImage);
   }
   try {
-    await store.setLive(state.sessionId, live);
+    const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+    await activeStore.setLive(state.sessionId, live);
     // live 구독이 방금 쓴 문항을 먼저 반영하면 pendingLiveQuestion이 -1로 비워진다.
     // liveToken이 우리가 쓴 값과 같으면 우리가 연 문항이므로 뒷정리를 건너뛰지 않는다.
     // (건너뛰면 dueQuestions에 남아 계속 재생이 같은 문항을 다시 연다)
@@ -8126,7 +8228,8 @@ async function plExplanationImage(question, questionIndex) {
   if (question.explainImgUrl) return question.explainImgUrl;
   if (!question.explainImgUp) return '';
   return loadQuestionImage(
-    pl.setId, String(question.key || questionIndex) + 'e', pl.sessionId, pl.snapshotVersion
+    pl.setId, String(question.key || questionIndex) + 'e', pl.sessionId, pl.snapshotVersion,
+    typeof playStore === 'function' ? playStore(pl) : store
   );
 }
 
@@ -8165,7 +8268,8 @@ async function plReveal() {
   try {
     const explainImage = await plExplanationImage(question, questionIndex);
     if (pl !== state || Number(state.live.q) !== Number(questionIndex)) return false;
-    const revealed = await store.revealLive(
+    const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+    const revealed = await activeStore.revealLive(
       state.sessionId,
       identity,
       FirestoreStore.publicAnswer(question, explainImage)
@@ -8273,7 +8377,8 @@ function plAutoResumeRemainingMs() {
     state.autoResumeQuestion = -1;
     return null;
   }
-  const now = typeof serverNow === 'function' ? serverNow() : Date.now();
+  const now = typeof playServerNow === 'function' ? playServerNow(pl) :
+    (typeof serverNow === 'function' ? serverNow() : Date.now());
   if (state.autoResumeQuestion !== questionIndex || !state.autoResumeAt) {
     state.autoResumeQuestion = questionIndex;
     state.autoResumeAt = now + seconds * 1000;
@@ -8287,7 +8392,8 @@ function plAutoResumeDue() {
   if (remaining === null || remaining > 0) return false;
   // 학생 제출 마감이 아직 안 끝났으면 계속 재생이 거부된다. 끝난 뒤에 넘긴다.
   const graceUntil = Number(state.live.submitGraceUntil);
-  const now = typeof serverNow === 'function' ? serverNow() : Date.now();
+  const now = typeof playServerNow === 'function' ? playServerNow(pl) :
+    (typeof serverNow === 'function' ? serverNow() : Date.now());
   if (state.live.accepting !== false && Number.isFinite(graceUntil) && now < graceUntil) return false;
   if (state.closeFlight) return false;
   state.autoResumeAt = 0;
@@ -8301,7 +8407,8 @@ function plCloseQuestion() {
   state.autoResumeAt = 0;
   state.autoResumeQuestion = -1;
   const submitGraceUntil = Number(state.live.submitGraceUntil);
-  const closeNow = typeof serverNow === 'function' ? serverNow() : Date.now();
+  const closeNow = typeof playServerNow === 'function' ? playServerNow(pl) :
+    (typeof serverNow === 'function' ? serverNow() : Date.now());
   if (state.live.accepting !== false &&
       Number.isFinite(submitGraceUntil) && closeNow < submitGraceUntil) {
     const waitSeconds = Math.max(1, Math.ceil((submitGraceUntil - closeNow) / 1000));
@@ -8344,6 +8451,7 @@ function plCloseQuestion() {
   state.closeError = '';
 
   const run = async () => {
+    const activeStore = typeof playStore === 'function' ? playStore(state) : store;
     // 열린 문항이 tick/seek 경계에서 다시 대기열에 들어왔더라도
     // 계속 재생 시 같은 문항을 즉시 다시 열지 않는다.
     if (Array.isArray(state.dueQuestions)) {
@@ -8377,13 +8485,13 @@ function plCloseQuestion() {
         return false;
       }
     }
-    const frozen = await store.freezeLive(state.sessionId, identity);
+    const frozen = await activeStore.freezeLive(state.sessionId, identity);
     if (!frozen) return false;
     if (!stillCurrent()) return false;
     state.live = Object.assign({}, state.live, { accepting: false });
     const [responseDocs, gradeDocs] = await Promise.all([
-      store.getResponses(state.sessionId),
-      store.getGrades(state.sessionId)
+      activeStore.getResponses(state.sessionId),
+      activeStore.getGrades(state.sessionId)
     ]);
     if (!stillCurrent()) return false;
     state.responseDocs = responseDocs || {};
@@ -8395,7 +8503,7 @@ function plCloseQuestion() {
     if (!stillCurrent()) return false;
     await plPushBoard();
     if (!stillCurrent()) return false;
-    const closed = await store.closeLive(state.sessionId, identity);
+    const closed = await activeStore.closeLive(state.sessionId, identity);
     if (!closed) {
       rollbackContinuePlayback();
       return false;
@@ -8479,10 +8587,11 @@ async function plEndSession() {
   if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
   await plExitStageFullscreen();
   if (pl !== state) return;
-  await store.endSession(state.sessionId);
+  const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+  await activeStore.endSession(state.sessionId);
   if (pl !== state) return;
-  if (state.classPlanAttached && store.finishClassPlan) {
-    const finished = await store.finishClassPlan(
+  if (state.classPlanAttached && activeStore.finishClassPlan) {
+    const finished = await activeStore.finishClassPlan(
       state.classPlanId,
       state.sessionId,
       { expectedRevision: state.classPlanRevision }
@@ -8573,7 +8682,8 @@ function plPushBoard() {
         }
       : { uid: r.sid, visible: false };
   });
-  return store.writeBoard(pl.sessionId, board, studentScores);
+  const activeStore = typeof playStore === 'function' ? playStore(pl) : store;
+  return activeStore.writeBoard(pl.sessionId, board, studentScores);
 }
 
 /**
@@ -8714,8 +8824,10 @@ function plRenderOverlay() {
   const mode = pl.set.settings.revealMode;
   const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === i);
   const closeGraceUntil = Number(pl.live.submitGraceUntil);
+  const overlayNow = typeof playServerNow === 'function' ? playServerNow(pl) :
+    (typeof serverNow === 'function' ? serverNow() : Date.now());
   const closeWaitMs = Number.isFinite(closeGraceUntil)
-    ? Math.max(0, closeGraceUntil - serverNow()) : 0;
+    ? Math.max(0, closeGraceUntil - overlayNow) : 0;
   const closeWaiting = pl.live.accepting !== false && closeWaitMs > 0;
   const overlayRevealed = !!(pl.live.revealed && pl.live.publicAnswer);
   const canContinue = mode === 'never' || overlayRevealed;
@@ -8891,6 +9003,7 @@ function plTimerTick() {
   const timerGeneration = Number(pl.quizTimerGeneration) || 0;
   const questionIndex = Number(pl.live.q);
   const liveToken = String(pl.live.liveToken || '');
+  const timerNow = () => typeof playServerNow === 'function' ? playServerNow(pl) : serverNow();
   const isCurrentTimer = state => pl === state &&
     (Number(state.quizTimerGeneration) || 0) === timerGeneration &&
     Number(state.live && state.live.q) === questionIndex &&
@@ -8898,21 +9011,21 @@ function plTimerTick() {
 
   // timer 모드는 시간이 차면 정답 projection도 Firestore에 함께 공개한다.
   const revealAt = Number(pl.live.revealAt) || 0;
-  const revealDue = revealAt > 0 && serverNow() >= revealAt;
+  const revealDue = revealAt > 0 && timerNow() >= revealAt;
   // 되돌릴 수 없는 실패(신분 상실 등)는 1초마다 다시 시도해도 소용없다.
   // 화면에 사유를 띄운 뒤 멈춰서 교사가 새 반을 열도록 한다.
   if (pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
       !pl.live.revealed && !pl.revealPending && !pl.revealRequested && !pl.revealFatal &&
-      serverNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
+      timerNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;
     Promise.resolve(plReveal()).then(revealed => {
       if (!isCurrentTimer(state)) return;
-      if (revealed === false) state.revealRetryAt = serverNow() + 1000;
+      if (revealed === false) state.revealRetryAt = timerNow() + 1000;
       else state.revealRequested = true;
     }).catch(e => {
       if (isCurrentTimer(state)) {
         state.revealRequested = false;
-        state.revealRetryAt = serverNow() + 1000;
+        state.revealRetryAt = timerNow() + 1000;
       }
       console.error(e);
     });
@@ -8920,12 +9033,12 @@ function plTimerTick() {
   if (plRevealed() !== pl.uiRevealed) plRenderOverlayCounts();
 
   const el = ov.querySelector('#ov-timer'), num = ov.querySelector('#ov-timer-n');
-  const t = FirestoreCore.timerView(pl.live, serverNow());
+  const t = FirestoreCore.timerView(pl.live, timerNow());
   if (!t) { if (el) el.style.display = 'none'; return; }
   el.style.display = '';
   const graceUntil = Number(pl.live.submitGraceUntil);
   const graceWaitMs = pl.live.accepting !== false && Number.isFinite(graceUntil)
-    ? Math.max(0, graceUntil - serverNow()) : 0;
+    ? Math.max(0, graceUntil - timerNow()) : 0;
   num.textContent = t.left > 0
     ? Math.ceil(t.left) + '초'
     : graceWaitMs > 0

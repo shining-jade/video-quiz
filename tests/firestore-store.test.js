@@ -6765,6 +6765,49 @@ test('score publication keeps aggregate teacher-only and hides own score until p
   ]);
 });
 
+test('비로그인 점수판은 기본 교사 저장소가 아니라 게스트 저장소에 기록한다', async () => {
+  const writes = [];
+  const guestStore = { async writeBoard(...args) { writes.push(args); } };
+  const context = {
+    pl: {
+      actorType: 'guest', guestLoad: { guestStore }, sessionId: 'guest-session',
+      students: { s1: { name: '학생', grade: 1, klass: 1, num: 1 } },
+      responses: { '0': { s1: { ok: true } } },
+      flatQuestions: [{ type: 'choice' }],
+      live: { q: 0, revealed: true }, set: { settings: { revealMode: 'manual' } }
+    },
+    store: new Proxy({}, { get() { throw new Error('기본 교사 저장소를 사용하면 안 된다'); } })
+  };
+  loadStageFunctions(['playStore', 'plScoreboard', 'plPushBoard'], context);
+
+  await context.plPushBoard();
+
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0][0], 'guest-session');
+  assert.equal(writes[0][1].s1, 1);
+});
+
+test('게스트 문항 이미지 캐시 미스는 게스트 저장소에서 세션 이미지를 읽는다', async () => {
+  const guestStore = {
+    async getSessionQuestionImage(ref, key) {
+      assert.equal(ref.id, 'guest-session');
+      assert.equal(ref.snapshotVersion, 1);
+      assert.equal(key, 'q-1');
+      return 'data:image/png;base64,guest';
+    }
+  };
+  const context = {
+    imgCache: {},
+    store: new Proxy({}, { get() { throw new Error('기본 교사 저장소를 사용하면 안 된다'); } }),
+    Promise
+  };
+  loadStageFunctions(['loadQuestionImage'], context);
+
+  const src = await context.loadQuestionImage('set-1', 'q-1', 'guest-session', 1, guestStore);
+
+  assert.equal(src, 'data:image/png;base64,guest');
+});
+
 test('문항 열기는 평탄화 문항의 전역 인덱스와 개별 제한 시간을 쓴다', async () => {
   let written;
   const ctx = loadStageFunctions(['limitFor', 'plOpenQuestion'], {
@@ -7656,6 +7699,34 @@ test('heartbeat는 lease 90초를 여유 있게 덮는 30초 간격을 사용한
 
   context.plStartSessionHeartbeat(state, owner, 1, 'allocation-token-123456');
   assert.equal(delay, 30_000);
+});
+
+test('비로그인 반 heartbeat는 교사 인증과 저장소 대신 게스트 경계를 사용한다', async () => {
+  const guest = { uid: 'guest-1', isAnonymous: true };
+  const calls = [];
+  let tick;
+  const guestStore = {
+    async renewSessionActivationLease(...args) { calls.push(args); return true; }
+  };
+  const state = {
+    actorType: 'guest', sessionId: 'guest-session', code: 'GST123',
+    guestLoad: { guestAuth: { currentUser: guest }, guestStore }
+  };
+  const context = {
+    pl: state,
+    firebase: { auth() { throw new Error('기본 교사 인증을 사용하면 안 된다'); } },
+    store: new Proxy({}, { get() { throw new Error('기본 교사 저장소를 사용하면 안 된다'); } }),
+    AuthCore: require('../auth-core.js'), teacherState: null, teacherAuthVersion: 0,
+    SESSION_HEARTBEAT_MS: 30_000, SESSION_HEARTBEAT_RETRY_MS: 5_000,
+    setTimeout(callback) { tick = callback; return 1; }, clearTimeout() {}, onCleanup() {}, toast() {}
+  };
+  loadStageFunctions(['playStore', 'playAuth', 'plStartSessionHeartbeat'], context);
+
+  context.plStartSessionHeartbeat(state, { uid: guest.uid, email: '' }, null, 'allocation-token-123456');
+  assert.equal(await tick(), true);
+  assert.deepEqual(calls, [[
+    'guest-session', 'GST123', 'guest-1', 'allocation-token-123456'
+  ]]);
 });
 
 test('Firestore 무료 사용량 초과는 원인과 재시도 안내를 보여준다', () => {
@@ -9346,6 +9417,31 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
   assert.equal(context.stLeftRatio().left, 10);
   context.plTimerTick();
   assert.equal(timerNumber.textContent, '10초');
+});
+
+test('비로그인 진행 타이머는 기본 교사 시계가 아니라 게스트 보정 시계를 사용한다', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const live = { q: 0, openedAt: 10_000, revealed: false, limitSec: 20, liveToken: 'guest-live' };
+  const fill = { style: {} };
+  const timer = { style: {}, classList: { toggle() {} }, querySelector() { return fill; } };
+  const timerNumber = { textContent: '' };
+  const overlay = { querySelector(selector) {
+    if (selector === '#ov-timer') return timer;
+    if (selector === '#ov-timer-n') return timerNumber;
+    return null;
+  } };
+  const context = {
+    pl: { actorType: 'guest', live, uiRevealed: false },
+    playServerNow() { return 15_000; },
+    serverNow() { throw new Error('기본 교사 시계를 사용하면 안 된다'); },
+    document: { getElementById() { return overlay; } },
+    plRevealed() { return false; }, plRenderOverlayCounts() {}, FirestoreCore: core
+  };
+  vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
+
+  context.plTimerTick();
+
+  assert.equal(timerNumber.textContent, '15초');
 });
 
 test('교사 타이머는 제출 보호 시간도 위 타이머 한 곳에서만 안내한다', () => {
@@ -15892,6 +15988,220 @@ test('권한 거부처럼 다시 시도해도 소용없는 실패는 곧바로 �
 });
 
 /* ── 비로그인 진행 반 복구 ─────────────────────────────────────────── */
+test('게스트 Firebase 서비스는 이름 있는 보조 앱으로 한 번만 생성된다', () => {
+  const primaryApp = { name: '[DEFAULT]' };
+  const guestAuth = { currentUser: null };
+  const guestDb = { kind: 'guest-db' };
+  const guestApp = { name: 'video-quiz-guest', auth() { return guestAuth; }, firestore() { return guestDb; } };
+  let initializations = 0;
+  const context = {
+    guestServices: null,
+    firebaseConfig: { projectId: 'video-quiz-test' },
+    firebase: {
+      apps: [primaryApp],
+      initializeApp(config, name) {
+        assert.equal(config.projectId, 'video-quiz-test');
+        assert.equal(name, 'video-quiz-guest');
+        initializations += 1;
+        this.apps.push(guestApp);
+        return guestApp;
+      },
+      firestore: { FieldValue: { serverTimestamp() {} } }
+    },
+    FirestoreStore: {
+      createFirestoreStore(db) {
+        assert.equal(db, guestDb);
+        return { kind: 'guest-store' };
+      }
+    },
+    Date
+  };
+  loadStageFunctions(['guestFirebaseServices'], context);
+
+  const first = context.guestFirebaseServices();
+  const second = context.guestFirebaseServices();
+
+  assert.equal(initializations, 1);
+  assert.equal(first, second);
+  assert.equal(first.auth, guestAuth);
+  assert.equal(first.store.kind, 'guest-store');
+});
+
+test('동시에 게스트 링크를 준비해도 익명 인증 초기화는 한 번만 실행된다', async () => {
+  const guest = { uid: 'guest-1', isAnonymous: true };
+  let observerCalls = 0;
+  let signIns = 0;
+  const auth = {
+    currentUser: null,
+    onAuthStateChanged(next) {
+      observerCalls += 1;
+      queueMicrotask(() => next(null));
+      return () => {};
+    },
+    async signInAnonymously() {
+      signIns += 1;
+      this.currentUser = guest;
+      return { user: guest };
+    }
+  };
+  const context = { guestAuthReadyPromise: null, queueMicrotask, Promise };
+  loadStageFunctions(['ensureGuestAnonymousUser'], context);
+
+  const [first, second] = await Promise.all([
+    context.ensureGuestAnonymousUser(auth),
+    context.ensureGuestAnonymousUser(auth)
+  ]);
+
+  assert.equal(first, guest);
+  assert.equal(second, guest);
+  assert.equal(observerCalls, 1);
+  assert.equal(signIns, 1);
+});
+
+test('비로그인 링크는 교사 기본 인증을 유지하고 분리된 익명 인증과 저장소를 사용한다', async () => {
+  let primarySignOuts = 0;
+  let guestSignIns = 0;
+  const teacher = { uid: 'teacher-1', isAnonymous: false };
+  const guest = { uid: 'guest-1', isAnonymous: true };
+  const primaryAuth = {
+    currentUser: teacher,
+    async signOut() { primarySignOuts += 1; this.currentUser = null; }
+  };
+  const guestAuth = {
+    currentUser: null,
+    onAuthStateChanged(next) {
+      queueMicrotask(() => next(this.currentUser));
+      return () => {};
+    },
+    async signInAnonymously() {
+      guestSignIns += 1;
+      this.currentUser = guest;
+      return { user: guest };
+    }
+  };
+  const guestStore = {
+    async loadActiveGuestQuizShare(shareId) {
+      assert.equal(shareId, 'S'.repeat(43));
+      return { shareId, sourceSetId: 'set-1', setSnapshot: { videos: [] }, snapshotImages: {} };
+    }
+  };
+  const context = {
+    guestAuthReadyPromise: null,
+    firebase: { auth() { return primaryAuth; } },
+    guestFirebaseServices() { return { auth: guestAuth, store: guestStore }; },
+    async ensureClock(user) { assert.equal(user, guest); },
+    console: { error() {} }
+  };
+  loadStageFunctions(['ensureGuestAnonymousUser', 'loadFreeGuestShare'], context);
+
+  const loaded = await context.loadFreeGuestShare({ shareId: 'S'.repeat(43) });
+
+  assert.equal(primarySignOuts, 0);
+  assert.equal(primaryAuth.currentUser, teacher);
+  assert.equal(guestSignIns, 1);
+  assert.equal(loaded.guestUser, guest);
+  assert.equal(loaded.guestAuth, guestAuth);
+  assert.equal(loaded.guestStore, guestStore);
+});
+
+test('게스트 반 복구는 다른 탭의 최근 반보다 현재 탭의 반을 우선한다', () => {
+  const uid = 'guest-1';
+  const shareId = 'S'.repeat(43);
+  const key = 'vq_guest_active_session:' + uid + ':' + shareId;
+  const tabRun = {
+    sessionId: 'tab-session', code: 'TAB123',
+    allocationToken: 'tab-allocation-token', sourceSetId: 'set-1'
+  };
+  const otherTabRun = {
+    sessionId: 'other-session', code: 'OTH123',
+    allocationToken: 'other-allocation-token', sourceSetId: 'set-1'
+  };
+  const context = {
+    ssGet(savedKey) { return savedKey === key ? JSON.stringify(tabRun) : null; },
+    lsGet(savedKey) { return savedKey === key ? JSON.stringify(otherTabRun) : ''; },
+    ssSet() {}, lsDel() {}, JSON, String
+  };
+  loadStageFunctions(['guestActiveSessionKey', 'readGuestActiveSession'], context);
+
+  const restored = context.readGuestActiveSession(uid, shareId);
+  assert.equal(restored.sessionId, 'tab-session');
+  assert.equal(restored.code, 'TAB123');
+  assert.equal(restored.allocationToken, 'tab-allocation-token');
+  assert.equal(restored.sourceSetId, 'set-1');
+});
+
+test('새 게스트 반은 공용 저장소가 아니라 현재 탭 저장소에 기록한다', () => {
+  const writes = [];
+  const context = {
+    guestActiveSessionKey() { return 'guest-run-key'; },
+    ssSet(key, value) { writes.push(['session', key, JSON.parse(value)]); },
+    lsSet(key, value) { writes.push(['local', key, value]); },
+    JSON
+  };
+  loadStageFunctions(['writeGuestActiveSession'], context);
+
+  context.writeGuestActiveSession('guest-1', 'share-1', {
+    sessionId: 'sess-1', code: 'ABC123',
+    allocationToken: 'allocation-token-1234', sourceSetId: 'set-1'
+  });
+
+  assert.deepEqual(writes, [[
+    'session', 'guest-run-key', {
+      sessionId: 'sess-1', code: 'ABC123',
+      allocationToken: 'allocation-token-1234', sourceSetId: 'set-1'
+    }
+  ]]);
+});
+
+test('비로그인 반 생성은 기본 교사 저장소가 아니라 게스트 인증 저장소를 끝까지 사용한다', async () => {
+  const guest = { uid: 'guest-1', isAnonymous: true };
+  const calls = [];
+  const guestStore = {
+    prepareGuestSession(load, label, actor, token) {
+      calls.push(['prepare', load.shareId, label, actor.uid, token]);
+      return { teacherUid: actor.uid, label };
+    },
+    async startSession(sessionId, session) {
+      calls.push(['start', sessionId, session.teacherUid]);
+      return 'ABC123';
+    },
+    async activateSessionAllocation(sessionId, code, uid, token) {
+      calls.push(['activate', sessionId, code, uid, token]);
+      return true;
+    }
+  };
+  const state = {
+    guestLoad: {
+      shareId: 'S'.repeat(43), guestUser: guest,
+      guestAuth: { currentUser: guest }, guestStore,
+      setSnapshot: { videos: [{ questions: [{ t: 1, text: 'Q' }] }] }, snapshotImages: {}
+    },
+    setId: 'set-1'
+  };
+  let id = 0;
+  const context = {
+    pl: state,
+    firebase: { auth() { return { currentUser: { uid: 'teacher-1', isAnonymous: false } }; } },
+    store: new Proxy({}, { get() { throw new Error('기본 교사 저장소를 사용하면 안 된다'); } }),
+    $(selector) { return selector === '#pl-label' ? { value: 'QA 반' } : null; },
+    rid() { id += 1; return id === 1 ? 'session-1' : 'allocation-token-123456'; },
+    PlaylistCore: require('../playlist-core.js'), imgCache: {},
+    guestActiveSessionKey() { return 'guest-run-key'; },
+    ssSet() {}, plStartSessionHeartbeat() {}, renderPlayRun() { context.rendered = true; },
+    guestLinkUnavailable() { context.unavailable = true; },
+    plSessionStartErrorMessage(error) { return error.message; },
+    alert(message) { context.alert = message; }, console: { error() {} },
+    Object, String
+  };
+  loadStageFunctions(['writeGuestActiveSession', 'plStartGuestSession'], context);
+
+  assert.equal(await context.plStartGuestSession(state), true, context.alert);
+  assert.equal(context.unavailable, undefined);
+  assert.equal(state.code, 'ABC123');
+  assert.equal(context.rendered, true);
+  assert.deepEqual(calls.map(call => call[0]), ['prepare', 'start', 'activate']);
+});
+
 function guestResumeContext(overrides) {
   const options = overrides || {};
   const store = Object.assign({
@@ -15903,7 +16213,8 @@ function guestResumeContext(overrides) {
       guestUser: { uid: 'guest-1' },
       shareId: 'S'.repeat(43),
       setSnapshot: { videos: [{ questions: [{ t: 1, text: 'Q' }] }] },
-      snapshotImages: {}
+      snapshotImages: {},
+      guestStore: store
     },
     setId: 'set-1'
   };
@@ -15912,11 +16223,15 @@ function guestResumeContext(overrides) {
     allocationToken: 'allocation-token-1234', sourceSetId: 'set-1'
   } : options.stored;
   const removed = [];
+  let tabStored = null;
   const context = {
     pl: state,
     store,
     imgCache: {},
     PlaylistCore: require('../playlist-core.js'),
+    ssGet() { return tabStored; },
+    ssSet(key, value) { tabStored = value; },
+    ssDel() { tabStored = null; },
     lsGet() { return stored === null ? '' : JSON.stringify(stored); },
     lsDel(key) { removed.push(key); },
     plStartSessionHeartbeat() { context.heartbeatStarted = true; },
@@ -16288,9 +16603,13 @@ function guestResumeChoiceContext(session) {
     setId: 'set-1'
   };
   const removed = [];
+  let tabStored = null;
   const context = {
     pl: state,
     store: { async getSession() { return session; } },
+    ssGet() { return tabStored; },
+    ssSet(key, value) { tabStored = value; },
+    ssDel() { tabStored = null; },
     lsGet() { return JSON.stringify({
       sessionId: 'sess-1', code: 'ABC123', allocationToken: 'allocation-token-1234'
     }); },
