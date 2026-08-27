@@ -8283,6 +8283,10 @@ async function plReveal() {
       FirestoreStore.publicAnswer(question, explainImage)
     );
     if (pl === state && revealed !== false) {
+      // 정답 공개 뒤의 구독 콜백에만 채점을 맡기면 구독 갱신이 늦거나 생략된
+      // 브라우저에서 응답이 계속 미채점으로 남는다. 공개 성공을 확인한 이 경로에서
+      // 현재 O·X/객관식 등 자동 채점 응답을 즉시 저장한다.
+      await plGradeCurrentResponses(state, questionIndex);
       state.revealError = '';
       state.revealFailures = 0;
       state.revealFatal = false;

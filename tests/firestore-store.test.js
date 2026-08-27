@@ -8012,7 +8012,8 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
         writes.push(['revealLive', id, identity, answer]);
         return Promise.resolve(true);
       }
-    }
+    },
+    async plGradeCurrentResponses() {}
   };
   vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
   vm.runInNewContext(extractFunction(html, 'plExplanationImage'), context);
@@ -13443,6 +13444,7 @@ test('지금 공개는 제출 마감 전에도 atomic 공개 쓰기를 보낸다
       publicAnswer() { return { answer: 0 }; }
     },
     async plExplanationImage() { return ''; },
+    async plGradeCurrentResponses() {},
     plRenderOverlayCounts() {},
     store: { revealLive() { reveals += 1; return true; } }
   };
@@ -16590,6 +16592,7 @@ function revealFailureContext(error) {
       publicAnswer() { return { answer: 0 }; }
     },
     async plExplanationImage() { return null; },
+    async plGradeCurrentResponses() {},
     plRenderOverlayCounts() {},
     plRenderOverlay() {},
     console: { error() {} },
@@ -16636,6 +16639,51 @@ test('정답 공개에 성공하면 남아 있던 경고를 지운다', async ()
   assert.equal(ctx.pl.revealError, '');
   assert.equal(ctx.pl.revealFailures, 0);
   assert.equal(ctx.pl.revealFatal, false);
+});
+
+test('O·X 정답 공개 성공은 구독 갱신을 기다리지 않고 현재 응답을 채점한다', async () => {
+  const state = {
+    live: { q: 0, revealed: false, liveToken: 'tok', openedAt: 1 },
+    flatQuestions: [{ type: 'ox', text: 'O·X', choices: ['O', 'X'], answer: 0 }],
+    responses: {
+      '0': {
+        correct: { answer: 0, submitted: true, revision: 1 },
+        wrong: { answer: 1, submitted: true, revision: 1 }
+      }
+    },
+    sessionId: 's1'
+  };
+  const writes = [];
+  const context = {
+    pl: state,
+    store: {
+      async revealLive() { writes.push(['reveal']); return true; },
+      async gradeAnswer(sessionId, studentId, questionIndex, revision, ok) {
+        writes.push(['grade', sessionId, studentId, questionIndex, revision, ok]);
+        return true;
+      }
+    },
+    FirestoreStore: {
+      liveIdentity() { return { q: 0, openedAt: 1, liveToken: 'tok' }; },
+      publicAnswer() { return { answer: 0 }; }
+    },
+    async plExplanationImage() { return null; },
+    qType(question) { return question.type || 'choice'; },
+    plRenderOverlayCounts() {},
+    plRenderOverlay() {},
+    console,
+    Number, String
+  };
+  loadStageFunctions(['isAutoGraded', 'gradeResponse', 'plGradeCurrentResponses', 'plReveal'], context);
+
+  assert.equal(await context.plReveal(), true);
+  assert.deepEqual(writes, [
+    ['reveal'],
+    ['grade', 's1', 'correct', 0, 1, true],
+    ['grade', 's1', 'wrong', 0, 1, false]
+  ]);
+  assert.equal(state.responses['0'].correct.ok, true);
+  assert.equal(state.responses['0'].wrong.ok, false);
 });
 
 function guestResumeChoiceContext(session) {
