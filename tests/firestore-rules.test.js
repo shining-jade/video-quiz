@@ -2766,6 +2766,29 @@ rulesTest('ox-submit: O and X retain own responses and stale revisions or closed
   assert.equal(retained.data().answers['0'].revision, 3);
 });
 
+rulesTest('trio-join: independent anonymous clients can join the same empty session concurrently', async () => {
+  const sessionId = 'TEST-trio-join';
+  await adminWrite('sessions/' + sessionId, {
+    code: 'TRI123', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', setId: 'set1',
+    status: 'live', registeredStudentCount: 0, studentCountRevision: 0,
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() + 120_000)
+  });
+  const clients = ['TEST_trio_A', 'TEST_trio_B', 'TEST_trio_C'].map(uid => {
+    const db = guestFirestore(uid);
+    return { uid, store: createFirestoreStore(compatStoreDb(db), {
+      serverTimestamp
+    }, () => Date.now()) };
+  });
+  const outcomes = await Promise.allSettled(clients.map(({ uid, store }, index) =>
+    store.joinStudent(sessionId, uid, { name: uid, grade: 1, klass: 1, num: index + 1 })
+  ));
+  assert.deepEqual(outcomes.map(value => value.status === 'fulfilled' ? 'joined' : value.reason.code),
+    ['joined', 'joined', 'joined']);
+  const stored = await adminRead('sessions/' + sessionId);
+  assert.equal(stored.registeredStudentCount, 3);
+  assert.equal(stored.studentCountRevision, 3);
+});
+
 rulesTest('fix-round-2: publicAnswer accept is bounded and string-only', async t => {
   const cases = [
     ['nested map', [{ answer: 'private' }]],

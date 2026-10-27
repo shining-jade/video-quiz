@@ -1253,6 +1253,76 @@ function oxStudentSubmissionHarness(selected = 0) {
   return { fake, store, context, question, setNow(value) { now = value; } };
 }
 
+function studentJoinRaceHarness(patch = {}, readMode = '', repeat = false) {
+  const sessionPath = 'sessions/TEST-race';
+  const initial = { teacherUid: 'teacher', code: 'RACE12', setId: 'set1', status: 'live',
+    registeredStudentCount: 0, studentCountRevision: 0, activationLeaseUntil: new Timestamp(120_000) };
+  const fake = makeFirestoreFake({ [sessionPath]: initial });
+  const originalTransaction = fake.db.runTransaction;
+  let attempts = 0;
+  const denied = Object.assign(new Error('TEST permission denied'), { code: 'permission-denied' });
+  fake.db.runTransaction = update => originalTransaction(async transaction => {
+    attempts += 1;
+    const result = await update(transaction);
+    if (attempts === 1 || repeat) {
+      const count = repeat ? fake.value(sessionPath).registeredStudentCount + 1 : 1;
+      await fake.db.doc(sessionPath).set({ ...initial, registeredStudentCount: count,
+        studentCountRevision: count, lastStudentUid: 'other-student', ...patch });
+      throw denied;
+    }
+    return result;
+  });
+  const originalDoc = fake.db.doc;
+  fake.db.doc = path => {
+    const ref = originalDoc(path);
+    if (path === sessionPath && readMode) {
+      const originalGet = ref.get;
+      ref.get = async options => {
+        if (readMode === 'offline') throw new Error('TEST offline');
+        const snapshot = await originalGet(options);
+        return { ...snapshot, metadata: { fromCache: readMode !== 'pending', hasPendingWrites: readMode === 'pending' } };
+      };
+    }
+    return ref;
+  };
+  return { fake, denied, attempts: () => attempts };
+}
+
+test('trio-join: rebase only a proven concurrent counter advance after permission denial', async () => {
+  const race = studentJoinRaceHarness();
+  const result = await createStore(race.fake).joinStudent('TEST-race', 'TEST_A', { name: 'TEST_A' });
+  assert.equal(result.uid, 'TEST_A');
+  assert.equal(race.attempts(), 2);
+  assert.equal(race.fake.value('sessions/TEST-race').registeredStudentCount, 2);
+  assert.equal(race.fake.value('sessions/TEST-race').studentCountRevision, 2);
+});
+
+test('trio-join: continuing proven contention is bounded and returns the existing retryable condition', async () => {
+  const race = studentJoinRaceHarness({}, '', true);
+  await assert.rejects(createStore(race.fake).joinStudent('TEST-race', 'TEST_A', { name: 'TEST_A' }),
+    error => error.code === 'aborted');
+  assert.equal(race.attempts(), 4);
+  assert.equal(race.fake.has('sessions/TEST-race/students/TEST_A'), false);
+});
+
+test('trio-join: genuine denial, ended/expired session and uncertain server evidence do not retry', async t => {
+  const cases = [
+    ['unchanged counter', { registeredStudentCount: 0, studentCountRevision: 0 }, ''],
+    ['ended', { status: 'ended' }, ''],
+    ['expired lease', { activationLeaseUntil: new Timestamp(1) }, ''],
+    ['changed owner', { teacherUid: 'another-teacher' }, ''],
+    ['malformed counter', { registeredStudentCount: '1' }, ''],
+    ['cached', {}, 'cached'], ['pending writes', {}, 'pending'], ['offline', {}, 'offline']
+  ];
+  for (const [name, patch, mode] of cases) await t.test(name, async () => {
+    const race = studentJoinRaceHarness(patch, mode);
+    await assert.rejects(createStore(race.fake).joinStudent('TEST-race', 'TEST_A', { name: 'TEST_A' }),
+      error => error === race.denied);
+    assert.equal(race.attempts(), 1);
+    assert.equal(race.fake.has('sessions/TEST-race/students/TEST_A'), false);
+  });
+});
+
 test('ox-submit: O/X correct and incorrect answers save, rejoin, grade and survive session end', async t => {
   for (const correct of [0, 1]) for (const selected of [0, 1]) {
     await t.test('correct ' + correct + ', selected ' + selected, async () => {

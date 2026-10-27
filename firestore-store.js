@@ -4593,7 +4593,10 @@
     async function joinStudent(sessionId, authUid, profile) {
       const sessionReference = db.doc('sessions/' + sessionId);
       const studentReference = db.doc('sessions/' + sessionId + '/students/' + authUid);
-      return db.runTransaction(async transaction => {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        let observed = null;
+        try {
+          return await db.runTransaction(async transaction => {
         const sessionSnapshot = await transaction.get(sessionReference);
         const studentSnapshot = await transaction.get(studentReference);
         if (!sessionSnapshot.exists) throw new Error('학생이 참여할 session이 없습니다.');
@@ -4607,6 +4610,7 @@
         if (!['active', 'live'].includes(session.status)) {
           throw new Error('종료된 session에는 학생이 참여할 수 없습니다.');
         }
+        observed = { teacherUid: session.teacherUid, setId: session.setId, code: session.code, count };
         let publicPlanReference = null;
         if (session.classPlanId !== undefined || session.classPlanRevision !== undefined) {
           const planId = assertPlanId(session.classPlanId);
@@ -4632,7 +4636,31 @@
           }
         }
         return student;
-      });
+          });
+        } catch (error) {
+          if (!observed || !String(error && error.code || '').endsWith('permission-denied')) throw error;
+          // Concurrent counter writes can be denied before Firestore reports the
+          // optimistic transaction conflict. Never blindly retry an auth denial:
+          // require fresh server evidence that another student advanced this
+          // same still-active classroom, then rebuild the transaction normally.
+          let snapshot;
+          try { snapshot = await sessionReference.get({ source: 'server' }); }
+          catch (readError) { throw error; }
+          const latest = snapshot.exists ? snapshot.data() || {} : null;
+          if (!snapshot.metadata || snapshot.metadata.fromCache !== false || snapshot.metadata.hasPendingWrites ||
+              !latest || !['active', 'live'].includes(latest.status) ||
+              latest.teacherUid !== observed.teacherUid || latest.setId !== observed.setId || latest.code !== observed.code ||
+              !Number.isSafeInteger(latest.registeredStudentCount) ||
+              latest.studentCountRevision !== latest.registeredStudentCount ||
+              latest.registeredStudentCount <= observed.count ||
+              !(timestampMillis(latest.activationLeaseUntil) > serverNow())) throw error;
+          if (attempt === 3) {
+            const contention = new Error('다른 학생이 동시에 입장하고 있습니다. 잠시 후 다시 시도해 주세요.');
+            contention.code = 'aborted';
+            throw contention;
+          }
+        }
+      }
     }
 
     async function getOwnResponses(sessionId, studentId) {

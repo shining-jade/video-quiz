@@ -1,0 +1,15 @@
+# Three independent student QA and join contention repair
+
+The user authorized continued verification, related fixes, and synthetic session operations. Keep session protection and OX fixes; never broaden Firestore/auth access or delete test records.
+
+Live production verification now has three normal anonymous Firebase client SDK apps with distinct UIDs and memory-only authentication, connected to TEST Q6BE3N3YQTP2/ZSFZ8H. All three concurrently submitted different multiple-choice answers; teacher UI saw three participants, three responses, separate answer distribution and correct score. OX correct/incorrect/unanswered, deadline rejection and a same-UID network reconnection are being exercised. This is real production client integration, not three browser-rendered pages.
+
+The first simultaneous join attempt admitted one of two clients and denied another. A local emulator reproduction with three authenticated anonymous clients concurrently joining an empty session also admits one and returns permission-denied for two. Sequential joins succeed. The application currently does not retry permission-denied, correctly preventing blind authorization retries but leaving this counter contention unrecovered.
+
+Repair: when a join transaction is denied, retry only after a fresh non-cached server read proves the same live session's valid participant counter advanced and its lease remains active. Never retry unchanged/malformed/ended/expired/different-owner state or uncertain reads. Bound internal attempts; only proven continued contention may become the existing retryable aborted condition. Keep all requests under unchanged Rules.
+
+Verification: failing emulator reproduction and store regression first; positive and negative guard tests; full suite and emulator; independent review; separate commit. Related repair can be deployed after green checks within the approved testing scope. Test the published code with three simultaneous SDK joins and responses again.
+
+Pre-deploy result: emulator concurrent join RED one joined/two denied -> GREEN all three joined. Full unit 944 passed, zero failed, 113 emulator-gated skips. Separate full emulator 490 passed, zero failed/skipped. Independent reviewer confirmed 11 targeted passes and no important defect. Minor ruling: a genuine invalid request coinciding with continuous valid counter advancement may return bounded retryable aborted after four attempts; unchanged Rules still deny every invalid write. Do not broaden retry to unchanged counters or relax Rules.
+
+Media/termination investigation: browser-created teacher tabs are inactive and new YouTube frames remain about:blank despite correct src; standalone embed navigation produces controls. Browser management tabs.update active was rejected as unsupported. Do not work around it. A single manual TEST-tab activation/cancel confirmation request is pending while independent SDK and local tests continue. Native confirmation support also stalls on Emulation.setFocusEmulationEnabled. Do not call that a completed UI end test or change app confirmation just to conceal a tool limitation.
