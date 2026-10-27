@@ -2742,6 +2742,30 @@ rulesTest('O·X 문항의 잘못된 답안은 그대로 막는다', async () => 
   }
 });
 
+rulesTest('ox-submit: O and X retain own responses and stale revisions or closed deadlines stay denied', async () => {
+  const owner = actorFirestore('owner');
+  const student = actorFirestore('student');
+  const question = { number: 1, total: 2, type: 'ox', text: 'TEST OX', choices: ['O', 'X'] };
+  await assertSucceeds(setDoc(doc(owner, 'sessions/s1/meta/live'), liveQuestion(0, { publicQuestion: question })));
+  const own = doc(student, 'sessions/s1/responses/student-uid');
+  for (const [revision, answer] of [[2, 0], [3, 1]]) {
+    await assertSucceeds(setDoc(own, { uid: 'student-uid', answers: { 0: { answer, submitted: true, revision } } }));
+    const saved = await assertSucceeds(getDoc(own));
+    assert.equal(saved.data().answers['0'].answer, answer);
+    assert.equal(saved.data().answers['0'].revision, revision);
+  }
+  await assertFails(updateDoc(own, { 'answers.0': { answer: 0, submitted: true, revision: 2 } }));
+  const now = Date.now();
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    publicQuestion: question, responseClosesAt: Timestamp.fromMillis(now - 2_000),
+    submitGraceUntil: Timestamp.fromMillis(now - 1_000), revealAt: Timestamp.fromMillis(now - 1_000)
+  }));
+  await assertFails(updateDoc(own, { 'answers.0': { answer: 0, submitted: true, revision: 4 } }));
+  const retained = await assertSucceeds(getDoc(own));
+  assert.equal(retained.data().answers['0'].answer, 1);
+  assert.equal(retained.data().answers['0'].revision, 3);
+});
+
 rulesTest('fix-round-2: publicAnswer accept is bounded and string-only', async t => {
   const cases = [
     ['nested map', [{ answer: 'private' }]],

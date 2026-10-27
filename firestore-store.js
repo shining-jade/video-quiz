@@ -157,7 +157,11 @@
     const question = publicQuestionValue || {};
     const type = String(question.type || 'choice');
     const choices = Array.isArray(question.choices) ? question.choices : [];
-    if (type === 'choice' || type === 'mc') {
+    if (type === 'ox') {
+      if (choices.length !== 2 || !Number.isInteger(answer) || answer < 0 || answer > 1) {
+        throw new Error('O·X 답안은 두 보기 중 하나여야 합니다.');
+      }
+    } else if (type === 'choice' || type === 'mc') {
       if (!Number.isInteger(answer) || answer < 0 || answer >= choices.length) {
         throw new Error('객관식 답안이 보기 범위를 벗어났습니다.');
       }

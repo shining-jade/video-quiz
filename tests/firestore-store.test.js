@@ -1218,6 +1218,91 @@ test('학생 응답 client validation은 공개 문항 유형과 같은 경계�
   assert.throws(() => validateStudentAnswer({ type: 'long', choices: [] }, 'x'.repeat(1001)), /서술형/);
 });
 
+test('ox-submit: binary OX validation accepts O and X and rejects malformed payloads', () => {
+  const { validateStudentAnswer } = loadStoreModule();
+  const question = { type: 'ox', choices: ['O (맞다)', 'X (아니다)'] };
+  for (const answer of [0, 1]) assert.equal(validateStudentAnswer(question, answer), true);
+  for (const answer of [-1, 2, 0.5, '0', 'O', true, null, undefined, [], [0]]) {
+    assert.throws(() => validateStudentAnswer(question, answer), /O·X/);
+  }
+  for (const choices of [[], ['O'], ['O', 'X', 'extra']]) {
+    assert.throws(() => validateStudentAnswer({ type: 'ox', choices }, 0), /O·X/);
+  }
+});
+
+function oxStudentSubmissionHarness(selected = 0) {
+  let now = 1_500;
+  const question = { type: 'ox', text: 'TEST OX', choices: ['O', 'X'], answer: 0 };
+  const fake = makeFirestoreFake({
+    'sessions/ox-test': { status: 'live', teacherUid: 'teacher', registeredStudentCount: 1,
+      studentCountRevision: 1, lastStudentUid: 'TEST_A' },
+    'sessions/ox-test/meta/live': { q: 0, openedAt: 1_000, limitSec: 15, revealed: false }
+  });
+  const store = createStore(fake, () => now);
+  const context = {
+    st: { sessionId: 'ox-test', authUid: 'TEST_A', live: {
+      q: 0, openedAt: 1_000, limitSec: 15, responseClosesAt: 16_000, liveToken: 'ox-live', revealed: false
+    }, currentQuestion: question, myAnswers: {}, sel: selected, submitted: false, revision: 0 },
+    FirestoreStore: loadStoreModule(), FirestoreCore: core, store, SV_TS: SERVER_TIMESTAMP,
+    QTYPES: { choice: 'choice', ox: 'ox' }, serverNow() { return now; },
+    stRender() {}, toast() {}, console, setTimeout
+  };
+  loadStageFunctions(['qType', 'gradeResponse', 'stRevealed', 'stLocked', 'stLeftRatio',
+    'stHasDraftAnswer', 'stBuildAnswer', 'stQueueWrite', 'stSend', 'stSubmitCurrent',
+    'stDeadlineTick'], context);
+  return { fake, store, context, question, setNow(value) { now = value; } };
+}
+
+test('ox-submit: O/X correct and incorrect answers save, rejoin, grade and survive session end', async t => {
+  for (const correct of [0, 1]) for (const selected of [0, 1]) {
+    await t.test('correct ' + correct + ', selected ' + selected, async () => {
+      const { fake, store, context, question } = oxStudentSubmissionHarness(selected);
+      question.answer = correct;
+      const first = context.stSubmitCurrent('button');
+      assert.equal(await context.stSubmitCurrent('button'), false, 'a second click cannot submit twice');
+      assert.equal(await first, true);
+      const answers = await store.getOwnResponses('ox-test', 'TEST_A');
+      assert.equal(answers['0'].answer, selected);
+      assert.equal(answers['0'].revision, 1);
+      context.st.myAnswers = answers;
+      context.st.submitted = true;
+      assert.equal(await context.stSubmitCurrent('button'), false, 'rejoin retains submission lock');
+      const ok = context.gradeResponse(question, answers['0']);
+      assert.equal(ok, correct === selected);
+      assert.equal(await store.gradeAnswer('ox-test', 'TEST_A', 0, 1, ok), true);
+      const response = fake.value('sessions/ox-test/responses/TEST_A');
+      const grade = fake.value('sessions/ox-test/grades/TEST_A__0');
+      const maps = core.responseDocsToQuestionMaps({ TEST_A: response }, { TEST_A__0: grade });
+      assert.equal(core.buildBoard({ TEST_A: {} }, { TEST_A: { answers: { 0: maps['0'].TEST_A } } }).TEST_A, ok ? 1 : 0);
+      await store.endSession('ox-test');
+      assert.equal(fake.value('sessions/ox-test').status, 'ended');
+      assert.deepEqual(fake.value('sessions/ox-test/responses/TEST_A'), response);
+      assert.deepEqual(fake.value('sessions/ox-test/grades/TEST_A__0'), grade);
+    });
+  }
+});
+
+test('ox-submit: no response and late button clicks create no answer; a deadline draft submits only once', async () => {
+  const empty = oxStudentSubmissionHarness(null);
+  assert.equal(await empty.context.stSubmitCurrent('button'), false);
+  empty.setNow(16_000);
+  empty.context.stDeadlineTick();
+  assert.equal(empty.fake.has('sessions/ox-test/responses/TEST_A'), false);
+  const late = oxStudentSubmissionHarness(1);
+  late.setNow(16_000);
+  assert.equal(await late.context.stSubmitCurrent('button'), false);
+  assert.equal(late.fake.has('sessions/ox-test/responses/TEST_A'), false);
+  const draft = oxStudentSubmissionHarness(1);
+  draft.setNow(16_000);
+  draft.context.stDeadlineTick();
+  draft.context.stDeadlineTick();
+  await new Promise(resolve => setImmediate(resolve));
+  const saved = await draft.store.getOwnResponses('ox-test', 'TEST_A');
+  assert.equal(saved['0'].answer, 1);
+  assert.equal(saved['0'].revision, 1);
+  assert.equal(saved['0'].submitted, true);
+});
+
 test('학생 참여는 자기 UID 문서를 먼저 읽고 프로필 필드로 저장한다', async () => {
   const fake = makeFirestoreFake({
     'sessions/session-a': {
