@@ -561,6 +561,13 @@ function extractFunction(source, name) {
 
 function loadStageFunctions(names, context) {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  // Executor tests inject the confirmation boundary; DOM behavior is exercised
+  // through the real controller in session-end-dialog.test.js.
+  if (names.includes('plEndSession') && !Object.hasOwn(context, 'plConfirmSessionEnd')) {
+    context.plConfirmSessionEnd = () => context.confirm();
+    context.plDismissEndSessionDialog = () => {};
+    context.plRenderEndSessionDialog = () => {};
+  }
   if (!Object.hasOwn(context, 'PublicAuthorLabelCore')) {
     context.PublicAuthorLabelCore = require('../public-author-label-core.js');
   }
@@ -5294,7 +5301,7 @@ test('end-race: question callbacks stop while ending and after successful termin
     pendingAllocationRemove() {}, toast() {}, go() {}, plRenderQList() {}, plRenderTimeline() {}, console };
   loadStageFunctions(['plEndSession', 'plOpenQuestion'], context);
   const ending = context.plEndSession();
-  await Promise.resolve();
+  await new Promise(setImmediate);
   assert.equal(await context.plOpenQuestion(0), false);
   finishEnd();
   await ending;
@@ -6893,7 +6900,7 @@ test('완료 메뉴는 대시보드 없이 순위·처음부터 재생·명시�
   assert.match(completion.innerHTML, /onclick="plToggleBoard\(\)"/);
   assert.doesNotMatch(completion.innerHTML, /대시보드|href="#\/live\/session-a"/);
   assert.match(completion.innerHTML, /onclick="plReplayPlaylist\(\)"/);
-  assert.match(completion.innerHTML, /onclick="plEndSession\(\)"/);
+  assert.match(completion.innerHTML, /onclick="plEndSession\(\)\.catch\(\(\)=>\{\}\)"/);
 });
 
 test('YouTube 상태는 새 영상 로드 잠금을 풀고 종료는 tick에 위임하며 오류는 자동 건너뛰지 않는다', () => {
