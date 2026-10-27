@@ -5245,6 +5245,7 @@ test('학생·응답·live 구독은 세션의 각 Firestore 경로 데이터만
 
 test('live 갱신은 meta/live 문서를 통째로 교체한다', async () => {
   const fake = makeFirestoreFake({
+    'sessions/a': { status: 'live' },
     'sessions/a/meta/live': { q: 2, openedAt: 10, revealed: true, limitSec: 30, stale: true }
   });
   const store = createStore(fake);
@@ -5253,6 +5254,125 @@ test('live 갱신은 meta/live 문서를 통째로 교체한다', async () => {
   await store.setLive('a', waiting);
 
   assert.deepEqual(fake.value('sessions/a/meta/live'), waiting);
+});
+
+test('end-race: late question publication cannot replace ended live state', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/TEST-end': { status: 'live', teacherUid: 'teacher', registeredStudentCount: 1,
+      studentCountRevision: 1, lastStudentUid: 'TEST_A' },
+    'sessions/TEST-end/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    'sessions/TEST-end/responses/TEST_A': { uid: 'TEST_A', answers: { 0: { answer: 0, submitted: true, revision: 1 } } }
+  });
+  const store = createStore(fake);
+  await store.endSession('TEST-end');
+  await assert.rejects(store.setLive('TEST-end', { q: 1, openedAt: 999, revealed: false, limitSec: 20 }), /종료|진행 중/);
+  assert.equal(fake.value('sessions/TEST-end').status, 'ended');
+  assert.equal(fake.value('sessions/TEST-end/meta/live').status, 'ended');
+  assert.equal(fake.value('sessions/TEST-end/meta/live').q, -1);
+  assert.equal(fake.value('sessions/TEST-end/responses/TEST_A').answers['0'].answer, 0);
+});
+
+test('end-race: idempotent termination repairs a late-reopened child without changing results or endedAt', async () => {
+  const fake = makeFirestoreFake({
+    'sessions/TEST-end': { status: 'ended', teacherUid: 'teacher', registeredStudentCount: 1,
+      studentCountRevision: 1, lastStudentUid: 'TEST_A', actualParticipants: 1, endedAt: new Timestamp(1_000) },
+    'sessions/TEST-end/meta/live': { q: 1, openedAt: 2_000, revealed: false, limitSec: 20 }
+  });
+  await createStore(fake).endSession('TEST-end');
+  assert.equal(fake.value('sessions/TEST-end').endedAt.toMillis(), 1_000);
+  assert.equal(fake.value('sessions/TEST-end/meta/live').status, 'ended');
+  assert.equal(fake.value('sessions/TEST-end/meta/live').q, -1);
+});
+
+test('end-race: question callbacks stop while ending and after successful termination', async () => {
+  let finishEnd, writes = 0;
+  const state = { sessionId: 'TEST-end', set: { settings: { autoPause: false, revealMode: 'manual' } },
+    live: { q: -1 }, flatQuestions: [{ type: 'choice', text: 'TEST', choices: ['A', 'B'], answer: 0 }] };
+  const context = { pl: state, confirm() { return true; }, async plExitStageFullscreen() {},
+    store: { endSession() { return new Promise(resolve => { finishEnd = resolve; }); }, async setLive() { writes += 1; } },
+    FirestoreStore: loadStoreModule(), SV_TS: SERVER_TIMESTAMP, limitFor() { return 20; },
+    pendingAllocationRemove() {}, toast() {}, go() {}, plRenderQList() {}, plRenderTimeline() {}, console };
+  loadStageFunctions(['plEndSession', 'plOpenQuestion'], context);
+  const ending = context.plEndSession();
+  await Promise.resolve();
+  assert.equal(await context.plOpenQuestion(0), false);
+  finishEnd();
+  await ending;
+  assert.equal(await context.plOpenQuestion(0), false);
+  assert.equal(writes, 0);
+});
+
+test('end-race: cancellation and network failure release the end latch, duplicate clicks do not overlap', { timeout: 5_000 }, async () => {
+  const state = { sessionId: 'TEST-end' };
+  let confirmed = false, calls = 0, finish;
+  const context = { pl: state, confirm: () => confirmed, async plExitStageFullscreen() {},
+    store: { endSession() { calls += 1; return new Promise((resolve, reject) => { finish = { resolve, reject }; }); } },
+    pendingAllocationRemove() {}, toast() {}, go() {} };
+  loadStageFunctions(['plEndSession'], context);
+  await context.plEndSession();
+  assert.equal(state.endingSession, false);
+  assert.equal(calls, 0);
+  confirmed = true;
+  const failed = context.plEndSession();
+  await new Promise(setImmediate);
+  await context.plEndSession();
+  assert.equal(calls, 1);
+  finish.reject(new Error('offline'));
+  await assert.rejects(failed, /offline/);
+  assert.equal(state.endingSession, false);
+  assert.equal(state.sessionEnded, undefined);
+  const retried = context.plEndSession();
+  await new Promise(setImmediate);
+  finish.resolve();
+  await retried;
+  assert.equal(calls, 2);
+  assert.equal(state.sessionEnded, true);
+});
+
+test('end-race: an image load started before termination cannot publish after termination', async () => {
+  let releaseImage, writes = 0;
+  const state = { sessionId: 'TEST-end', set: { settings: { autoPause: false } }, live: { q: -1 },
+    flatQuestions: [{ type: 'choice', imgUp: true }] };
+  const context = { pl: state, confirm() { return true; }, async plExitStageFullscreen() {},
+    loadQuestionImage() { return new Promise(resolve => { releaseImage = resolve; }); },
+    store: { async endSession() {}, async setLive() { writes += 1; } },
+    pendingAllocationRemove() {}, toast() {}, go() {} };
+  loadStageFunctions(['plEndSession', 'plOpenQuestion'], context);
+  const opening = context.plOpenQuestion(0);
+  await context.plEndSession();
+  releaseImage('TEST image');
+  assert.equal(await opening, false);
+  assert.equal(writes, 0);
+});
+
+test('end-race: playback and reveal timers do no work while ending or ended', () => {
+  for (const key of ['endingSession', 'sessionEnded']) {
+    const context = { pl: { [key]: true, player: { getCurrentTime() { throw new Error('timer ran'); } } } };
+    loadStageFunctions(['plTick', 'plTimerTick'], context);
+    context.plTick();
+    context.plTimerTick();
+  }
+});
+
+test('end-race: interrupted image publication does not strand the queue when termination fails', async () => {
+  let releaseImage, failEnd;
+  const state = { sessionId: 'TEST-end', set: { settings: { autoPause: false } }, live: { q: -1 },
+    dueQuestions: [0], flatQuestions: [{ type: 'choice', imgUp: true }] };
+  const context = { pl: state, confirm() { return true; }, async plExitStageFullscreen() {},
+    loadQuestionImage() { return new Promise(resolve => { releaseImage = resolve; }); },
+    store: { endSession() { return new Promise((resolve, reject) => { failEnd = reject; }); } } };
+  loadStageFunctions(['plEndSession', 'plOpenQuestion'], context);
+  const opening = context.plOpenQuestion(0);
+  const ending = context.plEndSession();
+  await new Promise(setImmediate);
+  releaseImage('TEST image');
+  assert.equal(await opening, false);
+  failEnd(new Error('offline'));
+  await assert.rejects(ending, /offline/);
+  assert.equal(state.pendingLiveQuestion, -1);
+  assert.equal(state.endingSession, false);
+  assert.notEqual(state.sessionEnded, true);
+  assert.deepEqual(state.dueQuestions, [0]);
 });
 
 test('정답 공개는 publicAnswer를 병합해 openedAt Timestamp를 그대로 보존한다', async () => {

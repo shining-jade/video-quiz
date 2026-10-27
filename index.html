@@ -890,7 +890,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="guest-quiz-share-core.js?v=20260826-resume"></script>
 <script src="public-author-label-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
-<script src="firestore-store.js?v=20261027-join-contention"></script>
+<script src="firestore-store.js?v=20261027-end-race"></script>
 <script src="choice-order-core.js"></script>
 <script src="image-lightbox-core.js"></script>
 <script src="quiz-trigger-core.js?v=20260825-seek"></script>
@@ -7346,6 +7346,11 @@ function renderPlayRun() {
       state.revealFatal = false;
     }
     state.live = nextLive;
+    if (nextLive.status === 'ended') {
+      state.sessionEnded = true;
+      state.pendingLiveQuestion = -1;
+      try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {}
+    }
     if (state.pendingLiveQuestion === state.live.q) state.pendingLiveQuestion = -1;
     if (state.live.revealed) {
       state.revealRequested = false;
@@ -8076,6 +8081,7 @@ function plOpenNextDueQuestion() {
 
 function plTick() {
   if (!pl || !pl.player || !pl.player.getCurrentTime) return;
+  if (pl.endingSession || pl.sessionEnded) return;
   if (pl.playlistDone) return;
   if (pl.playerLoading) return;
   if (pl.playerError !== null && pl.playerError !== undefined) return;
@@ -8152,6 +8158,7 @@ function plTick() {
 
 async function plOpenQuestion(i) {
   if (!pl || !pl.sessionId) return;
+  if (pl.endingSession || pl.sessionEnded) return false;
   const state = pl;
   const question = state.flatQuestions[i];
   if (!question) return;
@@ -8178,7 +8185,7 @@ async function plOpenQuestion(i) {
     }
     throw e;
   }
-  if (pl !== state || state.pendingLiveQuestion !== i) return false;
+  if (pl !== state || state.endingSession || state.sessionEnded || state.pendingLiveQuestion !== i) return false;
   const mode = state.set.settings.revealMode;
   const revealed = mode === 'instant';
   const configuredLimit = limitFor(state.set, i, state.flatQuestions);
@@ -8207,7 +8214,7 @@ async function plOpenQuestion(i) {
   }
   if (revealed) {
     const explainImage = await plExplanationImage(question, i);
-    if (pl !== state || state.pendingLiveQuestion !== i) return false;
+    if (pl !== state || state.endingSession || state.sessionEnded || state.pendingLiveQuestion !== i) return false;
     live.publicAnswer = FirestoreStore.publicAnswer(question, explainImage);
   }
   try {
@@ -8216,7 +8223,7 @@ async function plOpenQuestion(i) {
     // live 구독이 방금 쓴 문항을 먼저 반영하면 pendingLiveQuestion이 -1로 비워진다.
     // liveToken이 우리가 쓴 값과 같으면 우리가 연 문항이므로 뒷정리를 건너뛰지 않는다.
     // (건너뛰면 dueQuestions에 남아 계속 재생이 같은 문항을 다시 연다)
-    if (pl !== state || (state.pendingLiveQuestion !== i &&
+    if (pl !== state || state.endingSession || state.sessionEnded || (state.pendingLiveQuestion !== i &&
         String(state.live && state.live.liveToken || '') !== live.liveToken)) return false;
     state.openError = '';
     state.dueQuestions = (state.dueQuestions || []).filter(index => index !== i);
@@ -8600,37 +8607,48 @@ function plJumpTo(i) {
 }
 async function plEndSession() {
   const state = pl;
-  if (!state) return;
-  if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
-  await plExitStageFullscreen();
-  if (pl !== state) return;
-  const activeStore = typeof playStore === 'function' ? playStore(state) : store;
-  await activeStore.endSession(state.sessionId);
-  if (pl !== state) return;
-  if (state.classPlanAttached && activeStore.finishClassPlan) {
-    const finished = await activeStore.finishClassPlan(
-      state.classPlanId,
-      state.sessionId,
-      { expectedRevision: state.classPlanRevision }
-    );
+  if (!state || state.endingSession) return;
+  state.endingSession = true;
+  try {
+    if (!confirm('진행을 종료할까요? 학생 화면은 종료 안내로 바뀌고, 기록은 그대로 남습니다.')) return;
+    // Cancel any image/publication flight; a failed end can then resume queued work.
+    state.pendingLiveQuestion = -1;
+    await plExitStageFullscreen();
     if (pl !== state) return;
-    state.classPlanRevision = finished && finished.revision || state.classPlanRevision + 1;
-    state.classPlanFinished = true;
-  }
-  pendingAllocationRemove(state.sessionId, state.allocationToken);
-  toast('진행을 종료했습니다');
-  if (state.actorType === 'guest') {
-    if (typeof state.stopActivationHeartbeat === 'function') state.stopActivationHeartbeat();
-    // 끝낸 반은 복구 대상이 아니다. 남겨 두면 다음 방문 때 끝난 반에 붙으려 한다.
-    if (state.guestLoad && state.guestLoad.guestUser) {
-      clearGuestActiveSession(state.guestLoad.guestUser.uid, state.guestLoad.shareId);
+    try { if (state.player && state.player.pauseVideo) state.player.pauseVideo(); } catch (e) {}
+    const activeStore = typeof playStore === 'function' ? playStore(state) : store;
+    await activeStore.endSession(state.sessionId);
+    state.sessionEnded = true;
+    if (pl !== state) return;
+    if (state.classPlanAttached && activeStore.finishClassPlan) {
+      const finished = await activeStore.finishClassPlan(
+        state.classPlanId,
+        state.sessionId,
+        { expectedRevision: state.classPlanRevision }
+      );
+      if (pl !== state) return;
+      state.classPlanRevision = finished && finished.revision || state.classPlanRevision + 1;
+      state.classPlanFinished = true;
     }
-    APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="card"><div class="empty">' +
-      '<h2 style="margin-bottom:10px">수업 진행을 종료했습니다</h2>' +
-      '<p>학생 응답과 결과는 운영자에게 안전하게 저장되었습니다.</p></div></div></div>';
-    return;
+    pendingAllocationRemove(state.sessionId, state.allocationToken);
+    toast('진행을 종료했습니다');
+    if (state.actorType === 'guest') {
+      if (typeof state.stopActivationHeartbeat === 'function') state.stopActivationHeartbeat();
+      // 끝낸 반은 복구 대상이 아니다. 남겨 두면 다음 방문 때 끝난 반에 붙으려 한다.
+      if (state.guestLoad && state.guestLoad.guestUser) {
+        clearGuestActiveSession(state.guestLoad.guestUser.uid, state.guestLoad.shareId);
+      }
+      APP().innerHTML = guestTopbar() + '<div class="wrap"><div class="card"><div class="empty">' +
+        '<h2 style="margin-bottom:10px">수업 진행을 종료했습니다</h2>' +
+        '<p>학생 응답과 결과는 운영자에게 안전하게 저장되었습니다.</p></div></div></div>';
+      return;
+    }
+    go('live/' + state.sessionId);
+  } finally {
+    // Cancellation/failure allows another end attempt; a committed end keeps
+    // sessionEnded latched, including a later class-plan finalization failure.
+    state.endingSession = false;
   }
-  go('live/' + state.sessionId);
 }
 
 function plRenderQList() {
@@ -9015,6 +9033,7 @@ function plRenderOverlayCounts() {
 
 /** 남은 시간 표시 — 서버 시각 기준이라 학생 화면과 어긋나지 않는다 */
 function plTimerTick() {
+  if (!pl || pl.endingSession || pl.sessionEnded) return;
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
   const timerGeneration = Number(pl.quizTimerGeneration) || 0;

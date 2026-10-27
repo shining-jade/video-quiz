@@ -4433,3 +4433,53 @@ rulesTest('revoked share는 새 guest session 생성을 막지만 이미 만든 
     studentCountRevision: 0
   }));
 });
+
+rulesTest('end-race: delayed publication retries against an ended parent without reopening live', async () => {
+  let reachedParent, releaseParent;
+  const reached = new Promise(resolve => { reachedParent = resolve; });
+  const release = new Promise(resolve => { releaseParent = resolve; });
+  const publisher = emulatorStore(actorFirestore('owner'), null, {
+    path: 'sessions/s1', async wait() { reachedParent(); await release; }
+  });
+  const ending = emulatorStore(actorFirestore('owner'));
+  const publishing = publisher.setLive('s1', liveQuestion(1));
+  await reached;
+  await ending.endSession('s1');
+  releaseParent();
+  await assert.rejects(publishing);
+  assert.equal((await adminRead('sessions/s1/meta/live')).status, 'ended');
+  assert.equal((await adminRead('sessions/s1')).status, 'ended');
+});
+
+rulesTest('end-race: delayed and concurrent termination wins over publication and preserves records', async () => {
+  let reachedLive, releaseLive;
+  const reached = new Promise(resolve => { reachedLive = resolve; });
+  const release = new Promise(resolve => { releaseLive = resolve; });
+  const endingStore = emulatorStore(actorFirestore('owner'), async () => {
+    reachedLive(); await release;
+  });
+  const publisher = emulatorStore(actorFirestore('owner'));
+  const before = await adminRead('sessions/s1/responses/student-uid');
+  const ending = endingStore.endSession('s1');
+  await reached;
+  await publisher.setLive('s1', liveQuestion(1));
+  releaseLive();
+  await Promise.all([ending, publisher.endSession('s1')]);
+  const firstEndTime = (await adminRead('sessions/s1')).endedAt.toMillis();
+  await publisher.endSession('s1');
+  assert.equal((await adminRead('sessions/s1')).endedAt.toMillis(), firstEndTime);
+  assert.equal((await adminRead('sessions/s1/meta/live')).status, 'ended');
+  assert.deepEqual(await adminRead('sessions/s1/responses/student-uid'), before);
+});
+
+rulesTest('end-race: existing rules allow safe repair of a stale child while preserving endedAt and records', async () => {
+  const owner = emulatorStore(actorFirestore('owner'));
+  const before = await adminRead('sessions/s1/responses/student-uid');
+  await owner.endSession('s1');
+  const endedAt = (await adminRead('sessions/s1')).endedAt.toMillis();
+  await adminWrite('sessions/s1/meta/live', liveQuestion(1));
+  await owner.endSession('s1');
+  assert.equal((await adminRead('sessions/s1/meta/live')).status, 'ended');
+  assert.equal((await adminRead('sessions/s1')).endedAt.toMillis(), endedAt);
+  assert.deepEqual(await adminRead('sessions/s1/responses/student-uid'), before);
+});

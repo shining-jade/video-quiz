@@ -4825,7 +4825,17 @@
     }
 
     function setLive(sessionId, live) {
-      return db.doc('sessions/' + sessionId + '/meta/live').set(live);
+      const sessionRef = db.doc('sessions/' + sessionId);
+      const liveRef = db.doc('sessions/' + sessionId + '/meta/live');
+      // Reading the parent makes publication conflict with an overlapping end.
+      // A transaction retry must observe the committed terminal state.
+      return db.runTransaction(async transaction => {
+        const snapshot = await transaction.get(sessionRef);
+        if (!snapshot.exists || !['active', 'live'].includes((snapshot.data() || {}).status)) {
+          throw new Error('종료되었거나 진행 중이 아닌 session에는 문항을 게시할 수 없습니다.');
+        }
+        transaction.set(liveRef, live);
+      });
     }
 
     function updateCurrentLive(sessionId, expectedLive, update, options) {
@@ -5177,8 +5187,10 @@
             actualParticipants: session.actualParticipants
           };
         }
-        if (session.status === 'ended' && live.status === 'ended') {
-          transaction.set(sessionRef, { actualParticipants: count }, { merge: true });
+        if (session.status === 'ended') {
+          if (session.actualParticipants !== count) {
+            transaction.set(sessionRef, { actualParticipants: count }, { merge: true });
+          }
           transaction.set(liveRef, {
             q: -1, openedAt: 0, revealed: false, limitSec: 0, status: 'ended'
           });
