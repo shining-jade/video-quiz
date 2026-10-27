@@ -1600,7 +1600,11 @@ service cloud.firestore {
     }
 
     match /quiz_sets/{setId} {
-      allow get: if canReadPrivateSet(setId);
+      // Saving a new set first checks its ID. This exception is scoped to
+      // the missing set document, never its private images or children.
+      allow get: if isApprovedTeacher() &&
+        (!exists(/databases/$(database)/documents/quiz_sets/$(setId)) ||
+          canReadPrivateSet(setId));
       allow list: if (isAdmin() &&
           resource.data.keys().hasAll(['lifecycleState']) &&
           (resource.data.lifecycleState == 'active' ||

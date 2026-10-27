@@ -3430,6 +3430,65 @@ rulesTest('teacher-access: approval after-state cannot assign the canonical mirr
   assert.equal(await adminRead(`teacher_allowlist/${email}`), undefined);
 });
 
+rulesTest('approved teachers can check an unused quiz ID before creating a set', async () => {
+  for (const actor of approvedTeachers) {
+    const snapshot = await assertSucceeds(getDoc(doc(actorFirestore(actor), 'quiz_sets/unused-id')));
+    assert.equal(snapshot.exists(), false);
+  }
+});
+
+rulesTest('new quiz save, image upload, edit and copy work with private set rules', async () => {
+  const owner = actorFirestore('owner');
+  const store = emulatorStore(owner);
+  const content = {
+    title: '새 영상 퀴즈',
+    author: '',
+    settings: { revealMode: 'timer', limitSec: 20, autoPause: true },
+    videos: [{
+      videoId: 'Auy7GspB7j8', startSec: 0, endSec: null,
+      questions: [{ type: 'ox', t: 84, text: '복구한 문항', choices: ['O', 'X'], answer: 1 }]
+    }],
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  };
+
+  await assertSucceeds(store.saveOwnedQuizSet('new-quiz', content, {}, actors.owner));
+  const saved = (await getDoc(doc(owner, 'quiz_sets/new-quiz'))).data();
+  assert.equal(saved.title, '새 영상 퀴즈');
+  assert.equal(saved.videos[0].questions[0].text, '복구한 문항');
+  assert.equal(saved.ownerUid, 'owner-uid');
+  assert.equal(saved.imageCount, 0);
+
+  await assertSucceeds(store.saveQuizSetWithImages('new-quiz', {
+    ...saved, title: '수정한 영상 퀴즈', updatedAt: serverTimestamp()
+  }, { v0q0: 'uploaded-image' }, actors.owner));
+  assert.equal((await getDoc(doc(owner, 'quiz_sets/new-quiz'))).data().imageCount, 1);
+  assert.equal((await getDoc(doc(owner, 'images/new-quiz/q/v0q0'))).data().data, 'uploaded-image');
+
+  await assertSucceeds(store.copyOwnedQuizSet('new-quiz', 'new-copy', actors.owner));
+  const copy = (await getDoc(doc(owner, 'quiz_sets/new-copy'))).data();
+  assert.equal(copy.imageCount, 1);
+  assert.equal(copy.videos[0].questions[0].text, '복구한 문항');
+  assert.equal((await getDoc(doc(owner, 'images/new-copy/q/v0q0'))).data().data, 'uploaded-image');
+  await assertFails(getDoc(doc(actorFirestore('otherTeacher'), 'quiz_sets/new-quiz')));
+});
+
+rulesTest('missing private quiz IDs remain inaccessible without active teacher approval', async () => {
+  for (const actor of ['student', 'unapproved']) {
+    await assertFails(getDoc(doc(actorFirestore(actor), 'quiz_sets/unused-id')));
+  }
+  await assertFails(getDoc(doc(testEnvironment.unauthenticatedContext().firestore(), 'quiz_sets/unused-id')));
+  await adminWrite('teacher_allowances/owner-uid', {
+    uid: 'owner-uid', emailCanonical: 'owner@school.kr', role: 'teacher', status: 'suspended'
+  });
+  await assertFails(getDoc(doc(actorFirestore('owner'), 'quiz_sets/unused-id')));
+});
+
+rulesTest('a missing quiz parent never grants access to orphaned private images', async () => {
+  await adminWrite('images/unused-id/q/v0q0', { data: 'private-orphan-image' });
+  await assertFails(getDoc(doc(actorFirestore('otherTeacher'), 'images/unused-id/q/v0q0')));
+});
+
 rulesTest('FixRound2 private read and shared discovery use exact quiz_sets paths without collection-group leakage', async () => {
   const owner = actorFirestore('owner');
   const other = actorFirestore('otherTeacher');
