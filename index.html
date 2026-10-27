@@ -2351,6 +2351,8 @@ async function recoverPendingAllocationsForTeacher(owner) {
           {
             lastError: result && result.attached
               ? '연결된 수업계획 세션이 진행 중입니다. 이 기록은 자동 삭제하지 않습니다.'
+              : result && result.preserved
+                ? '안전한 정리 조건을 확인할 수 없어 세션을 삭제하지 않고 보존합니다. 기록과 상태를 먼저 확인해 주세요.'
               : result && result.active
                 ? '다른 교사 화면에서 진행 중입니다. heartbeat가 끝난 뒤 다시 시도해 주세요.'
                 : '세션 할당 identity가 달라 자동 정리를 건너뛰었습니다.'
@@ -2381,7 +2383,10 @@ async function recoverPendingAllocationsForTeacher(owner) {
 function retryPendingAllocations() {
   return recoverPendingAllocationsForTeacher(teacherState).then(results => {
     const failed = results.some(result => !result || !result.complete);
-    toast(failed
+    const preserved = results.some(result => result && result.preserved);
+    toast(preserved
+      ? '시작된 수업 또는 참여 기록이 있는 세션은 삭제하지 않고 보존했습니다.'
+      : failed
       ? '아직 정리하지 못한 세션이 있습니다. 잠시 후 다시 시도해 주세요.'
       : '남은 세션 할당 정리를 완료했습니다.');
     return results;

@@ -13,7 +13,9 @@ const {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   limit: queryLimit,
   onSnapshot,
   orderBy,
@@ -175,11 +177,13 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
     return {
       path,
       modularReference,
-      async get() {
-        const snapshot = await getDoc(modularReference);
+      async get(options) {
+        const snapshot = await (options && options.source === 'server'
+          ? getDocFromServer(modularReference) : getDoc(modularReference));
         return {
           exists: snapshot.exists(),
           id: snapshot.id,
+          metadata: snapshot.metadata,
           data: () => snapshot.data()
         };
       },
@@ -218,8 +222,9 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
     },
     collection(path) {
       const modularCollection = collection(modularDb, path);
-      const collectionSnapshot = async target => {
-        const snapshot = await getDocs(target);
+      const collectionSnapshot = async (target, options) => {
+        const snapshot = await (options && options.source === 'server'
+          ? getDocsFromServer(target) : getDocs(target));
         return {
           docs: snapshot.docs.map(document => ({
             exists: true,
@@ -228,12 +233,13 @@ function compatStoreDb(modularDb, pauseFirstLiveAccess, pauseAccess) {
             data: () => document.data()
           })),
           empty: snapshot.empty,
-          size: snapshot.size
+          size: snapshot.size,
+          metadata: snapshot.metadata
         };
       };
       const queryReference = target => ({
         path,
-        get() { return collectionSnapshot(target); },
+        get(options) { return collectionSnapshot(target, options); },
         where(field, operator, value) {
           return queryReference(query(target, where(field, operator, value)));
         },
@@ -1177,6 +1183,47 @@ rulesTest('strict counter 저장 API는 이미지 create·update·delete를 함�
   assert.equal((await getDoc(doc(owner, 'quiz_sets/set1'))).data().imageCount, 2);
 });
 
+rulesTest('record-protection: expired live sessions cannot become aborted even with zero counters', async () => {
+  await adminWrite('sessions/keep-live', {
+    code: 'KEEP23', setId: 'set1', teacherUid: actors.owner.uid, teacherEmail: actors.owner.email,
+    status: 'live', registeredStudentCount: 0, studentCountRevision: 0,
+    activationLeaseUntil: Timestamp.fromMillis(Date.now() - 100_000)
+  });
+  await assertFails(updateDoc(doc(actorFirestore('owner'), 'sessions/keep-live'), {
+    status: 'aborted', abortedAt: serverTimestamp()
+  }));
+  assert.equal((await adminRead('sessions/keep-live')).status, 'live');
+});
+
+rulesTest('record-protection: participation counters block draft abort and aborted parent deletion', async () => {
+  for (const status of ['allocating', 'aborted']) {
+    const id = 'keep-' + status;
+    await adminWrite('sessions/' + id, {
+      code: 'KEEP23', setId: 'set1', teacherUid: actors.owner.uid, teacherEmail: actors.owner.email,
+      status, registeredStudentCount: 1, studentCountRevision: 1, lastStudentUid: 'student-uid'
+    });
+    const ref = doc(actorFirestore('owner'), 'sessions/' + id);
+    await assertFails(updateDoc(ref, { status: 'aborted', abortedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(ref));
+    assert.equal((await adminRead('sessions/' + id)).registeredStudentCount, 1);
+  }
+});
+
+rulesTest('record-protection: unstarted sessions cannot acquire aggregate or opened-question records during cleanup', async () => {
+  for (const status of ['allocating', 'aborted']) {
+    const id = 'unstarted-' + status;
+    await adminWrite('sessions/' + id, {
+      code: 'KEEP23', setId: 'set1', teacherUid: actors.owner.uid, teacherEmail: actors.owner.email,
+      status, registeredStudentCount: 0, studentCountRevision: 0
+    });
+    const owner = actorFirestore('owner');
+    await assertFails(setDoc(doc(owner, 'sessions/' + id + '/meta/board'), {
+      scores: { 'student-uid': { correct: 1 } }
+    }));
+    await assertFails(setDoc(doc(owner, 'sessions/' + id + '/meta/live'), liveQuestion()));
+  }
+});
+
 rulesTest('allocation abort는 인증 교체·화면 이탈·부분 정리·code 재할당에서 fail closed다', async t => {
   const allocation = (store, sessionId, code) => store.startSession(sessionId, {
     setId: 'set1', setTitle: '세트', teacherUid: actors.owner.uid,
@@ -1277,7 +1324,7 @@ rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동
     await adminWrite(`sessions/${sessionId}`, {
       code, setId: 'set1', teacherUid: actors.owner.uid,
       teacherEmail: actors.owner.email, status,
-      activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000)
+      ...(status === 'live' ? { activationLeaseUntil: Timestamp.fromMillis(Date.now() + 60_000) } : {})
     });
     await adminWrite(`codes/${code}`, { sessionId });
     await adminWrite(`sessions/${sessionId}/meta/live`, {
@@ -1309,7 +1356,7 @@ rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동
       'sessions/legacy-live/meta/live'))).data().status, 'ended');
   });
 
-  await t.test('gate 전 legacy allocating recovery는 안전 정리할 수 있다', async () => {
+  await t.test('gate 전 빈 legacy allocating만 정리하고 expired live는 보존한다', async () => {
     await resetFirestore();
     await seedLegacy('legacy-allocating', 'LEGA13', 'allocating');
     const ownerStore = emulatorStore(actorFirestore('owner'));
@@ -1330,9 +1377,9 @@ rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동
     assert.deepEqual(await ownerStore.recoverPendingSessionAllocation({
       sessionId: 'legacy-stale-live', code: 'LEGA16', ownerUid: actors.owner.uid,
       ownerEmail: actors.owner.email, token: 'legacy-stale-live-allocation-token'
-    }), { complete: true, cleaned: true });
+    }), { complete: false, preserved: true });
     assert.equal((await getDoc(doc(actorFirestore('owner'),
-      'sessions/legacy-stale-live'))).exists(), false);
+      'sessions/legacy-stale-live'))).exists(), true);
   });
 
   await t.test('gate는 client write를 거부하고 exact preflight shape가 아니면 아직 완료로 취급하지 않는다', async () => {
@@ -1358,10 +1405,10 @@ rulesTest('session counter migration gate는 legacy 안전 경로만 rollout 동
       'legacy-after-gate-allocation-token'
     ));
     await assert.rejects(ownerStore.endSession('legacy-after-gate'));
-    await assert.rejects(ownerStore.abortSessionAllocation(
+    assert.equal(await ownerStore.abortSessionAllocation(
       'legacy-after-gate', 'LEGA15', actors.owner.uid,
       'legacy-after-gate-allocation-token'
-    ), /정리.*실패/);
+    ), false);
 
     await adminWrite('sessions/migrated-after-gate', {
       code: 'MIGR15', setId: 'set1', teacherUid: actors.owner.uid,

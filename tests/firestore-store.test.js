@@ -4723,23 +4723,181 @@ test('allocation과 heartbeat lease는 호출 시작의 보정 서버 시각에 
   assert.equal(fake.value('sessions/leased-session').activationLeaseUntil.getTime(), 160_000);
 });
 
-test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지우며 부분 실패를 재시도한다', async () => {
+function recordedAllocationFixture(status = 'allocating', patch = {}, children = {}) {
+  return {
+    'codes/KEEP23': { sessionId: 'recorded' },
+    'sessions/recorded': {
+      code: 'KEEP23', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr',
+      status, registeredStudentCount: 0, studentCountRevision: 0, ...patch
+    },
+    'sessions/recorded/meta/allocation': { token: 'record-protection-token', ownerUid: 'owner-uid' },
+    'sessions/recorded/meta/live': { q: -1, openedAt: 0, revealed: false, limitSec: 0 },
+    'sessions/recorded/meta/board': { scores: {} },
+    ...children
+  };
+}
+
+test('record-protection: preserved recovery explains retention without scheduling another cleanup', async () => {
+  const owner = { status: 'teacher', uid: 'teacher-a', email: 'a@school.kr', role: 'teacher' };
+  const patches = [], messages = [], timers = [];
+  const context = pendingAllocationTestContext({
+    teacherState: owner, teacherAuthVersion: 1, pendingAllocationRecoveryTimer: null,
+    AuthCore: require('../auth-core.js'),
+    pendingAllocationsForOwner() { return [{ sessionId: 'recorded', recoverAfter: 0 }]; },
+    pendingAllocationPatch(id, patch) { patches.push(patch); },
+    store: { async recoverPendingSessionAllocation() { return { complete: false, preserved: true }; } },
+    renderTeacherAuthArea() {}, toast(message) { messages.push(message); },
+    setTimeout(...args) { timers.push(args); }, clearTimeout() {}
+  });
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  for (const name of ['recoverPendingAllocationsForTeacher', 'retryPendingAllocations']) {
+    vm.runInNewContext(extractFunction(html, name), context);
+  }
+  await context.retryPendingAllocations();
+  assert.match(patches[0].lastError, /보존|삭제하지 않/);
+  assert.doesNotMatch(patches[0].lastError, /해당 반의 \[진행 종료\]를 사용하세요/);
+  assert.match(messages[0], /보존|삭제하지 않/);
+  assert.equal(timers.length, 0);
+});
+
+test('record-protection: expired live recovery preserves participants and answers without mutations', async () => {
+  const fake = makeFirestoreFake(recordedAllocationFixture('live', {
+    activationLeaseUntil: new Date(90_000), registeredStudentCount: 1,
+    studentCountRevision: 1, lastStudentUid: 'test-student'
+  }, {
+    'sessions/recorded/students/test-student': { uid: 'test-student', name: 'TEST_A' },
+    'sessions/recorded/responses/test-student': { answers: { 0: { answer: 3, submitted: true } } },
+    'sessions/recorded/student_scores/test-student': { correct: 1 }
+  }));
+  const { createFirestoreStore } = loadStoreModule();
+  const store = createFirestoreStore(fake.db, fake.fieldValue, () => 100_000);
+  const result = await store.recoverPendingSessionAllocation({
+    sessionId: 'recorded', code: 'KEEP23', ownerUid: 'owner-uid', token: 'record-protection-token'
+  });
+  assert.equal(result.preserved, true);
+  assert.equal(fake.value('sessions/recorded').status, 'live');
+  assert.equal(fake.has('codes/KEEP23'), true);
+  assert.equal(fake.has('sessions/recorded/responses/test-student'), true);
+  assert.equal(fake.calls().some(call => /^(delete|transactionDelete|transactionSet)$/.test(call.operation)), false);
+});
+
+test('record-protection: rollback preserves child records even with zero or legacy counters', async t => {
+  for (const [name, children] of Object.entries({
+    student: { 'sessions/recorded/students/a': { uid: 'a' } },
+    response: { 'sessions/recorded/responses/a': { answers: {} } },
+    grade: { 'sessions/recorded/grades/a__0': { ok: true } },
+    score: { 'sessions/recorded/student_scores/a': { correct: 0 } },
+    board: { 'sessions/recorded/meta/board': { scores: { a: { correct: 0 } } } },
+    openedQuestion: { 'sessions/recorded/meta/live': { q: 0, openedAt: 50_000 } }
+  })) {
+    await t.test(name, async () => {
+      const fake = makeFirestoreFake(recordedAllocationFixture('aborted', {}, children));
+      const store = createStore(fake);
+      assert.equal(await store.abortSessionAllocation('recorded', 'KEEP23', 'owner-uid', 'record-protection-token'), false);
+      assert.equal(fake.value('sessions/recorded').status, 'aborted');
+      assert.equal(fake.has('codes/KEEP23'), true);
+      for (const key of Object.keys(children)) assert.equal(fake.has(key), true, key);
+      assert.equal(fake.calls().some(call => /^(delete|transactionDelete|transactionSet)$/.test(call.operation)), false);
+    });
+  }
+});
+
+test('record-protection: participant evidence and uncertain counters prevent rollback', async t => {
+  for (const [name, patch] of Object.entries({
+    participants: { registeredStudentCount: 1, studentCountRevision: 1 },
+    revision: { studentCountRevision: 1 },
+    formerParticipant: { lastStudentUid: 'test-student' },
+    actualParticipants: { actualParticipants: 1 },
+    malformed: { registeredStudentCount: '0' },
+    previouslyActivated: { activationLeaseUntil: new Date(1) },
+    ended: { status: 'ended' }
+  })) {
+    await t.test(name, async () => {
+      const fake = makeFirestoreFake(recordedAllocationFixture('allocating', patch));
+      assert.equal(await createStore(fake).abortSessionAllocation('recorded', 'KEEP23', 'owner-uid', 'record-protection-token'), false);
+      assert.equal(fake.has('sessions/recorded'), true);
+      assert.equal(fake.has('codes/KEEP23'), true);
+    });
+  }
+});
+
+test('record-protection: failed or cached evidence reads leave status and code unchanged', async t => {
+  for (const mode of ['offline', 'cached']) await t.test(mode, async () => {
+    const fake = makeFirestoreFake(recordedAllocationFixture());
+    const originalCollection = fake.db.collection;
+    fake.db.collection = (path, ...args) => {
+      const query = originalCollection(path, ...args);
+      if (path !== 'sessions/recorded/students') return query;
+      const originalGet = query.get;
+      query.limit = () => query;
+      query.get = async options => {
+        if (mode === 'offline') throw new Error('TEST server read unavailable');
+        const snapshot = await originalGet(options);
+        return { ...snapshot, metadata: { fromCache: true, hasPendingWrites: false } };
+      };
+      return query;
+    };
+    await assert.rejects(createStore(fake).abortSessionAllocation('recorded', 'KEEP23', 'owner-uid', 'record-protection-token'));
+    assert.equal(fake.value('sessions/recorded').status, 'allocating');
+    assert.equal(fake.has('codes/KEEP23'), true);
+    assert.equal(fake.calls().some(call => /^(delete|transactionDelete|transactionSet)$/.test(call.operation)), false);
+  });
+});
+
+test('record-protection: concurrent activation or participant registration wins over cleanup', async t => {
+  for (const patch of [
+    { status: 'live', activationLeaseUntil: new Date(200_000) },
+    { status: 'allocating', registeredStudentCount: 1, studentCountRevision: 1, lastStudentUid: 'TEST_A' }
+  ]) await t.test(patch.status + ':' + (patch.registeredStudentCount || 0), async () => {
+    const initial = recordedAllocationFixture();
+    const fake = makeFirestoreFake(initial, {
+      beforeTransactionStart({ set }) { set('sessions/recorded', { ...initial['sessions/recorded'], ...patch }); }
+    });
+    assert.equal(await createStore(fake).abortSessionAllocation('recorded', 'KEEP23', 'owner-uid', 'record-protection-token'), false);
+    assert.equal(fake.has('codes/KEEP23'), true);
+    assert.equal(fake.has('sessions/recorded'), true);
+    assert.equal(fake.value('sessions/recorded').status, patch.status);
+  });
+});
+
+test('record-protection: aggregate arriving at either transaction is retained with its code', async t => {
+  for (const atTransaction of [1, 2]) await t.test('transaction ' + atTransaction, async () => {
+    const fake = makeFirestoreFake(recordedAllocationFixture('aborted'), {
+      beforeTransactionStart({ attempt, set }) {
+        if (attempt === atTransaction) set('sessions/recorded/meta/board', { scores: { TEST_A: { correct: 1 } } });
+      }
+    });
+    assert.equal(await createStore(fake).abortSessionAllocation('recorded', 'KEEP23', 'owner-uid', 'record-protection-token'), false);
+    assert.equal(fake.has('codes/KEEP23'), true);
+    assert.equal(fake.value('sessions/recorded/meta/board').scores.TEST_A.correct, 1);
+    assert.equal(fake.has('sessions/recorded'), true);
+  });
+});
+
+test('record-protection: later snapshot collection failure precedes any status or code mutation', async () => {
+  const fake = makeFirestoreFake(recordedAllocationFixture());
+  const originalCollection = fake.db.collection;
+  fake.db.collection = path => {
+    const query = originalCollection(path);
+    if (path === 'sessions/recorded/snapshot') query.get = async () => { throw new Error('TEST late collection failure'); };
+    return query;
+  };
+  await assert.rejects(createStore(fake).abortSessionAllocation('recorded', 'KEEP23', 'owner-uid', 'record-protection-token'));
+  assert.equal(fake.value('sessions/recorded').status, 'allocating');
+  assert.equal(fake.has('codes/KEEP23'), true);
+});
+
+test('allocation abort는 빈 미활성 초안만 정리하며 부분 실패를 재시도한다', async () => {
   const fake = makeFirestoreFake({
     'codes/ABC234': { sessionId: 'session-a' },
     'sessions/session-a': {
-      code: 'ABC234', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'live'
+      code: 'ABC234', teacherUid: 'owner-uid', teacherEmail: 'owner@school.kr', status: 'allocating'
     },
     'sessions/session-a/meta/live': { q: -1 },
     'sessions/session-a/meta/board': { scores: {} },
     'sessions/session-a/snapshot/set': { videos: [{ questions: [] }] },
-    'sessions/session-a/snapshot_images/v0q0': { data: 'image' },
-    'sessions/session-a/students/student-a': { uid: 'student-a' },
-    'sessions/session-a/responses/student-a': { uid: 'student-a', answers: {} },
-    'sessions/session-a/grades/student-a__0': {
-      uid: 'student-a', questionIndex: 0, revision: 1, ok: true
-    },
-    'sessions/session-a/student_scores/student-a': { correct: 1 }
-  }, { failBatchCommitAt: 1 });
+    'sessions/session-a/snapshot_images/v0q0': { data: 'image' }
+  }, { failTransactionAt: 2 });
   const store = createStore(fake);
 
   assert.equal(await store.abortSessionAllocation(
@@ -4758,7 +4916,7 @@ test('allocation abort는 code를 CAS 삭제한 뒤 모든 생성 문서를 지�
     'sessions/session-a/grades/student-a__0',
     'sessions/session-a/student_scores/student-a'
   ]) assert.equal(fake.has(path), false, path);
-  assert.ok(fake.calls().filter(call => call.operation === 'batchCommit').length >= 2);
+  assert.ok(fake.calls().filter(call => call.operation === 'runTransaction').length >= 4);
 });
 
 test('allocation abort는 reassigned code와 newer session을 보존하고 반복 호출은 idempotent하다', async () => {

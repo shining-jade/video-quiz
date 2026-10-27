@@ -967,15 +967,28 @@ service cloud.firestore {
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['activationLeaseUntil']);
     }
 
+    function emptyUnactivatedAllocation(data) {
+      return data.get('registeredStudentCount', 0) == 0 &&
+        data.get('studentCountRevision', 0) == 0 &&
+        data.get('actualParticipants', 0) == 0 &&
+        !('lastStudentUid' in data) && !('activationLeaseUntil' in data) && !('endedAt' in data);
+    }
+
+    function sessionHasStartedForRecords(sessionId) {
+      return getAfter(/databases/$(database)/documents/sessions/$(sessionId)).data.status in ['live', 'ended'];
+    }
+
+    function emptyAllocationBoard(data) {
+      return data.keys().hasOnly(['scores']) && data.scores is map && data.scores.size() == 0;
+    }
+
     function validSessionAbortTransition() {
       return !('classPlanId' in resource.data) && !('classPlanRevision' in resource.data) &&
         request.resource.data.status == 'aborted' &&
         request.resource.data.abortedAt == request.time &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'abortedAt']) &&
-        (resource.data.status in ['allocating', 'aborted'] ||
-          (resource.data.status == 'live' &&
-            resource.data.get('activationLeaseUntil', null) is timestamp &&
-            request.time > resource.data.get('activationLeaseUntil', null)));
+        resource.data.status in ['allocating', 'aborted'] &&
+        emptyUnactivatedAllocation(resource.data);
     }
 
     function validSessionEnd(sessionId) {
@@ -1755,6 +1768,7 @@ service cloud.firestore {
       allow delete: if !('classPlanId' in resource.data) &&
         !('classPlanRevision' in resource.data) &&
         (isAdmin() || (ownsSession(sessionId) && resource.data.status == 'aborted' &&
+          emptyUnactivatedAllocation(resource.data) &&
           (sessionHasCounterFields(resource.data)
             ? validSessionCounter(resource.data)
             : legacySessionCounterCompatibilityOpen() &&
@@ -1782,7 +1796,11 @@ service cloud.firestore {
           (isRegisteredStudent(sessionId) &&
             (validLiveData(resource.data) || validEndedLiveData(resource.data)));
         allow list: if isAdmin() || ownsSession(sessionId);
-        allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data);
+        allow create: if ownsSessionAfter(sessionId) && validLiveData(request.resource.data) &&
+          (sessionHasStartedForRecords(sessionId) ||
+            (request.resource.data.q == -1 && request.resource.data.openedAt == 0 &&
+              request.resource.data.revealed == false && request.resource.data.limitSec == 0 &&
+              !('publicQuestion' in request.resource.data) && !('publicAnswer' in request.resource.data)));
         allow update: if ownsSessionAfterForLiveMutation(sessionId) &&
           ((validLiveData(request.resource.data) &&
               validLiveUpdateTransition() && validAcceptingTransition()) ||
@@ -1794,7 +1812,11 @@ service cloud.firestore {
       match /meta/board {
         allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
         allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
-        allow create, update: if ownsSessionAfter(sessionId);
+        allow create: if ownsSessionAfter(sessionId) &&
+          (sessionHasStartedForRecords(sessionId) || emptyAllocationBoard(request.resource.data));
+        allow update: if ownsSessionAfter(sessionId) &&
+          (sessionHasStartedForRecords(sessionId) ||
+            (emptyAllocationBoard(resource.data) && emptyAllocationBoard(request.resource.data)));
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }
@@ -1850,8 +1872,10 @@ service cloud.firestore {
 
       match /grades/{gradeId} {
         allow get, list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
-        allow create: if (isAdmin() || ownsSessionAfter(sessionId)) && validGrade(gradeId);
+        allow create: if (isAdmin() || ownsSessionAfter(sessionId)) &&
+          sessionHasStartedForRecords(sessionId) && validGrade(gradeId);
         allow update: if (isAdmin() || ownsSessionAfter(sessionId)) &&
+          sessionHasStartedForRecords(sessionId) &&
           validGrade(gradeId) &&
           request.resource.data.uid == resource.data.uid &&
           request.resource.data.questionIndex == resource.data.questionIndex;
@@ -1863,7 +1887,8 @@ service cloud.firestore {
         allow get: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId) ||
           (isRegisteredStudent(sessionId) && studentId == request.auth.uid);
         allow list: if isAdmin() || ownsSession(sessionId) || sourceOwnerReadsGuestSession(sessionId);
-        allow create, update: if ownsSessionAfter(sessionId) && validStudentScore(studentId);
+        allow create, update: if ownsSessionAfter(sessionId) &&
+          sessionHasStartedForRecords(sessionId) && validStudentScore(studentId);
         allow delete: if isAdmin() || ownsSession(sessionId);
         allow read, write: if false;
       }

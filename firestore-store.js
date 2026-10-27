@@ -4866,84 +4866,114 @@
       });
     }
 
+    // Allocation rollback is only for an unactivated, empty draft. A lost
+    // heartbeat is not evidence that classroom records are disposable.
+    function allocationHasActivity(session) {
+      if (!['allocating', 'aborted'].includes(session.status)) return true;
+      if (session.activationLeaseUntil !== undefined || session.endedAt !== undefined ||
+          session.lastStudentUid !== undefined) return true;
+      return ['registeredStudentCount', 'studentCountRevision', 'actualParticipants'].some(key =>
+        session[key] !== undefined && (!Number.isSafeInteger(session[key]) || session[key] !== 0)
+      );
+    }
+
+    function assertAllocationServerRead(snapshot) {
+      if (!snapshot || !snapshot.metadata || snapshot.metadata.fromCache !== false ||
+          snapshot.metadata.hasPendingWrites) {
+        throw new Error('세션 기록을 서버에서 확인하지 못해 정리를 보류했습니다.');
+      }
+    }
+
+    function allocationMetadataHasActivity(name, value) {
+      if (name === 'allocation') return false;
+      if (name === 'board') {
+        return Object.keys(value).some(key => key !== 'scores') ||
+          (value.scores !== undefined && (!value.scores || typeof value.scores !== 'object' ||
+            Array.isArray(value.scores) || Object.keys(value.scores).length > 0));
+      }
+      if (name !== 'live') return true;
+      return Object.keys(value).some(key => !['q', 'openedAt', 'revealed', 'limitSec'].includes(key)) ||
+        value.q !== -1 || (value.openedAt !== undefined && value.openedAt !== 0) || value.revealed === true;
+    }
+
+    async function allocationCleanupReferences(sessionId) {
+      const references = [];
+      for (const name of ['meta', 'students', 'responses', 'grades', 'student_scores', 'snapshot', 'snapshot_images']) {
+        const snapshot = await db.collection('sessions/' + sessionId + '/' + name).get({ source: 'server' });
+        assertAllocationServerRead(snapshot);
+        if (['students', 'responses', 'grades', 'student_scores'].includes(name) && !snapshot.empty) return null;
+        for (const document of snapshot.docs) {
+          if (name === 'meta' && allocationMetadataHasActivity(document.id, document.data() || {})) return null;
+          references.push(document.ref);
+        }
+      }
+      // Keep rollback atomic; oversized drafts are retained for deliberate cleanup.
+      return references.length + 2 <= 450 ? references : null;
+    }
+
     async function abortSessionAllocation(sessionId, code, teacherUid, allocationToken) {
       const sessionReference = db.doc('sessions/' + sessionId);
       const codeReference = db.doc('codes/' + code);
       const allocationReference = db.doc('sessions/' + sessionId + '/meta/allocation');
-      const collectionNames = [
-        'meta', 'students', 'responses', 'grades', 'student_scores', 'snapshot', 'snapshot_images'
-      ];
+      const eligible = async (transaction, requireAborted) => {
+        const sessionSnapshot = await transaction.get(sessionReference);
+        const codeSnapshot = await transaction.get(codeReference);
+        const mapping = codeSnapshot.exists ? codeSnapshot.data() || {} : null;
+        if (!sessionSnapshot.exists) {
+          const complete = !mapping || mapping.sessionId !== sessionId;
+          return { allowed: complete, complete, mapping };
+        }
+        const session = sessionSnapshot.data() || {};
+        if (session.teacherUid !== teacherUid || session.code !== code || allocationHasActivity(session) ||
+            (requireAborted && session.status !== 'aborted') || session.classPlanId !== undefined ||
+            session.classPlanRevision !== undefined) return { allowed: false };
+        if (allocationToken) {
+          const snapshot = await transaction.get(allocationReference);
+          const allocation = snapshot.exists ? snapshot.data() || {} : null;
+          if (!allocation || allocation.token !== allocationToken || allocation.ownerUid !== teacherUid) {
+            return { allowed: false };
+          }
+        }
+        // Aggregate documents can change without touching the parent. Read them
+        // in the same transaction that freezes/deletes them, not just preflight.
+        for (const name of ['board', 'live']) {
+          const snapshot = await transaction.get(db.doc('sessions/' + sessionId + '/meta/' + name));
+          if (snapshot.exists && allocationMetadataHasActivity(name, snapshot.data() || {})) return { allowed: false };
+        }
+        return { allowed: true, complete: false, mapping };
+      };
       let lastError = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
+          const inspected = await sessionReference.get({ source: 'server' });
+          assertAllocationServerRead(inspected);
+          let references = [];
+          if (inspected.exists) {
+            const session = inspected.data() || {};
+            if (session.teacherUid !== teacherUid || session.code !== code || allocationHasActivity(session) ||
+                session.classPlanId !== undefined || session.classPlanRevision !== undefined) return false;
+            // All collection reads must succeed before any state/code mutation.
+            references = await allocationCleanupReferences(sessionId);
+            if (!references) return false;
+          }
           const prepared = await db.runTransaction(async transaction => {
-            const sessionSnapshot = await transaction.get(sessionReference);
-            const codeSnapshot = await transaction.get(codeReference);
-            const mapping = codeSnapshot.exists ? codeSnapshot.data() || {} : null;
-            if (!sessionSnapshot.exists) {
-              const complete = !mapping || mapping.sessionId !== sessionId;
-              return { allowed: complete, complete };
-            }
-            const session = sessionSnapshot.data() || {};
-            if (session.teacherUid !== teacherUid || session.code !== code) {
-              return { allowed: false, complete: false };
-            }
-            if (session.classPlanId !== undefined) {
-              const planId = assertPlanId(session.classPlanId);
-              const privatePlanSnapshot = await transaction.get(
-                db.doc('class_plans_private/' + planId)
-              );
-              const publicPlanSnapshot = await transaction.get(
-                db.doc('class_plans_public/' + planId)
-              );
-              if (!privatePlanSnapshot.exists || !publicPlanSnapshot.exists) {
-                return { allowed: false, complete: false };
-              }
-              const plan = assertClassPlanPair(
-                privatePlanSnapshot.data(), publicPlanSnapshot.data(), true
-              ).privateValue;
-              if (plan.sessionId === sessionId && ['live', 'ended'].includes(plan.status)) {
-                return { allowed: false, complete: false };
-              }
-              return { allowed: false, complete: false };
-            }
-            if (allocationToken) {
-              const allocationSnapshot = await transaction.get(allocationReference);
-              const allocation = allocationSnapshot.exists ? allocationSnapshot.data() || {} : null;
-              if (!allocation || allocation.token !== allocationToken ||
-                  allocation.ownerUid !== teacherUid) {
-                return { allowed: false, complete: false };
-              }
-            }
+            const result = await eligible(transaction, false);
+            if (!result.allowed || result.complete) return result;
             transaction.set(sessionReference, {
-              status: 'aborted',
-              abortedAt: fieldValue.serverTimestamp()
+              status: 'aborted', abortedAt: fieldValue.serverTimestamp()
             }, { merge: true });
-            if (mapping && mapping.sessionId === sessionId) transaction.delete(codeReference);
-            return { allowed: true, complete: false };
+            return result;
           });
           if (!prepared.allowed) return false;
           if (prepared.complete) return true;
-
-          const childReferences = [];
-          for (const collectionName of collectionNames) {
-            const snapshot = await db.collection(
-              'sessions/' + sessionId + '/' + collectionName
-            ).get();
-            snapshot.docs.forEach(document => childReferences.push(document.ref));
-          }
-          for (const group of chunk(childReferences, 400)) {
-            const batch = db.batch();
-            group.forEach(reference => batch.delete(reference));
-            await batch.commit();
-          }
-
-          return db.runTransaction(async transaction => {
-            const sessionSnapshot = await transaction.get(sessionReference);
-            if (!sessionSnapshot.exists) return true;
-            const session = sessionSnapshot.data() || {};
-            if (session.teacherUid !== teacherUid || session.code !== code ||
-                session.status !== 'aborted') return false;
+          // Rules reject new participation/results for an aborted draft. Keep
+          // the code until this atomic deletion succeeds, including on retries.
+          return await db.runTransaction(async transaction => {
+            const result = await eligible(transaction, true);
+            if (!result.allowed) return false;
+            if (result.complete) return true;
+            references.forEach(reference => transaction.delete(reference));
+            if (result.mapping && result.mapping.sessionId === sessionId) transaction.delete(codeReference);
             transaction.delete(sessionReference);
             return true;
           });
@@ -4956,7 +4986,6 @@
         (lastError && lastError.message ? lastError.message : String(lastError || 'unknown'))
       );
     }
-
     async function recoverPendingSessionAllocation(record) {
       const pending = record || {};
       const sessionSnapshot = await db.doc('sessions/' + pending.sessionId).get();
@@ -5033,6 +5062,7 @@
         if (leaseUntil && nowFn() + serverOffset <= leaseUntil) {
           return { complete: false, active: true };
         }
+        return { complete: false, preserved: true };
       } else if (!['allocating', 'aborted'].includes(session.status)) {
         return { complete: false, ignored: true };
       }
@@ -5041,7 +5071,7 @@
       );
       return cleaned === true
         ? { complete: true, cleaned: true }
-        : { complete: false, ignored: true };
+        : { complete: false, preserved: true };
     }
 
     function freezeLive(sessionId, expectedLive) {
