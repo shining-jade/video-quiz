@@ -572,6 +572,9 @@ function loadStageFunctions(names, context) {
     context.PublicAuthorLabelCore = require('../public-author-label-core.js');
   }
   vm.runInNewContext(extractFunction(html, 'plQuestionResumeAt'), context);
+  if (names.includes('plTick') || names.includes('plQueueDueQuestions')) {
+    vm.runInNewContext(extractFunction(html, 'plPlaybackEvent'), context);
+  }
   names.forEach(name => vm.runInNewContext(extractFunction(html, name), context));
   return context;
 }
@@ -5508,6 +5511,23 @@ test('stale freeze identity makes zero live mutation', async () => {
   assert.equal(fake.calls().filter(call => call.operation === 'transactionSet').length, 0);
 });
 
+test('영상 이동으로 응답을 마감할 때 현재 문항의 시간만 끝내고 정답은 공개하지 않는다', async () => {
+  const { current, fake, store, stale } = staleLiveFixture();
+  const path = 'sessions/a/meta/live';
+  const expected = { q: current.q, liveToken: current.liveToken, openedAt: current.openedAt };
+
+  assert.equal(await store.expireLiveForSeek('a', stale), false);
+  assert.deepEqual(fake.value(path), current);
+  assert.equal(await store.expireLiveForSeek('a', expected), true);
+  const updated = fake.value(path);
+  assert.equal(updated.q, current.q);
+  assert.equal(updated.revealed, false);
+  assert.equal('publicAnswer' in updated, false);
+  assert.ok(updated.responseClosesAt);
+  assert.deepEqual(updated.responseClosesAt, updated.submitGraceUntil);
+  assert.deepEqual(updated.responseClosesAt, updated.revealAt);
+});
+
 test('stale final close identity makes zero live mutation', async () => {
   const { current, fake, store, stale } = staleLiveFixture();
   assert.equal(typeof store.closeLive, 'function');
@@ -9484,8 +9504,8 @@ test('중앙 문제·순위 카드 위에서 교사 도구와 QR을 조작하고
   assert.match(html, /aria-label="QR 닫기" onclick="plToggleQrBubble\(\)"/);
   assert.match(bubbleRule[1], /right:\s*20px/);
   assert.match(bubbleRule[1], /top:\s*20px/);
-  assert.match(toolsRule[1], /position:\s*fixed/);
-  assert.match(toolsRule[1], /top:\s*16px/);
+  assert.match(toolsRule[1], /position:\s*relative/);
+  assert.match(toolsRule[1], /opacity:\s*1\b/);
   assert.match(timelineRule[1], /position:\s*relative/);
   assert.doesNotMatch(timelineRule[1], /position:\s*(?:fixed|absolute)/);
   assert.match(boardRule[1], /left:\s*50%[^}]*top:\s*50%[^}]*width:\s*min\(64vw,\s*960px\)/s);
@@ -13697,7 +13717,7 @@ test('문항이 열린 동안 지난 문항을 queue에 보존하고 닫을 때 
       },
       playlistDone: false, playerLoading: false, playerError: null,
       set: { videos: [{ startSec: 0, endSec: 100 }], settings: { autoPause: false } },
-      videoIndex: 0, lastT: 10,
+      videoIndex: 0, lastT: 10, lastTickAt: Date.now() - 10_000,
       flatQuestions: [{ videoIndex: 0, t: 5 }, { videoIndex: 0, t: 15 }],
       fired: [true, false], playbackEnded: false, transitionUntil: 0
     },
@@ -14576,9 +14596,6 @@ test('서술형 재개 시각은 응답 180초와 제출 유예 뒤 영상 속 �
   clock = 280_000;
   context.plTick();
   assert.deepEqual(actions, []);
-  position = 1197;
-  context.plTick();
-  assert.equal(trigger.state()[2], 'upcoming');
   clock = 282_000;
   context.plTick();
   assert.equal(await state.closeFlight.promise, true);
@@ -14587,6 +14604,48 @@ test('서술형 재개 시각은 응답 180초와 제출 유예 뒤 영상 속 �
   assert.equal(trigger.state()[1], 'completed');
   assert.equal(trigger.state()[2], 'queued');
   assert.deepEqual(state.dueQuestions, [2]);
+});
+
+test('열린 서술형에서 영상을 되감으면 시간 만료를 기다리지 않고 닫고 다시 출제할 수 있다', async () => {
+  const events = [];
+  let position = 120;
+  const questions = [{ t: 120, type: 'long', videoIndex: 0, resumeAt: 300 }];
+  const trigger = require('../quiz-trigger-core.js').create(questions);
+  trigger.open(0);
+  const state = {
+    sessionId: 'session', videoIndex: 0, lastT: 120, pendingLiveQuestion: -1,
+    live: { q: 0, liveToken: 'open', openedAt: 1_000, submitGraceUntil: 183_000, accepting: true },
+    flatQuestions: questions, fired: [true], dueQuestions: [], quizTrigger: trigger,
+    set: { settings: {}, videos: [{ endSec: 600 }] },
+    player: {
+      getPlayerState() { return 2; }, getCurrentTime() { return position; },
+      seekTo() { events.push('seek'); }, playVideo() { events.push('play'); }
+    }
+  };
+  const ctx = loadStageFunctions(['plTick', 'plQueueDueQuestions', 'plDetectSeek', 'plCloseQuestion',
+    'plEffectiveEnd'], {
+    pl: state, serverNow() { return 10_000; }, FirestoreCore: core, YT: { PlayerState: { PAUSED: 2 } },
+    $() { return null; }, plSetQuizOpen(open) { events.push(open ? 'show' : 'hide'); },
+    plAutoResumeDue() { return false; }, plOpenNextDueQuestion() { return false; },
+    plGradeCurrentResponses() {}, plPushBoard() {},
+    store: {
+      async expireLiveForSeek(id, expected) { events.push('expire:' + expected.liveToken); return true; },
+      async freezeLive() { events.push('freeze'); return true; },
+      async getResponses() { return {}; }, async getGrades() { return {}; },
+      async closeLive() { events.push('close'); return true; }
+    }
+  });
+
+  ctx.plTick();
+  position = 118.5;
+  ctx.plTick();
+  assert.equal(state.closeFlight?.questionIndex, 0);
+  assert.equal(events[0], 'hide');
+  assert.equal(await state.closeFlight.promise, true);
+  assert.deepEqual(events.filter(event => event !== 'hide'), ['expire:open', 'freeze', 'close']);
+  assert.equal(state.live.q, -1);
+  assert.equal(state.lastT, 118.5);
+  assert.equal(trigger.state()[0], 'rearmed');
 });
 
 test('timer reveal UI waits for the observed live document and stays hidden after write failure', async () => {

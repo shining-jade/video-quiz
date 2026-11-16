@@ -2328,6 +2328,34 @@ rulesTest('fix-round-4: stale freeze and final close transactions preserve a new
   });
 });
 
+rulesTest('teacher seek can close a timed question without revealing it or deleting submissions', async () => {
+  const now = Date.now();
+  const identity = { q: 0, liveToken: 'timed-seek', openedAt: now };
+  await adminWrite('sessions/s1/meta/live', liveQuestion(0, {
+    liveToken: identity.liveToken,
+    openedAt: Timestamp.fromMillis(now),
+    accepting: true,
+    responseClosesAt: Timestamp.fromMillis(now + 180_000),
+    submitGraceUntil: Timestamp.fromMillis(now + 182_000),
+    revealAt: Timestamp.fromMillis(now + 182_000)
+  }));
+  const answer = { answers: { '0': { answer: 0, submitted: true, revision: 1 } } };
+  await adminWrite('sessions/s1/responses/student-uid', answer);
+  const owner = actorFirestore('owner');
+  const store = emulatorStore(owner);
+  const live = doc(owner, 'sessions/s1/meta/live');
+
+  await assertFails(store.freezeLive('s1', identity));
+  assert.equal(await store.expireLiveForSeek('s1', identity), true);
+  const expired = (await getDoc(live)).data();
+  assert.equal(expired.revealed, false);
+  assert.equal('publicAnswer' in expired, false);
+  assert.equal(await store.freezeLive('s1', identity), true);
+  assert.equal(await store.closeLive('s1', identity), true);
+  assert.equal((await getDoc(live)).data().q, -1);
+  assert.deepEqual((await getDoc(doc(owner, 'sessions/s1/responses/student-uid'))).data(), answer);
+});
+
 rulesTest('current-live-question response validation', async () => {
   const student = anonymousContext('student-uid');
   const own = doc(student, 'sessions/s1/responses/student-uid');

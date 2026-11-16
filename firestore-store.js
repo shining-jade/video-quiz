@@ -5116,6 +5116,15 @@
         : { complete: false, preserved: true };
     }
 
+    function expireLiveForSeek(sessionId, expectedLive) {
+      const now = fieldValue.serverTimestamp();
+      return updateCurrentLive(sessionId, expectedLive, {
+        responseClosesAt: now,
+        submitGraceUntil: now,
+        revealAt: now
+      }, { merge: true });
+    }
+
     function freezeLive(sessionId, expectedLive) {
       return updateCurrentLive(
         sessionId,
@@ -5664,6 +5673,7 @@
       getOwnScore,
       setLive,
       revealLive,
+      expireLiveForSeek,
       freezeLive,
       closeLive,
       endSession,
