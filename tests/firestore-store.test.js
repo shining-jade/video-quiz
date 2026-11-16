@@ -571,6 +571,7 @@ function loadStageFunctions(names, context) {
   if (!Object.hasOwn(context, 'PublicAuthorLabelCore')) {
     context.PublicAuthorLabelCore = require('../public-author-label-core.js');
   }
+  vm.runInNewContext(extractFunction(html, 'plQuestionResumeAt'), context);
   names.forEach(name => vm.runInNewContext(extractFunction(html, name), context));
   return context;
 }
@@ -4013,6 +4014,35 @@ test('저장 검증은 모든 영상의 재생 구간 오류에 영상 번호를
   loadStageFunctions(['mkValidate'], context);
 
   assert.equal(context.mkValidate(), '영상 2: 1번 문항이 재생 구간 밖에 있습니다.');
+});
+
+test('서술형 영상 재개 시각은 재생 구간 안에서만 저장되고 다시 열린다', () => {
+  const question = { type: 'long', t: 1017, text: '메시지를 작성하세요', choices: [], limitSec: 180, resumeAt: '19:57' };
+  const context = {
+    mk: {
+      title: '활동지', settings: { limitSec: 20 },
+      videos: [{ videoId: 'SqwqdfMwbFg', videoUrl: 'https://youtu.be/SqwqdfMwbFg',
+        startSec: 0, endSec: 1250, questions: [question] }]
+    },
+    PlaylistCore: require('../playlist-core.js'), QTYPES: { long: '서술형' },
+    normSettings(settings) { return settings; }, qType(q) { return q.type; }, SV_TS: 1
+  };
+  loadStageFunctions(['parseTime', 'mkValidate', 'mkPayload', 'normQuestions', 'limitFor'], context);
+
+  assert.equal(context.mkValidate(), null);
+  const set = context.mkPayload().set;
+  const saved = set.videos[0].questions[0];
+  assert.equal(saved.resumeAt, 1197);
+  assert.equal(context.normQuestions([saved])[0].resumeAt, 1197);
+  assert.equal(GuestQuizShareCore.projectQuizSet(set, {}).questions[0].resumeAt, 1197);
+
+  question.resumeAt = '16:57';
+  assert.match(context.mkValidate(), /재개 시각/);
+  question.resumeAt = '21:00';
+  assert.match(context.mkValidate(), /재개 시각/);
+  question.resumeAt = '19:57';
+  question.limitSec = 0;
+  assert.match(context.mkValidate(), /제한 시간/);
 });
 
 test('이미지가 없는 편집 저장도 빈 이미지 집합으로 교체한다', async () => {
@@ -8419,7 +8449,6 @@ test('반 코드 후보를 모두 쓴 실패는 기존 안내 문구를 유지�
 });
 
 test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공개 때만 정답을 병합한다', async () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const serverTimestamp = Symbol('server timestamp');
   const writes = [];
   const context = {
@@ -8455,9 +8484,7 @@ test('문항 열기는 안전한 공개 문항과 현재 이미지만 쓰고 공
     },
     async plGradeCurrentResponses() {}
   };
-  vm.runInNewContext(extractFunction(html, 'plOpenQuestion'), context);
-  vm.runInNewContext(extractFunction(html, 'plExplanationImage'), context);
-  vm.runInNewContext(extractFunction(html, 'plReveal'), context);
+  loadStageFunctions(['plOpenQuestion', 'plExplanationImage', 'plReveal'], context);
 
   await context.plOpenQuestion(3);
   context.pl.live = { q: 3, openedAt: 456, revealed: false, limitSec: 20 };
@@ -9422,7 +9449,6 @@ test('계속 재생은 전체화면을 유지하고 같은 플레이어를 재�
 });
 
 test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', async () => {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const calls = [];
   const context = {
     pl: {
@@ -9442,8 +9468,7 @@ test('문항 닫기는 현재 점수판을 한 번 쓴 뒤 live를 닫는다', a
       }
     }
   };
-  vm.runInNewContext(extractFunction(html, 'plOpenNextDueQuestion'), context);
-  vm.runInNewContext(extractFunction(html, 'plCloseQuestion'), context);
+  loadStageFunctions(['plOpenNextDueQuestion', 'plCloseQuestion'], context);
 
   await context.plCloseQuestion();
 
@@ -9848,7 +9873,7 @@ test('교사와 학생 타이머는 같은 서버 시각으로 5초 경과를 �
     FirestoreCore: core
   };
   vm.runInNewContext(extractFunction(html, 'stLeftRatio'), context);
-  vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
+  loadStageFunctions(['plTimerTick'], context);
 
   assert.equal(context.stLeftRatio().left, 15);
   context.plTimerTick();
@@ -9878,7 +9903,7 @@ test('비로그인 진행 타이머는 기본 교사 시계가 아니라 게스�
     document: { getElementById() { return overlay; } },
     plRevealed() { return false; }, plRenderOverlayCounts() {}, FirestoreCore: core
   };
-  vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
+  loadStageFunctions(['plTimerTick'], context);
 
   context.plTimerTick();
 
@@ -9910,7 +9935,7 @@ test('교사 타이머는 제출 보호 시간도 위 타이머 한 곳에서만
     plRevealed() { return true; }, plRenderOverlayCounts() {}, plRenderOverlay() {},
     FirestoreCore: core
   };
-  vm.runInNewContext(extractFunction(html, 'plTimerTick'), context);
+  loadStageFunctions(['plTimerTick'], context);
 
   context.plTimerTick();
   assert.equal(closeButton.disabled, true);
@@ -13817,6 +13842,20 @@ test('closeLive 성공 직후 newer live로 바뀐 stale 경로도 이전 재생
   assert.equal(renders.at(-1), 1);
 });
 
+test('영상 재개 시각으로 이동했어도 영상이 멈춰 있으면 재생 성공으로 처리하지 않는다', async () => {
+  const ctx = loadStageFunctions(['plContinuePlayback'], {});
+  let time = 1017;
+  const player = {
+    seekTo(target) { time = target + 0.2; },
+    playVideo() {},
+    getCurrentTime() { return time; }
+  };
+
+  const resumed = await ctx.plContinuePlayback({ player, async playbackProbeDelay() {} }, 1197);
+
+  assert.equal(resumed.ok, false);
+});
+
 test('계속 재생 시작기는 YouTube 내부 비동기 rejection과 재생 명령을 분리한다', async () => {
   const ctx = loadStageFunctions(['plContinuePlayback'], {});
   assert.equal((await ctx.plContinuePlayback({ player: { playVideo() { return false; } } })).ok, false);
@@ -14417,6 +14456,70 @@ test('timer question stores authoritative close grace and reveal timestamps', as
   assert.equal('publicAnswer' in written[1], false);
 });
 
+test('서술형 재개 시각은 응답 180초와 제출 유예 뒤 영상 속 카운트다운을 건너뛴다', async () => {
+  const actions = [];
+  let clock = 100_000;
+  let position = 1017;
+  let playing = false;
+  const trigger = require('../quiz-trigger-core.js').create([
+    { t: 1017, videoIndex: 0 }, { t: 1100, videoIndex: 0 }, { t: 1197, videoIndex: 0 }
+  ]);
+  const state = {
+    sessionId: 'session-a', videoIndex: 0, pendingLiveQuestion: -1, live: { q: -1 }, lastT: 1017,
+    flatQuestions: [
+      { type: 'long', text: '메시지를 작성하세요', t: 1017, videoIndex: 0, resumeAt: 1197 },
+      { type: 'long', text: '영상 안의 문항', t: 1100, videoIndex: 0 },
+      { type: 'long', text: '다음 문항', t: 1197, videoIndex: 0 }
+    ],
+    set: { settings: { autoPause: true, revealMode: 'timer', revealDelaySec: 5 }, videos: [{ endSec: 1250 }] },
+    dueQuestions: [], fired: [], quizTrigger: trigger,
+    player: {
+      getCurrentTime() { return position; },
+      pauseVideo() { playing = false; },
+      seekTo(time) { actions.push(['seek', time]); position = time; },
+      playVideo() { actions.push(['play', position]); playing = true; }
+    },
+    async playbackProbeDelay() { if (playing) position += 0.2; }
+  };
+  const context = {
+    pl: state, serverNow() { return clock; }, SV_TS: {},
+    FirestoreStore: {
+      createLiveToken() { return 'question-token'; },
+      publicQuestion(question) { return { type: question.type, text: question.text }; }
+    },
+    FirestoreCore: core, limitFor() { return 180; },
+    store: {
+      async setLive(id, value) { state.live = { ...value, openedAt: clock }; },
+      async freezeLive() { return true; }, async getResponses() { return {}; },
+      async getGrades() { return {}; }, async closeLive() { return true; }
+    },
+    async plGradeCurrentResponses() {}, async plPushBoard() {},
+    plOpenNextDueQuestion() { return false; }, $() { return null; }
+  };
+  loadStageFunctions(['plOpenQuestion', 'plAutoResumeRemainingMs', 'plAutoResumeDue', 'plCloseQuestion', 'plTick',
+    'plContinuePlayback', 'plQueueDueQuestions', 'plDetectSeek', 'plEffectiveEnd'], context);
+
+  assert.equal(await context.plOpenQuestion(0), true);
+  assert.equal(state.live.limitSec, 180);
+  assert.equal(Number(state.live.responseClosesAt), 280_000);
+  assert.equal(Number(state.live.submitGraceUntil), 282_000);
+  assert.equal(state.live.revealed, false);
+  clock = 280_000;
+  context.plTick();
+  assert.deepEqual(actions, []);
+  position = 1197;
+  context.plTick();
+  assert.equal(trigger.state()[2], 'upcoming');
+  clock = 282_000;
+  context.plTick();
+  assert.equal(await state.closeFlight.promise, true);
+  assert.deepEqual(actions, [['seek', 1197], ['play', 1197]]);
+  assert.equal(state.live.q, -1);
+  assert.equal(trigger.state()[1], 'completed');
+  assert.equal(trigger.state()[2], 'queued');
+  assert.deepEqual(state.dueQuestions, [2]);
+});
+
 test('timer reveal UI waits for the observed live document and stays hidden after write failure', async () => {
   let renders = 0;
   let rejects = 0;
@@ -14493,9 +14596,7 @@ test('close freezes writes, reloads the accepted revision, grades it, then persi
     plOpenNextDueQuestion() { return false; },
     plTick() {}
   };
-  vm.runInNewContext(extractFunction(
-    fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8'), 'plCloseQuestion'
-  ), context);
+  loadStageFunctions(['plCloseQuestion'], context);
 
   await context.plCloseQuestion();
 

@@ -77,6 +77,9 @@
       output.explain = text(question.explain, 'explanation', 8000, true);
     }
     if (Number.isFinite(question.limitSec)) output.limitSec = finite(question.limitSec, 'question limit', 0, 600);
+    if (question.type === 'long' && Number.isFinite(question.resumeAt) && question.resumeAt > output.t) {
+      output.resumeAt = question.resumeAt;
+    }
     if (question.imgUp && typeof images[key] === 'string') output.imageKey = key;
     const explainKey = key + 'e';
     if (question.explainImgUp && typeof images[explainKey] === 'string') output.explainImageKey = explainKey;
@@ -129,6 +132,9 @@
         if (projected.t < projectedVideo.startSec ||
             (projectedVideo.endSec != null && projected.t > projectedVideo.endSec)) {
           fail('question time is outside video range');
+        }
+        if (projectedVideo.endSec != null && projected.resumeAt >= projectedVideo.endSec) {
+          fail('question resume time is outside video range');
         }
         questions.push(projected);
         for (const imageKey of [projected.imageKey, projected.explainImageKey]) {

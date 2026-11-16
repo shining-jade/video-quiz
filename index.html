@@ -887,7 +887,7 @@ img[data-lightbox]:focus-visible { outline: 3px solid var(--accent); outline-off
 <script src="editor-draft.js"></script>
 <script src="editor-history-core.js?v=20260825-browser"></script>
 <script src="playlist-core.js"></script>
-<script src="guest-quiz-share-core.js?v=20260826-resume"></script>
+<script src="guest-quiz-share-core.js?v=20261116-question-resume"></script>
 <script src="public-author-label-core.js"></script>
 <script src="collaboration-trash-core.js"></script>
 <script src="firestore-store.js?v=20261027-end-dialog"></script>
@@ -1488,6 +1488,8 @@ function normQuestions(qs) {
       explainImgUp: !!q.explainImgUp,
       _explainImg: '',
       _explainOpen: !!(q.explain || q.explainImgUrl || q.explainImgUp),
+      ...(type === 'long' && Number.isFinite(q.resumeAt) && q.resumeAt > Number(q.t)
+        ? { resumeAt: q.resumeAt } : {}),
       limitSec: (q.limitSec === undefined || q.limitSec === null || q.limitSec === '') ? null : Number(q.limitSec)
     };
   });
@@ -3798,6 +3800,7 @@ function setImportOne(p) {
       if (q.explainImgUrl) o.explainImgUrl = q.explainImgUrl;
       if (q.explainImgUp) o.explainImgUp = true;
       if (q.limitSec !== null && q.limitSec !== undefined) o.limitSec = q.limitSec;
+      if (q.resumeAt !== undefined) o.resumeAt = q.resumeAt;
       return o;
     })
   }));
@@ -4346,6 +4349,11 @@ function renderMake() {
           '<div class="field"><label class="f">이 문항만 제한 시간 다르게 (선택)</label><div class="unit-wrap">' +
           '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
             'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].limitSec=this.value===\'\'?null:Math.max(0,Number(this.value)||0)"><span class="unit">초</span></div></div></div>' +
+        (qType(q) === 'long' ? '<div class="field"><label class="f">재생 재개 시각 (선택)' +
+          '<input type="text" placeholder="예) 19:57" value="' +
+          esc(Number.isInteger(q.resumeAt) ? fmtTime(q.resumeAt) : q.resumeAt ?? '') + '" ' +
+          'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].resumeAt=this.value"></label>' +
+          '<div class="hint">제한 시간이 끝나면 답안을 마감하고, 이 영상 시각부터 자동으로 재생합니다.</div></div>' : '') +
       '</div>'
     ).join('') : '<div class="empty">문항이 없습니다. 아래에서 추가하세요.</div>';
 
@@ -4576,7 +4584,9 @@ function mkPreviewContinue() {
   if (preview && preview.remove) preview.remove();
   mkQuestionPreviewState = null;
   try {
-    state.player.seekTo(state.targetTime + .05, true);
+    const resumeAt = state.question && state.question.type === 'long' && state.question.resumeAt != null
+      ? parseTime(state.question.resumeAt) : NaN;
+    state.player.seekTo(resumeAt > state.targetTime ? resumeAt : state.targetTime + .05, true);
     state.player.playVideo();
   } catch (e) { toast('영상을 계속 재생하지 못했습니다: ' + e.message); return false; }
   return true;
@@ -5525,7 +5535,19 @@ function mkValidate() {
     for (let i = 0; i < video.questions.length; i++) {
       const q = video.questions[i], n = i + 1, type = qType(q);
       if (!String(q.text || '').trim()) return prefix + n + '번 문항의 질문이 비어 있습니다.';
-      if (type === 'long') continue;
+      if (type === 'long') {
+        if (String(q.resumeAt ?? '').trim()) {
+          const resumeAt = parseTime(q.resumeAt);
+          const end = video.endSec ?? (duration > 0 ? duration : Infinity);
+          if (!Number.isFinite(resumeAt) || resumeAt <= q.t || resumeAt >= end) {
+            return prefix + n + '번 문항의 재생 재개 시각은 문항 시각 이후, 영상 종료 시각 이전이어야 합니다.';
+          }
+          if (!(limitFor(mk, i, video.questions) > 0)) {
+            return prefix + n + '번 문항의 재생 재개 시각을 사용하려면 제한 시간을 설정하세요.';
+          }
+        }
+        continue;
+      }
       if (type === 'short') {
         if (!(q.accept || []).length) return prefix + n + '번 문항(단답형)에 정답으로 인정할 표현을 한 개 이상 적으세요.';
         continue;
@@ -5588,6 +5610,10 @@ function mkPayload() {
         images['v' + videoIndex + 'q' + questionIndex + 'e'] = q._explainImg;
       } else if (q.explainImgUrl) o.explainImgUrl = q.explainImgUrl;
       if (q.limitSec !== null && q.limitSec !== undefined && !isNaN(q.limitSec)) o.limitSec = Math.max(0, Number(q.limitSec));
+      if (type === 'long' && String(q.resumeAt ?? '').trim()) {
+        const resumeAt = parseTime(q.resumeAt);
+        if (Number.isFinite(resumeAt) && resumeAt > o.t) o.resumeAt = resumeAt;
+      }
       return o;
     });
     return {
@@ -7345,6 +7371,7 @@ function renderPlayRun() {
       state.revealError = '';
       state.revealFailures = 0;
       state.revealFatal = false;
+      state.closeError = '';
     }
     state.live = nextLive;
     if (nextLive.status === 'ended') {
@@ -8015,7 +8042,7 @@ function plDetectSeek(prev, now, wallElapsedSec, playbackRate) {
   return now - prev > elapsed * rate + 2;
 }
 
-function plQueueDueQuestions(prev, now) {
+function plQueueDueQuestions(prev, now, event) {
   if (!pl) return false;
   if (!Array.isArray(pl.dueQuestions)) pl.dueQuestions = [];
   if (pl.quizTrigger && pl.quizTrigger.advance) {
@@ -8026,7 +8053,7 @@ function plQueueDueQuestions(prev, now) {
     try {
       if (pl.player && pl.player.getPlaybackRate) playbackRate = pl.player.getPlaybackRate();
     } catch (e) {}
-    const triggerEvent = plDetectSeek(prev, now, wallElapsedSec, playbackRate) ? 'seek' : 'tick';
+    const triggerEvent = event || (plDetectSeek(prev, now, wallElapsedSec, playbackRate) ? 'seek' : 'tick');
     const result = pl.quizTrigger.advance({
       videoIndex: pl.videoIndex,
       previousTime: prev,
@@ -8104,6 +8131,12 @@ function plTick() {
     return;
   }
 
+  // 지정 위치로 이동한 상태에서 재생이 막혀도, 문항 마감 전에는 이동을 반영하지 않는다.
+  if (pl.live.q >= 0 && plQuestionResumeAt(pl, pl.live.q) !== null) {
+    if (plAutoResumeDue()) plCloseQuestion().catch(() => {});
+    return;
+  }
+
   let now;
   try { now = pl.player.getCurrentTime(); } catch (e) { return; }
   if (typeof now !== 'number' || isNaN(now)) return;
@@ -8158,6 +8191,14 @@ function plTick() {
   plRenderTransition();
 }
 
+function plQuestionResumeAt(state, index) {
+  const question = state.flatQuestions && state.flatQuestions[index];
+  if (!question || question.type !== 'long' || question.videoIndex !== state.videoIndex ||
+      !Number.isFinite(question.resumeAt) || question.resumeAt <= question.t) return null;
+  const video = state.set.videos && state.set.videos[question.videoIndex];
+  return video && video.endSec != null && question.resumeAt >= video.endSec ? null : question.resumeAt;
+}
+
 async function plOpenQuestion(i) {
   if (!pl || !pl.sessionId) return;
   if (pl.endingSession || pl.sessionEnded) return false;
@@ -8188,9 +8229,10 @@ async function plOpenQuestion(i) {
     throw e;
   }
   if (pl !== state || state.endingSession || state.sessionEnded || state.pendingLiveQuestion !== i) return false;
-  const mode = state.set.settings.revealMode;
-  const revealed = mode === 'instant';
   const configuredLimit = limitFor(state.set, i, state.flatQuestions);
+  const timedResume = plQuestionResumeAt(state, i) !== null && configuredLimit > 0;
+  const mode = state.set.settings.revealMode;
+  const revealed = mode === 'instant' && !timedResume;
   let liveLimit = configuredLimit;
   const live = {
     q: i,
@@ -8203,16 +8245,16 @@ async function plOpenQuestion(i) {
       question, question.number || i + 1, state.flatQuestions.length, image
     )
   };
-  if (mode === 'timer') {
+  if (mode === 'timer' || timedResume) {
     const openedMillis = typeof playServerNow === 'function' ? playServerNow(state) : serverNow();
     const revealDelay = Math.max(0, Number(state.set.settings.revealDelaySec) || 0);
-    liveLimit = configuredLimit > 0 ? Math.min(configuredLimit, revealDelay) : revealDelay;
+    if (!timedResume) liveLimit = configuredLimit > 0 ? Math.min(configuredLimit, revealDelay) : revealDelay;
     const closesAt = openedMillis + liveLimit * 1000;
     const graceUntil = closesAt + 2000;
     live.limitSec = liveLimit;
     live.responseClosesAt = new Date(closesAt);
     live.submitGraceUntil = new Date(graceUntil);
-    live.revealAt = new Date(Math.max(openedMillis + revealDelay * 1000, graceUntil));
+    live.revealAt = new Date(timedResume ? graceUntil : Math.max(openedMillis + revealDelay * 1000, graceUntil));
   }
   if (revealed) {
     const explainImage = await plExplanationImage(question, i);
@@ -8278,7 +8320,7 @@ function plRevealBlockedMessage(error) {
 
 async function plReveal() {
   if (!pl || pl.live.q < 0) return;
-  if (pl.revealPending) return false;
+  if (pl.revealPending || plQuestionResumeAt(pl, pl.live.q) !== null) return false;
   const state = pl;
   const questionIndex = state.live.q;
   const question = state.flatQuestions[questionIndex];
@@ -8329,7 +8371,7 @@ async function plReveal() {
 /** 확장 프로그램이 끼워 넣은 광고 요청 rejection은 무시하되, YouTube의 재생
     시간이 실제로 전진했는지를 확인한다. PLAYING은 아주 잠깐 보고된 뒤 다시
     멈출 수 있으므로 시간 API가 있으면 상태값만으로 성공 처리하지 않는다. */
-async function plContinuePlayback(state) {
+async function plContinuePlayback(state, resumeAt = null) {
   if (!state || !state.player || typeof state.player.playVideo !== 'function') {
     return { ok: false, error: new Error('재생기를 찾을 수 없습니다.') };
   }
@@ -8340,13 +8382,18 @@ async function plContinuePlayback(state) {
   if (canProbeTime) {
     try { beforeTime = Number(player.getCurrentTime()); } catch (e) {}
   }
+  const playbackStart = resumeAt ?? beforeTime;
   const delay = typeof state.playbackProbeDelay === 'function'
     ? state.playbackProbeDelay
     : (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  let previousSample = NaN;
   const started = () => {
     try {
       const current = canProbeTime ? Number(player.getCurrentTime()) : NaN;
-      if (Number.isFinite(beforeTime) && Number.isFinite(current) && current > beforeTime + 0.15) {
+      const advanced = resumeAt === null || (previousSample >= resumeAt - 0.15 &&
+        current > previousSample + 0.01 && current < resumeAt + 2);
+      previousSample = current;
+      if (Number.isFinite(playbackStart) && Number.isFinite(current) && current > playbackStart + 0.15 && advanced) {
         return true;
       }
     } catch (e) {}
@@ -8364,21 +8411,24 @@ async function plContinuePlayback(state) {
     return true;
   };
   const probe = async () => {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
+    previousSample = NaN;
+    const attempts = resumeAt === null ? 4 : 25;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
       if (started()) return true;
       await delay(120);
     }
     return started();
   };
   try {
+    if (resumeAt !== null) player.seekTo(resumeAt, true);
     if (!command()) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
     // 상태 API가 없는 오래된 테스트/플레이어는 기존 동기 명령 계약을 유지한다.
     if (!canProbeState && !canProbeTime) return { ok: true };
     if (await probe()) return { ok: true };
     // 간혹 퀴즈 overlay를 닫은 직후 첫 play 명령을 YouTube가 놓친다. 현재 위치를
     // 거의 그대로 다시 확정한 뒤 사용자 클릭 처리 중 한 번만 재시도한다.
-    if (Number.isFinite(beforeTime) && typeof player.seekTo === 'function') {
-      try { player.seekTo(beforeTime + 0.05, true); } catch (e) {}
+    if (Number.isFinite(playbackStart) && typeof player.seekTo === 'function') {
+      try { player.seekTo(resumeAt ?? (beforeTime + 0.05), true); } catch (e) {}
     }
     if (!command()) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
     if (await probe()) return { ok: true };
@@ -8389,22 +8439,26 @@ async function plContinuePlayback(state) {
 }
 
 /**
- * 정답이 공개된 뒤 설정한 시간이 지나면 교사가 누르지 않아도 영상을 이어 간다.
- * 정답을 아예 공개하지 않는 세트(never)는 교사가 직접 넘기도록 그대로 둔다.
+ * 재개 시각을 지정한 서술형은 제출 유예가 끝나면 재생한다.
+ * 그 외 문항은 정답 공개 후 설정한 시간을 기다린다.
  */
 function plAutoResumeRemainingMs() {
   const state = pl;
   if (!state || !state.live || !state.set) return null;
   const seconds = Number(state.set.settings && state.set.settings.autoResumeSec) || 0;
   const questionIndex = Number(state.live.q);
+  const now = typeof playServerNow === 'function' ? playServerNow(state) :
+    (typeof serverNow === 'function' ? serverNow() : Date.now());
+  if (plQuestionResumeAt(state, questionIndex) !== null) {
+    const graceUntil = Number(state.live.submitGraceUntil);
+    return graceUntil > 0 ? Math.max(0, graceUntil - now) : null;
+  }
   const revealed = !!(state.live.revealed && state.live.publicAnswer);
   if (seconds <= 0 || questionIndex < 0 || !revealed) {
     state.autoResumeAt = 0;
     state.autoResumeQuestion = -1;
     return null;
   }
-  const now = typeof playServerNow === 'function' ? playServerNow(pl) :
-    (typeof serverNow === 'function' ? serverNow() : Date.now());
   if (state.autoResumeQuestion !== questionIndex || !state.autoResumeAt) {
     state.autoResumeQuestion = questionIndex;
     state.autoResumeAt = now + seconds * 1000;
@@ -8421,7 +8475,7 @@ function plAutoResumeDue() {
   const now = typeof playServerNow === 'function' ? playServerNow(pl) :
     (typeof serverNow === 'function' ? serverNow() : Date.now());
   if (state.live.accepting !== false && Number.isFinite(graceUntil) && now < graceUntil) return false;
-  if (state.closeFlight) return false;
+  if (state.closeFlight || (state.closeError && plQuestionResumeAt(state, state.live.q) !== null)) return false;
   state.autoResumeAt = 0;
   state.autoResumeQuestion = -1;
   return true;
@@ -8444,6 +8498,7 @@ function plCloseQuestion() {
     return Promise.resolve(false);
   }
   const questionIndex = Number(state.live.q);
+  const resumeAt = plQuestionResumeAt(state, questionIndex);
   const identity = { q: questionIndex, openedAt: state.live.openedAt };
   if (typeof state.live.liveToken === 'string' && state.live.liveToken) {
     identity.liveToken = state.live.liveToken;
@@ -8486,7 +8541,7 @@ function plCloseQuestion() {
       );
     }
     const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
-    if (!hasQueuedFollowup) {
+    if (!hasQueuedFollowup || resumeAt !== null) {
       // playVideo는 클릭의 사용자 활성화가 살아 있는 첫 동기 구간에 호출해야 한다.
       // Firestore 작업을 먼저 await하면 YouTube가 autoplay로 판단해 명령을 무시할 수 있다.
       if (typeof plSetQuizOpen === 'function') {
@@ -8494,12 +8549,15 @@ function plCloseQuestion() {
         flight.overlayHidden = true;
       }
       const playback = typeof plContinuePlayback === 'function'
-        ? await plContinuePlayback(state)
+        ? await plContinuePlayback(state, resumeAt)
         : { ok: (() => {
           try { return !state.player || !state.player.playVideo || state.player.playVideo() !== false; }
           catch (error) { return false; }
         })() };
       if (!playback.ok) {
+        if (resumeAt !== null && state.player && state.player.pauseVideo) {
+          try { state.player.pauseVideo(); } catch (e) {}
+        }
         state.closeError = '동영상 재생을 시작하지 못했습니다. 계속 재생을 다시 시도해 주세요.';
         if (typeof toast === 'function') toast(state.closeError);
         rollbackContinuePlayback();
@@ -8512,8 +8570,10 @@ function plCloseQuestion() {
       }
     }
     const frozen = await activeStore.freezeLive(state.sessionId, identity);
-    if (!frozen) return false;
-    if (!stillCurrent()) return false;
+    if (!frozen || !stillCurrent()) {
+      rollbackContinuePlayback();
+      return false;
+    }
     state.live = Object.assign({}, state.live, { accepting: false });
     const [responseDocs, gradeDocs] = await Promise.all([
       activeStore.getResponses(state.sessionId),
@@ -8554,6 +8614,17 @@ function plCloseQuestion() {
     if (typeof plSetQuizOpen === 'function') plSetQuizOpen(false);
     if (state.quizTrigger && state.quizTrigger.complete) state.quizTrigger.complete(questionIndex);
     if (Array.isArray(state.fired)) state.fired[questionIndex] = true;
+    if (resumeAt !== null) {
+      // 목적지에 놓인 문항은 재생이 진행될 때 정상 출제한다.
+      state.lastT = resumeAt - 0.001;
+      plQueueDueQuestions(state.flatQuestions[questionIndex].t, state.lastT, 'seek');
+      let currentTime;
+      try { currentTime = state.player.getCurrentTime(); } catch (e) {}
+      if (Number.isFinite(currentTime) && currentTime >= resumeAt) {
+        plQueueDueQuestions(state.lastT, currentTime, 'tick');
+        state.lastT = currentTime;
+      }
+    }
     try {
       if (await plOpenNextDueQuestion()) return true;
     } catch (error) {
@@ -8815,7 +8886,7 @@ function plPushBoard() {
   const board = {};
   const studentScores = {};
   const rows = plScoreboard();
-  const visible = !!(pl.live && pl.live.revealed &&
+  const visible = !!(pl.live && (pl.live.revealed || plQuestionResumeAt(pl, pl.live.q) !== null) &&
     pl.set && pl.set.settings && pl.set.settings.revealMode !== 'never');
   rows.forEach(r => {
     board[r.sid] = r.correct;
@@ -8965,7 +9036,7 @@ function plRenderOverlay() {
 
   const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
-  const mode = pl.set.settings.revealMode;
+  const mode = plQuestionResumeAt(pl, i) !== null ? 'never' : pl.set.settings.revealMode;
   const closeBusy = !!(pl.closeFlight && pl.closeFlight.questionIndex === i);
   const closeGraceUntil = Number(pl.live.submitGraceUntil);
   const overlayNow = typeof playServerNow === 'function' ? playServerNow(pl) :
@@ -9136,7 +9207,8 @@ function plRenderOverlayCounts() {
   }
   const close = ov.querySelector('#ov-close');
   if (close && !(pl.closeFlight && pl.closeFlight.overlayHidden)) {
-    close.style.display = (pl.set.settings.revealMode === 'never' || revealed) ? '' : 'none';
+    close.style.display = (pl.set.settings.revealMode === 'never' || revealed ||
+      plQuestionResumeAt(pl, pl.live.q) !== null) ? '' : 'none';
   }
 }
 
@@ -9147,6 +9219,7 @@ function plTimerTick() {
   if (!ov || !pl || pl.live.q < 0) return;
   const timerGeneration = Number(pl.quizTimerGeneration) || 0;
   const questionIndex = Number(pl.live.q);
+  const timedResume = plQuestionResumeAt(pl, questionIndex) !== null;
   const liveToken = String(pl.live.liveToken || '');
   const timerNow = () => typeof playServerNow === 'function' ? playServerNow(pl) : serverNow();
   const isCurrentTimer = state => pl === state &&
@@ -9159,7 +9232,7 @@ function plTimerTick() {
   const revealDue = revealAt > 0 && timerNow() >= revealAt;
   // 되돌릴 수 없는 실패(신분 상실 등)는 1초마다 다시 시도해도 소용없다.
   // 화면에 사유를 띄운 뒤 멈춰서 교사가 새 반을 열도록 한다.
-  if (pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
+  if (!timedResume && pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
       !pl.live.revealed && !pl.revealPending && !pl.revealRequested && !pl.revealFatal &&
       timerNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;
@@ -9200,11 +9273,11 @@ function plTimerTick() {
     const revealMode = pl.set && pl.set.settings ? pl.set.settings.revealMode : 'timer';
     closeButton.disabled = waitMs > 0;
     if (closeButton.style) {
-      closeButton.style.display = (revealMode === 'never' || plRevealed()) && waitMs === 0 ? '' : 'none';
+      closeButton.style.display = (revealMode === 'never' || timedResume || plRevealed()) && waitMs === 0 ? '' : 'none';
     }
     const autoResumeLeft = typeof plAutoResumeRemainingMs === 'function'
       ? plAutoResumeRemainingMs() : null;
-    closeButton.textContent = autoResumeLeft === null
+    closeButton.textContent = autoResumeLeft === null || (timedResume && autoResumeLeft === 0)
       ? '▶ 계속 재생'
       : '▶ 계속 재생 (' + Math.ceil(autoResumeLeft / 1000) + '초)';
   }
