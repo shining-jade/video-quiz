@@ -657,6 +657,11 @@ body.stage-fallback-open { overflow: hidden; }
   display: grid; place-items: center; font-weight: 800; flex: none; font-size: 17px;
 }
 #overlay .ov-choice .cnt { margin-left: auto; font-size: 16px; font-weight: 700; opacity: .85; }
+#overlay .ov-choice-copy { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+#overlay .ov-choice-voters { font-size: .8em; font-weight: 500; }
+#overlay .ov-choice-voters:empty { display: none; }
+#overlay .ov-answer-summary { margin: 0 0 10px; font-weight: 700; font-size: clamp(14px, 2vw, 19px); }
+#overlay [hidden] { display: none; }
 #overlay .ov-choice.correct { border-color: #34d17f; background: rgba(52,209,127,.16); }
 #overlay .ov-choice.correct .lt { background: #34d17f; color: #04331d; }
 #overlay .ov-explain {
@@ -7409,6 +7414,7 @@ function renderPlayRun() {
     if (pl !== state) return;
     state.students = students || {};
     plRenderStudents();
+    plRenderOverlayCounts();
     plRenderBoardOverlay();
     plRenderStageControls();
   }, e => { if (pl === state) console.error(e); }));
@@ -8418,7 +8424,7 @@ function plRevealBlockedMessage(error) {
 
 async function plReveal() {
   if (!pl || pl.live.q < 0) return;
-  if (pl.revealPending || plQuestionResumeAt(pl, pl.live.q) !== null) return false;
+  if (pl.revealPending || pl.closeFlight || plQuestionResumeAt(pl, pl.live.q) !== null) return false;
   const state = pl;
   const questionIndex = state.live.q;
   const question = state.flatQuestions[questionIndex];
@@ -8579,7 +8585,7 @@ function plAutoResumeDue() {
   return true;
 }
 
-function plCloseQuestion(seek = null) {
+function plCloseQuestion(seek = null, skip = false) {
   const state = pl;
   if (!state || !state.live || Number(state.live.q) < 0) return Promise.resolve(false);
   state.autoResumeAt = 0;
@@ -8589,7 +8595,7 @@ function plCloseQuestion(seek = null) {
     (typeof serverNow === 'function' ? serverNow() : Date.now());
   const waitingForResponses = state.live.accepting !== false &&
     Number.isFinite(submitGraceUntil) && closeNow < submitGraceUntil;
-  if (!seek && waitingForResponses) {
+  if (!seek && !skip && waitingForResponses) {
     const waitSeconds = Math.max(1, Math.ceil((submitGraceUntil - closeNow) / 1000));
     state.closeError = '학생 답안 제출을 마감하는 중입니다. ' + waitSeconds +
       '초 후 계속 재생을 눌러 주세요.';
@@ -8644,26 +8650,14 @@ function plCloseQuestion(seek = null) {
       );
     }
     const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
-    if (seek) {
-      if (typeof plSetQuizOpen === 'function') {
-        plSetQuizOpen(false);
-        flight.overlayHidden = true;
-      }
-      if (waitingForResponses) {
-        // 정답 공개 없이 서버 시각에 응답 창을 만료시키면 즉시 마감할 수 있다.
-        const expired = await activeStore.expireLiveForSeek(state.sessionId, identity);
-        if (!expired || !stillCurrent()) {
-          rollbackContinuePlayback();
-          return false;
-        }
-      }
-    } else if (!hasQueuedFollowup || resumeAt !== null) {
+    const continuePlayback = !seek && (!hasQueuedFollowup || resumeAt !== null);
+    if ((seek || skip || continuePlayback) && typeof plSetQuizOpen === 'function') {
+      plSetQuizOpen(false);
+      flight.overlayHidden = true;
+    }
+    if (continuePlayback) {
       // playVideo는 클릭의 사용자 활성화가 살아 있는 첫 동기 구간에 호출해야 한다.
       // Firestore 작업을 먼저 await하면 YouTube가 autoplay로 판단해 명령을 무시할 수 있다.
-      if (typeof plSetQuizOpen === 'function') {
-        plSetQuizOpen(false);
-        flight.overlayHidden = true;
-      }
       const playback = typeof plContinuePlayback === 'function'
         ? await plContinuePlayback(state, resumeAt)
         : { ok: (() => {
@@ -8681,6 +8675,14 @@ function plCloseQuestion(seek = null) {
       }
       flight.playbackStarted = true;
       if (!stillCurrent()) {
+        rollbackContinuePlayback();
+        return false;
+      }
+    }
+    if ((seek || skip) && waitingForResponses) {
+      // 정답 공개 없이 서버 시각에 응답 창을 만료시키면 즉시 마감할 수 있다.
+      const expired = await activeStore.expireLiveForSeek(state.sessionId, identity);
+      if (!expired || !stillCurrent()) {
         rollbackContinuePlayback();
         return false;
       }
@@ -9186,6 +9188,7 @@ function plRenderOverlay() {
     stage.appendChild(ov);
   }
   const type = qType(q);
+  const showChoiceSummary = type === 'ox' || type === 'choice';
   const publicAnswer = pl.live.publicAnswer || {};
   ov.innerHTML = '<div class="ov-inner">' +
     '<div class="ov-top">' +
@@ -9202,12 +9205,14 @@ function plRenderOverlay() {
       (publicAnswer.explainImage ? '<img class="ov-explain-img" data-lightbox tabindex="0" role="button" aria-label="해설 이미지 크게 보기" id="ov-explain-img" style="display:none" src="' + esc(publicAnswer.explainImage) + '" alt="해설 이미지">' : '') +
       (isTextType(q)
         ? '<div id="ov-textwrap"></div>'
-        : '<div class="ov-choices" id="ov-choices">' +
+        : (showChoiceSummary ? '<div class="ov-answer-summary" id="ov-answer-summary" hidden></div>' : '') +
+          '<div class="ov-choices" id="ov-choices">' +
             q.choices.map((c, j) =>
               '<div class="ov-choice" data-c="' + j + '">' +
                 '<span class="bar"></span>' +
                 '<span class="lt">' + (type === 'ox' ? ['O', 'X'][j] : LETTERS[j]) + '</span>' +
-                '<span>' + esc(c) + '</span>' +
+                '<div class="ov-choice-copy"><div>' + esc(c) + '</div>' +
+                  (showChoiceSummary ? '<div class="ov-choice-voters"></div>' : '') + '</div>' +
                 '<span class="cnt" data-cnt="' + j + '"></span>' +
               '</div>').join('') +
           '</div>') +
@@ -9218,6 +9223,9 @@ function plRenderOverlay() {
       (pl.revealError ? '<div class="notice bad" role="alert">' + esc(pl.revealError) + '</div>' : '') +
       (mode === 'never' ? '' :
         '<button class="btn" id="ov-reveal" onclick="plReveal()">✅ ' + (mode === 'manual' ? '정답 공개' : '지금 공개') + '</button>') +
+      '<button class="btn" id="ov-skip" onclick="plCloseQuestion(null, true).catch(()=>{})"' +
+        ((closeBusy || pl.revealPending) ? ' disabled' : '') + (overlayRevealed ? ' hidden' : '') +
+        '>⏭ 문항 넘기기</button>' +
       '<button class="btn primary" id="ov-close" onclick="plCloseQuestion().catch(()=>{})"' +
         ((closeBusy || closeWaiting) ? ' disabled' : '') +
         (closeBusy ? ' aria-busy="true"' : '') +
@@ -9227,7 +9235,8 @@ function plRenderOverlay() {
           : autoResumeLeft !== null
             ? '▶ 계속 재생 (' + Math.ceil(autoResumeLeft / 1000) + '초)'
             : '▶ 계속 재생') + '</button>' +
-      '<button class="btn ghost" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()">🏆 순위</button>' +
+      '<button class="btn ghost" id="ov-rank" style="color:#fff;border-color:rgba(255,255,255,.3)" onclick="plToggleBoard()"' +
+        (showChoiceSummary && !overlayRevealed ? ' hidden' : '') + '>🏆 순위</button>' +
     '</div>' +
   '</div>';
 
@@ -9285,22 +9294,32 @@ function plTextSummary(q, resp) {
       : '') + '</div>';
 }
 
+function plChoiceGroups(q, responses) {
+  const groups = q.choices.map(() => []);
+  const isMulti = qType(q) === 'multi';
+  let total = 0;
+  for (const [studentId, response] of Object.entries(responses)) {
+    if (!FirestoreCore.answerIsSubmitted(response)) continue;
+    const answer = response.answer;
+    const picks = isMulti ? (Array.isArray(answer) ? answer : parseMulti(response.cs)) : [answer ?? response.c];
+    const valid = picks.filter(pick =>
+      (typeof pick === 'number' || (typeof pick === 'string' && pick.trim())) && groups[Number(pick)]);
+    if (!valid.length) continue;
+    total++;
+    for (const pick of new Set(valid.map(Number))) groups[pick].push(studentId);
+  }
+  return { groups, total };
+}
+
 function plRenderOverlayCounts() {
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
   const i = pl.live.q, q = pl.flatQuestions[i];
   if (!q) return;
   const resp = pl.responses[i] || {};
-  const keys = Object.keys(resp);
-  const total = keys.length;
   const totals = FirestoreCore.submissionCounts(pl.students, resp);
 
   const type = qType(q);
-  const counts = q.choices.map(() => 0);
-  keys.forEach(k => {
-    if (type === 'multi') parseMulti(resp[k].cs).forEach(j => { if (counts[j] !== undefined) counts[j]++; });
-    else { const c = Number(resp[k].c); if (counts[c] !== undefined) counts[c]++; }
-  });
 
   const cntEl = ov.querySelector('#ov-count');
   if (cntEl) cntEl.textContent = '참여 ' + totals.participants + '명 · 제출 ' + totals.submitted + '명 · 미제출 ' + totals.missing + '명';
@@ -9316,12 +9335,30 @@ function plRenderOverlayCounts() {
     if (wrap) wrap.innerHTML = revealed ? plTextSummary(q, resp)
       : '<div class="ov-explain" style="opacity:.75">학생들이 답을 쓰는 중입니다. 공개하면 여기에 모아 보여줍니다.</div>';
   } else {
-    const isAns = j => (type === 'multi') ? ((q.answers || []).indexOf(j) >= 0) : (j === Number(q.answer));
+    const distribution = revealed ? plChoiceGroups(q, resp) : null;
+    const answer = Number(pl.live.publicAnswer?.answer ?? q.answer);
+    const isAns = j => type === 'multi' ? ((q.answers || []).indexOf(j) >= 0) : j === answer;
+    const summary = ov.querySelector('#ov-answer-summary');
+    if (summary) {
+      summary.hidden = !revealed;
+      const total = distribution?.total || 0;
+      const correct = total ? Math.round((distribution.groups[answer]?.length || 0) / total * 100) : 0;
+      summary.textContent = !revealed ? '' : total
+        ? '정답률 ' + correct + '% · 오답률 ' + (100 - correct) + '%'
+        : '아직 제출한 학생이 없습니다.';
+    }
     $$('.ov-choice', ov).forEach(el => {
       const j = Number(el.dataset.c);
-      const pct = (revealed && total) ? Math.round(counts[j] / total * 100) : 0;
+      const voters = distribution?.groups[j] || [];
+      const pct = distribution?.total ? Math.round(voters.length / distribution.total * 100) : 0;
       el.querySelector('.bar').style.width = pct + '%';
-      el.querySelector('[data-cnt]').textContent = (revealed && total) ? counts[j] + '명 (' + pct + '%)' : '';
+      el.querySelector('[data-cnt]').textContent = revealed ? voters.length + '명 (' + pct + '%)' : '';
+      const label = el.querySelector('.ov-choice-voters');
+      if (label) {
+        const names = voters.map(id => pl.students?.[id]?.name).filter(Boolean).slice(0, 3);
+        const other = voters.length - names.length;
+        label.textContent = names.join(', ') + (names.length && other ? ' 외 ' + other + '명' : '');
+      }
       el.classList.toggle('correct', revealed && isAns(j));
     });
   }
@@ -9336,6 +9373,13 @@ function plRenderOverlayCounts() {
     rv.textContent = pl.revealPending ? '공개 중…'
       : ('✅ ' + (pl.set.settings.revealMode === 'manual' ? '정답 공개' : '지금 공개'));
   }
+  const skip = ov.querySelector('#ov-skip');
+  if (skip) {
+    skip.hidden = revealed;
+    skip.disabled = !!(pl.revealPending || pl.closeFlight);
+  }
+  const rank = ov.querySelector('#ov-rank');
+  if (rank) rank.hidden = (type === 'ox' || type === 'choice') && !revealed;
   const close = ov.querySelector('#ov-close');
   if (close && !(pl.closeFlight && pl.closeFlight.overlayHidden)) {
     close.style.display = (pl.set.settings.revealMode === 'never' || revealed ||
@@ -9363,7 +9407,7 @@ function plTimerTick() {
   const revealDue = revealAt > 0 && timerNow() >= revealAt;
   // 되돌릴 수 없는 실패(신분 상실 등)는 1초마다 다시 시도해도 소용없다.
   // 화면에 사유를 띄운 뒤 멈춰서 교사가 새 반을 열도록 한다.
-  if (!timedResume && pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
+  if (!timedResume && !pl.closeFlight && pl.set && pl.set.settings && pl.set.settings.revealMode === 'timer' &&
       !pl.live.revealed && !pl.revealPending && !pl.revealRequested && !pl.revealFatal &&
       timerNow() >= (Number(pl.revealRetryAt) || 0) && revealDue) {
     const state = pl;

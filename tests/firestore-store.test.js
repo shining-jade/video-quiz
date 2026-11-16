@@ -9338,8 +9338,48 @@ test('문제와 순위 오버레이는 전체화면 stage 안에 생성된다', 
   assert.match(appended[0].innerHTML, /종료 저장 실패: board offline/);
   assert.match(appended[0].innerHTML, /disabled aria-busy="true"/);
   assert.match(appended[0].innerHTML, /저장 중…/);
+  assert.match(appended[0].innerHTML, /onclick="plCloseQuestion\(null, true\)[^"]*"[^>]*>[^<]*문항 넘기기/);
   assert.match(appended[0].innerHTML, /🏆 순위/);
   assert.doesNotMatch(appended[0].innerHTML, /대시보드|href="#\/live\//);
+});
+
+test('교사 정답 공개는 보기별 제출자와 정답률을 채점 완료 전에 보여 준다', () => {
+  const summary = { hidden: true, textContent: '' };
+  const rank = { hidden: true };
+  const choices = [0, 1].map(index => {
+    const bar = { style: {} }, count = { textContent: '' }, voters = { textContent: '' };
+    return {
+      dataset: { c: String(index) }, bar, count, voters, classList: { toggle() {} },
+      querySelector(selector) { return { '.bar': bar, '[data-cnt]': count, '.ov-choice-voters': voters }[selector]; }
+    };
+  });
+  const overlay = {
+    querySelector(selector) { return { '#ov-answer-summary': summary, '#ov-rank': rank }[selector] || null; }
+  };
+  const ctx = loadStageFunctions(['plRevealed', 'plChoiceGroups', 'plRenderOverlayCounts'], {
+    pl: {
+      live: { q: 0, revealed: false }, set: { settings: {} },
+      flatQuestions: [{ type: 'ox', choices: ['맞다', '아니다'], answer: 0 }],
+      students: { a: { name: '가' }, b: { name: '나' }, c: { name: '다' }, d: { name: '라' }, e: { name: '마' }, f: { name: '바' } },
+      responses: { 0: { a: { answer: 0 }, b: { answer: 0 }, c: { answer: 0 }, d: { answer: 0 }, e: { c: 1 }, f: { answer: 1, submitted: false } } }
+    },
+    document: { getElementById() { return overlay; } },
+    qType(q) { return q.type; }, isTextType() { return false; }, $$(selector) { return choices; }, FirestoreCore: core
+  });
+
+  ctx.plRenderOverlayCounts();
+  assert.equal(summary.hidden, true);
+  assert.equal(choices[0].voters.textContent, '');
+  assert.equal(rank.hidden, true);
+
+  Object.assign(ctx.pl.live, { revealed: true, publicAnswer: { answer: 0 } });
+  ctx.plRenderOverlayCounts();
+  assert.equal(summary.hidden, false);
+  assert.match(summary.textContent, /정답률 80%.*오답률 20%/);
+  assert.equal(choices[0].count.textContent, '4명 (80%)');
+  assert.equal(choices[0].voters.textContent, '가, 나, 다 외 1명');
+  assert.equal(choices[1].voters.textContent, '마');
+  assert.equal(rank.hidden, false);
 });
 
 test('전체화면 문제 레이아웃은 같은 player-box와 중앙 카드를 유지한다', () => {
@@ -14646,6 +14686,31 @@ test('열린 서술형에서 영상을 되감으면 시간 만료를 기다리�
   assert.equal(state.live.q, -1);
   assert.equal(state.lastT, 118.5);
   assert.equal(trigger.state()[0], 'rearmed');
+});
+
+test('교사가 문항을 넘기면 남은 응답 시간을 마감하고 설정된 재개 시각으로 재생한다', async () => {
+  const events = [];
+  const state = {
+    sessionId: 'a', videoIndex: 0, lastT: 120, live: { q: 0, liveToken: 'q0', accepting: true, submitGraceUntil: 183_000 },
+    flatQuestions: [{ type: 'long', t: 120, videoIndex: 0, resumeAt: 300 }],
+    set: { videos: [{ endSec: 600 }], settings: {} }, fired: [true], dueQuestions: [], player: {}
+  };
+  const ctx = loadStageFunctions(['plCloseQuestion'], {
+    pl: state, serverNow() { return 10_000; }, FirestoreCore: core,
+    async plContinuePlayback(playState, time) { events.push('play:' + time); return { ok: true }; },
+    async plGradeCurrentResponses() {}, async plPushBoard() {}, plQueueDueQuestions() {},
+    plOpenNextDueQuestion() { return false; },
+    store: {
+      async expireLiveForSeek() { events.push('expire'); return true; },
+      async freezeLive() { events.push('freeze'); return true; },
+      async getResponses() { return {}; }, async getGrades() { return {}; },
+      async closeLive() { events.push('close'); return true; }
+    }
+  });
+
+  assert.equal(await ctx.plCloseQuestion(null, true), true);
+  assert.deepEqual(events, ['play:300', 'expire', 'freeze', 'close']);
+  assert.equal(state.live.q, -1);
 });
 
 test('timer reveal UI waits for the observed live document and stays hidden after write failure', async () => {
