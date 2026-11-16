@@ -4515,9 +4515,9 @@ function mkPreviewRender() {
     const message = state.correct === true ? '정답입니다.'
       : state.correct === false ? '아쉽지만 오답입니다.' : '서술형 답안을 확인했습니다.';
     const resultClass = state.correct === true ? 'ok' : state.correct === false ? 'bad' : 'manual';
+    const explanation = state.explanation || '';
     result = '<div class="preview-result ' + resultClass + '">' + message + '</div>' +
-      '<div class="preview-explanation"><b>해설</b><br>' +
-      esc(state.explanation || '등록된 해설이 없습니다.') + '</div>' +
+      (explanation.trim() ? '<div class="preview-explanation"><b>해설</b><br>' + esc(explanation) + '</div>' : '') +
       (explanationImage ? '<img class="preview-explanation-img" data-lightbox tabindex="0" role="button" aria-label="해설 이미지 크게 보기" src="' + esc(explanationImage) + '" alt="해설 이미지">' : '');
   }
   const card = mode => '<div class="mk-question-preview-card ' + mode + '">' +

@@ -8548,6 +8548,31 @@ test('미리보기는 교사용과 학생 모바일 카드를 한 화면에 같�
   assert.doesNotMatch(dialog.innerHTML, /mk-preview-modes|교사용 크게 보기|학생 모바일 보기/);
 });
 
+test('교사와 학생의 미리보기 결과에는 작성한 해설만 표시한다', () => {
+  const dialog = { innerHTML: '', setAttribute() {}, querySelector() { return null; } };
+  const question = { type: 'long', text: '질문' };
+  const state = { phase: 'result', number: 1, question, answer: '답안', correct: null };
+  const context = loadStageFunctions(['mkPreviewRender'], {
+    mkQuestionPreviewState: state,
+    document: { getElementById() { return dialog; } },
+    esc(value) { return String(value); }
+  });
+
+  context.mkPreviewRender();
+  assert.doesNotMatch(dialog.innerHTML, /class="preview-explanation"|등록된 해설이 없습니다/);
+  assert.equal((dialog.innerHTML.match(/서술형 답안을 확인했습니다/g) || []).length, 2);
+
+  state.explanation = '  \n';
+  question.explainImgUrl = 'https://example.test/explanation.png';
+  context.mkPreviewRender();
+  assert.doesNotMatch(dialog.innerHTML, /class="preview-explanation"|등록된 해설이 없습니다/);
+  assert.equal((dialog.innerHTML.match(/class="preview-explanation-img"/g) || []).length, 2);
+
+  state.explanation = '작성한 해설';
+  context.mkPreviewRender();
+  assert.equal((dialog.innerHTML.match(/작성한 해설/g) || []).length, 2);
+});
+
 test('한쪽 미리보기의 서술형 입력은 반대쪽 입력과 같은 답안 상태로 동기화된다', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const teacherInput = { value: '새 답' };
