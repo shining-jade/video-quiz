@@ -575,6 +575,11 @@ function loadStageFunctions(names, context) {
   if (names.includes('plTick') || names.includes('plQueueDueQuestions')) {
     vm.runInNewContext(extractFunction(html, 'plPlaybackEvent'), context);
   }
+  if (names.some(name => ['plOpenQuestion', 'plAutoResumeRemainingMs', 'plAutoResumeDue'].includes(name))) {
+    for (const name of ['plTimedChoice', 'plChoiceResultSequence']) {
+      vm.runInNewContext(extractFunction(html, name), context);
+    }
+  }
   names.forEach(name => vm.runInNewContext(extractFunction(html, name), context));
   return context;
 }
@@ -9373,6 +9378,13 @@ test('교사 정답 공개는 보기별 제출자와 정답률을 채점 완료 
   assert.equal(rank.hidden, true);
 
   Object.assign(ctx.pl.live, { revealed: true, publicAnswer: { answer: 0 } });
+  ctx.pl.choiceResultSequence = { phase: 'answer' };
+  ctx.plRenderOverlayCounts();
+  assert.equal(summary.hidden, true);
+  assert.equal(choices[0].count.textContent, '');
+  assert.equal(rank.hidden, true);
+
+  ctx.pl.choiceResultSequence.phase = 'distribution';
   ctx.plRenderOverlayCounts();
   assert.equal(summary.hidden, false);
   assert.match(summary.textContent, /정답률 80%.*오답률 20%/);
@@ -14547,7 +14559,7 @@ test('CSV 셀은 수식으로 해석되는 선행 문자를 quoting 전에 중�
   assert.equal(context.csvSafeCell(-2), '-2');
 });
 
-test('timer question stores authoritative close grace and reveal timestamps', async () => {
+test('객관식 타이머의 공개 지연보다 문항 응답 제한 시간을 우선한다', async () => {
   let written;
   const context = {
     pl: {
@@ -14575,10 +14587,10 @@ test('timer question stores authoritative close grace and reveal timestamps', as
   await context.plOpenQuestion(0);
 
   assert.equal(written[0], 'session-a');
-  assert.equal(written[1].limitSec, 5);
-  assert.equal(written[1].responseClosesAt.getTime(), 105_000);
-  assert.equal(written[1].submitGraceUntil.getTime(), 107_000);
-  assert.equal(written[1].revealAt.getTime(), 107_000);
+  assert.equal(written[1].limitSec, 20);
+  assert.equal(written[1].responseClosesAt.getTime(), 120_000);
+  assert.equal(written[1].submitGraceUntil.getTime(), 122_000);
+  assert.equal(written[1].revealAt.getTime(), 122_000);
   assert.equal(written[1].revealed, false);
   assert.equal(typeof written[1].liveToken, 'string');
   assert.ok(written[1].liveToken.length > 0);
@@ -17190,6 +17202,34 @@ function autoResumeContext(settings, live, patch) {
   loadStageFunctions(['plAutoResumeRemainingMs', 'plAutoResumeDue'], context);
   return context;
 }
+
+test('O/X 자동 공개는 정답, 분포, 순위, 재생을 순서대로 진행한다', () => {
+  const ctx = autoResumeContext({ autoResumeSec: 0 }, { limitSec: 20, liveToken: 'q0' }, {
+    flatQuestions: [{ type: 'ox' }]
+  });
+  const shown = [];
+  let boardOpen = false;
+  ctx.document = { getElementById(id) { return id === 'board-overlay' && boardOpen ? {} : null; } };
+  ctx.plToggleBoard = () => { boardOpen = !boardOpen; shown.push('rank'); };
+  ctx.plRenderOverlayCounts = () => { shown.push('distribution'); };
+
+  assert.equal(ctx.plAutoResumeDue(), false);
+  assert.deepEqual(shown, []);
+  ctx.now += 2000;
+  assert.equal(ctx.plAutoResumeDue(), false);
+  assert.deepEqual(shown, ['distribution']);
+  ctx.now += 7000;
+  ctx.pl.revealPending = true;
+  assert.equal(ctx.plAutoResumeDue(), false);
+  assert.equal(boardOpen, false);
+  ctx.pl.revealPending = false;
+  assert.equal(ctx.plAutoResumeDue(), false);
+  assert.deepEqual(shown, ['distribution', 'rank']);
+  ctx.now += 4999;
+  assert.equal(ctx.plAutoResumeDue(), false);
+  ctx.now += 1;
+  assert.equal(ctx.plAutoResumeDue(), true);
+});
 
 test('정답 공개 뒤 설정한 시간이 지나면 자동으로 계속 재생한다', () => {
   const ctx = autoResumeContext();
