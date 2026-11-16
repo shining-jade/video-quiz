@@ -3648,7 +3648,7 @@ test('이미지 로드 중 교사가 교체되면 이전 소유 세트 편집 �
   assert.equal(context.mk.videos[0].questions[0]._img, undefined);
 });
 
-test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한다', () => {
+test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링하고 같은 영상의 플레이어를 보존한다', () => {
   const app = { innerHTML: '' };
   const elements = new Map();
   const context = {
@@ -3682,6 +3682,28 @@ test('다중 영상 편집기는 영상 카드와 추가 버튼을 렌더링한�
   assert.match(app.innerHTML, /다음 YouTube 영상 추가/);
   assert.equal((app.innerHTML.match(/id="mk-player-wrap"/g) || []).length, 1);
   assert.match(app.innerHTML, /class="mk-question-text"[^>]*rows="2"[^>]*>한 줄 질문<\/textarea>/);
+  assert.match(app.innerHTML, /onclick="mkSeek\(0,0,true\)"/);
+  assert.match(app.innerHTML, /class="q-no"[^>]*onclick="mkSeek\(0,0\)"/);
+
+  let destroyed = 0;
+  const editingMarkup = app.innerHTML;
+  const playerWrap = {};
+  const player = { destroy() { destroyed += 1; } };
+  app.querySelector = selector => selector === '#mk-player-wrap' ? playerWrap : null;
+  context.mkPlayer = player;
+  context.mkPlayerVid = 'a';
+  context.parseYouTube = value => value;
+  context.mkUpdateEditorMarkup = (root, markup, preservedWrap) => {
+    assert.equal(root, app);
+    assert.equal(preservedWrap, playerWrap);
+    assert.match(markup, /질문 수정/);
+  };
+  context.mk.videos[0].questions[0].text = '질문 수정';
+  context.renderMake();
+
+  assert.equal(destroyed, 0);
+  assert.equal(context.mkPlayer, player);
+  assert.equal(app.innerHTML, editingMarkup);
 });
 
 test('문항 제목 버블은 영상 전체 번호와 빈 영상·마지막 삽입 dropzone을 렌더링한다', () => {
@@ -3709,7 +3731,7 @@ test('문항 제목 버블은 영상 전체 번호와 빈 영상·마지막 삽�
       return elements.get(selector);
     }
   };
-  loadStageFunctions(['mkTimelineDomain', 'renderMake'], context);
+  loadStageFunctions(['mkTimelineDomain', 'mkResumePlaceholder', 'renderMake'], context);
 
   context.renderMake();
 
@@ -3859,6 +3881,28 @@ test('타임라인 문항 시각은 현재 영상의 원본 YouTube 초로 저�
   assert.equal(context.mk.videos[0].questions[0].t, 500);
   context.mkSetQuestionTime(0, 0, 999);
   assert.equal(context.mk.videos[0].questions[0].t, 630);
+});
+
+test('서술형 제한 시간은 재개 시각의 예시만 갱신한다', () => {
+  const question = { type: 'long', t: 2386, resumeAt: '42:00' };
+  const video = { questions: [question] };
+  const input = { value: '42:00', placeholder: '' };
+  const context = loadStageFunctions(['fmtTime', 'mkResumePlaceholder', 'mkRefreshResumePlaceholder',
+    'mkSetQuestionLimit'], {
+    mk: { videos: [video] },
+    document: { querySelector: selector => selector === '[data-resume-at="0-0"]' ? input : null }
+  });
+
+  context.mkSetQuestionLimit(0, 0, '120');
+  assert.equal(input.placeholder, '예) 41:46');
+  assert.equal(input.value, '42:00');
+  assert.equal(question.resumeAt, '42:00');
+
+  video.endSec = 2500;
+  assert.equal(context.mkResumePlaceholder(video, question), '예) 분:초');
+  context.mkSetQuestionLimit(0, 0, '');
+  assert.equal(input.placeholder, '예) 분:초');
+  assert.equal(input.value, '42:00');
 });
 
 test('문항 시간 변경은 새 범위로 타임라인 점과 문항 목록 시간을 함께 갱신한다', () => {

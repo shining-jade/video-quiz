@@ -188,6 +188,7 @@ textarea { resize: vertical; min-height: 62px; }
 .q-card .q-no {
   width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: #fff;
   display: grid; place-items: center; font-size: 13px; font-weight: 700; flex: none;
+  border: 0; padding: 0; cursor: pointer;
 }
 .q-card .q-head .spacer { flex: 1; }
 .choice-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
@@ -4087,6 +4088,7 @@ function mkRefreshVideoTiming(videoIndex) {
     if (q) {
       dot.style.left = (PlaylistCore.timelineRatio(q.t, domain.start, domain.end) * 100) + '%';
       dot.title = (questionIndex + 1) + '번 · ' + fmtTime(q.t);
+      if (q.type === 'long') mkRefreshResumePlaceholder(videoIndex, questionIndex);
     }
   });
 }
@@ -4282,9 +4284,6 @@ function screenMake(setId) {
 
 function renderMake() {
   const isEdit = !!mk.id;
-  try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
-  mkPlayer = null;
-  mkPlayerVid = '';
   if (!Array.isArray(mk.videos) || !mk.videos.length) {
     mk.videos = [{ videoUrl: '', videoId: '', startSec: 0, endSec: null,
       durationSec: null, questions: [blankQuestion(0)] }];
@@ -4309,8 +4308,8 @@ function renderMake() {
       const label = '문항 ' + globalQuestionNumber + ' 이동: ' + title;
       return '<button type="button" class="mk-question-bubble" draggable="true" ' +
         'data-video="' + videoIndex + '" data-question="' + questionIndex + '" data-global-question="' + globalQuestionNumber + '" ' +
-        'aria-label="' + esc(label) + '" title="끌어서 순서를 바꾸거나 화살표 키로 이동" ' +
-        'onclick="mkFocusQuestion(' + videoIndex + ',' + questionIndex + ')" ' +
+        'aria-label="' + esc(label) + '" title="클릭하면 문항 시각부터 재생 · 끌어서 순서 변경" ' +
+        'onclick="mkSeek(' + videoIndex + ',' + questionIndex + ',true)" ' +
         'ondragstart="mkQuestionDragStart(event,' + videoIndex + ',' + questionIndex + ')" ' +
         'ondragover="mkQuestionDragOver(event)" ondragleave="mkQuestionDragLeave(event)" ' +
         'ondrop="mkQuestionDrop(event,' + videoIndex + ',' + questionIndex + ')" ' +
@@ -4326,12 +4325,14 @@ function renderMake() {
       (video.questions.length ? '＋ 이 영상의 맨 뒤에 놓기' : '여기에 문항 놓기') + '</button>';
     const questions = video.questions.length ? video.questions.map((q, questionIndex) =>
       '<div class="q-card" id="mk-q-' + videoIndex + '-' + questionIndex + '">' +
-        '<div class="q-head"><div class="q-no">' + (questionIndex + 1) + '</div>' +
+        '<div class="q-head"><button type="button" class="q-no" title="문항 시각부터 재생" ' +
+          'aria-label="' + (questionIndex + 1) + '번 문항 시각부터 재생" onclick="mkSeek(' + videoIndex + ',' + questionIndex + ')">' +
+          (questionIndex + 1) + '</button>' +
           '<input type="text" class="time-input mono" data-question-time="' + videoIndex + '-' + questionIndex + '" value="' + esc(fmtTime(q.t)) + '" ' +
             'oninput="mkInputQuestionTime(' + videoIndex + ',' + questionIndex + ',this)" ' +
             'onchange="mkSetQuestionTime(' + videoIndex + ',' + questionIndex + ',this.value)">' +
           '<button class="btn sm" onclick="mkStamp(' + videoIndex + ',' + questionIndex + ')">📍 현재 시각 찍기</button>' +
-          '<button class="btn sm ghost" onclick="mkSeek(' + videoIndex + ',' + questionIndex + ')">↪ 이동</button>' +
+          '<button class="btn sm ghost" onclick="mkSeek(' + videoIndex + ',' + questionIndex + ')">▶ 재생</button>' +
           '<div class="spacer"></div>' +
           '<button class="btn sm ghost" onclick="mkMove(' + videoIndex + ',' + questionIndex + ',-1)" ' + (questionIndex === 0 ? 'disabled' : '') + '>↑</button>' +
           '<button class="btn sm ghost" onclick="mkMove(' + videoIndex + ',' + questionIndex + ',1)" ' + (questionIndex === video.questions.length - 1 ? 'disabled' : '') + '>↓</button>' +
@@ -4348,12 +4349,13 @@ function renderMake() {
           mkExplanationField(q, videoIndex, questionIndex) + '</div>' +
           '<div class="field"><label class="f">이 문항만 제한 시간 다르게 (선택)</label><div class="unit-wrap">' +
           '<input type="number" min="0" max="600" value="' + (q.limitSec == null ? '' : q.limitSec) + '" ' +
-            'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].limitSec=this.value===\'\'?null:Math.max(0,Number(this.value)||0)"><span class="unit">초</span></div></div></div>' +
+            'oninput="mkSetQuestionLimit(' + videoIndex + ',' + questionIndex + ',this.value)"><span class="unit">초</span></div></div></div>' +
         (qType(q) === 'long' ? '<div class="field"><label class="f">재생 재개 시각 (선택)' +
-          '<input type="text" placeholder="예) 19:57" value="' +
+          '<input type="text" data-resume-at="' + videoIndex + '-' + questionIndex + '" placeholder="' +
+          esc(mkResumePlaceholder(video, q)) + '" value="' +
           esc(Number.isInteger(q.resumeAt) ? fmtTime(q.resumeAt) : q.resumeAt ?? '') + '" ' +
           'oninput="mk.videos[' + videoIndex + '].questions[' + questionIndex + '].resumeAt=this.value"></label>' +
-          '<div class="hint">제한 시간이 끝나면 답안을 마감하고, 이 영상 시각부터 자동으로 재생합니다.</div></div>' : '') +
+          '<div class="hint">멈춘 위치부터 이어가려면 비워 두세요. 영상 속 대기 구간을 건너뛰려면 그 구간이 끝나는 시각을 입력하세요.</div></div>' : '') +
       '</div>'
     ).join('') : '<div class="empty">문항이 없습니다. 아래에서 추가하세요.</div>';
 
@@ -4375,7 +4377,7 @@ function renderMake() {
         '<input data-range-slider="' + videoIndex + '-end" aria-label="영상 ' + (videoIndex + 1) + ' 종료" type="range" min="0" max="' + domain.max + '" value="' + domain.end + '" oninput="mkSetRange(' + videoIndex + ',\'end\',Number(this.value))"></div>' +
         '<div class="mk-timeline" data-timeline-video="' + videoIndex + '">' + dots + '</div></div>' +
         '<aside class="mk-question-navigator" ondragover="mkQuestionNavigatorDragOver(event)">' +
-          '<h3>문항 순서</h3><div class="sub">제목을 끌어 11번도 1번 앞으로 바로 옮길 수 있습니다.</div>' +
+          '<h3>문항 순서</h3><div class="sub">제목을 누르면 해당 시각부터 재생하고, 끌면 순서를 바꿉니다.</div>' +
           '<div class="mk-question-bubbles" aria-label="문항 제목 순서">' + bubbles + finalDropzone + '</div>' +
           '<button class="btn ghost sm block" onclick="mkSortQuestions(' + videoIndex + ')">시각 순으로 정렬</button>' +
         '</aside></div>' +
@@ -4385,7 +4387,7 @@ function renderMake() {
     '</section>';
   }).join('');
 
-  APP().innerHTML = topbar(
+  const markup = topbar(
       '<a class="btn sm ghost" href="#/sets">📚 세트 목록</a>' +
       (isEdit ? '<a class="btn sm" href="#/play/' + esc(mk.id) + '">▶ 진행 화면 열기</a>' : '')
     ) +
@@ -4414,16 +4416,49 @@ function renderMake() {
       '</div>' +
     '</div>';
 
+  const app = APP();
+  const currentVideo = mk.videos[mk.activeVideo];
+  const playerWrap = mkPlayerVid && parseYouTube(currentVideo.videoUrl) === mkPlayerVid
+    ? app.querySelector('#mk-player-wrap') : null;
+  if (playerWrap) {
+    mkUpdateEditorMarkup(app, markup, playerWrap);
+  } else {
+    try { mkPlayer && mkPlayer.destroy(); } catch (e) {}
+    mkPlayer = mk.player = null;
+    mk.playerReady = false;
+    mkPlayerVid = '';
+    app.innerHTML = markup;
+  }
+
   $('#mk-title').oninput = e => { mk.title = e.target.value; mkMarkDirty('title'); };
   $('#mk-author').oninput = e => { mk.author = e.target.value; lsSet('vq_teacher', e.target.value); mkMarkDirty('author'); };
   mkRenderSettings();
   mkSyncVideo(mk.activeVideo);
-  const app = APP();
   if (app) {
     app.oninput = event => mkMarkDirty(mkHistoryKeyFromEvent(event));
     app.onchange = event => mkMarkDirty(mkHistoryKeyFromEvent(event));
   }
   if (mk.id) mkShowShare();
+}
+
+function mkUpdateEditorMarkup(app, markup, playerWrap) {
+  const template = document.createElement('template');
+  template.innerHTML = markup;
+  let replacement = template.content.querySelector('#mk-player-wrap');
+  playerWrap.closest('.mk-video-card').dataset.videoIndex = replacement.closest('.mk-video-card').dataset.videoIndex;
+
+  // iframe을 DOM에서 떼면 같은 요소를 다시 붙여도 브라우저가 영상을 다시 로드한다.
+  // 플레이어와 그 부모는 연결된 채 두고, 각 부모 안의 형제 요소만 교체한다.
+  for (let current = playerWrap; current !== app; current = current.parentNode) {
+    const parent = replacement.parentNode;
+    const siblings = Array.from(parent.childNodes);
+    const index = siblings.indexOf(replacement);
+    while (current.previousSibling) current.previousSibling.remove();
+    while (current.nextSibling) current.nextSibling.remove();
+    current.before(...siblings.slice(0, index));
+    current.after(...siblings.slice(index + 1));
+    replacement = parent;
+  }
 }
 
 function mkQuestionNavigatorDragOver(event) {
@@ -4789,6 +4824,7 @@ function mkMoveVideo(i, delta) {
 
 function mkSelectVideo(i) {
   if (!mk.videos[i] || i === mk.activeVideo) return;
+  mk.pendingSeek = null;
   mk.activeVideo = i;
   renderMake();
 }
@@ -4796,6 +4832,7 @@ function mkSelectVideo(i) {
 function mkSetVideoUrl(i, value) {
   const video = mk.videos[i];
   if (!video) return;
+  mk.pendingSeek = null;
   video.videoUrl = String(value || '').trim();
   video.videoId = parseYouTube(video.videoUrl);
   mk.activeVideo = i;
@@ -4856,6 +4893,27 @@ function mkSetQuestionTime(videoIndex, questionIndex, value, options) {
     }
   }
   return changed;
+}
+
+function mkResumePlaceholder(video, question) {
+  const limit = Number(question.limitSec);
+  const resumeAt = Math.ceil(Number(question.t) + limit);
+  const end = video.endSec ?? (Number(video.durationSec) || Infinity);
+  return limit > 0 && limit <= 600 && Number.isFinite(resumeAt) && resumeAt < end
+    ? '예) ' + fmtTime(resumeAt) : '예) 분:초';
+}
+
+function mkRefreshResumePlaceholder(videoIndex, questionIndex) {
+  const input = document.querySelector('[data-resume-at="' + videoIndex + '-' + questionIndex + '"]');
+  if (!input) return;
+  const video = mk.videos[videoIndex];
+  input.placeholder = mkResumePlaceholder(video, video.questions[questionIndex]);
+}
+
+function mkSetQuestionLimit(videoIndex, questionIndex, value) {
+  const question = mk.videos[videoIndex].questions[questionIndex];
+  question.limitSec = value === '' ? null : Math.max(0, Number(value) || 0);
+  if (question.type === 'long') mkRefreshResumePlaceholder(videoIndex, questionIndex);
 }
 
 function mkInputQuestionTime(videoIndex, questionIndex, source) {
@@ -4929,7 +4987,7 @@ function mkSyncVideo(i) {
     mkPlayer = null; mkPlayerVid = '';
     return;
   }
-  if (vid === mkPlayerVid && mkPlayer) return;
+  if (vid === mkPlayerVid && wrap.querySelector('#mk-player')) return;
 
   mkPlayerVid = vid;
   wrap.innerHTML =
@@ -4941,13 +4999,22 @@ function mkSyncVideo(i) {
     '</div>';
 
   const state = mk;
+  const mount = wrap.querySelector('#mk-player');
   const cancelYT = whenYT(() => {
-    if (mk !== state || mkPlayerVid !== vid || !document.getElementById('mk-player')) return;
-    try { state.player && state.player.destroy(); } catch (e) {}
-    const player = new YT.Player('mk-player', {
+    if (mk !== state || mkPlayerVid !== vid || document.getElementById('mk-player') !== mount) return;
+    let player;
+    const events = ytEvents(() => mk === state && state.player === player ? player : null);
+    const ready = events.onReady;
+    events.onReady = event => {
+      if (mk !== state || state.player !== event.target) return;
+      state.playerReady = true;
+      ready();
+      mkPlayPendingSeek(state);
+    };
+    player = new YT.Player('mk-player', {
       videoId: vid,
       playerVars: { rel: 0, modestbranding: 1, playsinline: 1, cc_load_policy: 0 },
-      events: ytEvents(() => mk === state ? state.player : null)
+      events
     });
     state.player = player;
     mkPlayer = player;
@@ -5386,10 +5453,28 @@ function mkFocusQuestion(videoIndex, i) {
     try { ta.focus({ preventScroll: true }); } catch (e) { ta.focus(); }
   }, 320);
 }
-function mkSeek(videoIndex, i) {
-  if (videoIndex !== mk.activeVideo || !mkPlayer || !mkPlayer.seekTo) { toast('먼저 이 영상의 미리보기를 선택하세요'); return; }
-  mkPlayer.seekTo(Math.max(0, mk.videos[videoIndex].questions[i].t - 3), true);
-  mkPlayer.playVideo();
+function mkSeek(videoIndex, i, focusQuestion = false) {
+  const video = mk.videos[videoIndex];
+  const question = video && video.questions[i];
+  if (!question) return;
+  const videoId = parseYouTube(video.videoUrl);
+  if (!videoId) { toast('먼저 유튜브 주소를 입력해 주세요.'); return; }
+  mkSelectVideo(videoIndex);
+  mk.pendingSeek = { videoId, time: Math.max(0, Number(question.t) || 0) };
+  mkPlayPendingSeek(mk);
+  if (focusQuestion) mkFocusQuestion(videoIndex, i);
+}
+
+function mkPlayPendingSeek(state) {
+  const request = state.pendingSeek;
+  if (!request || !state.playerReady || request.videoId !== mkPlayerVid) return;
+  state.pendingSeek = null;
+  try {
+    state.player.seekTo(request.time, true);
+    state.player.playVideo();
+  } catch (e) {
+    toast('영상 재생을 시작하지 못했습니다. 다시 눌러 주세요.');
+  }
 }
 function mkAddQuestion(videoIndex) {
   const questions = mk.videos[videoIndex].questions;

@@ -254,7 +254,7 @@ test('문항 제목 목록은 영상 아래 왼쪽 탐색기로 배치되고 긴
   assert.match(html, /class="mk-video-left"[\s\S]*?class="mk-question-navigator"[\s\S]*?class="mk-question-editor"/);
   assert.match(html, /\.mk-video-left\s*\{[^}]*position:\s*sticky[^}]*overflow:\s*auto/s);
   assert.match(html, /function mkQuestionNavigatorDragOver\(event\)[\s\S]*?scrollTop/);
-  assert.match(html, /onclick="mkFocusQuestion\(/);
+  assert.match(html, /if \(focusQuestion\) mkFocusQuestion\(videoIndex, i\)/);
   assert.match(html, /function mkFocusQuestion\(videoIndex,\s*(?:questionIndex|i)\)[\s\S]*?scrollIntoView/);
 });
 
