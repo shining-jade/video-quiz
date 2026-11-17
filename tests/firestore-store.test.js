@@ -7414,6 +7414,66 @@ test('열린 timer 문항의 grace 전에는 교사가 다른 문항을 직접 �
   assert.equal(pauses, 1);
 });
 
+test('직접 연 문항은 기존 정지 위치 대신 해당 영상의 문항 시각부터 이어진다', async t => {
+  for (const [label, targetVideo, type, resumeAt, expected, questionTime = 244] of [
+    ['같은 영상', 0, 'choice', undefined, [['seek', 244], ['play', 244]]],
+    ['다른 영상', 1, 'choice', undefined, [['load', 'second', 244]]],
+    ['직접 지정한 재개 시각', 1, 'long', 270, [['load', 'second', 270]]],
+    ['문항이 영상 끝에 있는 경우', 0, 'choice', undefined, [['load', 'second', 0]], 600]
+  ]) {
+    await t.test(label, async () => {
+      const events = [];
+      let time = 80;
+      let playing = false;
+      let loadingAt = null;
+      const questions = [{ t: questionTime, videoIndex: targetVideo, type, resumeAt, text: '문항', choices: ['A', 'B'] }];
+      const trigger = require('../quiz-trigger-core.js').create(questions);
+      const state = {
+        sessionId: 'session', videoIndex: 0, pendingLiveQuestion: -1, lastT: 80,
+        live: { q: -1 }, dueQuestions: [], fired: [],
+        flatQuestions: questions, quizTrigger: trigger,
+        set: { settings: { revealMode: 'manual', autoPause: true, limitSec: 0 },
+          videos: [{ videoId: 'first', endSec: 600 }, { videoId: 'second', endSec: 600 }] },
+        player: {
+          getCurrentTime() { return time; }, pauseVideo() { playing = false; },
+          seekTo(value) { events.push(['seek', value]); time = value; },
+          playVideo() { events.push(['play', time]); playing = true; },
+          loadVideoById({ videoId, startSeconds }) {
+            events.push(['load', videoId, startSeconds]);
+            loadingAt = startSeconds;
+            playing = false;
+          }
+        },
+        async playbackProbeDelay() {
+          if (loadingAt !== null) {
+            time = loadingAt;
+            loadingAt = null;
+            playing = true;
+            state.playerLoading = false;
+          } else if (playing) time += 0.2;
+        }
+      };
+      const ctx = loadStageFunctions(['plOpenQuestion', 'plLoadVideo', 'plContinuePlayback', 'plCloseQuestion',
+        'plEffectiveEnd', 'limitFor', 'plQueueDueQuestions'], {
+        pl: state, SV_TS: 1000, FirestoreStore: loadStoreModule(), FirestoreCore: core,
+        store: {
+          async setLive(id, live) { state.live = live; },
+          async freezeLive() { return true; }, async getResponses() { return {}; },
+          async getGrades() { return {}; }, async closeLive() { return true; }
+        },
+        plGradeCurrentResponses() {}, plPushBoard() {}, plOpenNextDueQuestion() { return false; }
+      });
+
+      assert.equal(await ctx.plOpenQuestion(0, true), true);
+      assert.deepEqual(events, []);
+      assert.equal(await ctx.plCloseQuestion(), true);
+      assert.deepEqual(events, expected);
+      assert.equal(state.videoIndex, questionTime === 600 ? 1 : targetVideo);
+      assert.equal(trigger.state()[0], 'completed');
+    });
+  }
+});
+
 test('교사 문항 목록은 모든 영상의 전역 번호를 이어서 렌더링한다', () => {
   const box = { innerHTML: '' };
   const ctx = loadStageFunctions(['plRenderQList'], {
@@ -7434,6 +7494,7 @@ test('교사 문항 목록은 모든 영상의 전역 번호를 이어서 렌더
 
   assert.match(box.innerHTML, /1\. 첫 영상 문항/);
   assert.match(box.innerHTML, /2\. 둘째 영상 문항/);
+  assert.match(box.innerHTML, /onclick="plOpenQuestion\(1, true\)"[^>]*>열기/);
   assert.doesNotMatch(box.innerHTML, /구형 문항/);
 });
 

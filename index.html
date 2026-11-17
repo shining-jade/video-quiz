@@ -7362,7 +7362,7 @@ function renderPlayRun() {
         '</div>' +
         '<div class="card">' +
           '<h2>문항</h2>' +
-          '<div class="sub">클릭하면 그 시각 3초 전으로 이동합니다. 오른쪽 버튼으로 직접 열 수도 있습니다.</div>' +
+          '<div class="sub">제목을 누르면 문항 시각 3초 전으로 이동합니다. [열기]로 직접 연 문항을 마치면 해당 영상에서 이어 재생합니다.</div>' +
           '<div id="pl-qlist"></div>' +
         '</div>' +
       '</div>' +
@@ -7949,10 +7949,11 @@ function plRenderTimeline(force) {
   return true;
 }
 
-function plLoadVideo(index, autoplay) {
+function plLoadVideo(index, autoplay, startAt = null) {
   if (!pl || !pl.player || !pl.player.loadVideoById) return;
   const video = pl.set && pl.set.videos && pl.set.videos[index];
   if (!video) return;
+  const start = Math.max(0, startAt ?? (Number(video.startSec) || 0));
   const previousVideoIndex = pl.videoIndex;
   if (pl.quizTrigger && pl.quizTrigger.resetVideo) {
     pl.quizTrigger.resetVideo(previousVideoIndex);
@@ -7967,7 +7968,7 @@ function plLoadVideo(index, autoplay) {
   pl.playerLoading = true;
   pl.playerError = null;
   pl.dueQuestions = [];
-  pl.lastT = Math.max(0, Number(video.startSec) || 0) - 0.6;
+  pl.lastT = start - 0.6;
   if (typeof document !== 'undefined') {
     const transition = document.getElementById('pl-transition');
     if (transition && transition.remove) transition.remove();
@@ -7979,7 +7980,7 @@ function plLoadVideo(index, autoplay) {
   if (typeof plRenderTimeline === 'function') plRenderTimeline(true);
   pl.player.loadVideoById({
     videoId: video.videoId,
-    startSeconds: Math.max(0, Number(video.startSec) || 0)
+    startSeconds: start
   });
 }
 
@@ -8299,13 +8300,13 @@ function plTick() {
 
 function plQuestionResumeAt(state, index) {
   const question = state.flatQuestions && state.flatQuestions[index];
-  if (!question || question.type !== 'long' || question.videoIndex !== state.videoIndex ||
+  if (!question || question.type !== 'long' ||
       !Number.isFinite(question.resumeAt) || question.resumeAt <= question.t) return null;
   const video = state.set.videos && state.set.videos[question.videoIndex];
   return video && video.endSec != null && question.resumeAt >= video.endSec ? null : question.resumeAt;
 }
 
-async function plOpenQuestion(i) {
+async function plOpenQuestion(i, manual = false) {
   if (!pl || !pl.sessionId) return;
   if (pl.endingSession || pl.sessionEnded) return false;
   const state = pl;
@@ -8368,6 +8369,8 @@ async function plOpenQuestion(i) {
     if (pl !== state || state.endingSession || state.sessionEnded || state.pendingLiveQuestion !== i) return false;
     live.publicAnswer = FirestoreStore.publicAnswer(question, explainImage);
   }
+  const previousManualToken = state.manualQuestionToken;
+  if (manual) state.manualQuestionToken = live.liveToken;
   try {
     const activeStore = typeof playStore === 'function' ? playStore(state) : store;
     await activeStore.setLive(state.sessionId, live);
@@ -8385,6 +8388,7 @@ async function plOpenQuestion(i) {
     if (typeof plRenderTimeline === 'function') plRenderTimeline();
     return true;
   } catch (e) {
+    if (manual && state.manualQuestionToken === live.liveToken) state.manualQuestionToken = previousManualToken;
     if (pl === state && state.pendingLiveQuestion === i) {
       state.pendingLiveQuestion = -1;
       state.openError = e && e.message ? e.message : String(e);
@@ -8478,11 +8482,12 @@ async function plReveal() {
 /** 확장 프로그램이 끼워 넣은 광고 요청 rejection은 무시하되, YouTube의 재생
     시간이 실제로 전진했는지를 확인한다. PLAYING은 아주 잠깐 보고된 뒤 다시
     멈출 수 있으므로 시간 API가 있으면 상태값만으로 성공 처리하지 않는다. */
-async function plContinuePlayback(state, resumeAt = null) {
+async function plContinuePlayback(state, resumeAt = null, videoIndex = state?.videoIndex) {
   if (!state || !state.player || typeof state.player.playVideo !== 'function') {
     return { ok: false, error: new Error('재생기를 찾을 수 없습니다.') };
   }
   const player = state.player;
+  const switchingVideo = resumeAt !== null && videoIndex !== state.videoIndex;
   const canProbeState = typeof player.getPlayerState === 'function';
   const canProbeTime = typeof player.getCurrentTime === 'function';
   let beforeTime = NaN;
@@ -8495,6 +8500,7 @@ async function plContinuePlayback(state, resumeAt = null) {
     : (ms) => new Promise(resolve => setTimeout(resolve, ms));
   let previousSample = NaN;
   const started = () => {
+    if (switchingVideo && state.playerLoading) return false;
     try {
       const current = canProbeTime ? Number(player.getCurrentTime()) : NaN;
       const advanced = resumeAt === null || (previousSample >= resumeAt - 0.15 &&
@@ -8527,11 +8533,17 @@ async function plContinuePlayback(state, resumeAt = null) {
     return started();
   };
   try {
-    if (resumeAt !== null) player.seekTo(resumeAt, true);
-    if (!command()) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    if (switchingVideo) plLoadVideo(videoIndex, true, resumeAt);
+    else {
+      if (resumeAt !== null) player.seekTo(resumeAt, true);
+      if (!command()) return { ok: false, error: new Error('동영상 재생을 시작하지 못했습니다.') };
+    }
     // 상태 API가 없는 오래된 테스트/플레이어는 기존 동기 명령 계약을 유지한다.
     if (!canProbeState && !canProbeTime) return { ok: true };
     if (await probe()) return { ok: true };
+    if (switchingVideo && state.playerLoading) {
+      return await probe() ? { ok: true } : { ok: false, error: new Error('동영상 재생 상태를 확인하지 못했습니다.') };
+    }
     // 간혹 퀴즈 overlay를 닫은 직후 첫 play 명령을 YouTube가 놓친다. 현재 위치를
     // 거의 그대로 다시 확정한 뒤 사용자 클릭 처리 중 한 번만 재시도한다.
     if (Number.isFinite(playbackStart) && typeof player.seekTo === 'function') {
@@ -8647,7 +8659,16 @@ function plCloseQuestion(seek = null, skip = false) {
     return Promise.resolve(false);
   }
   const questionIndex = Number(state.live.q);
-  const resumeAt = seek ? null : plQuestionResumeAt(state, questionIndex);
+  const question = state.flatQuestions?.[questionIndex];
+  const manual = !!state.live.liveToken && state.manualQuestionToken === state.live.liveToken;
+  const manualTime = manual && Number.isFinite(question?.t) ? question.t : null;
+  const resumeAt = seek ? null : (plQuestionResumeAt(state, questionIndex) ?? manualTime);
+  const resumeVideoIndex = resumeAt !== null && Number.isInteger(question?.videoIndex) ? question.videoIndex : state.videoIndex;
+  const resumeVideo = state.set?.videos?.[resumeVideoIndex];
+  const sameVideo = state.videoIndex === resumeVideoIndex;
+  const resumeFrom = sameVideo ? state.lastT : (Number(resumeVideo?.startSec) || 0) - 0.6;
+  const clipEnd = resumeAt !== null && manual && resumeVideo ? plEffectiveEnd(resumeVideo, sameVideo ? state.player : null) : null;
+  const endOfClip = clipEnd !== null && resumeAt >= clipEnd;
   const identity = { q: questionIndex, openedAt: state.live.openedAt };
   if (typeof state.live.liveToken === 'string' && state.live.liveToken) {
     identity.liveToken = state.live.liveToken;
@@ -8695,8 +8716,8 @@ function plCloseQuestion(seek = null, skip = false) {
       );
     }
     const hasQueuedFollowup = Array.isArray(state.dueQuestions) && state.dueQuestions.length > 0;
-    const continuePlayback = !seek && (!hasQueuedFollowup || resumeAt !== null);
-    if ((seek || skip || continuePlayback) && typeof plSetQuizOpen === 'function') {
+    const continuePlayback = !seek && !endOfClip && (!hasQueuedFollowup || resumeAt !== null);
+    if ((seek || skip || continuePlayback || endOfClip) && typeof plSetQuizOpen === 'function') {
       plSetQuizOpen(false);
       flight.overlayHidden = true;
     }
@@ -8704,7 +8725,7 @@ function plCloseQuestion(seek = null, skip = false) {
       // playVideo는 클릭의 사용자 활성화가 살아 있는 첫 동기 구간에 호출해야 한다.
       // Firestore 작업을 먼저 await하면 YouTube가 autoplay로 판단해 명령을 무시할 수 있다.
       const playback = typeof plContinuePlayback === 'function'
-        ? await plContinuePlayback(state, resumeAt)
+        ? await plContinuePlayback(state, resumeAt, resumeVideoIndex)
         : { ok: (() => {
           try { return !state.player || !state.player.playVideo || state.player.playVideo() !== false; }
           catch (error) { return false; }
@@ -8775,15 +8796,20 @@ function plCloseQuestion(seek = null, skip = false) {
     state.closeError = '';
     state.pendingLiveQuestion = -1;
     state.choiceResultSequence = null;
+    if (manual) state.manualQuestionToken = null;
     if (typeof plSetQuizOpen === 'function') plSetQuizOpen(false);
+    // 영상 전환 시 로더가 열린 마커를 초기화하므로 직접 연 문항을 확정한다.
+    if (manual && state.quizTrigger?.open) state.quizTrigger.open(questionIndex);
     if (state.quizTrigger && state.quizTrigger.complete) state.quizTrigger.complete(questionIndex);
     if (Array.isArray(state.fired)) state.fired[questionIndex] = true;
-    if (seek) {
+    if (seek || manual) {
       for (const due of state.dueQuestions || []) {
         if (state.quizTrigger && state.quizTrigger.complete) state.quizTrigger.complete(due);
         if (Array.isArray(state.fired)) state.fired[due] = true;
       }
       state.dueQuestions = [];
+    }
+    if (seek) {
       if (Number.isInteger(seek.questionIndex)) plJumpTo(seek.questionIndex);
       else {
         plQueueDueQuestions(seek.from, seek.to, 'seek');
@@ -8792,10 +8818,15 @@ function plCloseQuestion(seek = null, skip = false) {
       if (typeof plRenderTimeline === 'function') plRenderTimeline();
       return true;
     }
+    if (endOfClip) {
+      if (resumeVideoIndex + 1 < state.set.videos.length) plLoadVideo(resumeVideoIndex + 1, true);
+      else plCompletePlaylist();
+      return true;
+    }
     if (resumeAt !== null) {
       // 목적지에 놓인 문항은 재생이 진행될 때 정상 출제한다.
       state.lastT = resumeAt - 0.001;
-      plQueueDueQuestions(state.flatQuestions[questionIndex].t, state.lastT, 'seek');
+      plQueueDueQuestions(manual ? resumeFrom : question.t, state.lastT, 'seek');
       let currentTime;
       try { currentTime = state.player.getCurrentTime(); } catch (e) {}
       if (Number.isFinite(currentTime) && currentTime >= resumeAt) {
@@ -9021,7 +9052,7 @@ function plRenderQList() {
       '<span class="t" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + fmtTime(q.t) + '</span>' +
       '<span class="x" onclick="plJumpTo(' + i + ')" style="cursor:pointer">' + (q.number || i + 1) + '. ' + esc(q.text) + '</span>' +
       (n ? '<span class="tag mute">' + n + '명 응답</span>' : '') +
-      '<button class="btn sm ghost" onclick="plOpenQuestion(' + i + ')" title="영상과 상관없이 지금 이 문항을 엽니다">열기</button>' +
+      '<button class="btn sm ghost" onclick="plOpenQuestion(' + i + ', true)" title="문항을 지금 열고, 마치면 해당 영상에서 이어 재생합니다">열기</button>' +
     '</div>';
   }).join('') + (pl.openError
     ? '<div class="notice bad" role="alert">문항 공개 실패: ' + esc(pl.openError) +
