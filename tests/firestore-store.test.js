@@ -17231,6 +17231,59 @@ test('O/X 자동 공개는 정답, 분포, 순위, 재생을 순서대로 진행
   assert.equal(ctx.plAutoResumeDue(), true);
 });
 
+test('학생 0명인 반에서도 영상 정보 조회와 독립적으로 결과 타이머가 진행된다', () => {
+  const ctx = autoResumeContext({ autoResumeSec: 0 }, {
+    limitSec: 10, openedAt: 980_000, liveToken: 'empty-room', accepting: false
+  }, { flatQuestions: [{ type: 'choice' }], students: {}, responses: {}, playerLoading: true, uiRevealed: true });
+  const seen = [];
+  const timer = { style: {}, querySelector: () => ({ style: {} }), classList: { toggle() {} } };
+  const label = { textContent: '' };
+  const overlay = { querySelector: id => ({ '#ov-timer': timer, '#ov-timer-n': label })[id] || null };
+  ctx.document = { getElementById: id => id === 'overlay' ? overlay : null };
+  ctx.plRevealed = () => true;
+  ctx.FirestoreCore = core;
+  ctx.plRenderOverlayCounts = () => seen.push('distribution');
+  ctx.plToggleBoard = () => seen.push('rank');
+  ctx.plCloseQuestion = async () => { seen.push('resume'); };
+  loadStageFunctions(['plTimerTick'], ctx);
+
+  ctx.plAutoResumeRemainingMs();
+  ctx.plTimerTick();
+  assert.deepEqual(seen, []);
+  assert.equal(label.textContent, '정답 공개 2초');
+  ctx.now += 2000;
+  ctx.plTimerTick();
+  assert.deepEqual(seen, ['distribution']);
+  assert.equal(label.textContent, '응답 분포 7초');
+  ctx.now += 7000;
+  ctx.plTimerTick();
+  assert.deepEqual(seen, ['distribution', 'rank']);
+  ctx.now += 5000;
+  ctx.plTimerTick();
+  assert.deepEqual(seen, ['distribution', 'rank', 'resume']);
+});
+
+test('공개 예정 시각이 없는 이전 타이머 문항은 응답 제한 시간이 끝나면 공개한다', async () => {
+  const ctx = autoResumeContext({}, {
+    revealed: false, publicAnswer: undefined, limitSec: 10, openedAt: 995_000
+  }, { flatQuestions: [{ type: 'choice' }], uiRevealed: false });
+  let reveals = 0;
+  const timer = { style: {}, querySelector: () => ({ style: {} }), classList: { toggle() {} } };
+  const overlay = { querySelector: id => ({ '#ov-timer': timer, '#ov-timer-n': {} })[id] || null };
+  ctx.document = { getElementById: () => overlay };
+  ctx.plRevealed = () => false;
+  ctx.plReveal = async () => { reveals++; return true; };
+  ctx.FirestoreCore = core;
+  loadStageFunctions(['plTimerTick'], ctx);
+
+  ctx.plTimerTick();
+  assert.equal(reveals, 0);
+  ctx.now += 5000;
+  ctx.plTimerTick();
+  assert.equal(reveals, 1);
+  await Promise.resolve();
+});
+
 test('정답 공개 뒤 설정한 시간이 지나면 자동으로 계속 재생한다', () => {
   const ctx = autoResumeContext();
 

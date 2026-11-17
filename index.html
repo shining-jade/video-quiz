@@ -8275,7 +8275,8 @@ function plTick() {
     if (reachedEnd) {
       try { if (pl.player.pauseVideo) pl.player.pauseVideo(); } catch (e) {}
     }
-    if (plAutoResumeDue()) plCloseQuestion().catch(() => {});
+    // 객관식·O/X 결과 화면은 재생기 시간 조회와 별개로 문항 타이머가 진행한다.
+    if (!pl.choiceResultSequence && plAutoResumeDue()) plCloseQuestion().catch(() => {});
     return;
   }
 
@@ -9441,6 +9442,11 @@ function plTimerTick() {
   if (!pl || pl.endingSession || pl.sessionEnded) return;
   const ov = document.getElementById('overlay');
   if (!ov || !pl || pl.live.q < 0) return;
+  const sequence = pl.choiceResultSequence;
+  if (sequence && plAutoResumeDue()) {
+    plCloseQuestion().catch(() => {});
+    return;
+  }
   const timerGeneration = Number(pl.quizTimerGeneration) || 0;
   const questionIndex = Number(pl.live.q);
   const timedResume = plQuestionResumeAt(pl, questionIndex) !== null;
@@ -9452,7 +9458,10 @@ function plTimerTick() {
     String(state.live && state.live.liveToken || '') === liveToken;
 
   // timer 모드는 시간이 차면 정답 projection도 Firestore에 함께 공개한다.
-  const revealAt = Number(pl.live.revealAt) || 0;
+  const openedAt = Number(pl.live.openedAt) || 0;
+  const limit = Number(pl.live.limitSec) || 0;
+  const revealAt = Number(pl.live.revealAt) || Number(pl.live.submitGraceUntil) ||
+    Number(pl.live.responseClosesAt) || (openedAt > 0 && limit > 0 ? openedAt + limit * 1000 : 0);
   const revealDue = revealAt > 0 && timerNow() >= revealAt;
   // 되돌릴 수 없는 실패(신분 상실 등)는 1초마다 다시 시도해도 소용없다.
   // 화면에 사유를 띄운 뒤 멈춰서 교사가 새 반을 열도록 한다.
@@ -9481,7 +9490,10 @@ function plTimerTick() {
   const graceUntil = Number(pl.live.submitGraceUntil);
   const graceWaitMs = pl.live.accepting !== false && Number.isFinite(graceUntil)
     ? Math.max(0, graceUntil - timerNow()) : 0;
-  num.textContent = t.left > 0
+  const phaseLabel = sequence?.phase === 'answer' ? '정답 공개' : sequence?.phase === 'distribution' ? '응답 분포' : '';
+  num.textContent = phaseLabel
+    ? phaseLabel + ' ' + Math.max(0, Math.ceil((sequence.nextAt - timerNow()) / 1000)) + '초'
+    : t.left > 0
     ? Math.ceil(t.left) + '초'
     : graceWaitMs > 0
       ? '제출 정리 중… ' + Math.ceil(graceWaitMs / 1000) + '초'
